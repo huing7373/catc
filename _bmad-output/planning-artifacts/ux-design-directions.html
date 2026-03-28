@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>裤衩猫 - UX Design Directions</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, 'SF Pro Rounded', 'SF Pro Display', system-ui, sans-serif; background: #1a1a1a; color: #f5f5f0; }
+
+  .header { text-align: center; padding: 40px 20px; border-bottom: 1px solid #333; }
+  .header h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+  .header p { color: #8e8e93; font-size: 14px; }
+
+  .nav { display: flex; justify-content: center; gap: 8px; padding: 20px; flex-wrap: wrap; position: sticky; top: 0; background: #1a1a1a; z-index: 100; border-bottom: 1px solid #333; }
+  .nav button { padding: 8px 16px; border: 1px solid #444; background: transparent; color: #f5f5f0; border-radius: 20px; cursor: pointer; font-size: 13px; transition: all 0.3s; }
+  .nav button:hover, .nav button.active { background: #FF8C42; border-color: #FF8C42; color: #000; }
+
+  .directions { max-width: 1200px; margin: 0 auto; padding: 20px; }
+  .direction { display: none; animation: fadeIn 0.5s ease; }
+  .direction.active { display: block; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+  .direction-title { font-size: 22px; font-weight: 700; margin: 30px 0 8px; }
+  .direction-subtitle { color: #8e8e93; font-size: 14px; margin-bottom: 24px; }
+
+  .mockup-row { display: flex; gap: 24px; margin-bottom: 32px; flex-wrap: wrap; justify-content: center; }
+
+  /* Watch mockup */
+  .watch-frame { width: 200px; height: 240px; background: #000; border-radius: 50px; border: 3px solid #333; position: relative; overflow: hidden; flex-shrink: 0; }
+  .watch-frame .crown { position: absolute; right: -8px; top: 50%; transform: translateY(-50%); width: 6px; height: 24px; background: #444; border-radius: 3px; }
+  .watch-screen { position: absolute; top: 16px; left: 16px; right: 16px; bottom: 16px; border-radius: 36px; overflow: hidden; }
+
+  /* iPhone mockup */
+  .iphone-frame { width: 220px; height: 440px; background: #000; border-radius: 30px; border: 3px solid #333; position: relative; overflow: hidden; flex-shrink: 0; }
+  .iphone-notch { position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 100px; height: 24px; background: #000; border-radius: 0 0 16px 16px; z-index: 10; }
+  .iphone-screen { position: absolute; top: 4px; left: 4px; right: 4px; bottom: 4px; border-radius: 26px; overflow: hidden; }
+  .iphone-home { position: absolute; bottom: 6px; left: 50%; transform: translateX(-50%); width: 80px; height: 4px; background: #555; border-radius: 2px; z-index: 10; }
+
+  /* Direction A: Minimal Zen */
+  .zen-watch { background: #000; display: flex; align-items: center; justify-content: center; height: 100%; position: relative; }
+  .zen-cat { width: 80px; height: 70px; position: relative; }
+  .zen-cat-body { width: 50px; height: 40px; background: #FFB87A; border-radius: 50% 50% 45% 45%; position: absolute; bottom: 0; left: 15px; }
+  .zen-cat-head { width: 36px; height: 30px; background: #FFB87A; border-radius: 50% 50% 40% 40%; position: absolute; top: 2px; left: 22px; }
+  .zen-cat-ear-l { width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 12px solid #FFB87A; position: absolute; top: -6px; left: 22px; transform: rotate(-10deg); }
+  .zen-cat-ear-r { width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 12px solid #FFB87A; position: absolute; top: -6px; left: 42px; transform: rotate(10deg); }
+  .zen-cat-eye-l { width: 4px; height: 4px; background: #2C2C2E; border-radius: 50%; position: absolute; top: 14px; left: 30px; }
+  .zen-cat-eye-r { width: 4px; height: 4px; background: #2C2C2E; border-radius: 50%; position: absolute; top: 14px; left: 42px; }
+  .zen-glow { position: absolute; width: 100px; height: 90px; background: radial-gradient(ellipse, rgba(255,184,122,0.08) 0%, transparent 70%); top: 50%; left: 50%; transform: translate(-50%,-50%); }
+  .zen-cat-anim { animation: zenBreathe 3.2s ease-in-out infinite; }
+  @keyframes zenBreathe { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-1.5px); } }
+
+  .zen-friend-cat { position: absolute; bottom: 30px; right: 20px; opacity: 0.7; transform: scale(0.5); }
+  .zen-friend-cat .zen-cat-body { background: #C4C4C4; }
+  .zen-friend-cat .zen-cat-head { background: #C4C4C4; }
+  .zen-friend-cat .zen-cat-ear-l, .zen-friend-cat .zen-cat-ear-r { border-bottom-color: #C4C4C4; }
+
+  .zen-blindbox { position: absolute; top: 20px; right: 16px; width: 18px; height: 18px; background: #A8D5BA; border-radius: 4px; animation: bbPulse 2s ease-in-out infinite; }
+  @keyframes bbPulse { 0%,100% { opacity: 0.6; transform: scale(1); } 50% { opacity: 1; transform: scale(1.1); } }
+
+  /* Direction B: Warm Glow */
+  .glow-watch { background: #000; height: 100%; position: relative; display: flex; align-items: center; justify-content: center; }
+  .glow-ambient { position: absolute; bottom: 0; left: 0; right: 0; height: 60%; background: linear-gradient(to top, rgba(255,140,66,0.04) 0%, transparent 100%); }
+  .glow-cat { position: relative; z-index: 2; }
+  .glow-cat-main { width: 70px; height: 55px; background: linear-gradient(135deg, #FFCB8E, #FFB87A); border-radius: 50% 50% 45% 45%; position: relative; box-shadow: 0 0 20px rgba(255,184,122,0.15); }
+  .glow-cat-face { width: 48px; height: 38px; background: linear-gradient(135deg, #FFCB8E, #FFB87A); border-radius: 50%; position: absolute; top: -22px; left: 11px; box-shadow: 0 0 15px rgba(255,184,122,0.1); }
+  .glow-cat-ear1 { width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 16px solid #FFCB8E; position: absolute; top: -34px; left: 8px; transform: rotate(-8deg); }
+  .glow-cat-ear2 { width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 16px solid #FFCB8E; position: absolute; top: -34px; right: 8px; transform: rotate(8deg); }
+  .glow-eye1 { width: 5px; height: 6px; background: #3a2a1a; border-radius: 50%; position: absolute; top: -12px; left: 18px; }
+  .glow-eye2 { width: 5px; height: 6px; background: #3a2a1a; border-radius: 50%; position: absolute; top: -12px; right: 18px; }
+  .glow-mouth { width: 8px; height: 4px; border-bottom: 1.5px solid #3a2a1a; border-radius: 0 0 50% 50%; position: absolute; top: -4px; left: 50%; transform: translateX(-50%); }
+  .glow-breathe { animation: glowBreathe 3.5s ease-in-out infinite; }
+  @keyframes glowBreathe { 0%,100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-2px) scale(1.01); } }
+
+  .glow-time { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); font-size: 10px; color: rgba(245,245,240,0.3); letter-spacing: 1px; }
+
+  /* Direction C: Playful Pop */
+  .pop-watch { background: #000; height: 100%; position: relative; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  .pop-cat-container { position: relative; z-index: 2; }
+  .pop-cat-body { width: 65px; height: 50px; background: #FFF5E6; border: 2.5px solid #E8C9A0; border-radius: 50% 50% 45% 45%; position: relative; }
+  .pop-cat-head { width: 50px; height: 40px; background: #FFF5E6; border: 2.5px solid #E8C9A0; border-radius: 50%; position: absolute; top: -25px; left: 5px; }
+  .pop-cat-ear1 { width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 14px solid #FFF5E6; position: absolute; top: -35px; left: 6px; }
+  .pop-cat-ear1i { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 9px solid #FFB5B5; position: absolute; top: -31px; left: 9px; }
+  .pop-cat-ear2 { width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 14px solid #FFF5E6; position: absolute; top: -35px; right: 6px; }
+  .pop-cat-ear2i { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 9px solid #FFB5B5; position: absolute; top: -31px; right: 9px; }
+  .pop-eye1 { width: 7px; height: 8px; background: #2C2C2E; border-radius: 50%; position: absolute; top: -16px; left: 15px; }
+  .pop-eye1-shine { width: 2px; height: 2px; background: #fff; border-radius: 50%; position: absolute; top: -15px; left: 17px; }
+  .pop-eye2 { width: 7px; height: 8px; background: #2C2C2E; border-radius: 50%; position: absolute; top: -16px; right: 15px; }
+  .pop-eye2-shine { width: 2px; height: 2px; background: #fff; border-radius: 50%; position: absolute; top: -15px; right: 17px; }
+  .pop-nose { width: 5px; height: 3px; background: #FFB5B5; border-radius: 50%; position: absolute; top: -7px; left: 50%; transform: translateX(-50%); }
+  .pop-whisker { position: absolute; top: -4px; width: 16px; height: 1px; background: #E8C9A0; }
+  .pop-w1 { left: -4px; transform: rotate(-5deg); }
+  .pop-w2 { left: -4px; top: -1px; transform: rotate(5deg); }
+  .pop-w3 { right: -4px; transform: rotate(5deg); }
+  .pop-w4 { right: -4px; top: -1px; transform: rotate(-5deg); }
+  .pop-tail { position: absolute; bottom: 5px; right: -12px; width: 20px; height: 30px; border: 2.5px solid #E8C9A0; border-left: none; border-bottom: none; border-radius: 0 20px 0 0; animation: popTail 2s ease-in-out infinite; }
+  @keyframes popTail { 0%,100% { transform: rotate(0deg); } 50% { transform: rotate(8deg); } }
+  .pop-bounce { animation: popBounce 3s ease-in-out infinite; }
+  @keyframes popBounce { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+
+  .pop-gift { position: absolute; top: 15px; left: 20px; }
+  .pop-gift-box { width: 16px; height: 14px; background: #A8D5BA; border-radius: 3px; border: 1.5px solid #7EC4A0; }
+  .pop-gift-bow { width: 10px; height: 6px; background: #FFB5B5; border-radius: 50%; position: absolute; top: -4px; left: 3px; }
+  .pop-sparkle { position: absolute; font-size: 8px; animation: sparkle 1.5s ease-in-out infinite; }
+  .pop-sparkle:nth-child(1) { top: 8px; left: 40px; animation-delay: 0s; }
+  .pop-sparkle:nth-child(2) { top: 20px; left: 32px; animation-delay: 0.5s; }
+  @keyframes sparkle { 0%,100% { opacity: 0; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-4px); } }
+
+  /* Direction D: Night Mode */
+  .night-watch { background: #000; height: 100%; position: relative; display: flex; align-items: center; justify-content: center; }
+  .night-moon { position: absolute; top: 14px; right: 20px; width: 14px; height: 14px; background: #E8E4D8; border-radius: 50%; box-shadow: 0 0 8px rgba(232,228,216,0.2); }
+  .night-stars { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
+  .night-star { position: absolute; width: 2px; height: 2px; background: rgba(245,245,240,0.3); border-radius: 50%; }
+  .night-cat-body { width: 60px; height: 45px; background: #B8A88A; border-radius: 50% 50% 45% 45%; position: relative; z-index: 2; filter: brightness(0.85); }
+  .night-cat-head { width: 44px; height: 34px; background: #B8A88A; border-radius: 50%; position: absolute; top: -20px; left: 8px; filter: brightness(0.85); }
+  .night-cat-ear1 { width: 0; height: 0; border-left: 7px solid transparent; border-right: 7px solid transparent; border-bottom: 13px solid #B8A88A; position: absolute; top: -29px; left: 6px; }
+  .night-cat-ear2 { width: 0; height: 0; border-left: 7px solid transparent; border-right: 7px solid transparent; border-bottom: 13px solid #B8A88A; position: absolute; top: -29px; right: 6px; }
+  .night-eye-closed1 { position: absolute; top: -10px; left: 14px; width: 8px; height: 1.5px; background: #5a4a3a; border-radius: 0 0 50% 50%; }
+  .night-eye-closed2 { position: absolute; top: -10px; right: 14px; width: 8px; height: 1.5px; background: #5a4a3a; border-radius: 0 0 50% 50%; }
+  .night-zzz { position: absolute; top: -30px; right: -10px; font-size: 10px; color: rgba(245,245,240,0.4); animation: zzz 3s ease-in-out infinite; }
+  @keyframes zzz { 0%,100% { opacity: 0.2; transform: translate(0,0); } 50% { opacity: 0.6; transform: translate(4px,-6px); } }
+  .night-sleep-breathe { animation: sleepBreathe 4s ease-in-out infinite; }
+  @keyframes sleepBreathe { 0%,100% { transform: translateY(0) scaleY(1); } 50% { transform: translateY(1px) scaleY(1.03); } }
+
+  /* Direction E: Social Focus */
+  .social-watch { background: #000; height: 100%; position: relative; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 30px; }
+  .social-my-cat { position: relative; z-index: 3; }
+  .social-cat-body { width: 55px; height: 42px; background: #FFB87A; border-radius: 50% 50% 45% 45%; position: relative; }
+  .social-cat-head { width: 40px; height: 32px; background: #FFB87A; border-radius: 50%; position: absolute; top: -18px; left: 7px; }
+  .social-friend-area { position: absolute; top: 20px; right: 12px; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .social-friend-cat { width: 32px; height: 26px; background: #C4B8FF; border-radius: 50% 50% 45% 45%; opacity: 0.8; position: relative; }
+  .social-friend-head { width: 24px; height: 18px; background: #C4B8FF; border-radius: 50%; position: absolute; top: -12px; left: 4px; }
+  .social-friend-status { width: 6px; height: 6px; background: #A8D5BA; border-radius: 50%; position: absolute; bottom: -2px; right: -2px; }
+  .social-touch-hint { position: absolute; top: 50%; right: 50px; transform: translateY(-50%); }
+  .social-touch-ring { width: 30px; height: 30px; border: 1.5px solid rgba(255,181,181,0.4); border-radius: 50%; animation: touchPulse 2s ease-in-out infinite; }
+  @keyframes touchPulse { 0%,100% { transform: scale(1); opacity: 0.4; } 50% { transform: scale(1.2); opacity: 0.1; } }
+
+  /* Direction F: Complication */
+  .complication-showcase { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; justify-content: center; padding: 20px; }
+  .comp-rect { width: 160px; height: 70px; background: #1C1C1E; border-radius: 16px; display: flex; align-items: center; padding: 10px; gap: 10px; }
+  .comp-rect-cat { width: 40px; height: 35px; position: relative; }
+  .comp-rect-cat-b { width: 28px; height: 20px; background: #FFB87A; border-radius: 50% 50% 40% 40%; position: absolute; bottom: 0; left: 6px; }
+  .comp-rect-cat-h { width: 22px; height: 16px; background: #FFB87A; border-radius: 50%; position: absolute; top: 0; left: 9px; }
+  .comp-rect-text { color: #8e8e93; font-size: 11px; line-height: 1.4; }
+  .comp-rect-status { color: #f5f5f0; font-size: 13px; font-weight: 600; }
+  .comp-circ { width: 54px; height: 54px; background: #1C1C1E; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+  .comp-circ-cat { width: 28px; height: 24px; position: relative; }
+  .comp-circ-b { width: 20px; height: 14px; background: #FFB87A; border-radius: 50% 50% 40% 40%; position: absolute; bottom: 0; left: 4px; }
+  .comp-circ-h { width: 16px; height: 12px; background: #FFB87A; border-radius: 50%; position: absolute; top: 0; left: 6px; }
+
+  /* iPhone screens */
+  .iphone-home-screen { background: #FAF8F5; height: 100%; display: flex; flex-direction: column; }
+  .iphone-status-bar { height: 28px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #2C2C2E; font-weight: 600; }
+  .iphone-hero { flex: 1; display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .iphone-hero-cat { width: 100px; height: 90px; background: #FFB87A; border-radius: 50% 50% 45% 45%; position: relative; box-shadow: 0 4px 20px rgba(255,140,66,0.15); }
+  .iphone-stats { display: flex; justify-content: space-around; padding: 12px 16px; background: #fff; margin: 0 12px; border-radius: 16px; margin-bottom: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
+  .iphone-stat { text-align: center; }
+  .iphone-stat-num { font-size: 18px; font-weight: 700; color: #FF8C42; }
+  .iphone-stat-label { font-size: 9px; color: #8e8e93; margin-top: 2px; }
+  .iphone-tab-bar { height: 50px; background: #fff; border-top: 0.5px solid #e5e5e5; display: flex; align-items: center; justify-content: space-around; padding: 0 8px; }
+  .iphone-tab { text-align: center; font-size: 8px; color: #8e8e93; }
+  .iphone-tab.active { color: #FF8C42; }
+  .iphone-tab-icon { font-size: 16px; margin-bottom: 1px; }
+
+  .iphone-skin-screen { background: #FAF8F5; height: 100%; display: flex; flex-direction: column; }
+  .iphone-skin-header { padding: 8px 16px; }
+  .iphone-skin-title { font-size: 18px; font-weight: 700; color: #2C2C2E; }
+  .iphone-skin-sub { font-size: 11px; color: #8e8e93; }
+  .iphone-skin-grid { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 8px 12px; overflow: hidden; }
+  .iphone-skin-card { background: #fff; border-radius: 12px; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 4px rgba(0,0,0,0.04); position: relative; }
+  .iphone-skin-card-icon { font-size: 28px; }
+  .iphone-skin-card-new { position: absolute; top: 6px; right: 6px; width: 6px; height: 6px; background: #A8D5BA; border-radius: 50%; }
+  .iphone-progress { margin: 8px 12px; padding: 10px; background: #fff; border-radius: 12px; }
+  .iphone-progress-bar { height: 4px; background: #F2F2F7; border-radius: 2px; overflow: hidden; }
+  .iphone-progress-fill { height: 100%; width: 62%; background: linear-gradient(90deg, #FF8C42, #FFB5B5); border-radius: 2px; }
+  .iphone-progress-text { font-size: 10px; color: #8e8e93; margin-top: 4px; }
+
+  .description { background: #222; border-radius: 12px; padding: 20px; margin: 16px 0; }
+  .description h3 { font-size: 16px; margin-bottom: 8px; color: #FF8C42; }
+  .description p { font-size: 13px; color: #aaa; line-height: 1.6; }
+  .description ul { font-size: 13px; color: #aaa; line-height: 1.8; padding-left: 20px; }
+
+  .compare-table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px; }
+  .compare-table th { text-align: left; padding: 8px 12px; color: #FF8C42; border-bottom: 1px solid #333; }
+  .compare-table td { padding: 8px 12px; border-bottom: 1px solid #222; color: #ccc; }
+  .compare-table tr:hover td { background: rgba(255,140,66,0.05); }
+
+  .label { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; margin-left: 8px; }
+  .label-rec { background: rgba(168,213,186,0.2); color: #A8D5BA; }
+  .label-alt { background: rgba(255,181,181,0.2); color: #FFB5B5; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>裤衩猫 Design Directions</h1>
+  <p>探索不同的视觉方向，找到最适合的表达方式</p>
+</div>
+
+<div class="nav">
+  <button class="active" onclick="show('all')">All</button>
+  <button onclick="show('a')">A. Minimal Zen</button>
+  <button onclick="show('b')">B. Warm Glow</button>
+  <button onclick="show('c')">C. Playful Pop</button>
+  <button onclick="show('d')">D. Night Mode</button>
+  <button onclick="show('e')">E. Social Focus</button>
+  <button onclick="show('f')">F. Complication</button>
+  <button onclick="show('g')">G. iPhone App</button>
+  <button onclick="show('compare')">Compare</button>
+</div>
+
+<div class="directions">
+
+  <!-- Direction A -->
+  <div class="direction active" id="dir-a">
+    <div class="direction-title">A. Minimal Zen <span class="label label-rec">RECOMMENDED</span></div>
+    <div class="direction-subtitle">极致克制——纯黑舞台上只有猫，信息密度最低</div>
+    <div class="mockup-row">
+      <div class="watch-frame">
+        <div class="crown"></div>
+        <div class="watch-screen">
+          <div class="zen-watch">
+            <div class="zen-glow"></div>
+            <div class="zen-cat zen-cat-anim">
+              <div class="zen-cat-ear-l"></div>
+              <div class="zen-cat-ear-r"></div>
+              <div class="zen-cat-head">
+                <div class="zen-cat-eye-l"></div>
+                <div class="zen-cat-eye-r"></div>
+              </div>
+              <div class="zen-cat-body"></div>
+            </div>
+            <div class="zen-friend-cat">
+              <div class="zen-cat">
+                <div class="zen-cat-ear-l"></div>
+                <div class="zen-cat-ear-r"></div>
+                <div class="zen-cat-head">
+                  <div class="zen-cat-eye-l"></div>
+                  <div class="zen-cat-eye-r"></div>
+                </div>
+                <div class="zen-cat-body"></div>
+              </div>
+            </div>
+            <div class="zen-blindbox"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="description">
+      <h3>设计理念</h3>
+      <ul>
+        <li>纯黑背景，猫是屏幕上唯一的色彩和光源（暖色光晕）</li>
+        <li>好友猫缩小 50% + 降低饱和度，明确前景/背景层级</li>
+        <li>盲盒以小色块在角落脉冲提示，不抢视觉焦点</li>
+        <li>零文字——所有信息通过猫的姿态和位置传达</li>
+        <li>最符合"少即是暖"和"猫是界面"原则</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Direction B -->
+  <div class="direction active" id="dir-b">
+    <div class="direction-title">B. Warm Glow</div>
+    <div class="direction-subtitle">温暖光感——猫自带柔和光晕，更强的"小夜灯"感觉</div>
+    <div class="mockup-row">
+      <div class="watch-frame">
+        <div class="crown"></div>
+        <div class="watch-screen">
+          <div class="glow-watch">
+            <div class="glow-ambient"></div>
+            <div class="glow-time">22:15</div>
+            <div class="glow-cat glow-breathe">
+              <div class="glow-cat-main">
+                <div class="glow-cat-face"></div>
+                <div class="glow-cat-ear1"></div>
+                <div class="glow-cat-ear2"></div>
+                <div class="glow-eye1"></div>
+                <div class="glow-eye2"></div>
+                <div class="glow-mouth"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="description">
+      <h3>设计理念</h3>
+      <ul>
+        <li>猫自带 box-shadow 光晕效果，视觉上"发光"</li>
+        <li>底部极淡的暖色氛围渐变（违反"纯黑舞台"规则，但情感更温暖）</li>
+        <li>时间显示在顶部极低透明度，提供时间上下文</li>
+        <li>猫的填充用渐变而非纯色，增加立体感</li>
+        <li>更"治愈"但牺牲了一点"纯黑舞台"的视觉冲击力</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Direction C -->
+  <div class="direction active" id="dir-c">
+    <div class="direction-title">C. Playful Pop</div>
+    <div class="direction-subtitle">活泼细节——轮廓线可见、耳朵有粉色、胡须和尾巴有动画</div>
+    <div class="mockup-row">
+      <div class="watch-frame">
+        <div class="crown"></div>
+        <div class="watch-screen">
+          <div class="pop-watch">
+            <div class="pop-gift">
+              <div class="pop-gift-bow"></div>
+              <div class="pop-gift-box"></div>
+            </div>
+            <span class="pop-sparkle">✦</span>
+            <span class="pop-sparkle">✦</span>
+            <div class="pop-cat-container pop-bounce">
+              <div class="pop-cat-body">
+                <div class="pop-cat-head"></div>
+                <div class="pop-cat-ear1"></div>
+                <div class="pop-cat-ear1i"></div>
+                <div class="pop-cat-ear2"></div>
+                <div class="pop-cat-ear2i"></div>
+                <div class="pop-eye1"></div>
+                <div class="pop-eye1-shine"></div>
+                <div class="pop-eye2"></div>
+                <div class="pop-eye2-shine"></div>
+                <div class="pop-nose"></div>
+                <div class="pop-whisker pop-w1"></div>
+                <div class="pop-whisker pop-w2"></div>
+                <div class="pop-whisker pop-w3"></div>
+                <div class="pop-whisker pop-w4"></div>
+                <div class="pop-tail"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="description">
+      <h3>设计理念</h3>
+      <ul>
+        <li>猫有可见的轮廓线（手绘抖动风格），最接近黄油猫参考</li>
+        <li>耳朵内部粉色、鼻子粉色——更多细节和色彩层次</li>
+        <li>胡须可见，尾巴有摆动动画——更多"猫的特征"</li>
+        <li>眼睛有高光点（反射光），更有"生命感"</li>
+        <li>礼物盒有蝴蝶结+微粒子，仪式感更强</li>
+        <li>更"可爱"但信息密度稍高</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Direction D -->
+  <div class="direction active" id="dir-d">
+    <div class="direction-title">D. Night Mode（深夜时段）</div>
+    <div class="direction-subtitle">展示时段光照变化——深夜的猫色温偏冷，月亮和星星作为氛围</div>
+    <div class="mockup-row">
+      <div class="watch-frame">
+        <div class="crown"></div>
+        <div class="watch-screen">
+          <div class="night-watch">
+            <div class="night-stars">
+              <div class="night-star" style="top:15%;left:20%"></div>
+              <div class="night-star" style="top:25%;left:70%"></div>
+              <div class="night-star" style="top:10%;left:45%"></div>
+              <div class="night-star" style="top:35%;left:15%"></div>
+              <div class="night-star" style="top:20%;left:85%"></div>
+            </div>
+            <div class="night-moon"></div>
+            <div class="night-sleep-breathe" style="position:relative;z-index:2">
+              <div class="night-cat-body">
+                <div class="night-cat-head"></div>
+                <div class="night-cat-ear1"></div>
+                <div class="night-cat-ear2"></div>
+                <div class="night-eye-closed1"></div>
+                <div class="night-eye-closed2"></div>
+                <div class="night-zzz">z z</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="description">
+      <h3>设计理念</h3>
+      <ul>
+        <li>深夜猫的色相偏冷（暖橙→灰棕），但亮度不降（HSB B ≥ 60%）</li>
+        <li>月亮和极少星点作为氛围元素（不是背景渐变，是猫世界的"道具"）</li>
+        <li>猫闭眼睡觉，呼吸起伏更明显（4px 幅度）</li>
+        <li>"z z" 字符缓慢飘动——唯一允许的"文字"，但它是猫世界的一部分</li>
+        <li>整体感觉：安静、私密、适合深夜的"嘘…"触碰时刻</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Direction E -->
+  <div class="direction active" id="dir-e">
+    <div class="direction-title">E. Social Focus（好友同屏）</div>
+    <div class="direction-subtitle">展示 2 猫同屏的布局——自己的猫偏下居中，好友猫在右上</div>
+    <div class="mockup-row">
+      <div class="watch-frame">
+        <div class="crown"></div>
+        <div class="watch-screen">
+          <div class="social-watch">
+            <div class="social-friend-area">
+              <div class="social-friend-cat">
+                <div class="social-friend-head"></div>
+                <div class="social-friend-status"></div>
+              </div>
+            </div>
+            <div class="social-touch-hint">
+              <div class="social-touch-ring"></div>
+            </div>
+            <div class="social-my-cat zen-cat-anim">
+              <div class="social-cat-body">
+                <div class="social-cat-head">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="description">
+      <h3>设计理念</h3>
+      <ul>
+        <li>自己的猫居下偏大（40% 屏幕），好友猫在右上偏小（25%）</li>
+        <li>好友猫有绿色状态点——在线/活跃指示</li>
+        <li>触碰交互用脉冲圆环暗示"可以点击好友猫"</li>
+        <li>好友猫用不同色系（紫色），靠皮肤颜色区分而非名字标签</li>
+        <li>空间分配清晰：下半屏 = 我的猫，上半屏 = 好友+事件</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Direction F -->
+  <div class="direction active" id="dir-f">
+    <div class="direction-title">F. Complication 设计</div>
+    <div class="direction-subtitle">表盘入口——accessoryRectangular 和 accessoryCircular 两种规格</div>
+    <div class="complication-showcase">
+      <div>
+        <div style="color:#8e8e93;font-size:11px;margin-bottom:8px">accessoryRectangular</div>
+        <div class="comp-rect">
+          <div class="comp-rect-cat">
+            <div class="comp-rect-cat-h"></div>
+            <div class="comp-rect-cat-b"></div>
+          </div>
+          <div>
+            <div class="comp-rect-status">在走路 🐾</div>
+            <div class="comp-rect-text">1,230 步</div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div style="color:#8e8e93;font-size:11px;margin-bottom:8px">accessoryCircular</div>
+        <div class="comp-circ">
+          <div class="comp-circ-cat">
+            <div class="comp-circ-h"></div>
+            <div class="comp-circ-b"></div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div style="color:#8e8e93;font-size:11px;margin-bottom:8px">Rectangular (sleeping)</div>
+        <div class="comp-rect">
+          <div class="comp-rect-cat">
+            <div class="comp-rect-cat-h" style="background:#B8A88A"></div>
+            <div class="comp-rect-cat-b" style="background:#B8A88A"></div>
+          </div>
+          <div>
+            <div class="comp-rect-status">在睡觉 💤</div>
+            <div class="comp-rect-text" style="color:#555">安静中...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="description">
+      <h3>设计理念</h3>
+      <ul>
+        <li>Rectangular：左猫插画（手绘风加粗线条）+ 右状态文字</li>
+        <li>Circular：仅猫头剪影，极简但一眼可辨</li>
+        <li>猫的颜色随状态和时段变化（走路=暖色，睡觉=冷灰色）</li>
+        <li>手绘线条在系统图标中"跳脱"出来——这是裤衩猫的表盘签名</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Direction G: iPhone -->
+  <div class="direction active" id="dir-g">
+    <div class="direction-title">G. iPhone 伴侣 App</div>
+    <div class="direction-subtitle">暖色品牌感——奶油白底色、橘色强调、大圆角卡片</div>
+    <div class="mockup-row">
+      <div class="iphone-frame">
+        <div class="iphone-notch"></div>
+        <div class="iphone-screen">
+          <div class="iphone-home-screen">
+            <div class="iphone-status-bar">9:41</div>
+            <div class="iphone-hero">
+              <div style="text-align:center">
+                <div class="iphone-hero-cat" style="margin:0 auto;position:relative">
+                  <div style="position:absolute;top:-15px;left:22px;width:30px;height:24px;background:#FFB87A;border-radius:50%"></div>
+                  <div style="position:absolute;top:-22px;left:20px;width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:10px solid #FFB87A"></div>
+                  <div style="position:absolute;top:-22px;right:20px;width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:10px solid #FFB87A"></div>
+                </div>
+                <div style="font-size:12px;color:#2C2C2E;margin-top:12px;font-weight:600">猫咪在走路 🐾</div>
+                <div style="font-size:10px;color:#8e8e93;margin-top:4px">今天已经走了 3,450 步</div>
+              </div>
+            </div>
+            <div class="iphone-stats">
+              <div class="iphone-stat"><div class="iphone-stat-num">3,450</div><div class="iphone-stat-label">步数</div></div>
+              <div class="iphone-stat"><div class="iphone-stat-num">2</div><div class="iphone-stat-label">盲盒</div></div>
+              <div class="iphone-stat"><div class="iphone-stat-num">23</div><div class="iphone-stat-label">皮肤</div></div>
+              <div class="iphone-stat"><div class="iphone-stat-num" style="color:#FFB5B5">5</div><div class="iphone-stat-label">触碰</div></div>
+            </div>
+            <div class="iphone-tab-bar">
+              <div class="iphone-tab active"><div class="iphone-tab-icon">🐱</div>首页</div>
+              <div class="iphone-tab"><div class="iphone-tab-icon">👕</div>皮肤库</div>
+              <div class="iphone-tab"><div class="iphone-tab-icon">✨</div>搭配</div>
+              <div class="iphone-tab"><div class="iphone-tab-icon">👥</div>好友</div>
+              <div class="iphone-tab"><div class="iphone-tab-icon">⚙️</div>设置</div>
+            </div>
+          </div>
+        </div>
+        <div class="iphone-home"></div>
+      </div>
+
+      <div class="iphone-frame">
+        <div class="iphone-notch"></div>
+        <div class="iphone-screen">
+          <div class="iphone-skin-screen">
+            <div class="iphone-status-bar">9:41</div>
+            <div class="iphone-skin-header">
+              <div class="iphone-skin-title">皮肤库</div>
+              <div class="iphone-skin-sub">已收集 23/37</div>
+            </div>
+            <div class="iphone-progress">
+              <div class="iphone-progress-bar"><div class="iphone-progress-fill"></div></div>
+              <div class="iphone-progress-text">收集进度 62%</div>
+            </div>
+            <div class="iphone-skin-grid">
+              <div class="iphone-skin-card"><div class="iphone-skin-card-icon">🎩</div><div class="iphone-skin-card-new"></div></div>
+              <div class="iphone-skin-card"><div class="iphone-skin-card-icon">👨‍🍳</div></div>
+              <div class="iphone-skin-card"><div class="iphone-skin-card-icon">🧣</div></div>
+              <div class="iphone-skin-card"><div class="iphone-skin-card-icon">🕶️</div></div>
+              <div class="iphone-skin-card" style="opacity:0.3"><div class="iphone-skin-card-icon">❓</div></div>
+              <div class="iphone-skin-card" style="opacity:0.3"><div class="iphone-skin-card-icon">❓</div></div>
+            </div>
+            <div class="iphone-tab-bar">
+              <div class="iphone-tab"><div class="iphone-tab-icon">🐱</div>首页</div>
+              <div class="iphone-tab active"><div class="iphone-tab-icon">👕</div>皮肤库</div>
+              <div class="iphone-tab"><div class="iphone-tab-icon">✨</div>搭配</div>
+              <div class="iphone-tab"><div class="iphone-tab-icon">👥</div>好友</div>
+              <div class="iphone-tab"><div class="iphone-tab-icon">⚙️</div>设置</div>
+            </div>
+          </div>
+        </div>
+        <div class="iphone-home"></div>
+      </div>
+    </div>
+    <div class="description">
+      <h3>设计理念</h3>
+      <ul>
+        <li>奶油白 #FAF8F5 底色——温暖但不刺眼</li>
+        <li>首页以猫为中心，底部统计卡片用白色浮层</li>
+        <li>皮肤库用 2 列网格，已有的正常显示，未获得的半透明+问号</li>
+        <li>收集进度条用橘→粉渐变，唯一允许的渐变使用</li>
+        <li>5 Tab 底栏：首页/皮肤库/搭配/好友/设置</li>
+        <li>触碰统计用柔粉色（社交色），与步数/盲盒的橘色区分</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Compare -->
+  <div class="direction active" id="dir-compare">
+    <div class="direction-title">方向对比</div>
+    <div class="direction-subtitle">各方向的核心差异与推荐组合</div>
+    <table class="compare-table">
+      <tr><th>维度</th><th>A. Minimal Zen</th><th>B. Warm Glow</th><th>C. Playful Pop</th></tr>
+      <tr><td>信息密度</td><td>极低 ⭐</td><td>低</td><td>中</td></tr>
+      <tr><td>情感温度</td><td>安静内敛</td><td>温暖治愈 ⭐</td><td>活泼可爱 ⭐</td></tr>
+      <tr><td>"少即是暖"</td><td>最符合 ⭐</td><td>较符合</td><td>稍违反</td></tr>
+      <tr><td>猫的细节</td><td>极简</td><td>中等</td><td>丰富 ⭐</td></tr>
+      <tr><td>黄油猫还原度</td><td>低</td><td>中</td><td>最高 ⭐</td></tr>
+      <tr><td>OLED 利用</td><td>最优 ⭐</td><td>较好</td><td>较好</td></tr>
+      <tr><td>开发复杂度</td><td>低 ⭐</td><td>中</td><td>高</td></tr>
+    </table>
+    <div class="description">
+      <h3>推荐组合：A 的布局 + C 的猫风格 + B 的光晕</h3>
+      <p>建议采用 A 的极简布局和信息密度（纯黑舞台、三层分离、零文字）作为框架，使用 C 的猫角色风格（轮廓线可见、耳朵粉色、眼睛高光、胡须尾巴）作为角色设计，加上 B 的环境光晕效果。这个组合兼顾了"少即是暖"的克制原则和黄油猫的角色辨识度。</p>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function show(id) {
+  document.querySelectorAll('.nav button').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+
+  if (id === 'all') {
+    document.querySelectorAll('.direction').forEach(d => d.classList.add('active'));
+    return;
+  }
+
+  document.querySelectorAll('.direction').forEach(d => d.classList.remove('active'));
+  document.getElementById('dir-' + id).classList.add('active');
+}
+</script>
+
+</body>
+</html>
