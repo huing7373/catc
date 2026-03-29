@@ -1,0 +1,112 @@
+# generated: 2026-03-29
+# last_updated: 2026-03-29
+# project: cat
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: _bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - SM typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+
+generated: 2026-03-29
+last_updated: 2026-03-29
+project: cat
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+
+development_status:
+  # ── Epic 1: 活的猫——手表核心体验 ──
+  epic-1: backlog
+  1-1-project-init-cat-state-machine: backlog
+  1-2-sensor-integration-cat-state-mapping: backlog
+  1-3-spritekit-cat-rendering-default-skin: backlog
+  1-4-mirror-moment-zero-guidance-onboarding: backlog
+  1-5-micro-behavior-animation-cat-personality: backlog
+  1-6-always-on-display-low-power-mode: backlog
+  epic-1-retrospective: optional
+
+  # ── Epic 2: 账号与云端基础 ──
+  epic-2: in-progress
+  2-1-go-backend-infrastructure-database: ready-for-dev
+  2-2-sign-in-with-apple-auth: backlog
+  2-3-watch-compatibility-detection: backlog
+  2-4-account-deletion-data-cleanup: backlog
+  2-5-device-migration-data-recovery: backlog
+  epic-2-retrospective: optional
+
+  # ── Epic 3: 皮肤收集与搭配 ──
+  epic-3: backlog
+  3-1-skin-data-model-server-api: backlog
+  3-2-cdn-skin-pipeline-cli-upload: backlog
+  3-3-watch-skin-cache-5-layer-rendering: backlog
+  3-4-watch-quick-skin-switch: backlog
+  3-5-iphone-skin-gallery: backlog
+  3-6-iphone-skin-outfit-dynamic-preview: backlog
+  3-7-skin-cross-device-sync: backlog
+  3-8-skin-version-check-drop-rate-adjust: backlog
+  epic-3-retrospective: optional
+
+  # ── Epic 4: 盲盒奖励与每日签到 ──
+  epic-4: backlog
+  4-1-serialized-gift-system-server: backlog
+  4-2-blindbox-drop-step-unlock: backlog
+  4-3-blindbox-offline-open-animation: backlog
+  4-4-blindbox-state-persistence-recovery: backlog
+  4-5-daily-checkin-cat-gift: backlog
+  4-6-checkin-cumulative-makeup: backlog
+  epic-4-retrospective: optional
+
+  # ── Epic 5: 社交体验——配对、好友猫与触觉触碰 ──
+  epic-5: backlog
+  5-1-social-data-model-friend-api: backlog
+  5-2-invite-link-auto-pairing: backlog
+  5-3-friend-cat-on-screen: backlog
+  5-4-system-cat-npc-companion: backlog
+  5-5-touch-send-receive: backlog
+  5-6-touch-push-background-receive: backlog
+  5-7-touch-rate-limit-mute: backlog
+  5-8-friend-management-trust-safety: backlog
+  5-9-notification-preferences: backlog
+  5-10-iphone-only-friend-support: backlog
+  epic-5-retrospective: optional
+
+  # ── Epic 6: Complication 表盘入口 ──
+  epic-6: backlog
+  6-1-complication-cat-status-illustration: backlog
+  6-2-complication-interaction-app-launch: backlog
+  6-3-day3-complication-delayed-guidance: backlog
+  epic-6-retrospective: optional
+
+  # ── Epic 7: 运维与数据分析 ──
+  epic-7: backlog
+  7-1-personal-brief-stats: backlog
+  7-2-daily-data-summary-db-backup: backlog
+  7-3-blindbox-open-audit: backlog
+  7-4-business-metrics-aggregation: backlog
+  epic-7-retrospective: optional
