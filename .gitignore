@@ -1,0 +1,41 @@
+# macOS
+.DS_Store
+*.swp
+
+# Xcode
+ios/Cat.xcworkspace/xcuserdata/
+ios/Cat.xcodeproj/xcuserdata/
+ios/Cat.xcodeproj/project.xcworkspace/xcuserdata/
+DerivedData/
+*.xcuserstate
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Go
+server/tmp/
+server/vendor/
+
+# Environment
+.env.production
+.env.staging
+
+# Generated
+api/gen/
+fixtures/*.generated.json
+
+# IDE
+.idea/
+.vscode/
+
+# Dependencies
+node_modules/
+
+# Binary
+*.exe
+*.out
+*.bin
