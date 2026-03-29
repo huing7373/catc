@@ -36,6 +36,7 @@ fixtures/*.generated.json
 node_modules/
 
 # Binary
+build/
 *.exe
 *.out
 *.bin

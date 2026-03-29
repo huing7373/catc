@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Build script for the cat server.
+# Usage: ./scripts/build.sh [--test] [--race]
+#   --test   Run tests after build
+#   --race   Enable race detector (build & test)
+#
+# Exit code 0 = success, non-zero = failure.
+# All output (stdout + stderr) is merged for easy capture.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SERVER_DIR="$REPO_ROOT/server"
+OUTPUT_DIR="$REPO_ROOT/build"
+BINARY_NAME="catserver"
+
+RUN_TESTS=false
+RACE_FLAG=""
+
+for arg in "$@"; do
+  case "$arg" in
+    --test) RUN_TESTS=true ;;
+    --race) RACE_FLAG="-race" ;;
+    *) echo "Unknown flag: $arg"; exit 1 ;;
+  esac
+done
+
+# Ensure output directory exists
+mkdir -p "$OUTPUT_DIR"
+
+echo "=== go vet ==="
+cd "$SERVER_DIR"
+if ! go vet ./... 2>&1; then
+  echo "FAIL: go vet found issues"
+  exit 1
+fi
+
+echo ""
+echo "=== go build ==="
+if ! go build $RACE_FLAG -o "$OUTPUT_DIR/$BINARY_NAME" ./cmd/server/ 2>&1; then
+  echo "FAIL: build failed"
+  exit 1
+fi
+echo "OK: binary at build/$BINARY_NAME"
+
+if [ "$RUN_TESTS" = true ]; then
+  echo ""
+  echo "=== go test ==="
+  if ! go test $RACE_FLAG -count=1 ./... 2>&1; then
+    echo "FAIL: tests failed"
+    exit 1
+  fi
+  echo "OK: all tests passed"
+fi
+
+echo ""
+echo "BUILD SUCCESS"
