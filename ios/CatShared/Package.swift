@@ -5,13 +5,28 @@ let package = Package(
     name: "CatShared",
     platforms: [
         .iOS(.v17),
-        .watchOS(.v10)
+        .watchOS(.v10),
+        .macOS(.v14)
     ],
     products: [
-        .library(name: "CatShared", targets: ["CatShared"])
+        .library(name: "CatShared", targets: ["CatShared"]),
+        .library(name: "CatCore", targets: ["CatCore"])
     ],
     targets: [
         .target(name: "CatShared"),
-        .testTarget(name: "CatSharedTests", dependencies: ["CatShared"])
+        .target(
+            name: "CatCore",
+            dependencies: ["CatShared"],
+            path: "Sources/CatCore"
+        ),
+        .testTarget(
+            name: "CatSharedTests",
+            dependencies: ["CatShared"]
+        ),
+        .testTarget(
+            name: "CatCoreTests",
+            dependencies: ["CatCore", "CatShared"],
+            path: "Tests/CatCoreTests"
+        )
     ]
 )

@@ -1,0 +1,72 @@
+name: Cat
+options:
+  bundleIdPrefix: com.zhuming.cat
+  deploymentTarget:
+    iOS: "17.0"
+    watchOS: "10.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+
+packages:
+  CatShared:
+    path: CatShared
+
+targets:
+  CatPhone:
+    type: application
+    platform: iOS
+    sources:
+      - CatPhone
+    dependencies:
+      - package: CatShared
+        product: CatShared
+      - package: CatShared
+        product: CatCore
+      - sdk: SpriteKit.framework
+      - sdk: HealthKit.framework
+      - sdk: WatchConnectivity.framework
+    info:
+      path: CatPhone/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zhuming.cat.phone
+
+  CatWatch:
+    type: application
+    platform: watchOS
+    sources:
+      - CatWatch
+    dependencies:
+      - package: CatShared
+        product: CatShared
+      - package: CatShared
+        product: CatCore
+      - sdk: SpriteKit.framework
+      - sdk: HealthKit.framework
+      - sdk: WatchConnectivity.framework
+      - sdk: WidgetKit.framework
+    info:
+      path: CatWatch/Info.plist
+      properties:
+        WKApplication: true
+        WKCompanionAppBundleIdentifier: com.zhuming.cat.phone
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zhuming.cat.phone.watchapp
+        WATCHOS_DEPLOYMENT_TARGET: "10.0"
+
+  CatPhoneTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - CatPhoneTests
+    dependencies:
+      - target: CatPhone
+
+  CatWatchTests:
+    type: bundle.unit-test
+    platform: watchOS
+    sources:
+      - CatWatchTests
+    dependencies:
+      - target: CatWatch

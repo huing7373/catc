@@ -1,0 +1,778 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		3033F394924BEACF147B73C8 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4C794CD8DCBDBC791EC7D665 /* WidgetKit.framework */; };
+		4218F24F6F4AA3ABEA67F9B7 /* CatWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0AFE9EA762E3472B93518D /* CatWatchApp.swift */; };
+		4BC40D434211B96A422522EC /* SpriteKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FCACF0A2DB62B65AA46AC320 /* SpriteKit.framework */; };
+		4EFEF6A626B82EBB045E5CFA /* CatCore in Frameworks */ = {isa = PBXBuildFile; productRef = 2FAF7567ACC10E85DE6D7620 /* CatCore */; };
+		52A1F9A621AB32ED404C36BB /* CatPhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F666123D57FA3A216D807BA /* CatPhoneApp.swift */; };
+		6DCA5B3E230B3692039C3DA4 /* CatShared in Frameworks */ = {isa = PBXBuildFile; productRef = 9FF1F0C94B40BF9434AEA653 /* CatShared */; };
+		7433239F84CF6324756995EA /* CatShared in Frameworks */ = {isa = PBXBuildFile; productRef = ECE8F7A230C7B48B11D9B863 /* CatShared */; };
+		9EBCACBB973D785FAA340427 /* HealthKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C39C586844268AAF61D3F65B /* HealthKit.framework */; };
+		C549D2CBBFA57F18974E831F /* WatchConnectivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 97CD948555D294784F1B2610 /* WatchConnectivity.framework */; };
+		DD6D099DAC5E276E65F09BB6 /* WatchConnectivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 97CD948555D294784F1B2610 /* WatchConnectivity.framework */; };
+		E5247657606C116A0C0EA869 /* CatCore in Frameworks */ = {isa = PBXBuildFile; productRef = D03833846C4DDFB370C1FC19 /* CatCore */; };
+		E64219F57FB614E44B6AA3E9 /* HealthKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C39C586844268AAF61D3F65B /* HealthKit.framework */; };
+		F27462F4D1D107F44CC2EF87 /* SpriteKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FCACF0A2DB62B65AA46AC320 /* SpriteKit.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		5DB659CE53B5AB9B1351131C /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F1FD9CB3F0CFF7057A5CE779 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 736450AC25E21950787D2FEF;
+			remoteInfo = CatPhone;
+		};
+		CA7B88E0B26E116711999107 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F1FD9CB3F0CFF7057A5CE779 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 70CE4039D0C3E0C71B14EE6C;
+			remoteInfo = CatWatch;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		14311BD9AE3540C72A3FDD7A /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		1D43DABD485086BDE39AE816 /* CatWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CatWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		47A1D57384883FD3B92725CA /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		4C794CD8DCBDBC791EC7D665 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
+		560936E97A6DB94EE941347A /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		5801D1D2F7923A8176D95E9C /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		5A90475B9CEAFD536D4F9EAB /* CatWatchTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CatWatchTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		5BC67436B57F3A84076E020E /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		6257829762F07F56AF1143AB /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		68DCF35834A654AEDF5E4705 /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		789BA4CB6B28A64D9D41072A /* CatPhoneTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = CatPhoneTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		85134BFA1371618A7E24AF8D /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		8BE80C4D158394F7F2E3B7A3 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		8D0AFE9EA762E3472B93518D /* CatWatchApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatWatchApp.swift; sourceTree = "<group>"; };
+		8F666123D57FA3A216D807BA /* CatPhoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatPhoneApp.swift; sourceTree = "<group>"; };
+		9239497A70B9574DCCD7AECC /* CatPhone.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = CatPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		97CD948555D294784F1B2610 /* WatchConnectivity.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WatchConnectivity.framework; path = System/Library/Frameworks/WatchConnectivity.framework; sourceTree = SDKROOT; };
+		9ECA7FA9604C0017D4F5CD3C /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		A2DB179CA72E6162C6564773 /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		A8B786567FC2EBE93920D198 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		BA14BCDCA2BF7D07D61B3848 /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		C39C586844268AAF61D3F65B /* HealthKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = HealthKit.framework; path = System/Library/Frameworks/HealthKit.framework; sourceTree = SDKROOT; };
+		D585C737AE3AD2A5BE7745F7 /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		E097041C89A0EA1BA0879BE1 /* CatShared */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CatShared; path = CatShared; sourceTree = SOURCE_ROOT; };
+		E0AE60423584D1CD3E5B2003 /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		EB3C8411E25D5D635CF81823 /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		F24767AAA00D1C88E70FFAEC /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		FCACF0A2DB62B65AA46AC320 /* SpriteKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SpriteKit.framework; path = System/Library/Frameworks/SpriteKit.framework; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		1EE8FE634CF83702FA86DC2A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7433239F84CF6324756995EA /* CatShared in Frameworks */,
+				4EFEF6A626B82EBB045E5CFA /* CatCore in Frameworks */,
+				F27462F4D1D107F44CC2EF87 /* SpriteKit.framework in Frameworks */,
+				9EBCACBB973D785FAA340427 /* HealthKit.framework in Frameworks */,
+				C549D2CBBFA57F18974E831F /* WatchConnectivity.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AF11A9CF0E4BD3FE3A25A932 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6DCA5B3E230B3692039C3DA4 /* CatShared in Frameworks */,
+				E5247657606C116A0C0EA869 /* CatCore in Frameworks */,
+				4BC40D434211B96A422522EC /* SpriteKit.framework in Frameworks */,
+				E64219F57FB614E44B6AA3E9 /* HealthKit.framework in Frameworks */,
+				DD6D099DAC5E276E65F09BB6 /* WatchConnectivity.framework in Frameworks */,
+				3033F394924BEACF147B73C8 /* WidgetKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		0DA5790ED81E5FB975915289 /* ViewModels */ = {
+			isa = PBXGroup;
+			children = (
+				D585C737AE3AD2A5BE7745F7 /* .gitkeep */,
+			);
+			path = ViewModels;
+			sourceTree = "<group>";
+		};
+		137CE149011EF1C6C2CF4A9A /* DeepLink */ = {
+			isa = PBXGroup;
+			children = (
+				47A1D57384883FD3B92725CA /* .gitkeep */,
+			);
+			path = DeepLink;
+			sourceTree = "<group>";
+		};
+		166BFE919D50E28362D50DB0 /* CatPhone */ = {
+			isa = PBXGroup;
+			children = (
+				8BE80C4D158394F7F2E3B7A3 /* Info.plist */,
+				48F4B76A6FD542644D2B4656 /* App */,
+				137CE149011EF1C6C2CF4A9A /* DeepLink */,
+				ABFF4279163864B218D10A37 /* Resources */,
+				8CC053BFFEC8BE34FF82158D /* Scenes */,
+				0DA5790ED81E5FB975915289 /* ViewModels */,
+				A2E2D820C32432FAC42B25EB /* Views */,
+			);
+			path = CatPhone;
+			sourceTree = "<group>";
+		};
+		35C77B363A2CB6244403A4C5 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				9ECA7FA9604C0017D4F5CD3C /* .gitkeep */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		40476E0C3A95090990ACFE8F /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				E097041C89A0EA1BA0879BE1 /* CatShared */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+		48F4B76A6FD542644D2B4656 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				A2DB179CA72E6162C6564773 /* .gitkeep */,
+				8F666123D57FA3A216D807BA /* CatPhoneApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		4C7DC96A423AFFDA2E7D8E56 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				6257829762F07F56AF1143AB /* .gitkeep */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		508671EFB475261110BC299C /* Complication */ = {
+			isa = PBXGroup;
+			children = (
+				5801D1D2F7923A8176D95E9C /* .gitkeep */,
+			);
+			path = Complication;
+			sourceTree = "<group>";
+		};
+		68795FD53A8561DBA4D24BDA /* CatWatchTests */ = {
+			isa = PBXGroup;
+			children = (
+				EB3C8411E25D5D635CF81823 /* .gitkeep */,
+			);
+			path = CatWatchTests;
+			sourceTree = "<group>";
+		};
+		78EFC1DEFB3452EE36DCFD6D /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				E0AE60423584D1CD3E5B2003 /* .gitkeep */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		8CC053BFFEC8BE34FF82158D /* Scenes */ = {
+			isa = PBXGroup;
+			children = (
+				68DCF35834A654AEDF5E4705 /* .gitkeep */,
+			);
+			path = Scenes;
+			sourceTree = "<group>";
+		};
+		8EDF074E98667A8D7F64D756 = {
+			isa = PBXGroup;
+			children = (
+				166BFE919D50E28362D50DB0 /* CatPhone */,
+				E911199FBB03AC49B687B3C6 /* CatPhoneTests */,
+				F2D2375204AF7CE4CB24E41C /* CatWatch */,
+				68795FD53A8561DBA4D24BDA /* CatWatchTests */,
+				40476E0C3A95090990ACFE8F /* Packages */,
+				A3D15C813F785E578704FD32 /* Frameworks */,
+				BB39D0F5923FE0719565E359 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A055347667FD9EEEB1BA6983 /* ViewModels */ = {
+			isa = PBXGroup;
+			children = (
+				85134BFA1371618A7E24AF8D /* .gitkeep */,
+			);
+			path = ViewModels;
+			sourceTree = "<group>";
+		};
+		A2E2D820C32432FAC42B25EB /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				BA14BCDCA2BF7D07D61B3848 /* .gitkeep */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		A3D15C813F785E578704FD32 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				C39C586844268AAF61D3F65B /* HealthKit.framework */,
+				FCACF0A2DB62B65AA46AC320 /* SpriteKit.framework */,
+				97CD948555D294784F1B2610 /* WatchConnectivity.framework */,
+				4C794CD8DCBDBC791EC7D665 /* WidgetKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		ABFF4279163864B218D10A37 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				F24767AAA00D1C88E70FFAEC /* .gitkeep */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		BB39D0F5923FE0719565E359 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				9239497A70B9574DCCD7AECC /* CatPhone.app */,
+				789BA4CB6B28A64D9D41072A /* CatPhoneTests.xctest */,
+				1D43DABD485086BDE39AE816 /* CatWatch.app */,
+				5A90475B9CEAFD536D4F9EAB /* CatWatchTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		C02F5AC10604BD1F34363825 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				5BC67436B57F3A84076E020E /* .gitkeep */,
+				8D0AFE9EA762E3472B93518D /* CatWatchApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		C0B8131E79C0215B7E03F9D4 /* Scenes */ = {
+			isa = PBXGroup;
+			children = (
+				14311BD9AE3540C72A3FDD7A /* .gitkeep */,
+			);
+			path = Scenes;
+			sourceTree = "<group>";
+		};
+		E911199FBB03AC49B687B3C6 /* CatPhoneTests */ = {
+			isa = PBXGroup;
+			children = (
+				560936E97A6DB94EE941347A /* .gitkeep */,
+			);
+			path = CatPhoneTests;
+			sourceTree = "<group>";
+		};
+		F2D2375204AF7CE4CB24E41C /* CatWatch */ = {
+			isa = PBXGroup;
+			children = (
+				A8B786567FC2EBE93920D198 /* Info.plist */,
+				C02F5AC10604BD1F34363825 /* App */,
+				508671EFB475261110BC299C /* Complication */,
+				35C77B363A2CB6244403A4C5 /* Core */,
+				78EFC1DEFB3452EE36DCFD6D /* Resources */,
+				C0B8131E79C0215B7E03F9D4 /* Scenes */,
+				A055347667FD9EEEB1BA6983 /* ViewModels */,
+				4C7DC96A423AFFDA2E7D8E56 /* Views */,
+			);
+			path = CatWatch;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1D671823A911F02D9148D4F8 /* CatPhoneTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FBC1A29B521A81D01C0D22CF /* Build configuration list for PBXNativeTarget "CatPhoneTests" */;
+			buildPhases = (
+				889F14DE1809BAEEABF085EE /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				EB11AE8BD50CE9EC65614092 /* PBXTargetDependency */,
+			);
+			name = CatPhoneTests;
+			packageProductDependencies = (
+			);
+			productName = CatPhoneTests;
+			productReference = 789BA4CB6B28A64D9D41072A /* CatPhoneTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		1D6E56F0B8058B3C5E4CF127 /* CatWatchTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 4DC9EB97640FAEBF2CA723FC /* Build configuration list for PBXNativeTarget "CatWatchTests" */;
+			buildPhases = (
+				437779B9D6B9B300606E18E6 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				CFFDD91267BC65D98D325EA8 /* PBXTargetDependency */,
+			);
+			name = CatWatchTests;
+			packageProductDependencies = (
+			);
+			productName = CatWatchTests;
+			productReference = 5A90475B9CEAFD536D4F9EAB /* CatWatchTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		70CE4039D0C3E0C71B14EE6C /* CatWatch */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1662D562438ED623E8671271 /* Build configuration list for PBXNativeTarget "CatWatch" */;
+			buildPhases = (
+				5FE45FBF4206D2EE31075BD8 /* Sources */,
+				AF11A9CF0E4BD3FE3A25A932 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CatWatch;
+			packageProductDependencies = (
+				9FF1F0C94B40BF9434AEA653 /* CatShared */,
+				D03833846C4DDFB370C1FC19 /* CatCore */,
+			);
+			productName = CatWatch;
+			productReference = 1D43DABD485086BDE39AE816 /* CatWatch.app */;
+			productType = "com.apple.product-type.application";
+		};
+		736450AC25E21950787D2FEF /* CatPhone */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3AD221A5AC98460EB750F5B7 /* Build configuration list for PBXNativeTarget "CatPhone" */;
+			buildPhases = (
+				1CD2FCD62995DBE84746C4E9 /* Sources */,
+				1EE8FE634CF83702FA86DC2A /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CatPhone;
+			packageProductDependencies = (
+				ECE8F7A230C7B48B11D9B863 /* CatShared */,
+				2FAF7567ACC10E85DE6D7620 /* CatCore */,
+			);
+			productName = CatPhone;
+			productReference = 9239497A70B9574DCCD7AECC /* CatPhone.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		F1FD9CB3F0CFF7057A5CE779 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+				};
+			};
+			buildConfigurationList = 6E0E644CC0B598B8CF563550 /* Build configuration list for PBXProject "Cat" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 8EDF074E98667A8D7F64D756;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A5EBC6A1FFA10F1E3D43AC4C /* XCLocalSwiftPackageReference "CatShared" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = BB39D0F5923FE0719565E359 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				736450AC25E21950787D2FEF /* CatPhone */,
+				1D671823A911F02D9148D4F8 /* CatPhoneTests */,
+				70CE4039D0C3E0C71B14EE6C /* CatWatch */,
+				1D6E56F0B8058B3C5E4CF127 /* CatWatchTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		1CD2FCD62995DBE84746C4E9 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				52A1F9A621AB32ED404C36BB /* CatPhoneApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		437779B9D6B9B300606E18E6 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5FE45FBF4206D2EE31075BD8 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4218F24F6F4AA3ABEA67F9B7 /* CatWatchApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		889F14DE1809BAEEABF085EE /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		CFFDD91267BC65D98D325EA8 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 70CE4039D0C3E0C71B14EE6C /* CatWatch */;
+			targetProxy = CA7B88E0B26E116711999107 /* PBXContainerItemProxy */;
+		};
+		EB11AE8BD50CE9EC65614092 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 736450AC25E21950787D2FEF /* CatPhone */;
+			targetProxy = 5DB659CE53B5AB9B1351131C /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0012F36EC2D4786B294295D2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = CatPhone/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zhuming.cat.phone;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		074C3C4AC45728582EF61E61 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zhuming.cat.CatPhoneTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/CatPhone.app/CatPhone";
+			};
+			name = Release;
+		};
+		0C86E2C146EEBFD64407419C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Debug;
+		};
+		12D3E3AE9E69D28AC46B1110 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				INFOPLIST_FILE = CatWatch/Info.plist;
+				PRODUCT_BUNDLE_IDENTIFIER = com.zhuming.cat.phone.watchapp;
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Debug;
+		};
+		5F1390FA7DA52B05CA538198 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zhuming.cat.CatPhoneTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/CatPhone.app/CatPhone";
+			};
+			name = Debug;
+		};
+		734B286F848CDF77F294058D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zhuming.cat.CatWatchTests;
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = 4;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/CatWatch.app/CatWatch";
+			};
+			name = Debug;
+		};
+		82384C8C6CFF404619A7FD32 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = CatPhone/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zhuming.cat.phone;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		9A9455B8CED25734429E842E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Release;
+		};
+		9CC6D356ECEE16D78F9F7865 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				INFOPLIST_FILE = CatWatch/Info.plist;
+				PRODUCT_BUNDLE_IDENTIFIER = com.zhuming.cat.phone.watchapp;
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Release;
+		};
+		CC489961CB3F4453A40CD3DD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zhuming.cat.CatWatchTests;
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = 4;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/CatWatch.app/CatWatch";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1662D562438ED623E8671271 /* Build configuration list for PBXNativeTarget "CatWatch" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				12D3E3AE9E69D28AC46B1110 /* Debug */,
+				9CC6D356ECEE16D78F9F7865 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		3AD221A5AC98460EB750F5B7 /* Build configuration list for PBXNativeTarget "CatPhone" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0012F36EC2D4786B294295D2 /* Debug */,
+				82384C8C6CFF404619A7FD32 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		4DC9EB97640FAEBF2CA723FC /* Build configuration list for PBXNativeTarget "CatWatchTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				734B286F848CDF77F294058D /* Debug */,
+				CC489961CB3F4453A40CD3DD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		6E0E644CC0B598B8CF563550 /* Build configuration list for PBXProject "Cat" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0C86E2C146EEBFD64407419C /* Debug */,
+				9A9455B8CED25734429E842E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FBC1A29B521A81D01C0D22CF /* Build configuration list for PBXNativeTarget "CatPhoneTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5F1390FA7DA52B05CA538198 /* Debug */,
+				074C3C4AC45728582EF61E61 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A5EBC6A1FFA10F1E3D43AC4C /* XCLocalSwiftPackageReference "CatShared" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = CatShared;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		2FAF7567ACC10E85DE6D7620 /* CatCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = CatCore;
+		};
+		9FF1F0C94B40BF9434AEA653 /* CatShared */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = CatShared;
+		};
+		D03833846C4DDFB370C1FC19 /* CatCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = CatCore;
+		};
+		ECE8F7A230C7B48B11D9B863 /* CatShared */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = CatShared;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = F1FD9CB3F0CFF7057A5CE779 /* Project object */;
+}
