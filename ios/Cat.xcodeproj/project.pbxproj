@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		3033F394924BEACF147B73C8 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4C794CD8DCBDBC791EC7D665 /* WidgetKit.framework */; };
+		37DFA0017B33400000000001 /* default_cat.png in Resources */ = {isa = PBXBuildFile; fileRef = 37DFA0027B33400000000001 /* default_cat.png */; };
+		37DFA0047B33400000000001 /* default_cat_atlas.png in Resources */ = {isa = PBXBuildFile; fileRef = 37DFA0057B33400000000001 /* default_cat_atlas.png */; };
 		4218F24F6F4AA3ABEA67F9B7 /* CatWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0AFE9EA762E3472B93518D /* CatWatchApp.swift */; };
 		4BC40D434211B96A422522EC /* SpriteKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FCACF0A2DB62B65AA46AC320 /* SpriteKit.framework */; };
 		4EFEF6A626B82EBB045E5CFA /* CatCore in Frameworks */ = {isa = PBXBuildFile; productRef = 2FAF7567ACC10E85DE6D7620 /* CatCore */; };
@@ -40,33 +42,35 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		14311BD9AE3540C72A3FDD7A /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		14311BD9AE3540C72A3FDD7A /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
 		1D43DABD485086BDE39AE816 /* CatWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CatWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		47A1D57384883FD3B92725CA /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		37DFA0027B33400000000001 /* default_cat.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = default_cat.png; sourceTree = "<group>"; };
+		37DFA0057B33400000000001 /* default_cat_atlas.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = default_cat_atlas.png; sourceTree = "<group>"; };
+		47A1D57384883FD3B92725CA /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
 		4C794CD8DCBDBC791EC7D665 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
-		560936E97A6DB94EE941347A /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
-		5801D1D2F7923A8176D95E9C /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		560936E97A6DB94EE941347A /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
+		5801D1D2F7923A8176D95E9C /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
 		5A90475B9CEAFD536D4F9EAB /* CatWatchTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CatWatchTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		5BC67436B57F3A84076E020E /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
-		6257829762F07F56AF1143AB /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
-		68DCF35834A654AEDF5E4705 /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		5BC67436B57F3A84076E020E /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
+		6257829762F07F56AF1143AB /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
+		68DCF35834A654AEDF5E4705 /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
 		789BA4CB6B28A64D9D41072A /* CatPhoneTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = CatPhoneTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		85134BFA1371618A7E24AF8D /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		85134BFA1371618A7E24AF8D /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
 		8BE80C4D158394F7F2E3B7A3 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		8D0AFE9EA762E3472B93518D /* CatWatchApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatWatchApp.swift; sourceTree = "<group>"; };
 		8F666123D57FA3A216D807BA /* CatPhoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatPhoneApp.swift; sourceTree = "<group>"; };
 		9239497A70B9574DCCD7AECC /* CatPhone.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = CatPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		97CD948555D294784F1B2610 /* WatchConnectivity.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WatchConnectivity.framework; path = System/Library/Frameworks/WatchConnectivity.framework; sourceTree = SDKROOT; };
-		9ECA7FA9604C0017D4F5CD3C /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
-		A2DB179CA72E6162C6564773 /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		9ECA7FA9604C0017D4F5CD3C /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
+		A2DB179CA72E6162C6564773 /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
 		A8B786567FC2EBE93920D198 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
-		BA14BCDCA2BF7D07D61B3848 /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		BA14BCDCA2BF7D07D61B3848 /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
 		C39C586844268AAF61D3F65B /* HealthKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = HealthKit.framework; path = System/Library/Frameworks/HealthKit.framework; sourceTree = SDKROOT; };
-		D585C737AE3AD2A5BE7745F7 /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
-		E097041C89A0EA1BA0879BE1 /* CatShared */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CatShared; path = CatShared; sourceTree = SOURCE_ROOT; };
-		E0AE60423584D1CD3E5B2003 /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
-		EB3C8411E25D5D635CF81823 /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
-		F24767AAA00D1C88E70FFAEC /* .gitkeep */ = {isa = PBXFileReference; path = .gitkeep; sourceTree = "<group>"; };
+		D585C737AE3AD2A5BE7745F7 /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
+		E097041C89A0EA1BA0879BE1 /* CatShared */ = {isa = PBXFileReference; lastKnownFileType = folder; path = CatShared; sourceTree = SOURCE_ROOT; };
+		E0AE60423584D1CD3E5B2003 /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
+		EB3C8411E25D5D635CF81823 /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
+		F24767AAA00D1C88E70FFAEC /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
 		FCACF0A2DB62B65AA46AC320 /* SpriteKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SpriteKit.framework; path = System/Library/Frameworks/SpriteKit.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
@@ -181,6 +185,8 @@
 		78EFC1DEFB3452EE36DCFD6D /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				37DFA0057B33400000000001 /* default_cat_atlas.png */,
+				37DFA0027B33400000000001 /* default_cat.png */,
 				E0AE60423584D1CD3E5B2003 /* .gitkeep */,
 			);
 			path = Resources;
@@ -337,6 +343,7 @@
 			buildConfigurationList = 1662D562438ED623E8671271 /* Build configuration list for PBXNativeTarget "CatWatch" */;
 			buildPhases = (
 				5FE45FBF4206D2EE31075BD8 /* Sources */,
+				37DFA0037B33400000000001 /* Resources */,
 				AF11A9CF0E4BD3FE3A25A932 /* Frameworks */,
 			);
 			buildRules = (
@@ -380,8 +387,6 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1600;
-				TargetAttributes = {
-				};
 			};
 			buildConfigurationList = 6E0E644CC0B598B8CF563550 /* Build configuration list for PBXProject "Cat" */;
 			developmentRegion = en;
@@ -407,6 +412,18 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		37DFA0037B33400000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				37DFA0047B33400000000001 /* default_cat_atlas.png in Resources */,
+				37DFA0017B33400000000001 /* default_cat.png in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		1CD2FCD62995DBE84746C4E9 /* Sources */ = {
@@ -554,6 +571,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				DEVELOPMENT_TEAM = 83WLPHU995;
 				INFOPLIST_FILE = CatWatch/Info.plist;
 				PRODUCT_BUNDLE_IDENTIFIER = com.zhuming.cat.phone.watchapp;
 				SDKROOT = watchos;
@@ -583,6 +601,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
+				DEVELOPMENT_TEAM = 83WLPHU995;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -672,6 +691,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				DEVELOPMENT_TEAM = 83WLPHU995;
 				INFOPLIST_FILE = CatWatch/Info.plist;
 				PRODUCT_BUNDLE_IDENTIFIER = com.zhuming.cat.phone.watchapp;
 				SDKROOT = watchos;
@@ -685,6 +705,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
+				DEVELOPMENT_TEAM = 83WLPHU995;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
