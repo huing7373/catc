@@ -83,7 +83,7 @@ public final class CatStateMachine {
 
     // MARK: - Public API
 
-    /// 传感器层唯一入口：传入运动输入，状态机内部处理防抖和转换规则
+    /// 传感器层唯一入口：主状态直接跟随系统运动分类
     public func handleMotionInput(_ input: MotionInput) {
         switch input {
         case .wristRaise:
@@ -142,35 +142,26 @@ public final class CatStateMachine {
     }
 
     private func handleStationaryInput() {
-        guard currentState == .walking || currentState == .running else {
-            cancelPendingInput()
+        cancelPendingInput()
+
+        guard currentState == .walking || currentState == .running || currentState.isMicroBehavior else {
             return
         }
 
-        startDebounce(for: .stationary, requiredDuration: Timing.stationaryDebounce) { [weak self] in
-            self?.transition(to: .idle)
-        }
+        transition(to: .idle)
     }
 
     private func handleMotionDetected(_ targetMotion: MotionInput) {
         let targetState: CatState = targetMotion == .walking ? .walking : .running
+        cancelPendingInput()
 
-        // walking ↔ running 直接转换（无防抖）
-        if (currentState == .walking && targetState == .running) ||
-           (currentState == .running && targetState == .walking) {
-            cancelPendingInput()
+        guard currentState != .sleeping else {
+            transition(to: .idle)
             transition(to: targetState)
             return
         }
 
-        guard currentState == .idle || currentState.isMicroBehavior else {
-            cancelPendingInput()
-            return
-        }
-
-        startDebounce(for: targetMotion, requiredDuration: Timing.motionDebounce) { [weak self] in
-            self?.transition(to: targetState)
-        }
+        transition(to: targetState)
     }
 
     // MARK: - Debounce
@@ -208,10 +199,7 @@ public final class CatStateMachine {
 
     private func resetSelfHealTimer() {
         selfHealToken?.cancel()
-        selfHealToken = scheduler.scheduleOnce(after: Timing.selfHealInterval) { [weak self] in
-            guard let self, self.currentState != .idle else { return }
-            self.transition(to: .idle)
-        }
+        selfHealToken = nil
     }
 
     // MARK: - Sleeping Check

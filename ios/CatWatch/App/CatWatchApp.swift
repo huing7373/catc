@@ -317,19 +317,31 @@ final class WatchMotionController: ObservableObject {
     private var fastWalkingSamples = 0
     private var fastStillSamples = 0
     private var recentDynamicSamples: [(time: Date, magnitude: Double)] = []
+    private var lastStepDrivenWalkAt: Date?
+    private var fastPatternConfirmations = 0
+    private var motionInactivityTimer: Timer?
+    private var lastMovementSignalAt = Date()
 
     private enum FastMotionTuning {
         static let updateInterval = 0.2
-        static let walkingAccelerationThreshold = 0.055
-        static let walkingSampleCount = 3
+        static let walkingAccelerationThreshold = 0.075
+        static let walkingSampleCount = 4
         static let stillSampleCount = 6
-        static let sampleWindowDuration: TimeInterval = 2.2
-        static let requiredPeakCount = 3
-        static let peakThreshold = 0.07
-        static let minPeakInterval: TimeInterval = 0.25
-        static let maxPeakInterval: TimeInterval = 0.9
-        static let allowedIntervalDrift: TimeInterval = 0.28
-        static let minimumAverageMagnitude = 0.05
+        static let sampleWindowDuration: TimeInterval = 2.6
+        static let requiredPeakCount = 4
+        static let peakThreshold = 0.09
+        static let minPeakInterval: TimeInterval = 0.3
+        static let maxPeakInterval: TimeInterval = 0.85
+        static let allowedIntervalDrift: TimeInterval = 0.2
+        static let minimumAverageMagnitude = 0.065
+        static let minimumCadenceSpan: TimeInterval = 1.0
+        static let minimumEnergeticSampleRatio = 0.55
+        static let requiredPatternConfirmations = 2
+    }
+
+    private enum IdleFallbackTuning {
+        static let checkInterval: TimeInterval = 3.0
+        static let movementTimeout: TimeInterval = 3.0
     }
 
     func start() {
@@ -347,8 +359,8 @@ final class WatchMotionController: ObservableObject {
             .store(in: &cancellables)
 
         startActivityUpdates()
-        startFastMotionUpdates()
         startPedometerUpdates()
+        startIdleFallbackChecks()
     }
 
     func handleWristRaise() {
@@ -373,6 +385,9 @@ final class WatchMotionController: ObservableObject {
             DispatchQueue.main.async {
                 self.sensorStatus = "已同步：\(self.displayName(for: input))"
                 self.lastMotionInput = input
+                if input == .walking || input == .running {
+                    self.lastMovementSignalAt = Date()
+                }
                 if let optimisticState {
                     self.currentState = optimisticState
                     self.onStateChanged?(optimisticState)
@@ -418,13 +433,23 @@ final class WatchMotionController: ObservableObject {
             fastWalkingSamples = 0
         }
 
-        if fastWalkingSamples >= FastMotionTuning.walkingSampleCount,
-           hasWalkingCadence(in: recentDynamicSamples),
+        let hasWalkingPattern =
+            fastWalkingSamples >= FastMotionTuning.walkingSampleCount &&
+            hasWalkingCadence(in: recentDynamicSamples)
+
+        if hasWalkingPattern {
+            fastPatternConfirmations += 1
+        } else if !isLikelyWalking {
+            fastPatternConfirmations = 0
+        }
+
+        if fastPatternConfirmations >= FastMotionTuning.requiredPatternConfirmations,
            currentState == .idle || currentState == .microYawn || currentState == .microStretch {
             currentState = .walking
             sensorStatus = "快速通道识别到 walking"
             onStateChanged?(.walking)
             onMotionInputChanged?(.walking)
+            machine.handleMotionInput(.walking)
         }
 
         if fastStillSamples >= FastMotionTuning.stillSampleCount,
@@ -432,6 +457,7 @@ final class WatchMotionController: ObservableObject {
            lastMotionInput == .stationary {
             currentState = .idle
             onStateChanged?(.idle)
+            fastPatternConfirmations = 0
         }
     }
 
@@ -440,6 +466,11 @@ final class WatchMotionController: ObservableObject {
 
         let averageMagnitude = samples.map(\.magnitude).reduce(0, +) / Double(samples.count)
         guard averageMagnitude >= FastMotionTuning.minimumAverageMagnitude else { return false }
+
+        let energeticSampleRatio =
+            Double(samples.filter { $0.magnitude >= FastMotionTuning.walkingAccelerationThreshold }.count) /
+            Double(samples.count)
+        guard energeticSampleRatio >= FastMotionTuning.minimumEnergeticSampleRatio else { return false }
 
         var peakTimes: [Date] = []
 
@@ -465,6 +496,12 @@ final class WatchMotionController: ObservableObject {
         guard peakTimes.count >= FastMotionTuning.requiredPeakCount else { return false }
 
         let recentPeaks = Array(peakTimes.suffix(FastMotionTuning.requiredPeakCount))
+        guard let firstPeak = recentPeaks.first,
+              let lastPeak = recentPeaks.last,
+              lastPeak.timeIntervalSince(firstPeak) >= FastMotionTuning.minimumCadenceSpan else {
+            return false
+        }
+
         let peakIntervals = zip(recentPeaks.dropFirst(), recentPeaks).map { later, earlier in
             later.timeIntervalSince(earlier)
         }
@@ -526,8 +563,7 @@ final class WatchMotionController: ObservableObject {
         pedometer.startUpdates(from: startOfDay) { [weak self] data, _ in
             DispatchQueue.main.async {
                 let steps = data?.numberOfSteps.intValue ?? 0
-                self?.todaySteps = steps
-                self?.onTodayStepsChanged?(steps)
+                self?.applyPedometerSteps(steps)
             }
         }
 
@@ -537,6 +573,25 @@ final class WatchMotionController: ObservableObject {
         }
     }
 
+    private func startIdleFallbackChecks() {
+        motionInactivityTimer?.invalidate()
+        motionInactivityTimer = Timer.scheduledTimer(withTimeInterval: IdleFallbackTuning.checkInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.checkIdleFallback()
+            }
+        }
+    }
+
+    private func checkIdleFallback() {
+        guard currentState == .walking || currentState == .running else { return }
+        guard Date().timeIntervalSince(lastMovementSignalAt) >= IdleFallbackTuning.movementTimeout else { return }
+
+        lastMotionInput = .stationary
+        sensorStatus = "兜底检测切回 idle"
+        onMotionInputChanged?(.stationary)
+        machine.handleMotionInput(.stationary)
+    }
+
     private func refreshPedometerTotal() {
         let startOfDay = Calendar.current.startOfDay(for: Date())
 
@@ -544,12 +599,41 @@ final class WatchMotionController: ObservableObject {
             DispatchQueue.main.async {
                 let steps = data?.numberOfSteps.intValue ?? 0
                 guard let self else { return }
-                if steps != self.todaySteps {
-                    self.todaySteps = steps
-                    self.onTodayStepsChanged?(steps)
-                }
+                self.applyPedometerSteps(steps)
             }
         }
+    }
+
+    private func applyPedometerSteps(_ steps: Int) {
+        let delta = max(steps - todaySteps, 0)
+        guard steps != todaySteps else { return }
+
+        todaySteps = steps
+        onTodayStepsChanged?(steps)
+
+        guard delta > 0 else { return }
+        triggerWalkingFromConfirmedSteps()
+    }
+
+    private func triggerWalkingFromConfirmedSteps() {
+        let now = Date()
+        if let lastStepDrivenWalkAt,
+           now.timeIntervalSince(lastStepDrivenWalkAt) < 2.5 {
+            return
+        }
+
+        lastStepDrivenWalkAt = now
+        lastMovementSignalAt = now
+        lastMotionInput = .walking
+        sensorStatus = "步数同步触发 walking"
+
+        if currentState == .idle || currentState == .microYawn || currentState == .microStretch {
+            currentState = .walking
+            onStateChanged?(.walking)
+        }
+
+        onMotionInputChanged?(.walking)
+        machine.handleMotionInput(.walking)
     }
 }
 
