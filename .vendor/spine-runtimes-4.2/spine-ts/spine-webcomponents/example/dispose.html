@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Webcomponent GUI</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+
+    <div style=" background-color: #fff; max-width: 800px; margin: auto;">
+        <h2 style="text-align: center; color: #333;">Dispose example</h2>
+
+        If you remove a widget from the DOM, it won't be disposed because you might want to append it to another node.
+        If you want to actually dispose of a widget, call <code>dispose()</code> on it.
+        <code>dispose()</code> is safe and won't release resources if they're still used by other widgets.
+
+        <br>
+        If you want to dispose of everything, call <code>dispose()</code> on the overlay.
+
+        <p>
+            The following example allows you to create and dispose of widgets using the same assets.
+            Below, you can see the number of references to each asset.
+            A red message will appear when an asset is actually disposed.
+            The number of skeleton references is at minimum 1 because there's a skeleton on the bottom of the page the use the same skeleton file.
+        </p>
+
+        <!-- <spine-skeleton
+            style="width: 25%; height: 100px;"
+            atlas="../../spine-webgl/demos/assets/atlas2.atlas"
+            skeleton="../../spine-webgl/demos/assets/demos.json"
+            json-skeleton-key="armorgirl"
+            animation="animation"
+        ></spine-skeleton> -->
+
+        <p>
+            <button id="button-add">Add</button>
+            <button id="button-delete">Dispose last</button>
+        </p>
+
+        <div id="container-delete" style="display: flex; height: auto; flex-wrap: wrap; width: 100%;"></div>
+
+
+        <ul>
+            <li>
+                Created widgets: <span id="delete-widget-counter">0</span>
+            </li>
+            <li>
+                Skeleton references<span id="delete-skeleton-counter">: 1</span>
+            </li>
+            <li>
+                Atlas references<span id="delete-atlas-counter">: 0</span> <span id="delete-atlas-dispose" style="color: red; opacity: 0; transition: opacity 1s;">DISPOSED</span>
+            </li>
+            <li>
+                Texture references<span id="delete-texture-counter">: 0</span> <span id="delete-texture-dispose" style="color: red; opacity: 0; transition: opacity 1s;">DISPOSED</span>
+            </li>
+        </ul>
+
+        <spine-skeleton
+            style="width: 25%; height: 100px;"
+            atlas="../../spine-webgl/demos/assets/atlas2.atlas"
+            skeleton="../../spine-webgl/demos/assets/demos.json"
+            json-skeleton-key="armorgirl"
+            animation="animation"
+        ></spine-skeleton>
+
+    </div>
+
+	<script type="module">
+		import { createSkeleton } from '../dist/esm/spine-webcomponents.mjs';
+
+		const buttonAdd = document.getElementById('button-add');
+		const buttonDel = document.getElementById('button-delete');
+		const deleteContainer = document.getElementById('container-delete');
+        const deleteWidgetCounter = document.getElementById('delete-widget-counter');
+        const deleteSkeletonCounter = document.getElementById('delete-skeleton-counter');
+        const deleteAtlasCounter = document.getElementById('delete-atlas-counter');
+        const deleteAtlasDisposeLabel = document.getElementById('delete-atlas-dispose');
+        const deleteTextureCounter = document.getElementById('delete-texture-counter');
+        const deleteTextureDisposeLabel = document.getElementById('delete-texture-dispose');
+        const deleteSkeletonPath = "../../spine-webgl/demos/assets/demos.json";
+        const deleteAtlasPath = "../../spine-webgl/demos/assets/heroes.atlas";
+        const deleteTexturePath = "../../spine-webgl/demos/assets/heroes.png";
+        let deleteAssetManager;
+
+        buttonAdd.onclick = async () => {
+            const skins = [
+                "Assassin", "Beardy", "Buck",
+                "Chuck", "Commander", "Ducky", "Dummy",
+                "Fletch", "Gabriel", "MetalMan", "Pamela-1",
+                "Pamela-2", "Pamela-3", "Pamela-4", "Pamela-5",
+                "Stumpy", "Truck", "Turbo", "Young",
+            ];
+            const animations = [
+                "block", "crouchIdle", "crouchWalk", "empty",
+                "floorGetUp", "floorIdle", "hideSword", "hitBig",
+                "idle", "idleTired", "jump", "meleeSwing1",
+                "meleeSwing2", "meleeSwing1-fullBody", "meleeSwing2-fullBody", "punch1",
+                "punch2", "roll", "run", "run2",
+                "walk", "walk2"
+            ];
+
+            const div = document.createElement('div');
+            const skin = skins[Math.floor(Math.random() * skins.length)];
+            div.style.flex = "1";
+            div.style.margin = "1px";
+            div.style.width = "25%";
+            div.style.height = "100px";
+            div.style.backgroundColor = "lightblue";
+            div.style.flex = "1";
+            div.style.boxShadow = "border-box";
+            div.innerHTML = `
+                <spine-skeleton
+                    atlas="${deleteAtlasPath}"
+                    skeleton="${deleteSkeletonPath}"
+                    json-skeleton-key="heroes"
+                    animation="${animations[Math.floor(Math.random() * animations.length)]}"
+                    skin="${skins[Math.floor(Math.random() * skins.length)]}"
+                ></spine-skeleton>
+            `;
+
+            deleteContainer.appendChild(div);
+
+            deleteAssetManager = (await div.firstElementChild.whenReady).overlay.assetManager.cache;
+
+            deleteWidgetCounter.innerText = deleteContainer.childNodes.length
+            deleteSkeletonCounter.innerText = ` (${deleteSkeletonPath}): ${deleteAssetManager.assetsRefCount[deleteSkeletonPath]}`
+            deleteAtlasCounter.innerText = ` (${deleteAtlasPath}): ${deleteAssetManager.assetsRefCount[deleteAtlasPath]}`
+            deleteTextureCounter.innerText = ` (${deleteTexturePath}): ${deleteAssetManager.assetsRefCount[deleteTexturePath]}`
+
+            deleteAtlasDisposeLabel.style.transition = undefined;
+            deleteAtlasDisposeLabel.style.opacity = 0;
+
+            deleteTextureDisposeLabel.style.transition = undefined;
+            deleteTextureDisposeLabel.style.opacity = 0;
+        }
+
+        buttonDel.onclick = async () => {
+            if (deleteContainer.lastChild) {
+                deleteContainer.removeChild(deleteContainer.lastChild).firstElementChild.dispose();
+
+                deleteWidgetCounter.innerText = deleteContainer.childNodes.length
+                deleteSkeletonCounter.innerText = ` (${deleteSkeletonPath}): ${deleteAssetManager.assetsRefCount[deleteSkeletonPath]}`
+                deleteAtlasCounter.innerText = ` (${deleteAtlasPath}): ${deleteAssetManager.assetsRefCount[deleteAtlasPath] || 0}`
+                deleteTextureCounter.innerText = ` (${deleteTexturePath}): ${deleteAssetManager.assetsRefCount[deleteTexturePath] || 0}`
+
+                if (!deleteAssetManager.assetsRefCount[deleteSkeletonPath]) console.log("disposed");
+
+                if (!deleteAssetManager.assetsRefCount[deleteAtlasPath]) {
+                    deleteAtlasDisposeLabel.style.transition = 'opacity 1s';
+                    deleteAtlasDisposeLabel.style.opacity = 1;
+                }
+
+                if (!deleteAssetManager.assetsRefCount[deleteTexturePath]) {
+                    deleteTextureDisposeLabel.style.transition = 'opacity 1s';
+                    deleteTextureDisposeLabel.style.opacity = 1;
+                }
+            }
+        }
+	</script>
+
+</body>
+</html>

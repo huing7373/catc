@@ -1,0 +1,149 @@
+
+// JReleaser config for release builds to Central Portal
+if (project.hasProperty('RELEASE')) {
+    apply plugin: 'org.jreleaser'
+
+    jreleaser {
+        deploy {
+            maven {
+                mavenCentral {
+                    sonatype {
+                        active = 'ALWAYS'
+                        username = getRepositoryUsername()
+                        password = getRepositoryPassword()
+                        url = 'https://central.sonatype.com/api/v1/publisher'
+                        stagingRepository("${buildDir}/staging-deploy")
+                        sign = false
+                        verifyPom = false
+                    }
+                }
+            }
+        }
+    }
+}
+
+project("spine-libgdx") {
+    apply plugin: "java-library"
+    apply plugin: "maven-publish"
+    apply plugin: "signing"
+
+    dependencies {
+        implementation "com.badlogicgames.gdx:gdx:$libgdxVersion"
+    }
+
+    tasks.register("sourceJar", Jar) {
+        archiveClassifier.set("sources")
+        from(sourceSets.main.allJava)
+    }
+
+    tasks.javadoc {
+        failOnError = false
+        options.addStringOption('Xdoclint:none', '-quiet')
+    }
+
+    tasks.register("javadocJar", Jar) {
+        dependsOn javadoc
+        archiveClassifier.set("javadoc")
+        from(javadoc.destinationDir)
+    }
+
+    afterEvaluate {
+        publishing {
+            publications {
+                create("release", MavenPublication) {
+                    from(components.java)
+                    artifact(tasks.getByName("sourceJar"))
+                    artifact(tasks.getByName("javadocJar"))
+
+                    groupId = "com.esotericsoftware.spine"
+                    artifactId = "spine-libgdx"
+                    version = project.version
+
+                    pom {
+                        packaging = "jar"
+                        name = POM_NAME
+                        if(!POM_DESCRIPTION.isEmpty())
+                            description = POM_DESCRIPTION
+                        url = POM_URL
+                        licenses {
+                            license {
+                                name = POM_LICENCE_NAME
+                                url = POM_LICENCE_URL
+                                distribution = POM_LICENCE_DIST
+                            }
+                        }
+                        developers {
+                            developer {
+                                name.set("Esoteric Software")
+                                email.set("contact@esotericsoftware.com")
+                            }
+                        }
+                        scm {
+                            connection = POM_SCM_CONNECTION
+                            developerConnection = POM_SCM_DEV_CONNECTION
+                            url = POM_SCM_URL
+                        }
+                    }
+                }
+            }
+
+            repositories {
+                maven {
+                    name = "SonaType"
+                    url = project.version.endsWith("-SNAPSHOT")
+                            ? getSnapshotRepositoryUrl()
+                            // If release build, dump artifacts to root project build/staging-deploy folder for consumption by jreleaser
+                            : rootProject.layout.buildDirectory.dir('staging-deploy')
+
+                    if (project.version.endsWith("-SNAPSHOT") && (getRepositoryUsername() || getRepositoryPassword())) {
+                        credentials {
+                            username = getRepositoryUsername()
+                            password = getRepositoryPassword()
+                        }
+                    }
+                }
+            }
+        }
+
+        signing {
+            useGpgCmd()
+            sign(publishing.publications["release"])
+        }
+
+        // Simply using "required" in signing block doesn't work because taskGraph isn't ready yet.
+        gradle.taskGraph.whenReady {
+            tasks.withType(Sign) {
+                onlyIf { !project.version.endsWith("-SNAPSHOT") }
+            }
+        }
+    }
+}
+
+// JReleaser config for release builds to Central Portal
+if (project.hasProperty('RELEASE')) {
+    apply plugin: 'org.jreleaser'
+
+    jreleaser {
+        deploy {
+            maven {
+                mavenCentral {
+                    sonatype {
+                        active = 'ALWAYS'
+                        username = getRepositoryUsername()
+                        password = getRepositoryPassword()
+                        url = 'https://central.sonatype.com/api/v1/publisher'
+                        stagingRepository("${rootProject.buildDir}/staging-deploy")
+                        sign = false
+                        verifyPom = false
+                    }
+                }
+            }
+        }
+    }
+
+    // For release builds, create a task that depends on publishing and finalizes with jreleaser
+    tasks.register('publishRelease') {
+        dependsOn tasks.withType(PublishToMavenRepository)
+        finalizedBy tasks.named('jreleaserDeploy')
+    }
+}

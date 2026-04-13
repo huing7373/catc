@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Webcomponent GUI</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+            font-size: 16px;
+            background-color: rgb(24, 149, 89);
+        }
+
+        .instruction {
+            display: flex; flex-direction: column; border: 3px solid black; border-radius: 10px; box-shadow: 5px 5px 15px grey; padding: 10px; background-color: white;
+        }
+
+        .instruction .title {
+            flex: 30%; font-weight: bold; text-transform: uppercase; border-bottom: 1px solid white; text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+    <div style="display: flex; justify-content: center; align-items: center; padding: 10px;">
+
+        <div class="split-top split" style="max-width: 800px; width: 100%;">
+            <div class="split-left" style="padding: 0;">
+
+                <div id="container-game" style="display: flex; flex-direction: column; height: 400px; position: relative;">
+                    <div
+                        id="win-panel"
+                        style="top: 0; left: 0; width: 100%; height: 100%; position: absolute; display: none; align-items: center; justify-content: center; background-color: #000000aa; z-index: 1; color: white; font-size: xx-large;">
+                        YOU LOSE!
+                    </div>
+
+                    <div class="bottom" style="flex: 80%; background-color: rgb(24, 149, 89); display: flex; align-items: center; justify-content: center;">
+                        <spine-skeleton
+                            identifier="windmill-game"
+                            atlas="/assets/windmill-pma.atlas"
+                            skeleton="/assets/windmill-ess.json"
+                            animation="animation"
+                            interactive
+                        ></spine-skeleton>
+                        <spine-skeleton
+                            identifier="spineboy-game"
+                            atlas="/assets/spineboy-pma.atlas"
+                            skeleton="/assets/spineboy-pro.json"
+                            animation="hoverboard"
+                            fit="none"
+                        ></spine-skeleton>
+                    </div>
+                </div>
+
+            </div>
+
+            <div class="split-right">
+                <div class="top" style="flex: 20%; flex-direction: column; gap: 10px; display: flex; align-items: center; justify-content: center; align-items: stretch; height: 100%;">
+                    <div class="instruction">
+                        Use WASD to move around!
+                    </div>
+
+                    <div class="instruction">
+                        <div id="killed" class="title"></div>
+                        <div style="flex: 70%;"">Save the flowers from the white pest by shooting them</div>
+                    </div>
+
+                    <div class="instruction">
+                        <div id="ammo" class="title"></div>
+                        <div>Go to the red colored rooster of bush when ammo is low</div>
+                    </div>
+
+                    <div class="instruction">
+                        <div id="level" class="title"></div>
+                        <div>Reach level 10 to win the game</div>
+                    </div>
+
+                </div>
+            </div>
+
+        </div>
+
+    </div>
+
+	<script type="module">
+		import * as spine from '../dist/esm/spine-webcomponents.mjs';
+
+        const winPanel = document.getElementById("win-panel");
+            const killedSpan = document.getElementById("killed");
+            const ammoSpan = document.getElementById("ammo");
+            const levelSpan = document.getElementById("level");
+            const containerGame = document.getElementById("container-game");
+
+            (async () => {
+                const spineboy = spine.getSkeleton("spineboy-game");
+                const windmill = spine.getSkeleton("windmill-game");
+                await Promise.all([spineboy.whenReady, windmill.whenReady]);
+
+                spineboy.state.setAnimation(2, "aim", true);
+
+                spineboy.skeleton.slots.forEach(slot => {
+                    if (slot.data.name === "gun") {
+                        spineboy.addPointerSlotEventCallback(slot, (slot,event) => {
+                            if (event === "down") {
+                                spineboy.state.setAnimation(1, "shoot", false);
+                            }
+                        });
+                    }
+
+                    if (slot.data.name === "torso") {
+                        spineboy.addPointerSlotEventCallback(slot, (slot,event) => {
+                            if (event === "down") {
+                                spineboy.state.setAnimation(0, "jump", false).mixDuration = 0.2;
+                                spineboy.state.addAnimation(0, "walk", true).mixDuration = 0.2;
+                            }
+                        });
+                    }
+
+                    if (slot.data.name === "head") {
+                        spineboy.addPointerSlotEventCallback(slot, (slot,event) => {
+                            if (event === "down") {
+                                spineboy.state.setAnimation(1, "run", true).mixDuration = 0.2;
+                            } else {
+                                if (event === "up") {
+                                    spineboy.state.setEmptyAnimation(1, 1);
+                                    spineboy.state.clearTrack(1);
+                                }
+                            }
+                        });
+                    }
+                });
+
+                const tempVector = new spine.Vector2();
+                const crosshairSlot = spineboy.skeleton.findSlot("crosshair");
+                crosshairSlot.color.a = 0;
+                const crosshairBone = crosshairSlot.bone;
+
+                let points = 0;
+                let ammo = 5;
+                let killed = 0;
+                let level = 1;
+                ammoSpan.innerText = `Ammo: ${ammo}`;
+                killedSpan.innerText = `Saved: ${killed}`;
+                levelSpan.innerText = `Level: ${level}`;
+
+                const flowers = [];
+                const ammoLocations = [];
+                windmill.skeleton.slots.forEach(slot => {
+                    if (slot.data.name === "rooster" || slot.data.name === "bush1") {
+                        ammoLocations.push(slot)
+                    }
+
+                    if (!Number.isNaN(parseInt(slot.data.name.replace("flower", ""))) || slot.data.name === "flower") {
+
+                        slot.color.set(1, 0, 0, 1);
+
+                        flowers.push(slot);
+
+                        windmill.addPointerSlotEventCallback(slot, (slot, event) => {
+                            if (ammo === 0) return;
+
+                            if (event !== "down") return;
+
+                            if (slot.color.g === 0) return;
+
+                            spineboy.state.setAnimation(1, "shoot", false);
+                            ammo--;
+                            points++;
+                            killed++;
+                            if (points === 10) {
+                                level++
+                                points = 0
+                                maxTime -= 100
+                            }
+                            ammoSpan.innerText = `Ammo: ${ammo}`;
+                            killedSpan.innerText = `Saved: ${killed}`;
+
+                            tempVector.x = slot.bone.x;
+                            tempVector.y = slot.bone.y;
+                            slot.bone.parentToWorld(tempVector);
+
+                            crosshairBone.x = (tempVector.x + (windmill.worldX - spineboy.worldX) - spineboy.skeleton.x) / spineboy.skeleton.scaleX;
+                            crosshairBone.y = (tempVector.y + (windmill.worldY - spineboy.worldY) - spineboy.skeleton.y) / spineboy.skeleton.scaleY;
+
+                            slot.color.set(1, 0, 0, 1);
+                        });
+
+                    }
+                });
+
+
+                let time = 0;
+                let maxTime = 1000;
+                let ammoLocationActive = false;
+                let gameVectorTemp = new spine.Vector3();
+                let interval = setInterval(() => {
+
+                    if (!ammoLocationActive && ammo <= 2) {
+                        ammoLocationActive = true;
+                        spineboy.overlay.worldToScreen(gameVectorTemp, spineboy.worldX + spineboy.skeleton.x, spineboy.worldY + spineboy.skeleton.y);
+                        const { x, width } = containerGame.getBoundingClientRect();
+                        const containerGameMiddle = x + width / 2;
+                        const left = gameVectorTemp.x < containerGameMiddle;
+                        const ammoLocation = ammoLocations[left ? 1 : 0];
+                        (ammoLocation.darkColor ||= new spine.Color()).set(1, 0, 0, 1);
+                        levelSpan.innerText = `Level: ${level} / 10`;
+                    };
+
+                    if (time >= maxTime) {
+                        time = 0;
+                        const flower = random(flowers);
+                        flower.color.set(1, 1, 1, 1);
+                    }
+
+                    if (checkLoseCondition()) {
+                        endGame(false, interval);
+                        return;
+                    }
+
+                    if (checkWinCondition()) {
+                        levelSpan.innerText = `Level: 10 / 10`;
+                        endGame(true, interval);
+                        return;
+                    }
+
+                    time += 100;
+                }, 100);
+
+                const checkWinCondition = () => level === 10;
+                const checkLoseCondition = () => flowers.every((flowerSlot) => flowerSlot.color.g !== 0);
+                const endGame = (win, interval) => {
+                    clearInterval(interval);
+                    winPanel.style.display = "flex";
+                    winPanel.innerText = win ? "YOU WIN!" : "YOU LOSE!"
+                    document.removeEventListener('keydown', handleKeyDown);
+                    document.removeEventListener('keyup', handleKeyUp);
+                    keys.w = false;
+                    keys.a = false;
+                    keys.s = false;
+                    keys.d = false;
+                    spineboy.state.setAnimation(1, win ? "jump" : "death", win);
+                }
+                const random = array => array[Math.floor(Math.random() * array.length)];
+
+                const MOVE_SPEED = 350;
+                const keys = {
+                    w: false,
+                    a: false,
+                    s: false,
+                    d: false
+                };
+
+                function handleKeyDown(e) {
+                    const key = e.key.toLowerCase();
+                    if (key in keys) {
+                        keys[key] = true;
+                    }
+                }
+
+                function handleKeyUp(e) {
+                    const key = e.key.toLowerCase();
+                    if (key in keys) keys[key] = false;
+                }
+
+                spineboy.skeleton.x += 0
+                spineboy.skeleton.y -= 330
+                let direction = 1;
+
+                spineboy.beforeUpdateWorldTransforms = (delta) => {
+                    let posX = 0;
+                    let posY = 0;
+
+                    // Move based on pressed keys
+                    const inc = (MOVE_SPEED * delta) * windmill.skeleton.scaleX;
+                    if (keys.w) posY -= inc;
+                    if (keys.a) posX -= inc;
+                    if (keys.s) posY += inc;
+                    if (keys.d) posX += inc;
+
+                    // Update visual position
+                    spineboy.skeleton.x += posX;
+                    spineboy.skeleton.y -= posY;
+
+                    direction = posX < 0 ? direction = -1 : posX > 0 ? 1 : direction;
+                    spineboy.skeleton.scaleX = .25 * windmill.skeleton.scaleX * direction;
+                    spineboy.skeleton.scaleY = .25 * windmill.skeleton.scaleY;
+
+
+                    const spineboyPosition = {
+                        x: spineboy.worldX + spineboy.skeleton.x - spineboy.bounds.width / 2 * spineboy.skeleton.scaleX * direction,
+                        y: spineboy.worldY + spineboy.skeleton.y ,
+                        width: spineboy.bounds.width * spineboy.skeleton.scaleX * direction,
+                        height: spineboy.bounds.height * spineboy.skeleton.scaleY,
+                    }
+
+                    ammoLocations.forEach(element => {
+                        const width = element.attachment.region.width * windmill.skeleton.scaleX;
+                        const height = element.attachment.region.height * windmill.skeleton.scaleY;
+                        const x = windmill.worldX + element.bone.worldX - width / 2;
+                        const y = windmill.worldY + element.bone.worldY - height / 2;
+
+                        if (isIntersecting(spineboyPosition, { x, y, width, height })) {
+                            if (element.darkColor) {
+                                ammo = 5;
+                                element.darkColor = null;
+                                ammoLocationActive = false;
+                                ammoSpan.innerText = `Ammo: ${ammo}`;
+                            }
+                        }
+                    });
+
+                }
+
+                document.addEventListener('keydown', handleKeyDown);
+                document.addEventListener('keyup', handleKeyUp);
+            })();
+
+
+            function isIntersecting(rect1, rect2) {
+                return (
+                    rect1.x < rect2.x + rect2.width &&
+                    rect1.x + rect1.width > rect2.x &&
+                    rect1.y < rect2.y + rect2.height &&
+                    rect1.y + rect1.height > rect2.y
+                );
+            }
+	</script>
+
+</body>
+</html>

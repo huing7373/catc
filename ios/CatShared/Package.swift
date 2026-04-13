@@ -13,7 +13,12 @@ let package = Package(
         .library(name: "CatCore", targets: ["CatCore"])
     ],
     targets: [
-        .target(name: "CatShared"),
+        .target(
+            name: "CatShared",
+            resources: [
+                .process("Resources")
+            ]
+        ),
         .target(
             name: "CatCore",
             dependencies: ["CatShared"],

@@ -21,6 +21,7 @@ struct WatchHomeView: View {
     @StateObject private var controller = WatchMotionController()
     @StateObject private var reminderManager = StandReminderManager()
     @StateObject private var blindBoxManager = BlindBoxManager()
+    private let isPreview = ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1"
 
     var body: some View {
         ZStack {
@@ -36,7 +37,7 @@ struct WatchHomeView: View {
 
             VStack(spacing: 10) {
                 ZStack {
-                    LiveCatView(state: controller.currentState)
+                    SpineWatchCatView(state: controller.currentState)
                         .frame(width: 116, height: 116)
 
                     if let blindBox = blindBoxManager.currentBlindBox {
@@ -132,6 +133,7 @@ struct WatchHomeView: View {
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: reminderManager.foregroundBannerText)
         .task {
+            guard !isPreview else { return }
             controller.onMotionInputChanged = { input in
                 reminderManager.registerMotion(input)
             }
@@ -148,6 +150,7 @@ struct WatchHomeView: View {
             blindBoxManager.start()
         }
         .onChange(of: scenePhase) { _, newPhase in
+            guard !isPreview else { return }
             if newPhase == .active {
                 controller.handleWristRaise()
                 reminderManager.handleScenePhaseChange(.active)
@@ -175,6 +178,10 @@ struct WatchHomeView: View {
             return "idle"
         }
     }
+}
+
+#Preview("Watch Home") {
+    WatchHomeView()
 }
 
 private struct LiveCatView: View {

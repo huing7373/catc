@@ -1,0 +1,27 @@
+{
+   "name": "spine-haxe",
+   "url": "https://github.com/esotericsoftware/spine-runtimes",
+   "license": "Spine Runtime License",
+   "tags": [
+      "spine",
+      "2d-animation",
+      "skeletal-animation",
+      "starling",
+      "2d",
+      "gpu",
+      "openfl",
+      "flash",
+      "air",
+      "js",
+      "web",
+      "cpp"
+   ],
+   "description": "The official Spine Runtime for Haxe",
+   "version": "4.2.9",
+   "releasenote": "Update to 4.2.9",
+   "contributors": [
+      "esotericsoftware"
+   ],
+   "dependencies": {},
+   "classPath": "spine-haxe"
+}

@@ -1,16 +1,11 @@
 import SwiftUI
+import CatShared
 
 @main
 struct CatPhoneApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            SpineboyPreviewView()
         }
-    }
-}
-
-struct ContentView: View {
-    var body: some View {
-        Text("Cat Phone")
     }
 }

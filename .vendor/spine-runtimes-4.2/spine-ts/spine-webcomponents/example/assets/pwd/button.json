@@ -1,0 +1,139 @@
+{
+"skeleton": {
+	"hash": "yil4eBV+4V0",
+	"spine": "4.2.38",
+	"x": -241,
+	"y": -139,
+	"width": 484,
+	"height": 234,
+	"images": "./images/",
+	"audio": "./audio"
+},
+"bones": [
+	{ "name": "root" },
+	{ "name": "button-small", "parent": "root" },
+	{ "name": "button-big", "parent": "button-small" },
+	{ "name": "follower", "parent": "button-small", "rotation": 45, "x": 100, "y": 200 }
+],
+"slots": [
+	{ "name": "Shadow", "bone": "button-small", "attachment": "Shadow" },
+	{ "name": "button-big", "bone": "button-big", "attachment": "Button" },
+	{ "name": "button-small", "bone": "button-small", "attachment": "Button" },
+	{ "name": "CLICK ME", "bone": "button-small", "attachment": "CLICK ME" },
+	{ "name": "follower", "bone": "follower" }
+],
+"skins": [
+	{
+		"name": "default",
+		"attachments": {
+			"button-big": {
+				"Button": { "width": 402, "height": 152 }
+			},
+			"button-small": {
+				"Button": { "width": 402, "height": 152 }
+			},
+			"CLICK ME": {
+				"CLICK ME": { "x": 0.5, "y": -1, "width": 233, "height": 40 }
+			},
+			"Shadow": {
+				"Shadow": { "x": 1, "y": -22, "width": 484, "height": 234 }
+			}
+		}
+	}
+],
+"animations": {
+	"enhance-in": {
+		"slots": {
+			"button-big": {
+				"rgba": [
+					{ "color": "ffffffff" },
+					{ "time": 0.3333, "color": "ffffff00" }
+				]
+			}
+		},
+		"bones": {
+			"button-big": {
+				"scale": [
+					{},
+					{ "time": 0.3333, "x": 1.5, "y": 1.5 }
+				]
+			}
+		}
+	},
+	"enhance-out": {
+		"slots": {
+			"button-big": {
+				"rgba": [
+					{ "color": "ffffff00" },
+					{ "time": 0.3333, "color": "ffffffff" }
+				]
+			}
+		},
+		"bones": {
+			"button-big": {
+				"scale": [
+					{ "x": 1.5, "y": 1.5 },
+					{ "time": 0.3333 }
+				]
+			}
+		}
+	},
+	"idle": {
+		"slots": {
+			"button-big": {
+				"attachment": [
+					{}
+				]
+			},
+			"Shadow": {
+				"attachment": [
+					{}
+				]
+			}
+		}
+	},
+	"jump": {
+		"bones": {
+			"button-small": {
+				"translate": [
+					{
+						"curve": [ 0.078, 0, 0.156, 0, 0.078, 0, 0.156, 10 ]
+					},
+					{
+						"time": 0.2333,
+						"y": 10,
+						"curve": [ 0.311, 0, 0.389, 0, 0.311, 10, 0.389, 0 ]
+					},
+					{ "time": 0.4667 }
+				]
+			}
+		}
+	},
+	"shadow-in": {
+		"slots": {
+			"Shadow": {
+				"rgba": [
+					{ "color": "ffffff00" },
+					{ "time": 0.3333, "color": "ffffffff" }
+				],
+				"attachment": [
+					{ "name": "Shadow" }
+				]
+			}
+		}
+	},
+	"shadow-out": {
+		"slots": {
+			"Shadow": {
+				"rgba": [
+					{ "color": "ffffffff" },
+					{ "time": 0.3333, "color": "ffffff00" }
+				],
+				"attachment": [
+					{ "name": "Shadow" }
+				]
+			}
+		}
+	}
+}
+}

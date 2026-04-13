@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Webcomponent GUI</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+
+    <div style=" background-color: #fff; max-width: 800px; margin: auto;">
+        <h2 style="text-align: center; color: #333;">Meet our team!</h2>
+        <h3 style="text-align: center; color: #333;">Hover to the widgets to make them jump, or click on them to change randomly the default animation.</h3>
+        <div id="team-container" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; width: 100%;">
+        </div>
+    </div>
+
+	<script type="module">
+		import { createSkeleton } from '../dist/esm/spine-webcomponents.mjs';
+
+		const container = document.getElementById("team-container");
+
+        const members = [
+            { skin: "mario", name: "Mario", role: "Developer" },
+            { skin: "misaki", name: "Misaki", role: "Artist"  },
+            { skin: "erikari", name: "Erika", role: "Artist"  },
+            { skin: "nate", name: "Nate", role: "Developer"  },
+            { skin: "luke", name: "Luke", role: "Support"  },
+            { skin: "sinisa", name: "Sinisa", role: "Artist"  },
+            { skin: "harri", name: "Harri", role: "Developer"  },
+            { skin: "soeren", name: "Sören", role: "Artist"  },
+            { skin: "spineboy", name: "Spineboy", role: "Mascotte"  },
+        ];
+
+        const style = document.createElement("style");
+        style.innerHTML = `
+        .team-member:hover {
+            transform: scale(1.25);
+            transition: transform 0.3s ease;
+        }
+        `;
+        document.head.appendChild(style);
+
+        members.forEach(async (member, i) => {
+            const div1 = document.createElement("div");
+            container.appendChild(div1);
+            div1.style.display = "flex";
+            div1.style.flexDirection = "column";
+            div1.style.alignItems = "center";
+            div1.style.textAlign = "center";
+            div1.style.backgroundColor = "#f9f9f9";
+            div1.style.padding = "1rem";
+            div1.style.borderRadius = "8px";
+            div1.style.boxShadow = "0 4px 6px rgba(0,0,0,0.1)";
+            div1.style.transition = "transform 0.3s ease";
+            div1.classList.add("team-member");
+
+
+            const div2 = document.createElement("div");
+            div1.appendChild(div2);
+            div2.style.width = "150px";
+            div2.style.height = "150px";
+            div2.style.border = "4px solid #333";
+
+            const widget = createSkeleton({
+                identifier: member.skin,
+                atlasPath: "/assets/chibi-stickers-pma.atlas",
+                skeletonPath: "/assets/chibi-stickers.json",
+                skin: member.skin,
+                animation: "emotes/wave",
+                padTop: "0.05",
+                padBottom: "0.05",
+                interactive: true,
+            });
+
+            div2.appendChild(widget);
+
+            const div3 = document.createElement("div");
+            div1.appendChild(div3);
+            div3.style.marginTop = "15px";
+            div3.style.width = "100%";
+
+            const div4 = document.createElement("div");
+            div3.appendChild(div4);
+            div4.innerHTML = member.name;
+            div4.style.fontWeight = "bold";
+            div4.style.fontSize = "1.1rem";
+            div4.style.marginBottom = "5px";
+            div4.style.color = "#333";
+
+            const div5 = document.createElement("div");
+            div3.appendChild(div5);
+            div5.classList.add("team-member-role");
+            div5.innerHTML = member.role;
+            div5.style.fontSize = "0.9rem";
+            div5.style.color = "#666";
+
+            await widget.whenReady;
+
+            const emotes = widget.skeleton.data.animations.reduce((acc, { name }) => name.startsWith("emotes") ? [...acc, name] : acc, []);
+            let leaveAnimation = "emotes/wave";
+            widget.pointerEventCallback = (event) => {
+                if (event === "enter") widget.state.setAnimation(0, "emotes/hooray", true).mixDuration = .15;
+                else if (event === "leave") widget.state.setAnimation(0, leaveAnimation, true).mixDuration = .25;
+                else if (event === "down") {
+                    leaveAnimation = emotes[Math.floor(Math.random() * emotes.length)];
+                    widget.state.setAnimation(0, leaveAnimation, true).mixDuration = .25;
+                }
+            }
+        });
+	</script>
+
+</body>
+</html>

@@ -1,0 +1,38 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./spine-core"
+    },
+    {
+      "path": "./spine-canvas"
+    },
+    {
+      "path": "./spine-canvaskit"
+    },
+    {
+      "path": "./spine-webgl"
+    },
+    {
+      "path": "./spine-phaser-v3"
+    },
+    {
+      "path": "./spine-phaser-v4"
+    },
+    {
+      "path": "./spine-player"
+    },
+    {
+      "path": "./spine-threejs"
+    },
+    {
+      "path": "./spine-pixi-v7"
+    },
+    {
+      "path": "./spine-pixi-v8"
+    },
+    {
+      "path": "./spine-webcomponents"
+    }
+  ]
+}

@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Webcomponent GUI</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+
+    <div style="display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 10px; gap: 10px;">
+
+        <span id="ruler" style="visibility: hidden; white-space: nowrap; position: absolute"></span>
+        <div style="background-color: white; width: 250px; padding: 30px; text-align: center; border-radius: 10px; border: 3px solid black; box-shadow: 5px 5px rgb(0, 0, 0);">
+            <div style="display: flex; justify-content: center;">
+                <div style="width: 150px; height:150px; border-radius: 5%; border: 1px solid rgb(113, 113, 113); background-color: rgb(211, 211, 211); margin-bottom: 30px;">
+                    <spine-skeleton
+                        identifier="spineboy-login"
+                        atlas="/assets/pwd/chibi-stickers-pro-pwd-test.atlas"
+                        skeleton="/assets/pwd/chibi-stickers.json"
+                        skin="spineboy"
+                        bounds-x="-177"
+                        bounds-y="238"
+                        bounds-width="364"
+                        bounds-height="412"
+                        animation="interactive/head/idle"
+                        clip
+                        interactive
+                    ></spine-skeleton>
+                </div>
+            </div>
+
+            <div class="input-group" style="margin-bottom: 15px;"><select id="skinSelect"></select></div>
+
+            <form id="loginForm">
+                <div class="input-group" style="margin-bottom: 15px;">
+                    <input style="width: 100%; padding: 10px; box-sizing: border-box;" type="text" id="username" name="username" placeholder="Username" autocomplete="off" required>
+                </div>
+                <div class="input-group" style="margin-bottom: 15px;">
+                    <input style="width: 100%; padding: 10px; box-sizing: border-box;" type="password" id="password" name="password" placeholder="Password" required>
+                </div>
+
+                <div style="margin-bottom: 10px; color: black">Password is <code>password</code></div>
+
+                <div style="height: 75px; pointer: pointer;">
+                    <div id="button-text" style="font-size: xx-large; pointer: pointer; user-select: none; display: none;"> LOGIN </div>
+                    <spine-skeleton
+                        identifier="button-login"
+                        atlas="/assets/pwd/button.atlas"
+                        skeleton="/assets/pwd/button.json"
+                        animation="idle"
+                        interactive
+                        fit="fill"
+                    ></spine-skeleton>
+                </div>
+
+            </form>
+        </div>
+
+        <div style="background-color: white; padding: 10px; border-radius: 10px; border: 3px solid black; box-shadow: 5px 5px rgb(0, 0, 0);">
+            A login UI made using the chibi stickers and a button made using
+            <p>
+                The chibi sticker does the following:
+                <ul>
+                    <li>It looks at the pointer when no input field is selected</li>
+                    <li>Look at the caret when username input field is selected</li>
+                    <li>Cover its eyes when password input field is selected</li>
+                    <li>React in two different ways depending on the password</li>
+                </ul>
+            </p>
+
+            <p>
+                The button does the following:
+                <ul>
+                    <li>Starts some animation when pointer enters, leaves, stays, or click the button</li>
+                    <li>Appends a div containing the <code>LOGIN</code> text to a slot</li>
+                    <li>Submits the form on click</li>
+                </ul>
+            </p>
+        </div>
+    </div>
+
+	<script type="module">
+		import { getSkeleton, MixBlend } from '../dist/esm/spine-webcomponents.mjs';
+
+		const mouseX = Smooth(0, 200);
+        const mouseY = Smooth(0, 200);
+
+        (async () => {
+
+            const form = document.getElementById('loginForm');
+            const widgetButton = getSkeleton("button-login");
+            await widgetButton.whenReady;
+
+            widgetButton.skeleton.color.set(.85, .85, .85, 1);
+            widgetButton.pointerEventCallback = (event, originalEvent) => {
+                if (event === "enter") {
+                    widgetButton.state.setAnimation(0, "enhance-in", false);
+                    widgetButton.state.setAnimation(1, "shadow-in", false);
+                    widgetButton.state.setAnimation(2, "jump", true);
+                };
+                if (event === "leave") {
+                    widgetButton.state.setAnimation(0, "enhance-out", false).timeScale = 2;
+                    widgetButton.state.setAnimation(1, "shadow-out", false);
+                    widgetButton.state.setEmptyAnimation(2, 0).mixDuration = .25;
+                };
+                if (event === "down") {
+                    widgetButton.state.setAnimation(0, "enhance-in", false).timeScale = 2;
+                    originalEvent.preventDefault();
+                    if (form.reportValidity()) {
+                        if (passwordInput.value === "password") {
+                            widget.state.setAnimation(0, "interactive/pwd/hooray", 0);
+                            widget.state.addAnimation(0, "interactive/head/idle", true);
+                        } else {
+                            widget.state.setAnimation(0, "interactive/pwd/sad", 0);
+                            widget.state.addAnimation(0, "interactive/head/idle", true);
+                        }
+                    }
+                };
+            }
+
+            const textSlot = widgetButton.skeleton.findSlot("CLICK ME");
+            textSlot.setAttachment(null);
+
+
+            const divText = document.getElementById("button-text");
+
+            widgetButton.followSlot("CLICK ME", divText, { followScale: false });
+
+            const widget = getSkeleton("spineboy-login");
+            await widget.whenReady;
+
+            // default settings
+            widget.state.data.defaultMix = 0.15;
+
+            // Skin selection
+            const skinSelect = document.getElementById('skinSelect');
+            widget.skeleton.data.skins.forEach(({ name }) => {
+                if (name === "default") return;
+                skinSelect.add(new Option(name, name, name === "spineboy"));
+            });
+            skinSelect.value = "spineboy";
+            skinSelect.addEventListener('change', (e) => widget.skin = e.target.value);
+
+            // click on spineboy
+            widget.pointerEventCallback = (event) => {
+                if (event === "down") {
+                    widget.state.setAnimation(0, "interactive/pwd/touch", false);
+                    widget.state.addAnimation(0, "interactive/head/idle", true);
+                }
+                if (event === "enter") widget.state.setAnimation(0, "emotes/wave", true);
+                if (event === "leave") widget.state.setAnimation(0, "interactive/head/idle", false);
+            }
+
+            // Head follow logic
+            let focusInput = false;
+
+            // Password input field
+            const passwordInput = document.getElementById('password');
+            passwordInput.addEventListener('focus', () => {
+                focusInput = true;
+                resetBlendTracks();
+                widget.state.setAnimation(0, "interactive/pwd/hide", 0);
+            });
+            passwordInput.addEventListener('blur', () => {
+                focusInput = false;
+                widget.state.setAnimation(0, "interactive/head/idle", 0);
+            });
+
+            // Username input field
+            const usernameInput = document.getElementById('username');
+            usernameInput.addEventListener('input', () => {
+                setBlendTracks();
+            });
+            usernameInput.addEventListener('focus', () => {
+                focusInput = true;
+                setBlendTracks();
+            });
+            usernameInput.addEventListener('blur', () => {
+                focusInput = false;
+                setBlendTracks();
+            });
+
+            // Animation left/down blending
+            const ALPHA_LEFT_RANGE = 4;
+            const ALPHA_DOWN = .8;
+            const ALPHA_DOWN_RANGE = 2;
+            const moveVector = [0, 0];
+            const leftTrack = widget.state.setAnimation(1, "interactive/head/left", true);
+            const downTrack = widget.state.setAnimation(2, "interactive/head/down", true);
+            leftTrack.mixBlend = MixBlend.add;
+            downTrack.mixBlend = MixBlend.add;
+
+            const setBlendTracks = () => {
+                moveVector[0] = getAlphaLeft();
+                moveVector[1] = ALPHA_DOWN;
+            }
+            const resetBlendTracks = () => {
+                moveVector[0] = 0;
+                moveVector[1] = 0;
+            }
+            resetBlendTracks();
+
+            const getWidthOfText = (txt) => {
+                const ruler = document.getElementById("ruler");
+                ruler.innerHTML = txt;
+                return ruler.offsetWidth;
+            }
+
+            const getAlphaLeft = () => {
+                const { width } = usernameInput.getBoundingClientRect();
+                const length = getWidthOfText(usernameInput.value);
+                const alpha = Math.min(1, length / width) * 2
+                return 1 - alpha;
+            };
+
+            widget.afterUpdateWorldTransforms = () => {
+                if (focusInput) {
+                    blendTo(moveVector[0], moveVector[1]);
+                } else {
+                    const { x, y, width, height} = widget.getHostElement().getBoundingClientRect();
+                    const l = -((widget.overlay.pointerCanvasX - (x + width)) / window.innerWidth) * ALPHA_LEFT_RANGE;
+                    const d = ((widget.overlay.pointerCanvasY - (y + height)) / window.innerHeight) * ALPHA_DOWN_RANGE;
+                    blendTo(l, d);
+                }
+            };
+
+            const blendTo = (x, y) => {
+                leftTrack.alpha = mouseX(x);
+                downTrack.alpha = mouseY(y);
+            }
+
+        })();
+
+        function Smooth(f,t){var p=performance,b=p.now(),o=f,s=0,m,n,x,d,k=f;return function(v){n=p.now()-b;m=t*t/n/n;d=o-f;x=s*t+d+d;if(n>0)k=n<t?o-x/m/t*n+(x+x-d)/m-s*n-d:o;if(v!=void 0&&v!=o){f=k;b+=n;o=v;s=n>0&&n<t?s+3*x/m/t-(4*x-d-d)/m/n:0}return k}}
+	</script>
+
+</body>
+</html>

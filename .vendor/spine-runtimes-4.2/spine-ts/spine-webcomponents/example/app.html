@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Webcomponent GUI</title>
+    <style>
+        body {
+            margin: 0 auto;
+            padding: 0;
+            font-family: Arial, sans-serif;
+            font-size: 16px;
+        }
+
+        .phone {
+            min-width: 288px;
+            height: 80%;
+            background: white;
+            border-radius: 30px;
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+            overflow: hidden;
+            border: 16px solid black;
+            position: relative;
+            display: flex;
+            aspect-ratio: 1/2;
+            color: black;
+        }
+
+        .screen-container {
+            display: flex;
+            width: 100%;
+            transition: transform 0.25s linear;
+        }
+
+        .screen {
+            width: 100%;
+            height: 100%;
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .top-section {
+            flex: 1;
+            background: #ddd;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 24px;
+            font-weight: bold;
+            border-bottom: 5px solid black;
+        }
+
+        .bottom-section {
+            display: flex;
+            flex-direction: row;
+            /* height: 40%; */
+            background: #fff;
+        }
+
+        .left-section, .right-section {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            border-right: 5px solid black;
+        }
+
+        .right-section {
+            border-right: none;
+        }
+
+        .left-section {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 5px;
+            padding: 5px;
+            width: 100%;
+            max-width: 800px;
+        }
+
+        .item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: space-evenly;
+            background: #f0f0f0;
+            padding: 1px;
+            border-radius: 5px;
+        }
+
+        .item img {
+            width: 100%;
+            height: auto;
+            max-width: 30px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 5px;
+            flex-direction: row-reverse;
+        }
+
+        .controls button {
+            width: 20px;
+            height: 20px;
+            font-size: 12px;
+        }
+
+        .btn-small {
+            font-size: 16px;
+            border: none;
+            background: #007bff;
+            color: white;
+            pointer: pointer;
+            border-radius: 3px;
+            margin: 1px 0;
+        }
+
+        .btn-small:active {
+            background: #0056b3;
+        }
+
+        .list {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: #f0f0f0;
+        }
+
+        .list-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex: 1;
+            font-size: 16px;
+            font-weight: bold;
+            padding: 5px;
+            border-bottom: 3px solid black;
+        }
+
+        .buttons {
+            display: flex;
+        }
+
+        .btn {
+            flex: 1;
+            padding: 10px;
+            font-size: 16px;
+            font-weight: bold;
+            border: none;
+            background: #dc3545;
+            color: white;
+            pointer: pointer;
+        }
+
+        .btn.next {
+            background: #28a745;
+        }
+
+        .btn:active {
+            opacity: 0.8;
+        }
+
+        .buttons-section-2 {
+            height: 40%;
+        }
+
+        .food-piece-circle {
+            width: 45px;
+            height: 45px;
+            border-radius: 50%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            border: 3px solid transparent;
+            transition: border-color 0.3s ease-in-out;
+            pointer: pointer;
+            background: white;
+            box-shadow: 0px 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .box-button:active {
+            box-shadow: inset 0px 4px 6px rgba(0, 0, 0, 0.1);
+            transform: translateY(2px);
+        }
+
+        .group-buttons {
+            width: 100%;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+<body>
+    <div id="container" style="display: flex; justify-content: center; align-items: center; padding: 10px;">
+        <div style="max-width: 280px;" class="phone">
+            <spine-overlay overlay-id="phone"></spine-overlay>
+            <div class="screen-container" id="screenContainer">
+
+                <!-- SECTION 1 -->
+                <div class="screen">
+                    <div class="top-section">
+                        <spine-skeleton
+                            identifier="list"
+
+                            overlay-id="phone"
+                            default-mix=".2"
+                            atlas="/assets/food/food-app-pro.atlas"
+                            skeleton="/assets/food/list-search.json"
+                            animation="animation"
+
+                            interactive
+
+                        ></spine-skeleton>
+                    </div>
+
+                    <div class="bottom-section">
+                        <div class="left-section">
+                            <div id="carrotDiv" class="item">
+                                <img src="/assets/food/carrot-body.png">
+                                <div class="controls">
+                                    <button id="carrotPlus" class="btn-small">+</button>
+                                    <button id="carrotMinus" class="btn-small">-</button>
+                                </div>
+                            </div>
+                            <div id="tomatoDiv" class="item">
+                                <img src="/assets/food/tomato-body.png">
+                                <div class="controls">
+                                    <button id="tomatoPlus" class="btn-small">+</button>
+                                    <button id="tomatoMinus" class="btn-small">-</button>
+                                </div>
+                            </div>
+                            <div id="breadDiv" class="item">
+                                <img src="/assets/food/bread.png">
+                                <div class="controls">
+                                    <button id="breadPlus" class="btn-small">+</button>
+                                    <button id="breadMinus" class="btn-small">-</button>
+                                </div>
+                            </div>
+                            <div id="mushroomDiv" class="item">
+                                <img src="/assets/food/mushroom.png">
+                                <div class="controls">
+                                    <button id="mushroomPlus" class="btn-small">+</button>
+                                    <button id="mushroomMinus" class="btn-small">-</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="right-section">
+                            <div class="list">
+                                <div class="list-item"><span>Carrots</span> <span id="list-item-carrot">0</span></div>
+                                <div class="list-item"><span>Tomatoes</span> <span id="list-item-tomato">0</span></div>
+                                <div class="list-item"><span>Breads</span> <span id="list-item-bread">0</span></div>
+                                <div class="list-item"><span>Mushrooms</span> <span id="list-item-mushroom">0</span></div>
+                            </div>
+                            <div class="buttons">
+                                <button class="btn">Clear</button>
+                                <button class="btn next">Next</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <!-- SECTION 1 -->
+
+
+
+                <!-- SECTION 2 -->
+                <div class="screen">
+                    <div class="top-section">
+
+                        <spine-skeleton
+                            identifier="pan"
+
+                            overlay-id="phone"
+                            default-mix=".2"
+                            atlas="/assets/food/food-app-pro.atlas"
+                            skeleton="/assets/food/pan-cooking-pro.json"
+                            animation="animation"
+
+                        ></spine-skeleton>
+
+                    </div>
+
+                    <div class="buttons-section-2">
+
+                        <div class="group-buttons">
+                            <div style="text-align: center;">
+                                Click on the food to cook it
+                            </div>
+                            <div class="buttons">
+                                <button class="btn" style="padding: 5px;">Prev</button>
+                                <button id="btn-next-2" class="btn" style="padding: 5px; background-color: gainsboro; transition: background-color 0.25s ease-in-out;" disabled>Next</button>
+                            </div>
+                        </div>
+
+                        <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 10px">
+                            <div id="foodPieceDiv1" class="food-piece-circle">
+                                <img src="/assets/food/food-piece-1.png" style="width: 70%; height: auto;">
+                            </div>
+
+                            <div id="foodPieceDiv2" class="food-piece-circle">
+                                <img src="/assets/food/food-piece-2.png" style="width: 70%; height: auto;">
+                            </div>
+
+                            <div id="foodPieceDiv3" class="food-piece-circle">
+                                <img src="/assets/food/food-piece-3.png" style="width: 70%; height: auto;">
+                            </div>
+
+                            <div id="foodPieceDiv4" class="food-piece-circle">
+                                <img src="/assets/food/food-piece-4.png" style="width: 70%; height: auto;">
+                            </div>
+
+                            <div id="foodPieceDiv5" class="food-piece-circle">
+                                <img src="/assets/food/food-piece-5.png" style="width: 70%; height: auto;">
+                            </div>
+
+                            <div id="foodPieceDiv6" class="food-piece-circle">
+                                <img src="/assets/food/food-piece-6.png" style="width: 70%; height: auto;">
+                            </div>
+
+                            <div id="foodPieceDiv7" class="food-piece-circle">
+                                <img src="/assets/food/food-piece-7.png" style="width: 70%; height: auto;">
+                            </div>
+                        </div>
+
+                    </div>
+
+                </div>
+
+                <!-- SECTION 2 -->
+
+                <!-- SECTION 3 -->
+                <div class="screen">
+                    <div class="top-section">
+
+                        <spine-skeleton
+                            identifier="delivery"
+
+                            overlay-id="phone"
+                            default-mix=".2"
+                            atlas="/assets/food/food-app-pro.atlas"
+                            skeleton="/assets/food/meal-delivery-pro.json"
+                            animation="animation"
+
+                        ></spine-skeleton>
+
+                    </div>
+
+                    <div class="buttons-section-2">
+                        <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 10px">
+                            <div id="buttonDistance" class="food-piece-circle box-button" style="user-select: none;">
+                                <img src="/assets/food/box.png" style="width: 70%; height: auto;">
+                            </div>
+                        </div>
+
+                        <div class="group-buttons">
+                            <div style="text-align: center;">
+                                Help the box to reach the destination by clicking the button above!
+                            </div>
+                            <div class="buttons">
+                                <button class="btn" style="padding: 5px;">Prev</button>
+                                <button id="btn-next-3" class="btn" style="padding: 5px; background-color: gainsboro; transition: background-color 0.25s ease-in-out;" disabled>Next</button>
+                            </div>
+                        </div>
+
+                    </div>
+
+                </div>
+                <!-- SECTION 3 -->
+
+                <!-- SECTION 4 -->
+                <div class="screen">
+                    <div class="top-section">
+
+                        <spine-skeleton
+                            identifier="ready"
+
+                            overlay-id="phone"
+                            default-mix=".2"
+                            atlas="/assets/food/food-app-pro.atlas"
+                            skeleton="/assets/food/meal-ready-pro.json"
+                            animation="base"
+
+                            interactive
+                        ></spine-skeleton>
+
+                    </div>
+
+                    <div class="buttons-section-2">
+                        <div class="group-buttons">
+                            <div style="text-align: center;">
+                                Congratulation! You food has just been delivered!
+                            </div>
+                            <div class="buttons">
+                                <button class="btn" style="padding: 5px;">Prev</button>
+                            </div>
+                        </div>
+
+                    </div>
+
+                </div>
+                <!-- SECTION 4 -->
+
+            </div>
+        </div>
+    </div>
+
+	<script type="module">
+		import * as spine from '../dist/esm/spine-webcomponents.mjs';
+
+        (async () => {
+
+            /* SECTION 1 */
+            const widget1 = await spine.getSkeleton("list").whenReady;
+
+            const setInteractionSectionOne = (itemName, trackNumber) => {
+                const divName = `${itemName}Div`;
+                const buttonNamePlus = `${itemName}Plus`;
+                const buttonNameMinus = `${itemName}Minus`;
+                const listItemName = `list-item-${itemName}`;
+                const itemDiv = document.getElementById(divName);
+                const listItemDiv = document.getElementById(listItemName);
+
+                itemDiv.addEventListener('mouseenter', () => {
+                    widget1.state.setAnimation(0, `focus-${itemName}`, true);
+                    widget1.state.setAnimation(trackNumber, `shake-${itemName}`, true);
+                });
+
+                const setDefaultState = () => {
+
+                    const currentEntry = widget1.state.getCurrent(trackNumber);
+                    if (!currentEntry) return;
+
+                    if (currentEntry.animation.name === `shake-${itemName}`) {
+                        widget1.state.setEmptyAnimation(trackNumber);
+                    } else if (currentEntry.next && currentEntry.next.animation && currentEntry.next.animation.name === `shake-${itemName}`) {
+                        widget1.state.clearNext(currentEntry);
+                        widget1.state.addEmptyAnimation(trackNumber);
+                    }
+                    widget1.state.setAnimation(0, "animation", true);
+
+                }
+                itemDiv.addEventListener('mouseleave', setDefaultState);
+
+                const addItemAction = () => {
+                    widget1.state.setAnimation(trackNumber, `add-${itemName}`, false);
+                    widget1.state.addAnimation(trackNumber, `shake-${itemName}`, true);
+                    listItemDiv.textContent = parseInt(listItemDiv.textContent) + 1;
+                }
+
+                const itemSlot = widget1.skeleton.findSlot(`bubble-base-${itemName.charAt(0)}`);
+                let onItem = false;
+                widget1.addPointerSlotEventCallback(itemSlot, (slot, event) => {
+
+                    if (event === "enter") {
+                        widget1.state.setAnimation(0, `focus-${itemName}`, true);
+                        widget1.state.setAnimation(trackNumber, `shake-${itemName}`, true);
+                    }
+
+                    if (event === "leave") {
+                        onItem = false;
+                        const currentEntry = widget1.state.getCurrent(trackNumber);
+                        if (currentEntry.animation.name === `shake-${itemName}`) {
+                            widget1.state.setEmptyAnimation(trackNumber);
+                        } else if (currentEntry.next && currentEntry.next.animation && currentEntry.next.animation.name === `shake-${itemName}`) {
+                            widget1.state.clearNext(currentEntry);
+                            widget1.state.addEmptyAnimation(trackNumber);
+                        }
+
+                        const currentEntryZero = widget1.state.getCurrent(0);
+                        if (currentEntryZero.animation.name === `focus-${itemName}`) {
+                            widget1.state.setAnimation(0, "animation", true);
+                        }
+                    }
+
+                    if (event === "down") {
+                        addItemAction();
+                    }
+
+                });
+
+                const itemButtonPlus = document.getElementById(buttonNamePlus);
+                itemButtonPlus.onclick = addItemAction;
+
+                const itemButtonMinus = document.getElementById(buttonNameMinus);
+                const removeItemAction = () => {
+                    const current = parseInt(listItemDiv.textContent);
+                    if (current > 0) listItemDiv.textContent = current - 1;
+                }
+                itemButtonMinus.onclick = removeItemAction;
+
+            }
+            setInteractionSectionOne("carrot", 1);
+            setInteractionSectionOne("tomato", 2);
+            setInteractionSectionOne("bread", 3);
+            setInteractionSectionOne("mushroom", 4);
+            /* SECTION 1 */
+
+
+
+            /* SECTION 2 */
+            const btnNext2 = document.getElementById("btn-next-2");
+
+            const widget2 = await spine.getSkeleton("pan").whenReady;
+            const foodPiece1 = widget2.skeleton.findSlot(`food-piece-1`);
+            const foodPiece2 = widget2.skeleton.findSlot(`food-piece-2`);
+            const foodPiece3 = widget2.skeleton.findSlot(`food-piece-3`);
+            const foodPiece4 = widget2.skeleton.findSlot(`food-piece-4`);
+            const foodPiece5 = widget2.skeleton.findSlot(`food-piece-5`);
+            const foodPiece6 = widget2.skeleton.findSlot(`food-piece-6`);
+            const foodPiece7 = widget2.skeleton.findSlot(`food-piece-7`);
+
+            const foodPieces = [
+                [foodPiece1, document.getElementById("foodPieceDiv1")],
+                [foodPiece2, document.getElementById("foodPieceDiv2")],
+                [foodPiece3, document.getElementById("foodPieceDiv3")],
+                [foodPiece4, document.getElementById("foodPieceDiv4")],
+                [foodPiece5, document.getElementById("foodPieceDiv5")],
+                [foodPiece6, document.getElementById("foodPieceDiv6")],
+                [foodPiece7, document.getElementById("foodPieceDiv7")],
+            ];
+
+            foodPieces.forEach(([foodPiece, itemDiv], index) => {
+                foodPiece.color.set(1, 1, 1, 0);
+                itemDiv.addEventListener('mousedown', () => {
+
+                    if (itemDiv.dataset.cooking) {
+                        itemDiv.style.borderColor = "transparent";
+                        delete itemDiv.dataset.cooking;
+                        const interval = setInterval(() => {
+                            let alpha = foodPiece.color.a;
+                            if (alpha <= 0) {
+                                clearInterval(interval);
+                                return;
+                            }
+                            foodPiece.color.set(1, 1, 1, alpha - 0.1);
+                        }, 10);
+                    } else {
+                        itemDiv.style.borderColor = "#4CAF50";
+                        itemDiv.dataset.cooking = true;
+                        const interval = setInterval(() => {
+                            let alpha = foodPiece.color.a;
+                            if (alpha >= 1) {
+                                clearInterval(interval);
+                                return;
+                            }
+                            foodPiece.color.set(1, 1, 1, alpha + 0.1);
+                        }, 10);
+                    }
+
+                    if (foodPieces.every(([,{ dataset }]) => dataset.cooking)) {
+                        btnNext2.style.backgroundColor = "#28a745";
+                        btnNext2.removeAttribute("disabled");
+                    } else {
+                        btnNext2.style.backgroundColor = "gainsboro";
+                        btnNext2.setAttribute("disabled", "");
+                    }
+                });
+            })
+
+            /* SECTION 2 */
+
+            /* SECTION 3 */
+            const widget3 = await spine.getSkeleton("delivery").whenReady;
+            const btnNext3 = document.getElementById("btn-next-3");
+            const box = widget3.skeleton.findSlot("box");
+
+            let distance = -1300;
+
+            const buttonDistance = document.getElementById("buttonDistance");
+            buttonDistance.addEventListener("mousedown", () => {
+                let toAdd = 200;
+                const interval = setInterval(() => {
+                    if (toAdd <= 0) {
+                        clearInterval(interval);
+                        return;
+                    }
+                    toAdd -= 10;
+                    distance += 10;
+                }, 10)
+            })
+
+            setInterval(() => {
+                if (distance <= -1300) return;
+                distance -= 5;
+
+                if (distance > 2000) {
+                    btnNext3.style.backgroundColor = "#28a745";
+                    btnNext3.removeAttribute("disabled");
+                } else {
+                    btnNext3.style.backgroundColor = "gainsboro";
+                    btnNext3.setAttribute("disabled", "");
+                }
+            }, 10)
+
+            widget3.beforeUpdateWorldTransforms = () => {
+                box.bone.x += distance;
+            }
+
+
+            if (foodPieces.every(([,{ dataset }]) => dataset.cooking)) {
+                btnNext3.style.backgroundColor = "#28a745";
+                btnNext3.removeAttribute("disabled");
+            } else {
+                btnNext3.style.backgroundColor = "gainsboro";
+                btnNext3.setAttribute("disabled", "");
+            }
+
+            /* SECTION 3 */
+
+
+            /* SECTION 4 */
+            const widget4 = await spine.getSkeleton("ready").whenReady;
+
+            const slot4Bread = widget4.skeleton.findSlot("salad");
+            widget4.addPointerSlotEventCallback(slot4Bread, (slot, event) => {
+
+                if (event === "enter") {
+                    widget4.state.setAnimation(1, "bread-opening", false);
+                    widget4.state.addAnimation(1, "bread-open", true);
+                }
+
+                if (event === "leave") {
+                    widget4.state.setAnimation(1, "bread-closing", false);
+                }
+
+            });
+
+            const slot4Bottle = widget4.skeleton.findSlot("bottle-base");
+            widget4.addPointerSlotEventCallback(slot4Bottle, (slot, event) => {
+
+                if (event === "enter") {
+                    widget4.state.setAnimation(2, "bottle-opening", false);
+                    widget4.state.addAnimation(2, "bottle-open", true);
+                }
+
+                if (event === "leave") {
+                    widget4.state.setAnimation(2, "bottle-closing", false);
+                }
+
+            });
+
+            const slot4Fries = widget4.skeleton.findSlot("fries-case-back");
+            widget4.addPointerSlotEventCallback(slot4Fries, (slot, event) => {
+
+                if (event === "enter") {
+                    widget4.state.setAnimation(3, "fries", true);
+                }
+
+                if (event === "leave") {
+                    let track = widget4.state.setEmptyAnimation(3);
+                    track.mixDuration = 1;
+                }
+
+            });
+
+            /* SECTION 4 */
+        })();
+
+        let currentIndex = 0;
+        function nextScreen() {
+            const container = document.getElementById('screenContainer');
+            const totalScreens = document.querySelectorAll('.screen').length;
+            if (currentIndex < totalScreens - 1) {
+                currentIndex++;
+                container.style.transform = `translateX(-${currentIndex * 100}%)`;
+            }
+        }
+        function prevScreen() {
+            const container = document.getElementById('screenContainer');
+            const totalScreens = document.querySelectorAll('.screen').length;
+            if (currentIndex > 0) {
+                currentIndex--;
+                container.style.transform = `translateX(-${currentIndex * 100}%)`;
+            }
+        }
+
+        const nextButtons = [
+            document.querySelector("button.btn.next"),
+            document.getElementById("btn-next-2"),
+            document.getElementById("btn-next-3"),
+        ];
+        for (const button of nextButtons) button.onclick = nextScreen;
+
+        const prevButtons = Array.from(document.querySelectorAll('button')).filter(button => button.textContent.trim() === 'Prev');
+        for (const button of prevButtons) button.onclick = prevScreen;
+	</script>
+
+</body>
+</html>

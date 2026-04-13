@@ -1,0 +1,103 @@
+<html>
+  <head>
+	<meta charset="UTF-8" />
+	<title>spine-pixi</title>
+	<script src="https://cdn.jsdelivr.net/npm/pixi.js@7.4.3/dist/pixi.js"></script>
+	<script src="../dist/iife/spine-pixi-v7.js"></script>
+	<link rel="stylesheet" href="../../index.css">
+  </head>
+
+  <body>
+	<script>
+	  (async function () {
+		await Promise.resolve();
+		var app = new PIXI.Application({
+			width: window.innerWidth,
+			height: window.innerHeight,
+			resolution: window.devicePixelRatio || 1,
+			autoDensity: true,
+			resizeTo: window,
+			backgroundColor: 0x2c3e50,
+			hello: true,
+		});
+		document.body.appendChild(app.view);
+
+		// BASE64 DATA
+		const base64Data = {
+			atlas: "data:text/plain;base64,aW5saW5lLnBuZwpzaXplOjE2LDE2CmZpbHRlcjpMaW5lYXIsTGluZWFyCnBtYTp0cnVlCmRvdApib3VuZHM6MCwwLDEsMQo=",
+			skel: "data:application/octet-stream;base64,/B8S/IqaXgYHNC4yLjM5wkgAAMJIAABCyAAAQsgAAELIAAAAAQRkb3QCBXJvb3QAAAAAAAAAAAAAAAA/gAAAP4AAAAAAAAAAAAAAAAAAAAAABGRvdAAAAAAAAAAAAAAAAABCyAAAQsgAAAAAAAAAAAAAAAAAAAAAAQRkb3QB//////////8BAAAAAAABAAEBACWwfdcAAAAAP4AAAD+AAAA/gAAAP4AAAAAAAQphbmltYXRpb24BAQABAQMAAAAAAP////8/gAAA/wAA/wBAAAAA/////wAAAAAAAAAAAA==",
+			json: "data:application/json;base64,ew0KInNrZWxldG9uIjogeyAiaGFzaCI6ICJkZnFNKy9hYStzNCIsICJzcGluZSI6ICI0LjIuNDMiLCAiaW1hZ2VzIjogIi9Vc2Vycy9kYXZpZGV0YW50aWxsby9Eb3dubG9hZHMvaW1hZ2VzIiwgImF1ZGlvIjogIi4vYXVkaW8iIH0sDQoiYm9uZXMiOiBbDQoJeyAibmFtZSI6ICJyb290IiB9LA0KCXsgIm5hbWUiOiAiZG90IiwgInBhcmVudCI6ICJyb290IiwgInNjYWxlWCI6IDEwMCwgInNjYWxlWSI6IDEwMCB9DQpdLA0KInNsb3RzIjogWw0KCXsgIm5hbWUiOiAiZG90IiwgImJvbmUiOiAiZG90IiwgImF0dGFjaG1lbnQiOiAiZG90IiB9DQpdLA0KInNraW5zIjogWw0KCXsNCgkJIm5hbWUiOiAiZGVmYXVsdCIsDQoJCSJhdHRhY2htZW50cyI6IHsNCgkJCSJkb3QiOiB7DQoJCQkJImRvdCI6IHsgIndpZHRoIjogMSwgImhlaWdodCI6IDEgfQ0KCQkJfQ0KCQl9DQoJfQ0KXSwNCiJhbmltYXRpb25zIjogew0KCSJhbmltYXRpb24iOiB7DQoJCSJzbG90cyI6IHsNCgkJCSJkb3QiOiB7DQoJCQkJInJnYmEiOiBbDQoJCQkJCXsgImNvbG9yIjogImZmZmZmZmZmIiB9LA0KCQkJCQl7ICJ0aW1lIjogMSwgImNvbG9yIjogImZmMDAwMGZmIiB9LA0KCQkJCQl7ICJ0aW1lIjogMiwgImNvbG9yIjogImZmZmZmZmZmIiB9DQoJCQkJXQ0KCQkJfQ0KCQl9DQoJfQ0KfQ0KfQ==",
+			png: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQMAAAAl21bKAAAAAXNSR0IB2cksfwAAAAlwSFlzAAALEwAACxMBAJqcGAAAAANQTFRF////p8QbyAAAAApJREFUeJxjZAAAAAQAAiFkrWoAAAAASUVORK5CYII="
+		}
+
+		const textureBase64 = await PIXI.Assets.load({
+			alias: 'textureBase64',
+			loadParser: 'loadTextures',
+			src: base64Data.png,
+			// data: { alphaMode: PIXI.ALPHA_MODES.PMA } // if texture is pma uncomment this and set as pixi preference (preferCreateImageBitmap: false)
+		})
+
+		PIXI.Assets.add({
+			alias: "atlasBase64",
+			loadParser: "spineTextureAtlasLoader",
+			src: base64Data.atlas,
+			data: { images: { "inline.png": textureBase64.baseTexture } }
+		})
+
+		PIXI.Assets.add({
+			alias: "skelBase64",
+			loadParser: "spineSkeletonLoader",
+			// loadParser: "loadJson", // use "loadJson", if asset is json
+			src: base64Data.skel,
+		})
+		await PIXI.Assets.load(["skelBase64", "atlasBase64"]);
+
+		// creating spine game object with base64 data
+		const base64GameObject = spine.Spine.from({skeleton: "skelBase64", atlas: "atlasBase64" });
+		app.stage.addChild(base64GameObject);
+		base64GameObject.state.setAnimation(0, "animation", true);
+		base64GameObject.position.set(window.innerWidth / 3, window.innerHeight / 2);
+
+
+		// BLOB DATA
+		// now transform base64 into blob to show how to load blob
+		const blobData = {
+			atlas: await fetch(base64Data.atlas).then(res => res.blob()),
+			skel: await fetch(base64Data.skel).then(res => res.blob()),
+			json: await fetch(base64Data.json).then(res => res.blob()),
+			png: await fetch(base64Data.png).then(res => res.blob()),
+		}
+
+		const textureBlob = await PIXI.Assets.load({
+			alias: 'textureBlob',
+			loadParser: 'loadTextures',
+			src: URL.createObjectURL(blobData.png),
+			// data: { alphaMode: PIXI.ALPHA_MODES.PMA } // if texture is pma uncomment this and set as pixi preference (preferCreateImageBitmap: false)
+		})
+
+		PIXI.Assets.add({
+			alias: "atlasBlob",
+			loadParser: "spineTextureAtlasLoader",
+			src: URL.createObjectURL(blobData.atlas),
+			data: { images: { "inline.png": textureBlob.baseTexture } }
+		})
+
+		PIXI.Assets.add({
+			alias: "skelBlob",
+			// loadParser: "spineSkeletonLoader", // use "spineSkeletonLoader", if asset is skel
+			loadParser: "loadJson",
+			src: URL.createObjectURL(blobData.json),
+		})
+		await PIXI.Assets.load(["skelBlob", "atlasBlob"]);
+
+		// creating spine game object
+		const blobGameObject = spine.Spine.from({skeleton: "skelBase64", atlas: "atlasBase64" });
+		app.stage.addChild(blobGameObject);
+		blobGameObject.state.setAnimation(0, "animation", true);
+		blobGameObject.position.set(window.innerWidth / 3 * 2, window.innerHeight / 2);
+	  })();
+
+   </script>
+
+  </body>
+</html>

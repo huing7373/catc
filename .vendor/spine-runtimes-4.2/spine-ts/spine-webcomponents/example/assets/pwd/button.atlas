@@ -1,0 +1,14 @@
+button.png
+size:372,510
+filter:Linear,Linear
+Button
+bounds:220,2,400,150
+offsets:1,1,402,152
+rotate:90
+CLICK ME
+bounds:2,470,231,38
+offsets:1,1,233,40
+Shadow
+bounds:2,2,466,216
+offsets:9,9,484,234
+rotate:90
