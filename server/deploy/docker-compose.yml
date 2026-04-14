@@ -1,22 +1,22 @@
-version: '3.8'
-
 services:
-  postgres:
-    image: postgres:16-alpine
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:27017:27017"
     environment:
-      POSTGRES_USER: cat
-      POSTGRES_PASSWORD: cat_dev_password
-      POSTGRES_DB: cat_dev
+      MONGO_INITDB_ROOT_USERNAME: cat
+      MONGO_INITDB_ROOT_PASSWORD: cat_dev_password
+      MONGO_INITDB_DATABASE: cat
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - mongodata:/data/db
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     ports:
       - "127.0.0.1:6379:6379"
     command: redis-server --requirepass cat_redis_dev
 
 volumes:
-  pgdata:
+  mongodata:

@@ -37,7 +37,7 @@ fi
 
 echo ""
 echo "=== go build ==="
-if ! go build $RACE_FLAG -o "$OUTPUT_DIR/$BINARY_NAME" ./cmd/server/ 2>&1; then
+if ! go build $RACE_FLAG -o "$OUTPUT_DIR/$BINARY_NAME" ./cmd/cat/ 2>&1; then
   echo "FAIL: build failed"
   exit 1
 fi

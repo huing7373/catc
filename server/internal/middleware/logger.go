@@ -1,64 +1,42 @@
 package middleware
 
 import (
-	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+
+	"github.com/huing7373/catc/server/pkg/logx"
 )
 
-const (
-	// RequestIDKey is the context key for the request ID.
-	RequestIDKey = "request_id"
-	// UserIDKey is the context key for the authenticated user ID.
-	UserIDKey = "user_id"
-)
-
-// InitLogger sets up zerolog for JSON output to stdout.
-func InitLogger() {
-	zerolog.TimeFieldFormat = time.RFC3339
-	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Logger()
-}
-
-// RequestLogger returns a Gin middleware that logs each request with structured JSON.
+// RequestLogger generates a request_id, propagates it via both Gin
+// context and the request's standard context (so log.Ctx inherits it),
+// and emits one structured access-log entry when the request finishes.
 func RequestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 
-		// Generate request ID
-		requestID := uuid.New().String()
-		c.Set(RequestIDKey, requestID)
-		c.Header("X-Request-ID", requestID)
+		rid := uuid.NewString()
+		c.Set(CtxKeyRequestID, rid)
 
-		// Process request
+		ctx := logx.ContextWithRequestID(c.Request.Context(), rid)
+		c.Request = c.Request.WithContext(ctx)
+
+		c.Writer.Header().Set("X-Request-ID", rid)
+
 		c.Next()
 
-		// Log after request completes
 		duration := time.Since(start)
-		statusCode := c.Writer.Status()
-
-		event := log.Info()
-		if statusCode >= 500 {
-			event = log.Error()
-		} else if statusCode >= 400 {
-			event = log.Warn()
-		}
-
-		event.
-			Str("request_id", requestID).
+		entry := log.Ctx(c.Request.Context()).Info().
 			Str("endpoint", c.Request.Method+" "+c.FullPath()).
-			Int("status_code", statusCode).
-			Int64("duration_ms", duration.Milliseconds()).
-			Str("client_ip", c.ClientIP())
+			Int("status_code", c.Writer.Status()).
+			Int64("duration_ms", duration.Milliseconds())
 
-		// Include user_id if authenticated
-		if userID, exists := c.Get(UserIDKey); exists {
-			event.Str("user_id", userID.(string))
+		uid := UserIDFrom(c)
+		if uid != "" {
+			entry = entry.Str("user_id", string(uid))
 		}
-
-		event.Msg("request")
+		entry.Msg("http request")
 	}
 }
