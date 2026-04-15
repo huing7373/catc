@@ -25,15 +25,22 @@ db = 0
 [jwt]
 access_secret = "local-dev-access-secret-change-me"
 refresh_secret = "local-dev-refresh-secret-change-me"
-access_ttl_min = 60
+access_secret_previous = ""
+refresh_secret_previous = ""
+access_ttl_min = 10080
 refresh_ttl_day = 30
 issuer = "cat-backend-local"
 
 [apns]
 key_id = ""
 team_id = ""
-bundle_id = "com.example.cat.dev"
+bundle_id = "com.zhuming.cat.dev"
 key_path = ""
+
+[apple]
+jwks_url = "https://appleid.apple.com/auth/keys"
+jwks_cache_ttl_min = 60
+allowed_audiences = ["com.zhuming.cat.dev"]
 
 [cdn]
 base_url = "http://localhost:9000/cat-dev"

@@ -2,7 +2,6 @@ package mongox
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 )
@@ -24,7 +23,7 @@ func TestConnect_FailsFast_WithUnreachableURI(t *testing.T) {
 // TestWithTx_CommitsAndRollsBack requires a real Mongo instance with
 // replica set support. We skip unless CAT_TEST_MONGO_URI is set.
 func TestWithTx_CommitsAndRollsBack(t *testing.T) {
-	uri := os.Getenv("CAT_TEST_MONGO_URI")
+	uri := IntegrationURI()
 	if uri == "" {
 		t.Skip("CAT_TEST_MONGO_URI not set — skipping real-mongo transaction test")
 	}

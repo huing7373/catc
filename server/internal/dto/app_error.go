@@ -42,3 +42,11 @@ func (e *AppError) WithCause(cause error) *AppError {
 	clone.Wrapped = cause
 	return &clone
 }
+
+// ErrValidation is the canonical 400 emitted when request binding /
+// validator fails. Handlers wrap the underlying validator error via
+// NewValidationError so the cause is logged but not leaked to clients.
+var ErrValidation = &AppError{HTTPStatus: 400, Code: "VALIDATION_ERROR", Message: "request validation failed"}
+
+// NewValidationError wraps cause inside ErrValidation for handler use.
+func NewValidationError(cause error) *AppError { return ErrValidation.WithCause(cause) }

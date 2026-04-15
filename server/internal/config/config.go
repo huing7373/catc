@@ -28,6 +28,7 @@ type Config struct {
 	Redis  RedisCfg  `toml:"redis"`
 	JWT    JWTCfg    `toml:"jwt"`
 	APNs   APNsCfg   `toml:"apns"`
+	Apple  AppleCfg  `toml:"apple"`
 	CDN    CDNCfg    `toml:"cdn"`
 }
 
@@ -60,12 +61,30 @@ type RedisCfg struct {
 }
 
 // JWTCfg covers JWT signing secrets and TTLs.
+//
+// AccessSecretPrevious / RefreshSecretPrevious enable a 24-hour
+// dual-key rotation window: parsing accepts either the current or the
+// previous secret; signing always uses the current one. Empty values
+// disable rotation.
 type JWTCfg struct {
-	AccessSecret  string `toml:"access_secret"`
-	RefreshSecret string `toml:"refresh_secret"`
-	AccessTTLMin  int    `toml:"access_ttl_min"`
-	RefreshTTLDay int    `toml:"refresh_ttl_day"`
-	Issuer        string `toml:"issuer"`
+	AccessSecret          string `toml:"access_secret"`
+	RefreshSecret         string `toml:"refresh_secret"`
+	AccessSecretPrevious  string `toml:"access_secret_previous"`
+	RefreshSecretPrevious string `toml:"refresh_secret_previous"`
+	AccessTTLMin          int    `toml:"access_ttl_min"`
+	RefreshTTLDay         int    `toml:"refresh_ttl_day"`
+	Issuer                string `toml:"issuer"`
+}
+
+// AppleCfg covers Sign in with Apple identity-token verification.
+//
+// AllowedAudiences must contain the iOS bundle identifier (and watchOS
+// bundle identifier, if Apple issues separate tokens for it). When left
+// empty, applyDefaults populates it from APNs.BundleID.
+type AppleCfg struct {
+	JWKSURL          string   `toml:"jwks_url"`
+	JWKSCacheTTLMin  int      `toml:"jwks_cache_ttl_min"`
+	AllowedAudiences []string `toml:"allowed_audiences"`
 }
 
 // APNsCfg covers Apple Push Notification credentials.
@@ -85,12 +104,21 @@ type CDNCfg struct {
 // Env var names that overrideFromEnv looks for. Exposed so tests can
 // reference the exact keys without hardcoding strings.
 const (
-	EnvJWTAccessSecret  = "CAT_JWT_ACCESS_SECRET"
-	EnvJWTRefreshSecret = "CAT_JWT_REFRESH_SECRET"
-	EnvMongoURI         = "CAT_MONGO_URI"
-	EnvRedisPassword    = "CAT_REDIS_PASSWORD"
-	EnvAPNsKeyPath      = "CAT_APNS_KEY_PATH"
-	EnvCDNUploadKey     = "CAT_CDN_UPLOAD_KEY"
+	EnvJWTAccessSecret          = "CAT_JWT_ACCESS_SECRET"
+	EnvJWTRefreshSecret         = "CAT_JWT_REFRESH_SECRET"
+	EnvJWTAccessSecretPrevious  = "CAT_JWT_ACCESS_SECRET_PREVIOUS"
+	EnvJWTRefreshSecretPrevious = "CAT_JWT_REFRESH_SECRET_PREVIOUS"
+	EnvAppleJWKSURL             = "CAT_APPLE_JWKS_URL"
+	EnvMongoURI                 = "CAT_MONGO_URI"
+	EnvRedisPassword            = "CAT_REDIS_PASSWORD"
+	EnvAPNsKeyPath              = "CAT_APNS_KEY_PATH"
+	EnvCDNUploadKey             = "CAT_CDN_UPLOAD_KEY"
+)
+
+// Apple identity-token defaults.
+const (
+	defaultAppleJWKSURL         = "https://appleid.apple.com/auth/keys"
+	defaultAppleJWKSCacheTTLMin = 60
 )
 
 // MustLoad parses the TOML file at path, applies environment overrides
@@ -153,13 +181,25 @@ func (c *Config) applyDefaults() {
 		c.Mongo.TimeoutSec = 5
 	}
 	if c.JWT.AccessTTLMin == 0 {
-		c.JWT.AccessTTLMin = 60
+		// 7 days. Aligned with architecture decision Access 7d / Refresh
+		// 30d so Watch users who rarely open the phone don't lose their
+		// session mid-week.
+		c.JWT.AccessTTLMin = 10080
 	}
 	if c.JWT.RefreshTTLDay == 0 {
 		c.JWT.RefreshTTLDay = 30
 	}
 	if c.JWT.Issuer == "" {
 		c.JWT.Issuer = "cat-backend"
+	}
+	if c.Apple.JWKSURL == "" {
+		c.Apple.JWKSURL = defaultAppleJWKSURL
+	}
+	if c.Apple.JWKSCacheTTLMin == 0 {
+		c.Apple.JWKSCacheTTLMin = defaultAppleJWKSCacheTTLMin
+	}
+	if len(c.Apple.AllowedAudiences) == 0 && c.APNs.BundleID != "" {
+		c.Apple.AllowedAudiences = []string{c.APNs.BundleID}
 	}
 }
 
@@ -172,6 +212,15 @@ func (c *Config) overrideFromEnv() {
 	}
 	if v := os.Getenv(EnvJWTRefreshSecret); v != "" {
 		c.JWT.RefreshSecret = v
+	}
+	if v := os.Getenv(EnvJWTAccessSecretPrevious); v != "" {
+		c.JWT.AccessSecretPrevious = v
+	}
+	if v := os.Getenv(EnvJWTRefreshSecretPrevious); v != "" {
+		c.JWT.RefreshSecretPrevious = v
+	}
+	if v := os.Getenv(EnvAppleJWKSURL); v != "" {
+		c.Apple.JWKSURL = v
 	}
 	if v := os.Getenv(EnvMongoURI); v != "" {
 		c.Mongo.URI = v
@@ -214,7 +263,18 @@ func (c *Config) validate() error {
 	if c.Server.Mode != "debug" && c.Server.Mode != "release" {
 		return fmt.Errorf("config: server.mode must be debug|release, got %q", c.Server.Mode)
 	}
+	if len(c.Apple.AllowedAudiences) == 0 {
+		// applyDefaults populates this from apns.bundle_id; if both are
+		// empty the deployment is misconfigured: Apple identity-token
+		// audience validation has nothing to compare against.
+		return errors.New("config: apple.allowed_audiences empty (set apple.allowed_audiences or apns.bundle_id)")
+	}
 	return nil
+}
+
+// AppleJWKSCacheTTL returns the JWKS cache window as a duration.
+func (c *Config) AppleJWKSCacheTTL() time.Duration {
+	return time.Duration(c.Apple.JWKSCacheTTLMin) * time.Minute
 }
 
 // AccessTTL returns the access-token lifetime as a duration.

@@ -23,6 +23,7 @@ import (
 // handler == add a field here and wire in initialize.
 type handlers struct {
 	health *handler.HealthHandler
+	auth   *handler.AuthHandler
 	ws     *handler.WSHandler
 }
 
@@ -34,7 +35,7 @@ type handlers struct {
 //  2. RequestLogger — request_id injection + access log
 //  3. CORS          — production whitelist
 //  4. (auth/ratelimit are mounted inside /v1/ groups, not globally)
-func buildRouter(cfg *config.Config, h handlers, jwtMgr *jwtx.Manager) *gin.Engine {
+func buildRouter(cfg *config.Config, h handlers, jwtMgr *jwtx.Manager, authLimiter middleware.Limiter) *gin.Engine {
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -46,18 +47,23 @@ func buildRouter(cfg *config.Config, h handlers, jwtMgr *jwtx.Manager) *gin.Engi
 
 	r.GET("/health", h.health.Get)
 
-	// Authenticated API group. Story 2-2 lands the first real endpoints
-	// (auth, profile). Rate-limit uses a null implementation until
-	// Story 2-2 delivers Redis-backed token-buckets.
 	v1 := r.Group("/v1")
-	v1.Use(middleware.RateLimit(middleware.NullLimiter{}, middleware.IPKey, 0, 0))
 	{
-		v1ws := v1.Group("")
-		v1ws.GET("/ws", h.ws.Serve)
+		// /v1/auth — public (no AuthRequired); guarded by per-IP
+		// sliding-window rate-limit (10 / minute, burst 10).
+		auth := v1.Group("/auth")
+		auth.Use(middleware.RateLimit(authLimiter, middleware.IPKey, 10, 10))
+		{
+			auth.POST("/login", h.auth.Login)
+			auth.POST("/refresh", h.auth.Refresh)
+		}
 
+		// WebSocket. Auth happens inside Serve via JWT query param.
+		v1.GET("/ws", h.ws.Serve)
+
+		// Authenticated business endpoints land here in later stories.
 		authed := v1.Group("")
 		authed.Use(middleware.AuthRequired(jwtMgr))
-		// TODO(#story-2-2): mount authenticated endpoints (e.g. /users/me) here.
 		_ = authed
 	}
 
@@ -103,13 +109,20 @@ func healthProbes(mongoCli *mongo.Client, rdb *redis.Client) (handler.HealthChec
 
 // mustNewJWT centralises panic-to-fatal translation for the JWT
 // manager constructor so initialize stays a clean linear script.
+//
+// The previous-secret pair is forwarded so a 24h key rotation actually
+// takes effect at runtime (otherwise the manager runs single-key and
+// any token signed with the old secret 401s the moment the new secret
+// is deployed).
 func mustNewJWT(cfg config.JWTCfg, accessTTL, refreshTTL time.Duration) *jwtx.Manager {
 	mgr, err := jwtx.New(jwtx.Config{
-		AccessSecret:  cfg.AccessSecret,
-		RefreshSecret: cfg.RefreshSecret,
-		AccessTTL:     accessTTL,
-		RefreshTTL:    refreshTTL,
-		Issuer:        cfg.Issuer,
+		AccessSecret:          cfg.AccessSecret,
+		RefreshSecret:         cfg.RefreshSecret,
+		AccessSecretPrevious:  cfg.AccessSecretPrevious,
+		RefreshSecretPrevious: cfg.RefreshSecretPrevious,
+		AccessTTL:             accessTTL,
+		RefreshTTL:            refreshTTL,
+		Issuer:                cfg.Issuer,
 	})
 	if err != nil {
 		log.Fatal().Err(err).Msg("jwt manager build failed")

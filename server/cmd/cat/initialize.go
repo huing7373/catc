@@ -8,10 +8,12 @@ import (
 	"github.com/huing7373/catc/server/internal/config"
 	"github.com/huing7373/catc/server/internal/cron"
 	"github.com/huing7373/catc/server/internal/handler"
+	"github.com/huing7373/catc/server/internal/middleware"
 	"github.com/huing7373/catc/server/internal/push"
 	"github.com/huing7373/catc/server/internal/repository"
 	"github.com/huing7373/catc/server/internal/service"
 	"github.com/huing7373/catc/server/internal/ws"
+	"github.com/huing7373/catc/server/pkg/applex"
 	"github.com/huing7373/catc/server/pkg/logx"
 	"github.com/huing7373/catc/server/pkg/mongox"
 	"github.com/huing7373/catc/server/pkg/redisx"
@@ -45,6 +47,14 @@ func initialize(cfg *config.Config) *App {
 	})
 	jwtMgr := mustNewJWT(cfg.JWT, cfg.AccessTTL(), cfg.RefreshTTL())
 
+	appleVerifier := applex.New(applex.Config{
+		JWKSURL:          cfg.Apple.JWKSURL,
+		JWKSCacheTTL:     cfg.AppleJWKSCacheTTL(),
+		AllowedAudiences: cfg.Apple.AllowedAudiences,
+	})
+
+	authLimiter := middleware.NewRedisLimiter(rdb, "auth-login", 60, repository.RateLimitKey)
+
 	var pusher push.Pusher = push.NewAPNsPusher(push.Config{
 		KeyID:    cfg.APNs.KeyID,
 		TeamID:   cfg.APNs.TeamID,
@@ -71,6 +81,7 @@ func initialize(cfg *config.Config) *App {
 	// 4. Services.
 	userSvc := service.NewUserService(userRepo)
 	_ = userSvc
+	authSvc := service.NewAuthService(appleVerifier, userRepo, jwtMgr, cfg.AccessTTL(), cfg.RefreshTTL())
 
 	// 5. WebSocket hub + router.
 	hub := ws.NewHub()
@@ -80,11 +91,12 @@ func initialize(cfg *config.Config) *App {
 	mcheck, rcheck := healthProbes(mongoCli, rdb)
 	h := handlers{
 		health: handler.NewHealthHandler(mcheck, rcheck),
+		auth:   handler.NewAuthHandler(authSvc),
 		ws:     handler.NewWSHandler(hub, wsRouter, jwtMgr, cfg.Server.CORSAllowedOrigins),
 	}
 
 	// 7. HTTP router.
-	engine := buildRouter(cfg, h, jwtMgr)
+	engine := buildRouter(cfg, h, jwtMgr, authLimiter)
 	http := newHTTPServer(addrOf(cfg.Server.Port), engine)
 
 	// 8. Cron scheduler.

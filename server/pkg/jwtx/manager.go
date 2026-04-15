@@ -14,12 +14,20 @@ import (
 )
 
 // Config is the minimal shape jwtx needs.
+//
+// AccessSecretPrevious / RefreshSecretPrevious enable a 24h dual-key
+// rotation window: ParseAccess / ParseRefresh first try the current
+// secret; on signature failure they retry with the previous secret if
+// non-empty. Sign* always uses the current secret. Empty previous
+// secrets disable the fallback (zero behavioural change vs single-key).
 type Config struct {
-	AccessSecret  string
-	RefreshSecret string
-	AccessTTL     time.Duration
-	RefreshTTL    time.Duration
-	Issuer        string
+	AccessSecret          string
+	RefreshSecret         string
+	AccessSecretPrevious  string
+	RefreshSecretPrevious string
+	AccessTTL             time.Duration
+	RefreshTTL            time.Duration
+	Issuer                string
 }
 
 // TokenKind distinguishes access vs refresh tokens in claims.
@@ -94,13 +102,17 @@ func (m *Manager) SignRefresh(uid ids.UserID) (string, error) {
 }
 
 // ParseAccess verifies an access token and returns the enclosed user id.
+// During key rotation it first tries the current secret, then the
+// previous secret (if configured). Expiry is checked before signature
+// retry, so an expired token never wakes the previous-secret path.
 func (m *Manager) ParseAccess(token string) (ids.UserID, error) {
-	return m.parse(token, KindAccess, m.cfg.AccessSecret)
+	return m.parseWithRotation(token, KindAccess, m.cfg.AccessSecret, m.cfg.AccessSecretPrevious)
 }
 
-// ParseRefresh verifies a refresh token and returns the enclosed user id.
+// ParseRefresh verifies a refresh token and returns the enclosed user
+// id, with the same dual-secret rotation behaviour as ParseAccess.
 func (m *Manager) ParseRefresh(token string) (ids.UserID, error) {
-	return m.parse(token, KindRefresh, m.cfg.RefreshSecret)
+	return m.parseWithRotation(token, KindRefresh, m.cfg.RefreshSecret, m.cfg.RefreshSecretPrevious)
 }
 
 func (m *Manager) sign(uid ids.UserID, kind TokenKind, ttl time.Duration, secret string) (string, error) {
@@ -121,6 +133,30 @@ func (m *Manager) sign(uid ids.UserID, kind TokenKind, ttl time.Duration, secret
 		return "", fmt.Errorf("jwtx: sign: %w", err)
 	}
 	return signed, nil
+}
+
+// parseWithRotation runs parse with the current secret. If — and only
+// if — the failure is a pure signature error AND a previous secret is
+// configured, it retries once with the previous secret. Expiry,
+// wrong-kind, and malformed-claim errors are returned as-is so we never
+// "rescue" a token the new secret correctly rejected.
+func (m *Manager) parseWithRotation(token string, want TokenKind, current, previous string) (ids.UserID, error) {
+	uid, err := m.parse(token, want, current)
+	if err == nil {
+		return uid, nil
+	}
+	if previous == "" {
+		return "", err
+	}
+	if errors.Is(err, ErrExpiredToken) {
+		return "", err
+	}
+	if !errors.Is(err, ErrInvalidToken) {
+		return "", err
+	}
+	// Retry with the previous secret. Expiry will still be enforced
+	// because parse re-checks ExpiresAt.
+	return m.parse(token, want, previous)
 }
 
 func (m *Manager) parse(token string, want TokenKind, secret string) (ids.UserID, error) {

@@ -33,3 +33,11 @@ func TokenBlacklistKey(jti string) string { return tokenBlacklistKey(jti) }
 // SkinListCacheKey exposes the skin list cache key builder to future
 // skin repository code.
 func SkinListCacheKey(uid ids.UserID) string { return skinListCacheKey(uid) }
+
+// RateLimitKey returns the Redis key used by the sliding-window
+// rate-limiter. bucket is a coarse bucket name ("auth-login",
+// "touch-send", etc.); subject is the per-actor identifier (IP, user
+// id…). Centralising the key prevents fmt.Sprintf scatter at call sites.
+func RateLimitKey(bucket, subject string) string {
+	return "ratelimit:" + bucket + ":" + subject
+}
