@@ -40,4 +40,3 @@ build/
 *.exe
 *.out
 *.bin
-.agents/
