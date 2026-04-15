@@ -380,25 +380,90 @@ So that 后续所有服务端功能有统一的基础设施。
 **And** Docker Compose 包含 Go 服务 + PostgreSQL + Redis
 **And** 环境配置通过 .env.development 管理
 
-### Story 2.2: Sign in with Apple 认证系统
+<!-- 原 Story 2.2 已按 backend / iPhone / Watch 三拆。其它 full-stack story（2.4 / 2.5 / 3.8 / 4.6 / 5.2 / 5.5 / 5.6 / 5.7 / 5.8 / 3.7 / 5.9）
+在各自进入 sprint 时再按同样规则拆，epics.md 里保留原文直到拆分时再改。-->
 
-As a 用户,
-I want 通过 Sign in with Apple 一键登录,
-So that 我不需要记住额外的账号密码就能使用裤衩猫。
+### Story 2.2a: Sign in with Apple 认证——后端
+
+As a 开发者,
+I want 实现 /v1/auth/login 和 /v1/auth/refresh 端点（Apple identity token 验证、用户 upsert、JWT 双 token 发放、Redis per-IP 限流、双密钥轮换）,
+So that 客户端 2.2b / 2.2c 可以在真实契约上对接，后续所有 AuthRequired 端点也有可靠基座。
 
 **Acceptance Criteria:**
 
-**Given** 用户在 iPhone App 点击 Sign in with Apple
-**When** Apple 认证完成返回 identity token
-**Then** 客户端将 identity token 发送到 POST /v1/auth/login
-**And** 服务端验证 Apple token，创建/查找用户记录，返回 JWT Access Token（7天有效）+ Refresh Token（30天有效）
-**And** Token 存储在 iPhone Keychain 和 Watch Keychain
-**And** JWT 双密钥轮换：新密钥签发 + 旧密钥验证并行 24 小时
+**Given** 客户端 POST /v1/auth/login 提交 `{apple_jwt, nonce, device_id}`
+**When** 服务端收到请求
+**Then** pkg/applex 验证 Apple identity token：JWKS 拉取 + TTL 缓存 + RS256 签名 + iss/aud/exp/nbf/nonce 校验；失败返回 sentinel 错误映射成 401 `APPLE_AUTH_FAIL` / `NONCE_MISMATCH`
+**And** UserRepository.UpsertOnAppleLogin 三分支：活跃用户刷新 last_active_at / 冷却期内已删除用户恢复（FR49）/ 新用户创建；并发注册 DuplicateKey 重试一次
+**And** pkg/jwtx 签发 Access (7 天) + Refresh (30 天) Token 对，返回 `{user_id, access_token, refresh_token, access_expires_at, refresh_expires_at, login_outcome}`
 
-**Given** Access Token 过期
-**When** 客户端发起 API 请求
-**Then** 自动用 Refresh Token 调用 POST /v1/auth/refresh 换取新 Token 对，对用户透明
-**And** Refresh Token 也过期时，引导用户重新 Sign in with Apple
+**Given** 客户端 POST /v1/auth/refresh 提交 `{refresh_token}`
+**When** refresh token 有效且账号未删除
+**Then** 重新签发 access + refresh 对；对已删除账号返回 401 `UNAUTHORIZED`；对过期 token 返回 401 `AUTH_EXPIRED`
+
+**Given** 服务端 JWT 配置了 access_secret_previous / refresh_secret_previous（双密钥轮换窗口）
+**When** 解析 token
+**Then** 先用当前 secret，失败回退 previous secret；签发永远只用当前 secret；previous 为空时行为与 2-1a 完全一致（零回归）
+
+**Given** /v1/auth/* 路由
+**When** 启动
+**Then** 挂 Redis 滑动窗口限流（10 次/分钟 per IP，burst 10）；Redis 不可用时 fail-open + warn 日志
+**And** 访问日志字段齐全（request_id / endpoint / status_code / duration_ms / user_id），**不**包含 apple_jwt / access_token / refresh_token 明文
+
+### Story 2.2b: Sign in with Apple 认证——iPhone 客户端
+
+As a iPhone 用户,
+I want 打开 CatPhone 用 Sign in with Apple 一键登录, Token 自动存 Keychain，access 过期透明刷新，refresh 过期回登录页,
+So that 我不用记密码，会话体验像原生 Apple 应用。
+
+**Acceptance Criteria:**
+
+**Given** CatShared 包 Networking / Persistence 目录
+**When** 本故事交付
+**Then** 新增 APIClient (actor) + URLSession 封装 + JSON snake_case 约定 + 401 AUTH_EXPIRED 自动 refresh（并发去重，单次重试）+ refresh 失败清 Keychain 抛 reauthRequired
+**And** 新增 KeychainTokenStore (actor) 基于 Security framework，`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`，不上 iCloud
+**And** TokenPair / AuthAPI / WatchTokenBridging protocol 全部放 CatShared（跨 iOS/watchOS 可用）
+
+**Given** 用户首次打开 CatPhone
+**When** SignInViewModel.bootstrap 发现 Keychain 空
+**Then** 显示 SignInView + 原生 SignInWithAppleButton（HIG 样式）
+**And** Nonce 两份约定：raw nonce hex 给后端 / sha256(raw) hex 给 Apple
+**And** 登录成功后保存 token + 通过 WatchTokenBridging 推送到 Watch + 切主视图
+
+**Given** 用户重启 App
+**When** SignInViewModel.bootstrap 发现 Keychain 非空且 access 未过期
+**Then** 直接进主视图（不再弹 SIWA）
+**And** access 过期但 refresh 有效 → 静默 refresh → 进主视图
+**And** refresh 失败 → 清 Keychain → 回 SignInView
+
+**Given** CatPhone entitlements
+**When** xcodegen generate
+**Then** CatPhone target 启用 com.apple.developer.applesignin；CatWatch **不**启用
+
+### Story 2.2c: Sign in with Apple 认证——Apple Watch 客户端
+
+As a Apple Watch 用户,
+I want iPhone 登录后手表自动通过 WCSession 拿到 token 并落 Keychain，未登录时显示清晰引导,
+So that 我不用在 watchOS 上操作 SIWA（watchOS 无原生 SIWA UI），但体验上跟 iPhone 一样"登着"。
+
+**Acceptance Criteria:**
+
+**Given** iPhone 端 SignInViewModel 登录 / refresh 成功
+**When** 调 WatchTokenBridging.push(tokenPair)
+**Then** iOS 侧 WatchConnectivityBridge 用 WCSession.updateApplicationContext(["auth.tokens.v1": JSON(tokenPair)]) 推送
+**And** push 失败不阻塞 iPhone 登录流程（log warn）
+
+**Given** Watch App 启动或后台被唤醒
+**When** WatchTokenReceiver 收到 applicationContext
+**Then** 解码 TokenPair → CatShared 的 KeychainTokenStore 保存 → WatchAuthState 切 .signedIn
+
+**Given** Watch App 冷启动
+**When** WatchAuthState.bootstrap
+**Then** 读 Keychain：非空未过期 → .signedIn；非空过期 → APIClient.refresh 成功 → .signedIn / 失败 → 清 Keychain + .signedOut；空 → .signedOut
+
+**Given** Watch .signedOut
+**When** 渲染 body
+**Then** 显示 WatchWaitingForPhoneView："请在 iPhone 上登录"；**不**提供任何 SIWA 按钮
 
 ### Story 2.3: 手表兼容性检测
 
