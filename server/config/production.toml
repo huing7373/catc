@@ -1,0 +1,57 @@
+# Production configuration template. Sensitive values (JWT secrets,
+# Redis password, APNs key path, CDN upload key, Mongo URI) must come
+# from environment variables at runtime:
+#
+#   CAT_JWT_ACCESS_SECRET
+#   CAT_JWT_REFRESH_SECRET
+#   CAT_JWT_ACCESS_SECRET_PREVIOUS   # only during a key rotation window
+#   CAT_JWT_REFRESH_SECRET_PREVIOUS  # only during a key rotation window
+#   CAT_APPLE_JWKS_URL               # override only for staging/regional Apple endpoints
+#   CAT_MONGO_URI
+#   CAT_REDIS_PASSWORD
+#   CAT_APNS_KEY_PATH
+#   CAT_CDN_UPLOAD_KEY
+
+[server]
+port = 8080
+mode = "release"
+cors_allowed_origins = []   # populate with the real production origin list
+shutdown_timeout_sec = 30
+
+[log]
+level = "info"
+format = "json"
+
+[mongo]
+uri = ""           # override via CAT_MONGO_URI
+database = "cat"
+timeout_sec = 10
+
+[redis]
+addr = "redis:6379"
+password = ""      # override via CAT_REDIS_PASSWORD
+db = 0
+
+[jwt]
+access_secret = ""               # override via CAT_JWT_ACCESS_SECRET
+refresh_secret = ""              # override via CAT_JWT_REFRESH_SECRET
+access_secret_previous = ""      # override via CAT_JWT_ACCESS_SECRET_PREVIOUS during rotation
+refresh_secret_previous = ""     # override via CAT_JWT_REFRESH_SECRET_PREVIOUS during rotation
+access_ttl_min = 10080
+refresh_ttl_day = 30
+issuer = "cat-backend"
+
+[apns]
+key_id = ""
+team_id = ""
+bundle_id = "com.zhuming.cat.phone"
+key_path = ""        # override via CAT_APNS_KEY_PATH
+
+[apple]
+jwks_url = "https://appleid.apple.com/auth/keys"  # override via CAT_APPLE_JWKS_URL only if needed
+jwks_cache_ttl_min = 60
+allowed_audiences = ["com.zhuming.cat.phone"]
+
+[cdn]
+base_url = ""
+upload_key = ""      # override via CAT_CDN_UPLOAD_KEY
