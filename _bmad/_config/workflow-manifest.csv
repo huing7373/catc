@@ -1,3 +1,0 @@
-name,description,module,path,canonicalId
-"market-research","Conduct game market research on competition and players. Use when the user says ""create a market research report about [game idea]"".","gds","_bmad/gds/workflows/1-preproduction/research/workflow-market-research.md","gds-market-research"
-"technical-research","Conduct technical research on game technologies and architecture. Use when the user says ""create a technical research report on [game tech topic]"".","gds","_bmad/gds/workflows/1-preproduction/research/workflow-technical-research.md","gds-technical-research"
