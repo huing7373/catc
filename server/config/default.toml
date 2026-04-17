@@ -10,15 +10,20 @@ output = ""
 [mongo]
 uri = ""
 db = ""
+timeout_sec = 10
 
 [redis]
 addr = ""
 db = 0
 
 [jwt]
-secret = ""
+private_key_path = ""
+private_key_path_old = ""
+active_kid = ""
+old_kid = ""
 issuer = ""
-expiry = 0
+access_expiry_sec = 900
+refresh_expiry_sec = 2592000
 
 [apns]
 key_id = ""

@@ -26,15 +26,20 @@ output = "stdout"
 [mongo]
 uri = "mongodb://localhost:27017"
 db = "catdb"
+timeout_sec = 5
 
 [redis]
 addr = "localhost:6379"
 db = 0
 
 [jwt]
-secret = "test-secret"
-issuer = "cat"
-expiry = 3600
+private_key_path = "/path/to/active.pem"
+private_key_path_old = "/path/to/old.pem"
+active_kid = "key-2026-04"
+old_kid = "key-2026-01"
+issuer = "catserver"
+access_expiry_sec = 900
+refresh_expiry_sec = 2592000
 
 [apns]
 key_id = "KEY123"
@@ -52,8 +57,15 @@ base_url = "https://cdn.example.com"
 	assert.Equal(t, "0.0.0.0", cfg.Server.Host)
 	assert.Equal(t, 8080, cfg.Server.Port)
 	assert.Equal(t, "mongodb://localhost:27017", cfg.Mongo.URI)
+	assert.Equal(t, 5, cfg.Mongo.TimeoutSec)
 	assert.Equal(t, "localhost:6379", cfg.Redis.Addr)
-	assert.Equal(t, "test-secret", cfg.JWT.Secret)
+	assert.Equal(t, "/path/to/active.pem", cfg.JWT.PrivateKeyPath)
+	assert.Equal(t, "/path/to/old.pem", cfg.JWT.PrivateKeyPathOld)
+	assert.Equal(t, "key-2026-04", cfg.JWT.ActiveKID)
+	assert.Equal(t, "key-2026-01", cfg.JWT.OldKID)
+	assert.Equal(t, "catserver", cfg.JWT.Issuer)
+	assert.Equal(t, 900, cfg.JWT.AccessExpirySec)
+	assert.Equal(t, 2592000, cfg.JWT.RefreshExpirySec)
 	assert.NotEmpty(t, cfg.Hash)
 	assert.Len(t, cfg.Hash, 8)
 }

@@ -46,7 +46,7 @@ development_status:
   epic-0: in-progress
   0-1-project-skeleton-and-dev-toolchain: done
   0-2-app-entry-and-runnable-lifecycle: done
-  0-3-infra-connectivity-and-clients: backlog
+  0-3-infra-connectivity-and-clients: review
   0-4-multi-dimensional-healthcheck-endpoint: backlog
   0-5-structured-logging-and-request-correlation-id: backlog
   0-6-apperror-and-error-category-registry: backlog

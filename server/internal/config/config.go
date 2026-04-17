@@ -43,9 +43,13 @@ type RedisCfg struct {
 }
 
 type JWTCfg struct {
-	Secret string `toml:"secret"`
-	Issuer string `toml:"issuer"`
-	Expiry int    `toml:"expiry"`
+	PrivateKeyPath    string `toml:"private_key_path"`
+	PrivateKeyPathOld string `toml:"private_key_path_old"`
+	ActiveKID         string `toml:"active_kid"`
+	OldKID            string `toml:"old_kid"`
+	Issuer            string `toml:"issuer"`
+	AccessExpirySec   int    `toml:"access_expiry_sec"`
+	RefreshExpirySec  int    `toml:"refresh_expiry_sec"`
 }
 
 type APNsCfg struct {
