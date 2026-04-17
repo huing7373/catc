@@ -38,6 +38,11 @@ func MustConnect(opts ConnectOptions) *Client {
 	return &Client{cli: cli}
 }
 
+// WrapClient wraps an existing *redis.Client for use in tests.
+func WrapClient(cli *redis.Client) *Client {
+	return &Client{cli: cli}
+}
+
 // Cmdable returns the underlying redis.Cmdable for command execution.
 func (c *Client) Cmdable() redis.Cmdable {
 	return c.cli

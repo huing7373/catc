@@ -41,6 +41,9 @@ issuer = "catserver"
 access_expiry_sec = 900
 refresh_expiry_sec = 2592000
 
+[ws]
+max_connections = 10000
+
 [apns]
 key_id = "KEY123"
 team_id = "TEAM123"
@@ -59,6 +62,7 @@ base_url = "https://cdn.example.com"
 	assert.Equal(t, "mongodb://localhost:27017", cfg.Mongo.URI)
 	assert.Equal(t, 5, cfg.Mongo.TimeoutSec)
 	assert.Equal(t, "localhost:6379", cfg.Redis.Addr)
+	assert.Equal(t, 10000, cfg.WS.MaxConnections)
 	assert.Equal(t, "/path/to/active.pem", cfg.JWT.PrivateKeyPath)
 	assert.Equal(t, "/path/to/old.pem", cfg.JWT.PrivateKeyPathOld)
 	assert.Equal(t, "key-2026-04", cfg.JWT.ActiveKID)

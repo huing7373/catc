@@ -15,6 +15,7 @@ type Config struct {
 	Mongo  MongoCfg  `toml:"mongo"`
 	Redis  RedisCfg  `toml:"redis"`
 	JWT    JWTCfg    `toml:"jwt"`
+	WS     WSCfg     `toml:"ws"`
 	APNs   APNsCfg   `toml:"apns"`
 	CDN    CDNCfg    `toml:"cdn"`
 	Hash   string    `toml:"-"`
@@ -50,6 +51,10 @@ type JWTCfg struct {
 	Issuer            string `toml:"issuer"`
 	AccessExpirySec   int    `toml:"access_expiry_sec"`
 	RefreshExpirySec  int    `toml:"refresh_expiry_sec"`
+}
+
+type WSCfg struct {
+	MaxConnections int `toml:"max_connections"`
 }
 
 type APNsCfg struct {

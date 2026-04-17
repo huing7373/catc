@@ -16,9 +16,14 @@ type Runnable interface {
 	Final(ctx context.Context) error
 }
 
+type ReadySignaler interface {
+	Ready() <-chan struct{}
+}
+
 type App struct {
-	runs []Runnable
-	stop chan os.Signal
+	runs    []Runnable
+	stop    chan os.Signal
+	onReady func()
 }
 
 func NewApp(runs ...Runnable) *App {
@@ -26,6 +31,10 @@ func NewApp(runs ...Runnable) *App {
 		runs: runs,
 		stop: make(chan os.Signal, 1),
 	}
+}
+
+func (a *App) OnReady(fn func()) {
+	a.onReady = fn
 }
 
 func (a *App) Run() {
@@ -42,11 +51,27 @@ func (a *App) Run() {
 		}(r)
 	}
 
+	// Wait for all ReadySignaler runnables to be ready before marking app ready.
+	for _, r := range a.runs {
+		if rs, ok := r.(ReadySignaler); ok {
+			select {
+			case <-rs.Ready():
+			case err := <-startErr:
+				startErr <- err // put it back for the shutdown path
+				goto shutdown
+			}
+		}
+	}
+	if a.onReady != nil {
+		a.onReady()
+	}
+
 	signal.Notify(a.stop, os.Interrupt, syscall.SIGTERM)
 	select {
 	case <-a.stop:
 	case <-startErr:
 	}
+shutdown:
 	cancel()
 
 	shutCtx, c := context.WithTimeout(context.Background(), 30*time.Second)

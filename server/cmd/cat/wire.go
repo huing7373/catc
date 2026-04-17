@@ -20,11 +20,13 @@ func buildRouter(_ *config.Config, h *handlers) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.GET("/healthz", h.health.Healthz)
+	r.GET("/readyz", h.health.Readyz)
 	return r
 }
 
 type httpServer struct {
-	srv *http.Server
+	srv     *http.Server
+	ready   chan struct{}
 }
 
 func newHTTPServer(cfg *config.Config, router *gin.Engine) *httpServer {
@@ -33,14 +35,22 @@ func newHTTPServer(cfg *config.Config, router *gin.Engine) *httpServer {
 			Addr:    net.JoinHostPort(cfg.Server.Host, fmt.Sprintf("%d", cfg.Server.Port)),
 			Handler: router,
 		},
+		ready: make(chan struct{}),
 	}
 }
 
 func (h *httpServer) Name() string { return "http_server" }
 
+func (h *httpServer) Ready() <-chan struct{} { return h.ready }
+
 func (h *httpServer) Start(_ context.Context) error {
-	log.Info().Str("addr", h.srv.Addr).Msg("http server listening")
-	if err := h.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	ln, err := net.Listen("tcp", h.srv.Addr)
+	if err != nil {
+		return err
+	}
+	log.Info().Str("addr", ln.Addr().String()).Msg("http server listening")
+	close(h.ready)
+	if err := h.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil

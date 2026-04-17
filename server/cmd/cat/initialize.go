@@ -5,6 +5,7 @@ import (
 
 	"github.com/huing/cat/server/internal/config"
 	"github.com/huing/cat/server/internal/handler"
+	"github.com/huing/cat/server/internal/ws"
 	"github.com/huing/cat/server/pkg/mongox"
 	"github.com/huing/cat/server/pkg/redisx"
 )
@@ -27,12 +28,16 @@ func initialize(cfg *config.Config) *App {
 		DB:   cfg.Redis.DB,
 	})
 
+	hubStub := ws.NewHubStub()
+
 	h := &handlers{
-		health: handler.NewHealthHandler(),
+		health: handler.NewHealthHandler(mongoCli, redisCli, hubStub, redisCli.Cmdable(), cfg.WS.MaxConnections),
 	}
 
 	router := buildRouter(cfg, h)
 	httpSrv := newHTTPServer(cfg, router)
 
-	return NewApp(mongoCli, redisCli, httpSrv)
+	app := NewApp(mongoCli, redisCli, httpSrv)
+	app.OnReady(h.health.SetReady)
+	return app
 }

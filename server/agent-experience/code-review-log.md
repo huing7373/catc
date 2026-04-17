@@ -37,3 +37,12 @@
 | 3 | patch | WithTx 集成测试只覆盖成功路径，未验证回滚 | pkg/mongox/client_integration_test.go:68 | 添加 callback 返回错误→断言集合为空的回滚测试 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go vet -tags=integration` 通过
+
+## [0-4-multi-dimensional-healthcheck-endpoint] Round 1 — 2026-04-17
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | onReady 在启动 Start goroutine 后立即调用，未等待 HTTP 端口绑定 | cmd/cat/app.go:50 | readyz 在端口未 bind 时就返回 200，违反"启动完成标志"语义；httpServer 改用 net.Listen 先绑端口再 Serve，App 通过 ReadySignaler 接口等待 |
+| 2 | patch | healthz 依赖检查无超时边界，复用无 deadline 的 request context | internal/handler/health_handler.go:48 | 依赖卡住时探针一起卡死，p95 无法保证；添加 3s WithTimeout 上界 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go vet -tags=integration` 通过

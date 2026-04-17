@@ -45,6 +45,11 @@ func MustConnect(opts ConnectOptions) *Client {
 	return &Client{cli: cli, db: opts.DB}
 }
 
+// WrapClient wraps an existing *mongo.Client for use in tests.
+func WrapClient(cli *mongo.Client, db string) *Client {
+	return &Client{cli: cli, db: db}
+}
+
 // DB returns the configured database handle.
 func (c *Client) DB() *mongo.Database {
 	return c.cli.Database(c.db)

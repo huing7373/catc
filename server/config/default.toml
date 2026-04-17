@@ -25,6 +25,9 @@ issuer = ""
 access_expiry_sec = 900
 refresh_expiry_sec = 2592000
 
+[ws]
+max_connections = 10000
+
 [apns]
 key_id = ""
 team_id = ""
