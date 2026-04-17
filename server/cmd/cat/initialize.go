@@ -6,6 +6,7 @@ import (
 	"github.com/huing/cat/server/internal/config"
 	"github.com/huing/cat/server/internal/handler"
 	"github.com/huing/cat/server/internal/ws"
+	"github.com/huing/cat/server/pkg/logx"
 	"github.com/huing/cat/server/pkg/mongox"
 	"github.com/huing/cat/server/pkg/redisx"
 )
@@ -13,10 +14,14 @@ import (
 var buildVersion = "dev"
 
 func initialize(cfg *config.Config) *App {
-	log.Info().
-		Str("build_version", buildVersion).
-		Str("config_hash", cfg.Hash).
-		Msg("server starting")
+	logx.Init(logx.Options{
+		Level:        cfg.Log.Level,
+		Format:       cfg.Log.Format,
+		BuildVersion: buildVersion,
+		ConfigHash:   cfg.Hash,
+	})
+
+	log.Info().Msg("server starting")
 
 	mongoCli := mongox.MustConnect(mongox.ConnectOptions{
 		URI:        cfg.Mongo.URI,

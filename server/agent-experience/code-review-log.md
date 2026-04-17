@@ -46,3 +46,14 @@
 | 2 | patch | healthz 依赖检查无超时边界，复用无 deadline 的 request context | internal/handler/health_handler.go:48 | 依赖卡住时探针一起卡死，p95 无法保证；添加 3s WithTimeout 上界 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go vet -tags=integration` 通过
+
+## [0-5-structured-logging-and-request-correlation-id] Round 1 — 2026-04-17
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | WithRequestID/Ctx 基于 zerolog.Ctx 取 context logger，空 context 返回 disabled logger，字段注入静默失效 | pkg/logx/logx.go:48,52 | requestId/全局字段/请求日志链路在真实请求中全部失效；AC2/AC5/AC6/AC8 不成立 |
+| 2 | patch | Logger 中间件手动查 c.Get("userId") 而非从 context logger 继承 | internal/middleware/logger.go:21 | logx.WithUserID() 注入的 userId 不会出现在 access log 中，API 链路与文档脱节 |
+| 3 | patch | Logger 中间件在 c.Next() 后顺序执行写日志，panic 时 Logger 后半段不执行 | internal/middleware/logger.go:12, cmd/cat/wire.go:23 | 失败请求只有 recover error log 没有 access log，违反 AC6"每请求一条" |
+| 4 | patch | Recover() 未检查 c.Writer.Written() 就强行写 500 JSON | internal/middleware/recover.go:20 | handler 已写部分响应后 panic，客户端收到混合响应 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过

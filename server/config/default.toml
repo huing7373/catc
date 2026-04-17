@@ -5,6 +5,7 @@ tls = false
 
 [log]
 level = ""
+format = "json"
 output = ""
 
 [mongo]

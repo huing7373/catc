@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/huing/cat/server/internal/config"
 	"github.com/huing/cat/server/internal/handler"
+	"github.com/huing/cat/server/internal/middleware"
 	"github.com/rs/zerolog/log"
 )
 
@@ -19,6 +20,9 @@ type handlers struct {
 func buildRouter(_ *config.Config, h *handlers) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	r.Use(middleware.Logger())
+	r.Use(middleware.Recover())
+	r.Use(middleware.RequestID())
 	r.GET("/healthz", h.health.Healthz)
 	r.GET("/readyz", h.health.Readyz)
 	return r

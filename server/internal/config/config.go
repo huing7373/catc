@@ -29,6 +29,7 @@ type ServerCfg struct {
 
 type LogCfg struct {
 	Level  string `toml:"level"`
+	Format string `toml:"format"`
 	Output string `toml:"output"`
 }
 
