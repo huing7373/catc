@@ -86,3 +86,14 @@
 | 4 | patch | 并行测试各自调 gin.SetMode 修改全局状态，存在竞态风险 | internal/dto/error_codes_test.go:148,168,186,203 | flaky 测试；改为 TestMain 统一设置 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过
+
+## [0-6-apperror-and-error-category-registry] Round 2 — 2026-04-17
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | intent_gap→patch | retry_after 裸 sentinel 无默认 Retry-After header，客户端收到 429 但不知何时重试 | internal/dto/error.go:72 | RespondAppError 对 retry_after category 默认 Retry-After: 60 |
+| 2 | patch | allCodes 切片与 registry 仍是两套维护：init() 遍历 allCodes 建 registry，漏加 sentinel 启动不报错 | internal/dto/error_codes.go:30,54 | 改为 register() 构造函数同时创建 sentinel 并注册到 registry，结构上消除遗漏可能 |
+| 3 | patch | RespondAppError 对 typed-nil *AppError 无防护，errors.As 命中后 ae 为 nil 触发 panic | internal/dto/error.go:70 | 添加 ae != nil 守卫 |
+| 4 | patch | TestCategoryHTTPStatus_Mapping 抽样 9/19 码，未测到的码可能带错误 HTTPStatus 过 CI | internal/dto/error_codes_test.go:150 | 改为遍历 RegisteredCodes() 全量校验 Category→HTTPStatus 范围约束 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过

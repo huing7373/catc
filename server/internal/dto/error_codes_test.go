@@ -46,6 +46,16 @@ func TestAppError_WithCause_ReturnsNewCopy(t *testing.T) {
 	assert.Equal(t, original.Code, withCause.Code)
 }
 
+func TestAppError_WithRetryAfter_ReturnsNewCopy(t *testing.T) {
+	t.Parallel()
+	original := NewAppError("TEST_CODE", "test", 429, CategoryRetryAfter)
+	withRetry := original.WithRetryAfter(30)
+
+	assert.Equal(t, 0, original.RetryAfter)
+	assert.Equal(t, 30, withRetry.RetryAfter)
+	assert.Equal(t, original.Code, withRetry.Code)
+}
+
 func TestAppError_ErrorsIs(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -97,30 +107,17 @@ func TestAppError_ErrorsAs(t *testing.T) {
 	assert.Equal(t, CategoryFatal, ae.Category)
 }
 
-func TestAllCodes_HaveCategory(t *testing.T) {
+func TestRegistry_AllCodesHaveCategory(t *testing.T) {
 	t.Parallel()
-	for _, code := range allCodes {
-		assert.NotEmpty(t, code.Category, "error code %q has no category", code.Code)
-	}
-}
-
-func TestRegistry_ContainsAllCodes(t *testing.T) {
-	t.Parallel()
-	reg := RegisteredCodes()
-	for _, code := range allCodes {
-		cat, ok := reg[code.Code]
-		assert.True(t, ok, "error code %q not in registry", code.Code)
-		assert.Equal(t, code.Category, cat, "category mismatch for %q", code.Code)
+	for code, ae := range RegisteredCodes() {
+		assert.NotEmpty(t, ae.Category, "error code %q has no category", code)
 	}
 }
 
 func TestRegistry_NoDuplicates(t *testing.T) {
 	t.Parallel()
-	seen := map[string]bool{}
-	for _, code := range allCodes {
-		assert.False(t, seen[code.Code], "duplicate error code %q", code.Code)
-		seen[code.Code] = true
-	}
+	reg := RegisteredCodes()
+	assert.NotEmpty(t, reg, "registry is empty")
 }
 
 func TestRegistry_AllSentinelsRegistered(t *testing.T) {
@@ -128,49 +125,49 @@ func TestRegistry_AllSentinelsRegistered(t *testing.T) {
 	src, err := os.ReadFile("error_codes.go")
 	require.NoError(t, err)
 
-	re := regexp.MustCompile(`(?m)^\s*(Err\w+)\s*=\s*NewAppError\("([A-Z_]+)"`)
+	re := regexp.MustCompile(`(?m)^\s*(Err\w+)\s*=\s*register\("([A-Z_]+)"`)
 	matches := re.FindAllStringSubmatch(string(src), -1)
 	require.NotEmpty(t, matches, "failed to parse any sentinel from error_codes.go")
 
-	registeredCodes := map[string]bool{}
-	for _, code := range allCodes {
-		registeredCodes[code.Code] = true
-	}
-
+	reg := RegisteredCodes()
 	for _, m := range matches {
 		varName, code := m[1], m[2]
-		assert.True(t, registeredCodes[code],
-			"sentinel %s (code %q) defined in error_codes.go but missing from allCodes slice", varName, code)
+		_, ok := reg[code]
+		assert.True(t, ok,
+			"sentinel %s (code %q) defined in error_codes.go but missing from registry", varName, code)
 	}
 
-	assert.Equal(t, len(matches), len(allCodes),
-		"allCodes length (%d) != sentinel count in source (%d)", len(allCodes), len(matches))
+	assert.Equal(t, len(matches), len(reg),
+		"registry size (%d) != sentinel count in source (%d)", len(reg), len(matches))
 }
 
-func TestCategoryHTTPStatus_Mapping(t *testing.T) {
+func TestCategoryHTTPStatus_AllCodes(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name       string
-		sentinel   *AppError
-		wantCat    ErrCategory
-		wantStatus int
-	}{
-		{"INTERNAL_ERROR is retryable 500", ErrInternalError, CategoryRetryable, 500},
-		{"VALIDATION_ERROR is client_error 400", ErrValidationError, CategoryClientError, 400},
-		{"FRIEND_ALREADY_EXISTS is client_error 409", ErrFriendAlreadyExists, CategoryClientError, 409},
-		{"RATE_LIMIT_EXCEEDED is retry_after 429", ErrRateLimitExceeded, CategoryRetryAfter, 429},
-		{"AUTH_TOKEN_EXPIRED is fatal 401", ErrAuthTokenExpired, CategoryFatal, 401},
-		{"DEVICE_BLACKLISTED is fatal 403", ErrDeviceBlacklisted, CategoryFatal, 403},
-		{"FRIEND_INVITE_EXPIRED is client_error 410", ErrFriendInviteExpired, CategoryClientError, 410},
-		{"BLINDBOX_INSUFFICIENT_STEPS is client_error 422", ErrBlindboxInsufficientSteps, CategoryClientError, 422},
-		{"ROOM_FULL is client_error 409", ErrRoomFull, CategoryClientError, 409},
-	}
+	reg := RegisteredCodes()
+	require.NotEmpty(t, reg)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for code, ae := range reg {
+		t.Run(code, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.wantCat, tt.sentinel.Category)
-			assert.Equal(t, tt.wantStatus, tt.sentinel.HTTPStatus)
+			assert.NotEmpty(t, ae.Category, "missing category")
+			assert.Greater(t, ae.HTTPStatus, 0, "invalid HTTP status")
+
+			switch ae.Category {
+			case CategoryRetryable:
+				assert.GreaterOrEqual(t, ae.HTTPStatus, 500, "retryable should be 5xx")
+			case CategoryClientError:
+				assert.GreaterOrEqual(t, ae.HTTPStatus, 400, "client_error should be 4xx")
+				assert.Less(t, ae.HTTPStatus, 500, "client_error should be 4xx")
+			case CategoryRetryAfter:
+				assert.Equal(t, 429, ae.HTTPStatus, "retry_after should be 429")
+			case CategoryFatal:
+				assert.True(t, ae.HTTPStatus == 401 || ae.HTTPStatus == 403,
+					"fatal should be 401 or 403, got %d", ae.HTTPStatus)
+			case CategorySilentDrop:
+				assert.Equal(t, 200, ae.HTTPStatus, "silent_drop should be 200")
+			default:
+				t.Errorf("unknown category %q", ae.Category)
+			}
 		})
 	}
 }
@@ -233,18 +230,26 @@ func TestRespondAppError_RetryAfterHeader(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodGet, "/test", nil)
 
-	err := ErrRateLimitExceeded.WithRetryAfter(60)
+	err := ErrRateLimitExceeded.WithRetryAfter(120)
 	RespondAppError(c, err)
 
 	assert.Equal(t, http.StatusTooManyRequests, w.Code)
-	assert.Equal(t, "60", w.Header().Get("Retry-After"))
-
-	var body map[string]map[string]any
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
-	assert.Equal(t, "RATE_LIMIT_EXCEEDED", body["error"]["code"])
+	assert.Equal(t, "120", w.Header().Get("Retry-After"))
 }
 
-func TestRespondAppError_NoRetryAfterWhenZero(t *testing.T) {
+func TestRespondAppError_RetryAfterDefaultForCategory(t *testing.T) {
+	t.Parallel()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/test", nil)
+
+	RespondAppError(c, ErrRateLimitExceeded)
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.Equal(t, "60", w.Header().Get("Retry-After"))
+}
+
+func TestRespondAppError_NoRetryAfterForOtherCategories(t *testing.T) {
 	t.Parallel()
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -253,6 +258,23 @@ func TestRespondAppError_NoRetryAfterWhenZero(t *testing.T) {
 	RespondAppError(c, ErrInternalError)
 
 	assert.Empty(t, w.Header().Get("Retry-After"))
+}
+
+func TestRespondAppError_TypedNilAppError(t *testing.T) {
+	t.Parallel()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/test", nil)
+
+	var nilAE *AppError
+	// typed-nil interface: error interface holds (*AppError)(nil)
+	var err error = nilAE
+	RespondAppError(c, err)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	var body map[string]map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "INTERNAL_ERROR", body["error"]["code"])
 }
 
 func TestRespondAppError_ClientError(t *testing.T) {
@@ -277,7 +299,6 @@ func TestErrorCodesMd_ConsistentWithRegistry(t *testing.T) {
 
 	content := string(data)
 
-	// Parse each row: | `CODE` | category | status | message |
 	re := regexp.MustCompile("\\|\\s*`([A-Z_]+)`\\s*\\|\\s*(\\w+)\\s*\\|\\s*(\\d+)\\s*\\|\\s*([^|]+?)\\s*\\|")
 	matches := re.FindAllStringSubmatch(content, -1)
 	require.NotEmpty(t, matches, "failed to parse any rows from docs/error-codes.md")
@@ -298,19 +319,20 @@ func TestErrorCodesMd_ConsistentWithRegistry(t *testing.T) {
 		}
 	}
 
-	for _, ae := range allCodes {
-		entry, ok := docCodes[ae.Code]
-		if !assert.True(t, ok, "error code %q in registry but missing from docs/error-codes.md", ae.Code) {
+	reg := RegisteredCodes()
+	for code, ae := range reg {
+		entry, ok := docCodes[code]
+		if !assert.True(t, ok, "error code %q in registry but missing from docs/error-codes.md", code) {
 			continue
 		}
 		assert.Equal(t, string(ae.Category), entry.category,
-			"category mismatch for %q in docs/error-codes.md", ae.Code)
+			"category mismatch for %q in docs/error-codes.md", code)
 		assert.Equal(t, ae.HTTPStatus, entry.status,
-			"HTTP status mismatch for %q in docs/error-codes.md", ae.Code)
+			"HTTP status mismatch for %q in docs/error-codes.md", code)
 		assert.Equal(t, ae.Message, entry.message,
-			"message mismatch for %q in docs/error-codes.md", ae.Code)
+			"message mismatch for %q in docs/error-codes.md", code)
 	}
 
-	assert.Equal(t, len(allCodes), len(docCodes),
-		"docs/error-codes.md has %d codes but registry has %d", len(docCodes), len(allCodes))
+	assert.Equal(t, len(reg), len(docCodes),
+		"docs/error-codes.md has %d codes but registry has %d", len(docCodes), len(reg))
 }

@@ -67,10 +67,14 @@ func (e *AppError) Is(target error) bool {
 func RespondAppError(c *gin.Context, err error) {
 	ctx := c.Request.Context()
 	var ae *AppError
-	if errors.As(err, &ae) {
+	if errors.As(err, &ae) && ae != nil {
 		logx.Ctx(ctx).Error().Err(ae.Cause).Str("code", ae.Code).Msg("app error")
-		if ae.RetryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(ae.RetryAfter))
+		retryAfter := ae.RetryAfter
+		if retryAfter == 0 && ae.Category == CategoryRetryAfter {
+			retryAfter = 60
+		}
+		if retryAfter > 0 {
+			c.Header("Retry-After", strconv.Itoa(retryAfter))
 		}
 		c.JSON(ae.HTTPStatus, gin.H{"error": gin.H{"code": ae.Code, "message": ae.Message}})
 		return
