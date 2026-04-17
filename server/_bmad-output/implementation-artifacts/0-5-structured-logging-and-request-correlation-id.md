@@ -208,7 +208,7 @@ Claude Opus 4.6 (1M context)
 - 中间件顺序 Logger→Recover→RequestID：Logger defer 确保 panic 也产出 access log
 - .golangci.yml 已有完整 forbidigo 配置，无需修改
 - 删除 pkg/logx/doc.go、internal/middleware/doc.go、docs/code-examples/.gitkeep 占位文件
-- 19 个单元测试全部通过（logx 9 + PII 9 + middleware 8 → 实际分别为 logx 7, PII 9, middleware 8 = 24 个子测试）
+- 22 个顶层测试全部通过（含 table-driven 子测试共 31 个），覆盖 logx + PII + middleware
 - 全量回归：所有已有测试通过（handler, config, jwtx, mongox, redisx）
 
 ### Change Log
@@ -235,7 +235,7 @@ Claude Opus 4.6 (1M context)
 - internal/config/config.go (LogCfg 添加 Format 字段)
 - config/default.toml (添加 format = "json")
 - cmd/cat/initialize.go (添加 logx.Init 调用)
-- cmd/cat/wire.go (注册中间件链 Recover→RequestID→Logger)
+- cmd/cat/wire.go (注册中间件链 Logger→Recover→RequestID)
 
 **删除：**
 - pkg/logx/doc.go (占位文件)

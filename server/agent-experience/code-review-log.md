@@ -66,3 +66,12 @@
 | 2 | bad_spec | Story 文档描述 logx.Ctx 为 zerolog.Ctx 薄封装 + Logger 从 gin.Get 读 userId，实际已改为回退全局 logger + context logger 自动继承 | 0-5 story:108,116,199 | 后续开发者按旧文档接入会走回 disabled logger 的错误路径 |
 
 **构建验证：** ✅ 文档修正，无代码变更
+
+## [0-5-structured-logging-and-request-correlation-id] Round 3 — 2026-04-17
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | bad_spec | File List 中 wire.go 描述仍写旧中间件顺序 Recover→RequestID→Logger | 0-5 story:238 | 与已修正的 Task 4.1 和 Dev Notes 矛盾，文档内部不一致 |
+| 2 | bad_spec | Completion Notes 测试计数自相矛盾："19 个"与"24 个子测试" | 0-5 story:211 | 验证记录不可靠；实际为 22 个顶层测试 / 31 个含子测试 |
+
+**构建验证：** ✅ 文档修正，无代码变更
