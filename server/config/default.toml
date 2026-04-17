@@ -1,0 +1,30 @@
+[server]
+host = ""
+port = 0
+tls = false
+
+[log]
+level = ""
+output = ""
+
+[mongo]
+uri = ""
+db = ""
+
+[redis]
+addr = ""
+db = 0
+
+[jwt]
+secret = ""
+issuer = ""
+expiry = 0
+
+[apns]
+key_id = ""
+team_id = ""
+bundle_id = ""
+key_path = ""
+
+[cdn]
+base_url = ""

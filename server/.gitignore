@@ -1,0 +1,25 @@
+# Build output
+build/
+*.out
+
+# Local config (not committed)
+config/local.toml
+.env.local
+
+# IDE directories
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test coverage
+coverage.out
+coverage.html
+
+# Binary
+catserver

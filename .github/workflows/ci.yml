@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: server/go.sum
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: server
+
+      - name: Build
+        run: bash scripts/build.sh
+
+      - name: Test
+        run: bash scripts/build.sh --test
+
+      - name: Race test
+        run: bash scripts/build.sh --race --test
+
+      - name: Integration test
+        run: bash scripts/build.sh --integration
