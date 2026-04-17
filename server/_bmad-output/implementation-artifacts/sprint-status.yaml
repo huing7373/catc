@@ -1,0 +1,129 @@
+# generated: 2026-04-17
+# last_updated: 2026-04-17
+# project: server
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: "{project-root}/_bmad-output/implementation-artifacts"
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog -> in-progress: Automatically when first story is created (via create-story)
+#   - in-progress -> done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - SM typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+
+generated: 2026-04-17
+last_updated: 2026-04-17
+project: server
+project_key: NOKEY
+tracking_system: file-system
+story_location: "{project-root}/_bmad-output/implementation-artifacts"
+
+development_status:
+  # Epic 0: 服务端骨架与平台基线
+  epic-0: backlog
+  0-1-project-skeleton-and-dev-toolchain: backlog
+  0-2-app-entry-and-runnable-lifecycle: backlog
+  0-3-infra-connectivity-and-clients: backlog
+  0-4-multi-dimensional-healthcheck-endpoint: backlog
+  0-5-structured-logging-and-request-correlation-id: backlog
+  0-6-apperror-and-error-category-registry: backlog
+  0-7-clock-interface-and-virtual-clock: backlog
+  0-8-cron-scheduler-and-distributed-lock: backlog
+  0-9-ws-hub-skeleton-envelope-broadcaster-interface: backlog
+  0-10-ws-upstream-eventid-idempotent-dedup: backlog
+  0-11-ws-connect-rate-limit-and-abnormal-device-reject: backlog
+  0-12-session-resume-cache-throttle: backlog
+  0-13-apns-push-platform-pusher-queue-routing-410-cleanup: backlog
+  0-14-ws-message-type-registry-and-version-query: backlog
+  0-15-spike-op1-watchos-ws-primary-stability-test-matrix: backlog
+  epic-0-retrospective: optional
+
+  # Epic 1: 身份与账户
+  epic-1: backlog
+  1-1-user-domain-sign-in-with-apple-jwt: backlog
+  1-2-refresh-token-revoke-per-device-session: backlog
+  1-3-jwt-auth-middleware-userid-context-injection: backlog
+  1-4-apns-device-token-registration-endpoint: backlog
+  1-5-profile-preferences-displayname-timezone-quiethours: backlog
+  1-6-account-deletion-request: backlog
+  epic-1-retrospective: optional
+
+  # Epic 2: 你的猫活着（状态映射 + 步数）
+  epic-2: backlog
+  2-1-catstate-domain-source-priority-fsm: backlog
+  2-2-ws-state-tick-persist-source-priority-conflict: backlog
+  2-3-http-post-state-healthkit-background: backlog
+  2-4-abnormal-step-increment-flagging: backlog
+  2-5-decay-engine-cron-fsm-idle-inference-broadcast: backlog
+  epic-2-retrospective: optional
+
+  # Epic 3: 好友圈
+  epic-3: backlog
+  3-1-invite-token-generation-universal-link-url: backlog
+  3-2-accept-friend-invite-limit-check-mongo-transaction: backlog
+  3-3-unfriend: backlog
+  3-4-friend-list-query-with-block-filter: backlog
+  3-5-block-unblock: backlog
+  epic-3-retrospective: optional
+
+  # Epic 4: 好友房间 / 环境在场感
+  epic-4: backlog
+  4-1-presence-lifecycle-d8-ws-disconnect-leave-room: backlog
+  4-2-roomservice-room-snapshot-4-person-cap: backlog
+  4-3-roomstatebroadcaster-replace-epic2-noop: backlog
+  4-4-friend-online-offline-event-broadcast: backlog
+  4-5-session-resume-full-snapshot-lasteventid-recovery: backlog
+  epic-4-retrospective: optional
+
+  # Epic 5: 触碰 / 触觉社交
+  epic-5: backlog
+  5-1-touch-domain-touch-logs-repo-emotetype-enum: backlog
+  5-2-touch-send-ws-rpc-online-ws-offline-apns-fallback: backlog
+  5-3-touch-rate-limit-per-pair-60s-3-silent-drop: backlog
+  5-4-block-intercept-receiver-blocked-sender-silent-drop: backlog
+  5-5-cross-timezone-quiet-mode-apns-silent: backlog
+  epic-5-retrospective: optional
+
+  # Epic 6: 盲盒（掉落 + 领取）
+  epic-6: backlog
+  6-1-blindbox-skin-domain-skins-seed-reward-weights: backlog
+  6-2-blindbox-drop-cron-30min-idle-single-slot-notify: backlog
+  6-3-blindbox-inventory-query: backlog
+  6-4-blindbox-redeem-transaction-lottery-points-broadcast: backlog
+  epic-6-retrospective: optional
+
+  # Epic 7: 皮肤与定制
+  epic-7: backlog
+  7-1-skin-catalog-query: backlog
+  7-2-unlocked-skins-list-session-resume-skins-provider: backlog
+  7-3-skin-equip-friend-visible: backlog
+  epic-7-retrospective: optional
+
+  # Epic 8: 冷启动召回
+  epic-8: backlog
+  8-1-cold-start-user-detection-cron: backlog
+  8-2-recall-push-send-throttle: backlog
+  epic-8-retrospective: optional
