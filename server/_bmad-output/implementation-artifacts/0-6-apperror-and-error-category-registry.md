@@ -1,6 +1,6 @@
 # Story 0.6: AppError + 错误分类注册表
 
-Status: review
+Status: done
 
 ## Story
 

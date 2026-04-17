@@ -50,7 +50,7 @@ development_status:
   0-3-infra-connectivity-and-clients: done
   0-4-multi-dimensional-healthcheck-endpoint: done
   0-5-structured-logging-and-request-correlation-id: done
-  0-6-apperror-and-error-category-registry: review
+  0-6-apperror-and-error-category-registry: done
   0-7-clock-interface-and-virtual-clock: backlog
   0-8-cron-scheduler-and-distributed-lock: backlog
   0-9-ws-hub-skeleton-envelope-broadcaster-interface: backlog
