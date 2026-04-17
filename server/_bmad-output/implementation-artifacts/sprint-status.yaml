@@ -48,7 +48,7 @@ development_status:
   0-2-app-entry-and-runnable-lifecycle: done
   0-3-infra-connectivity-and-clients: done
   0-4-multi-dimensional-healthcheck-endpoint: done
-  0-5-structured-logging-and-request-correlation-id: review
+  0-5-structured-logging-and-request-correlation-id: done
   0-6-apperror-and-error-category-registry: backlog
   0-7-clock-interface-and-virtual-clock: backlog
   0-8-cron-scheduler-and-distributed-lock: backlog

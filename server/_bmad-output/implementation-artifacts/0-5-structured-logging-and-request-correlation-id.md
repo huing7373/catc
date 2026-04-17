@@ -1,6 +1,6 @@
 # Story 0.5: 结构化日志与请求关联 ID
 
-Status: review
+Status: done
 
 ## Story
 
