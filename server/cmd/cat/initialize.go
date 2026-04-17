@@ -6,6 +6,7 @@ import (
 	"github.com/huing/cat/server/internal/config"
 	"github.com/huing/cat/server/internal/handler"
 	"github.com/huing/cat/server/internal/ws"
+	"github.com/huing/cat/server/pkg/clockx"
 	"github.com/huing/cat/server/pkg/logx"
 	"github.com/huing/cat/server/pkg/mongox"
 	"github.com/huing/cat/server/pkg/redisx"
@@ -32,6 +33,9 @@ func initialize(cfg *config.Config) *App {
 		Addr: cfg.Redis.Addr,
 		DB:   cfg.Redis.DB,
 	})
+
+	clk := clockx.NewRealClock()
+	_ = clk // consumed by services in later stories
 
 	hubStub := ws.NewHubStub()
 

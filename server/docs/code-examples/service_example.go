@@ -2,26 +2,28 @@ package examples
 
 import (
 	"context"
+	"time"
 
+	"github.com/huing/cat/server/pkg/clockx"
 	"github.com/huing/cat/server/pkg/logx"
 )
 
-// ExampleService demonstrates structured logging in a service layer function.
-//
-//	The context carries requestId and userId injected by middleware.
-//	Service code uses logx.Ctx(ctx) to obtain the enriched logger.
-func ExampleService(ctx context.Context, itemID string) error {
+type ExampleService struct {
+	clock clockx.Clock
+}
+
+func NewExampleService(clock clockx.Clock) *ExampleService {
+	return &ExampleService{clock: clock}
+}
+
+func (s *ExampleService) ProcessItem(ctx context.Context, itemID string) (time.Time, error) {
+	now := s.clock.Now()
+
 	logx.Ctx(ctx).Info().
 		Str("action", "processItem").
 		Str("itemId", itemID).
+		Time("timestamp", now).
 		Msg("starting item processing")
 
-	// business logic ...
-
-	logx.Ctx(ctx).Info().
-		Str("action", "processItem").
-		Str("itemId", itemID).
-		Msg("item processed")
-
-	return nil
+	return now, nil
 }

@@ -38,6 +38,12 @@ if ! go vet ./... 2>&1; then
   exit 1
 fi
 
+echo ""
+echo "=== check time.Now() usage (M9) ==="
+if ! bash "$REPO_ROOT/scripts/check_time_now.sh" 2>&1; then
+  exit 1
+fi
+
 BUILD_VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS="-X main.buildVersion=${BUILD_VERSION}"
 
