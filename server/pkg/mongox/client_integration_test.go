@@ -12,7 +12,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
-	"github.com/huing/cat/server/internal/config"
 	"github.com/huing/cat/server/pkg/mongox"
 )
 
@@ -26,13 +25,11 @@ func TestMustConnect_Integration(t *testing.T) {
 	uri, err := container.ConnectionString(ctx)
 	require.NoError(t, err)
 
-	cfg := config.MongoCfg{
+	cli := mongox.MustConnect(mongox.ConnectOptions{
 		URI:        uri,
 		DB:         "testdb",
 		TimeoutSec: 10,
-	}
-
-	cli := mongox.MustConnect(cfg)
+	})
 	t.Cleanup(func() { _ = cli.Final(ctx) })
 
 	t.Run("HealthCheck", func(t *testing.T) {

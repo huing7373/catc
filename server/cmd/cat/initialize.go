@@ -17,8 +17,15 @@ func initialize(cfg *config.Config) *App {
 		Str("config_hash", cfg.Hash).
 		Msg("server starting")
 
-	mongoCli := mongox.MustConnect(cfg.Mongo)
-	redisCli := redisx.MustConnect(cfg.Redis)
+	mongoCli := mongox.MustConnect(mongox.ConnectOptions{
+		URI:        cfg.Mongo.URI,
+		DB:         cfg.Mongo.DB,
+		TimeoutSec: cfg.Mongo.TimeoutSec,
+	})
+	redisCli := redisx.MustConnect(redisx.ConnectOptions{
+		Addr: cfg.Redis.Addr,
+		DB:   cfg.Redis.DB,
+	})
 
 	h := &handlers{
 		health: handler.NewHealthHandler(),

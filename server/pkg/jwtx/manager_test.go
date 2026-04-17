@@ -13,8 +13,6 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/huing/cat/server/internal/config"
 )
 
 func writeKeyFile(t *testing.T, dir, name string, key *rsa.PrivateKey) string {
@@ -41,7 +39,7 @@ func setupManager(t *testing.T) (*Manager, *rsa.PrivateKey, *rsa.PrivateKey) {
 	activePath := writeKeyFile(t, dir, "active.pem", activeKey)
 	oldPath := writeKeyFile(t, dir, "old.pem", oldKey)
 
-	cfg := config.JWTCfg{
+	opts := Options{
 		PrivateKeyPath:    activePath,
 		PrivateKeyPathOld: oldPath,
 		ActiveKID:         "kid-new",
@@ -51,7 +49,7 @@ func setupManager(t *testing.T) (*Manager, *rsa.PrivateKey, *rsa.PrivateKey) {
 		RefreshExpirySec:  2592000,
 	}
 
-	m := New(cfg)
+	m := New(opts)
 	return m, activeKey, oldKey
 }
 
@@ -178,7 +176,7 @@ func TestManager_New_WithoutOldKey(t *testing.T) {
 	require.NoError(t, err)
 	keyPath := writeKeyFile(t, dir, "key.pem", key)
 
-	cfg := config.JWTCfg{
+	opts := Options{
 		PrivateKeyPath:   keyPath,
 		ActiveKID:        "kid-only",
 		Issuer:           "test",
@@ -186,7 +184,7 @@ func TestManager_New_WithoutOldKey(t *testing.T) {
 		RefreshExpirySec: 120,
 	}
 
-	m := New(cfg)
+	m := New(opts)
 	assert.NotNil(t, m)
 	assert.Nil(t, m.oldPub)
 

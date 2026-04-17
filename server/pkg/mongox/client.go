@@ -7,9 +7,14 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-
-	"github.com/huing/cat/server/internal/config"
 )
+
+// ConnectOptions holds the parameters needed to connect to MongoDB.
+type ConnectOptions struct {
+	URI        string
+	DB         string
+	TimeoutSec int
+}
 
 // Client wraps a MongoDB client with convenience helpers.
 type Client struct {
@@ -19,13 +24,13 @@ type Client struct {
 
 // MustConnect creates a MongoDB client, pings it, and returns a Client.
 // Calls log.Fatal on any failure (startup-only I/O).
-func MustConnect(cfg config.MongoCfg) *Client {
-	timeout := time.Duration(cfg.TimeoutSec) * time.Second
+func MustConnect(opts ConnectOptions) *Client {
+	timeout := time.Duration(opts.TimeoutSec) * time.Second
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
 
-	cli, err := mongo.Connect(options.Client().ApplyURI(cfg.URI))
+	cli, err := mongo.Connect(options.Client().ApplyURI(opts.URI))
 	if err != nil {
 		log.Fatal().Err(err).Msg("mongo connect failed")
 	}
@@ -37,7 +42,7 @@ func MustConnect(cfg config.MongoCfg) *Client {
 		log.Fatal().Err(err).Msg("mongo ping failed")
 	}
 
-	return &Client{cli: cli, db: cfg.DB}
+	return &Client{cli: cli, db: opts.DB}
 }
 
 // DB returns the configured database handle.

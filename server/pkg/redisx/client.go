@@ -6,11 +6,15 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
-
-	"github.com/huing/cat/server/internal/config"
 )
 
 const redisPingTimeout = 10 * time.Second
+
+// ConnectOptions holds the parameters needed to connect to Redis.
+type ConnectOptions struct {
+	Addr string
+	DB   int
+}
 
 // Client wraps a Redis client with convenience helpers.
 type Client struct {
@@ -19,10 +23,10 @@ type Client struct {
 
 // MustConnect creates a Redis client and pings it.
 // Calls log.Fatal on any failure (startup-only I/O).
-func MustConnect(cfg config.RedisCfg) *Client {
+func MustConnect(opts ConnectOptions) *Client {
 	cli := redis.NewClient(&redis.Options{
-		Addr: cfg.Addr,
-		DB:   cfg.DB,
+		Addr: opts.Addr,
+		DB:   opts.DB,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), redisPingTimeout)

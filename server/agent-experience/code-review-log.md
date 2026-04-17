@@ -17,3 +17,13 @@
 | 6 | bad_spec | WithTx 回调签名在 AC/task/dev notes 三处不一致（mongo.SessionContext vs context.Context） | pkg/mongox/tx.go:11 | mongo-driver v2 无 SessionContext；已统一 AC 为 func(context.Context) error |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过
+
+## [0-3-infra-connectivity-and-clients] Round 2 — 2026-04-17
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | pkg/ 直接 import internal/config，违反项目分层约束 | pkg/mongox/client.go:11, pkg/redisx/client.go:10, pkg/jwtx/manager.go:14 | 架构违规：pkg/ 不得引用 internal/；改为各 pkg 定义 Options struct，initialize.go 做转换 |
+| 2 | patch | JWT 过期时间未校验非正数，配置写错时静默签发已过期 token | pkg/jwtx/manager.go:50 | 故障延后到鉴权阶段才暴露；添加 AccessExpirySec/RefreshExpirySec <= 0 的 log.Fatal 校验 |
+| 3 | patch | WithTx EndSession 复用事务 ctx，取消/超时时 cleanup 在失效上下文上执行 | pkg/mongox/tx.go:16 | session cleanup 可能失败或阻塞；改为 context.Background() |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go vet -tags=integration` 通过

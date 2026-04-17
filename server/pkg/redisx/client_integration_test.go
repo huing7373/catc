@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 
-	"github.com/huing/cat/server/internal/config"
 	"github.com/huing/cat/server/pkg/redisx"
 )
 
@@ -26,12 +25,10 @@ func TestMustConnect_Integration(t *testing.T) {
 	port, err := container.MappedPort(ctx, "6379/tcp")
 	require.NoError(t, err)
 
-	cfg := config.RedisCfg{
+	cli := redisx.MustConnect(redisx.ConnectOptions{
 		Addr: host + ":" + port.Port(),
 		DB:   0,
-	}
-
-	cli := redisx.MustConnect(cfg)
+	})
 	t.Cleanup(func() { _ = cli.Final(ctx) })
 
 	t.Run("HealthCheck", func(t *testing.T) {

@@ -13,7 +13,7 @@ func WithTx(ctx context.Context, cli *mongo.Client, fn func(ctx context.Context)
 	if err != nil {
 		return err
 	}
-	defer sess.EndSession(ctx)
+	defer sess.EndSession(context.Background())
 
 	_, err = sess.WithTransaction(ctx, func(sc context.Context) (any, error) {
 		return nil, fn(sc)

@@ -10,8 +10,6 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/rs/zerolog/log"
-
-	"github.com/huing/cat/server/internal/config"
 )
 
 // CustomClaims holds the application-specific JWT claims.
@@ -21,6 +19,17 @@ type CustomClaims struct {
 	Platform  string `json:"plat"`
 	TokenType string `json:"ttype"`
 	jwt.RegisteredClaims
+}
+
+// Options holds the parameters needed to create a JWT Manager.
+type Options struct {
+	PrivateKeyPath    string
+	PrivateKeyPathOld string
+	ActiveKID         string
+	OldKID            string
+	Issuer            string
+	AccessExpirySec   int
+	RefreshExpirySec  int
 }
 
 // Manager handles RS256 JWT signing and verification with key rotation support.
@@ -35,34 +44,40 @@ type Manager struct {
 	refreshExpiry time.Duration
 }
 
-// New creates a Manager from config. Reads RSA PEM key files.
-// Calls log.Fatal if the active key cannot be loaded.
-func New(cfg config.JWTCfg) *Manager {
-	if cfg.ActiveKID == "" {
+// New creates a Manager from options. Reads RSA PEM key files.
+// Calls log.Fatal if required fields are missing or keys cannot be loaded.
+func New(opts Options) *Manager {
+	if opts.ActiveKID == "" {
 		log.Fatal().Msg("jwt: active_kid must not be empty")
 	}
-	if cfg.Issuer == "" {
+	if opts.Issuer == "" {
 		log.Fatal().Msg("jwt: issuer must not be empty")
 	}
+	if opts.AccessExpirySec <= 0 {
+		log.Fatal().Int("access_expiry_sec", opts.AccessExpirySec).Msg("jwt: access_expiry_sec must be positive")
+	}
+	if opts.RefreshExpirySec <= 0 {
+		log.Fatal().Int("refresh_expiry_sec", opts.RefreshExpirySec).Msg("jwt: refresh_expiry_sec must be positive")
+	}
 
-	activeKey := mustLoadPrivateKey(cfg.PrivateKeyPath)
+	activeKey := mustLoadPrivateKey(opts.PrivateKeyPath)
 
 	m := &Manager{
 		activeKey:     activeKey,
 		activePub:     &activeKey.PublicKey,
-		activeKID:     cfg.ActiveKID,
-		issuer:        cfg.Issuer,
-		accessExpiry:  time.Duration(cfg.AccessExpirySec) * time.Second,
-		refreshExpiry: time.Duration(cfg.RefreshExpirySec) * time.Second,
+		activeKID:     opts.ActiveKID,
+		issuer:        opts.Issuer,
+		accessExpiry:  time.Duration(opts.AccessExpirySec) * time.Second,
+		refreshExpiry: time.Duration(opts.RefreshExpirySec) * time.Second,
 	}
 
-	if cfg.PrivateKeyPathOld != "" {
-		if cfg.OldKID == "" {
+	if opts.PrivateKeyPathOld != "" {
+		if opts.OldKID == "" {
 			log.Fatal().Msg("jwt: old_kid must not be empty when private_key_path_old is set")
 		}
-		oldKey := mustLoadPrivateKey(cfg.PrivateKeyPathOld)
+		oldKey := mustLoadPrivateKey(opts.PrivateKeyPathOld)
 		m.oldPub = &oldKey.PublicKey
-		m.oldKID = cfg.OldKID
+		m.oldKID = opts.OldKID
 	}
 
 	return m
