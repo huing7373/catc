@@ -25,10 +25,11 @@ func TestRecover_CatchesPanic(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 
-	var m map[string]any
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &m))
-	assert.Equal(t, "INTERNAL_ERROR", m["code"])
-	assert.Equal(t, "internal server error", m["message"])
+	var body map[string]map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "INTERNAL_ERROR", body["error"]["code"])
+	assert.Equal(t, "internal server error", body["error"]["message"])
+	assert.NotContains(t, w.Body.String(), "something went wrong")
 }
 
 func TestRecover_PassesThroughNormally(t *testing.T) {

@@ -75,3 +75,14 @@
 | 2 | bad_spec | Completion Notes 测试计数自相矛盾："19 个"与"24 个子测试" | 0-5 story:211 | 验证记录不可靠；实际为 22 个顶层测试 / 31 个含子测试 |
 
 **构建验证：** ✅ 文档修正，无代码变更
+
+## [0-6-apperror-and-error-category-registry] Round 1 — 2026-04-17
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | intent_gap→patch | retry_after 分类缺 Retry-After header 语义：AppError 无延迟字段，RespondAppError 不设该 header | internal/dto/error.go:59 | RATE_LIMIT_EXCEEDED 返回裸 429，客户端无法知道何时重试 |
+| 2 | patch | allCodes 切片自证正确：init() 基于 allCodes 生成 registry，漏加 sentinel 不会被发现 | internal/dto/error_codes.go:30 | AC4/AC5 "遗漏检测"形同虚设；添加源码扫描测试独立验证 sentinel 计数 |
+| 3 | patch | 文档一致性测试只校验 code 名称存在，不验证 Category/HTTPStatus/Message 逐行匹配 | internal/dto/error_codes_test.go:219 | error-codes.md 某行填错仍能通过测试，不满足 AC7 |
+| 4 | patch | 并行测试各自调 gin.SetMode 修改全局状态，存在竞态风险 | internal/dto/error_codes_test.go:148,168,186,203 | flaky 测试；改为 TestMain 统一设置 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过

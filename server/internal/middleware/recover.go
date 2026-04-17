@@ -1,10 +1,11 @@
 package middleware
 
 import (
-	"net/http"
+	"fmt"
 	"runtime/debug"
 
 	"github.com/gin-gonic/gin"
+	"github.com/huing/cat/server/internal/dto"
 	"github.com/huing/cat/server/pkg/logx"
 )
 
@@ -18,10 +19,7 @@ func Recover() gin.HandlerFunc {
 					Msg("panic recovered")
 
 				if !c.Writer.Written() {
-					c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
-						"code":    "INTERNAL_ERROR",
-						"message": "internal server error",
-					})
+					dto.RespondAppError(c, dto.ErrInternalError.WithCause(fmt.Errorf("panic: %v", r)))
 				} else {
 					c.Abort()
 				}
