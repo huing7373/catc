@@ -288,3 +288,25 @@ func TestManager_Verify_WrongSigningMethod(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "signing method")
 }
+
+func TestManager_Verify_MissingExpiration(t *testing.T) {
+	t.Parallel()
+	m, activeKey, _ := setupManager(t)
+
+	claims := CustomClaims{
+		UserID:    "u1",
+		TokenType: "access",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:   "test-issuer",
+			IssuedAt: jwt.NewNumericDate(time.Now()),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = "kid-new"
+	tokenStr, err := token.SignedString(activeKey)
+	require.NoError(t, err)
+
+	_, err = m.Verify(tokenStr)
+	assert.Error(t, err)
+}

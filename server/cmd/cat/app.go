@@ -32,16 +32,21 @@ func (a *App) Run() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	startErr := make(chan error, len(a.runs))
 	for _, r := range a.runs {
 		go func(r Runnable) {
 			if err := r.Start(ctx); err != nil {
-				log.Fatal().Err(err).Str("runnable", r.Name()).Msg("start failed")
+				log.Error().Err(err).Str("runnable", r.Name()).Msg("start failed")
+				startErr <- err
 			}
 		}(r)
 	}
 
 	signal.Notify(a.stop, os.Interrupt, syscall.SIGTERM)
-	<-a.stop
+	select {
+	case <-a.stop:
+	case <-startErr:
+	}
 	cancel()
 
 	shutCtx, c := context.WithTimeout(context.Background(), 30*time.Second)
@@ -51,5 +56,11 @@ func (a *App) Run() {
 		if err := a.runs[i].Final(shutCtx); err != nil {
 			log.Error().Err(err).Str("runnable", a.runs[i].Name()).Msg("final failed")
 		}
+	}
+
+	select {
+	case <-startErr:
+		os.Exit(1)
+	default:
 	}
 }

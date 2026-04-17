@@ -4,6 +4,7 @@ package mongox_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -65,10 +66,33 @@ func TestWithTx_Integration(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cli.Disconnect(ctx) })
 
-	err = mongox.WithTx(ctx, cli, func(sc context.Context) error {
-		coll := cli.Database("testdb").Collection("test")
-		_, err := coll.InsertOne(sc, map[string]string{"key": "value"})
-		return err
+	t.Run("Success", func(t *testing.T) {
+		err = mongox.WithTx(ctx, cli, func(sc context.Context) error {
+			coll := cli.Database("testdb").Collection("tx_success")
+			_, err := coll.InsertOne(sc, map[string]string{"key": "value"})
+			return err
+		})
+		assert.NoError(t, err)
+
+		count, err := cli.Database("testdb").Collection("tx_success").CountDocuments(ctx, map[string]string{})
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), count)
 	})
-	assert.NoError(t, err)
+
+	t.Run("Rollback", func(t *testing.T) {
+		rollbackErr := errors.New("forced rollback")
+		err = mongox.WithTx(ctx, cli, func(sc context.Context) error {
+			coll := cli.Database("testdb").Collection("tx_rollback")
+			_, err := coll.InsertOne(sc, map[string]string{"key": "should_not_persist"})
+			if err != nil {
+				return err
+			}
+			return rollbackErr
+		})
+		assert.Error(t, err)
+
+		count, err := cli.Database("testdb").Collection("tx_rollback").CountDocuments(ctx, map[string]string{})
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), count)
+	})
 }

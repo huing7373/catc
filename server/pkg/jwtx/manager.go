@@ -117,7 +117,7 @@ func (m *Manager) Verify(tokenStr string) (*CustomClaims, error) {
 			return m.oldPub, nil
 		}
 		return nil, errors.New("unknown kid: " + kid)
-	}, jwt.WithIssuer(m.issuer))
+	}, jwt.WithIssuer(m.issuer), jwt.WithExpirationRequired())
 	if err != nil {
 		return nil, err
 	}

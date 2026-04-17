@@ -27,3 +27,13 @@
 | 3 | patch | WithTx EndSession 复用事务 ctx，取消/超时时 cleanup 在失效上下文上执行 | pkg/mongox/tx.go:16 | session cleanup 可能失败或阻塞；改为 context.Background() |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go vet -tags=integration` 通过
+
+## [0-3-infra-connectivity-and-clients] Round 3 — 2026-04-17
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | Verify 未要求 exp claim 必填，允许永不过期 token 通过验签 | pkg/jwtx/manager.go:120 | jwt/v5 默认 exp 非必填，无 exp 的 token 绕过过期校验；添加 jwt.WithExpirationRequired() |
+| 2 | patch | App.Run 中 Start 失败后直接 log.Fatal，跳过所有 Final 清理 | cmd/cat/app.go:38 | Mongo/Redis 连接泄漏；改为 channel 通知→逆序 Final→os.Exit(1) |
+| 3 | patch | WithTx 集成测试只覆盖成功路径，未验证回滚 | pkg/mongox/client_integration_test.go:68 | 添加 callback 返回错误→断言集合为空的回滚测试 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go vet -tags=integration` 通过
