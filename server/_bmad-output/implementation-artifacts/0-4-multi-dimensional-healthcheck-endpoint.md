@@ -1,6 +1,6 @@
 # Story 0.4: 多维健康检查 endpoint
 
-Status: review
+Status: done
 
 ## Story
 
