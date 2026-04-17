@@ -56,6 +56,13 @@ func TestAppError_WithRetryAfter_ReturnsNewCopy(t *testing.T) {
 	assert.Equal(t, original.Code, withRetry.Code)
 }
 
+func TestNewAppError_PanicsOnInvalidCategory(t *testing.T) {
+	t.Parallel()
+	assert.Panics(t, func() { NewAppError("BAD", "bad", 400, "") })
+	assert.Panics(t, func() { NewAppError("BAD", "bad", 400, "nonexistent") })
+	assert.NotPanics(t, func() { NewAppError("OK", "ok", 400, CategoryClientError) })
+}
+
 func TestAppError_ErrorsIs(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

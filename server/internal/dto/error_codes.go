@@ -41,10 +41,10 @@ var (
 	ErrRoomFull                  = register("ROOM_FULL", "room is full", http.StatusConflict, CategoryClientError)
 )
 
-func RegisteredCodes() map[string]*AppError {
-	cp := make(map[string]*AppError, len(registry))
+func RegisteredCodes() map[string]AppError {
+	cp := make(map[string]AppError, len(registry))
 	for k, v := range registry {
-		cp[k] = v
+		cp[k] = *v
 	}
 	return cp
 }

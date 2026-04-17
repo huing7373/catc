@@ -97,3 +97,12 @@
 | 4 | patch | TestCategoryHTTPStatus_Mapping 抽样 9/19 码，未测到的码可能带错误 HTTPStatus 过 CI | internal/dto/error_codes_test.go:150 | 改为遍历 RegisteredCodes() 全量校验 Category→HTTPStatus 范围约束 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过
+
+## [0-6-apperror-and-error-category-registry] Round 3 — 2026-04-17
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | RegisteredCodes() 返回 map[string]*AppError，浅拷贝暴露全局 sentinel 可变指针 | internal/dto/error_codes.go:44 | 调用方修改返回值污染全局 sentinel；改为返回 map[string]AppError 值拷贝 |
+| 2 | patch | NewAppError 公开构造函数不校验 category，包外可构造空/无效 category 的 AppError | internal/dto/error.go:30 | 分类不变量被绕过；添加 validCategories 集合 + panic 守卫 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过

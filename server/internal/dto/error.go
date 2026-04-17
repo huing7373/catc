@@ -27,7 +27,18 @@ type AppError struct {
 	RetryAfter int // seconds; if > 0, RespondAppError sets Retry-After header
 }
 
+var validCategories = map[ErrCategory]bool{
+	CategoryRetryable:   true,
+	CategoryClientError: true,
+	CategorySilentDrop:  true,
+	CategoryRetryAfter:  true,
+	CategoryFatal:       true,
+}
+
 func NewAppError(code string, message string, httpStatus int, category ErrCategory) *AppError {
+	if !validCategories[category] {
+		panic("dto.NewAppError: invalid category " + strconv.Quote(string(category)) + " for code " + code)
+	}
 	return &AppError{
 		Code:       code,
 		Message:    message,
