@@ -1,6 +1,6 @@
 # Story 0.3: 基础设施连通性与客户端
 
-Status: review
+Status: done
 
 ## Story
 
