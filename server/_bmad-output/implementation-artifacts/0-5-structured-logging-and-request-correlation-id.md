@@ -41,7 +41,7 @@ so that I can grep-and-jq through 3 AM WS hub incident logs to locate users and 
   - [x] 3.3 实现 `internal/middleware/recover.go`：panic recovery → zerolog error + stack → `{"code":"INTERNAL_ERROR","message":"internal server error"}` 500
   - [x] 3.4 单元测试 `internal/middleware/*_test.go`（使用 `httptest.NewRecorder` + `gin.CreateTestContext`）
 - [x] Task 4: Router 集成 (AC: #5, #6, #7)
-  - [x] 4.1 `cmd/cat/wire.go` buildRouter 中注册中间件链：`Recover → RequestID → Logger`
+  - [x] 4.1 `cmd/cat/wire.go` buildRouter 中注册中间件链：`Logger → Recover → RequestID`
   - [x] 4.2 `cmd/cat/initialize.go` 启动时调用 `logx.Init(logx.Options{...})`
 - [x] Task 5: 全局 zerolog 迁移 (AC: #8)
   - [x] 5.1 `initialize.go` / `app.go` / `wire.go` 中的全局 log 调用保持不变（启动期合法）
@@ -98,43 +98,51 @@ so that I can grep-and-jq through 3 AM WS hub incident logs to locate users and 
 
 **logx.Init 签名与行为：**
 ```go
-func Init(cfg config.LogCfg, buildVersion, configHash string)
+func Init(opts Options)  // Options{Level, Format, BuildVersion, ConfigHash}
 ```
-- `cfg.Format == "console"` → `zerolog.ConsoleWriter{Out: os.Stdout}`
+- `opts.Format == "console"` → `zerolog.ConsoleWriter{Out: os.Stdout}`
 - 否则 → `zerolog.New(os.Stdout)`（JSON，默认）
-- 设置 `zerolog.SetGlobalLevel` 根据 `cfg.Level`（默认 "info"）
-- 注入全局字段：`log.Logger = logger.With().Str("buildVersion", buildVersion).Str("configHash", configHash).Logger()`
+- 设置 `zerolog.SetGlobalLevel` 根据 `opts.Level`（默认 "info"）
+- 注入全局字段：`log.Logger = logger.With().Str("buildVersion", ...).Str("configHash", ...).Logger()`
 
 **logx.Ctx 实现：**
 ```go
 func Ctx(ctx context.Context) *zerolog.Logger {
-    return zerolog.Ctx(ctx)
+    l := zerolog.Ctx(ctx)
+    if l.GetLevel() == zerolog.Disabled {
+        return &log.Logger  // 回退到全局 logger（含 buildVersion/configHash）
+    }
+    return l
 }
 ```
-zerolog 已内置 context 支持，`Ctx` 是薄封装保持 API 一致性。
+当 context 中没有 logger 时（如中间件尚未注入），回退到全局 `log.Logger` 而非返回 disabled logger。`WithRequestID`/`WithUserID`/`WithConnID` 内部使用相同的回退逻辑（`ctxLogger` helper），确保在空 context 上也能正确链式注入字段。
 
 **Context 注入链路：**
-1. `middleware.RequestID` → `logx.WithRequestID(ctx, id)` → context 中存入带 requestId 字段的 logger
-2. 后续 handler/service 调用 `logx.Ctx(ctx)` 自动获取含 requestId 的 logger
-3. userId 在 JWT auth middleware（Story 1.3）中注入，本 story 只预留 `WithUserID` 方法
+1. `middleware.RequestID` → `logx.WithRequestID(ctx, id)` → 基于全局 logger（或已有 context logger）创建带 requestId 字段的新 logger，种入 context
+2. 后续 handler/service 调用 `logx.Ctx(ctx)` 自动获取含 requestId + 全局字段的 logger
+3. userId 由 JWT auth middleware（Story 1.3）通过 `logx.WithUserID(ctx, id)` 注入，access log 通过 `logx.Ctx(ctx)` 自动继承，无需手动读取
 
 **middleware.Recover 暂行方案：**
-Story 0.6 AppError 尚未实现，Recover 直接构造 JSON 响应：
+Story 0.6 AppError 尚未实现，Recover 检查 `c.Writer.Written()` 后决定响应策略：
 ```go
-c.AbortWithStatusJSON(500, gin.H{
-    "code":    "INTERNAL_ERROR",
-    "message": "internal server error",
-})
+if !c.Writer.Written() {
+    c.AbortWithStatusJSON(500, gin.H{
+        "code":    "INTERNAL_ERROR",
+        "message": "internal server error",
+    })
+} else {
+    c.Abort()  // 已写部分响应，只中止后续处理
+}
 ```
 
 **中间件注册顺序（wire.go buildRouter）：**
 ```go
 r := gin.New()
-r.Use(middleware.Recover())
-r.Use(middleware.RequestID())
-r.Use(middleware.Logger())
+r.Use(middleware.Logger())    // 最外层，defer 确保 panic 也产出 access log
+r.Use(middleware.Recover())   // 捕获 panic，写 500 JSON
+r.Use(middleware.RequestID()) // 注入 requestId 到 context logger
 ```
-Recover 必须最外层以捕获所有 panic；RequestID 在 Logger 之前以确保日志含 requestId。
+Logger 使用 defer 写日志，即使 Recover 处理了 panic，Logger 的 defer 仍会执行。RequestID 最内层注入 requestId，Logger defer 读取时 context 已包含该字段。
 
 ### Testing Standards
 
@@ -193,10 +201,11 @@ Claude Opus 4.6 (1M context)
 ### Completion Notes List
 
 - logx.Init 使用 Options struct（非 config.LogCfg）避免 pkg→internal 循环依赖，与 mongox/redisx ConnectOptions 模式一致
-- logx.Ctx 薄封装 zerolog.Ctx，保持 API 一致性
-- WithRequestID/WithUserID/WithConnID 通过 zerolog WithContext 链式注入字段
-- middleware.Recover 暂返直接 JSON（Story 0.6 AppError 未实现），不引入前向依赖
-- middleware.Logger 从 gin.Context.Get("userId") 读取 userId，由未来 JWT auth middleware（Story 1.3）注入
+- logx.Ctx 在 context 无 logger 时回退到全局 log.Logger（含 buildVersion/configHash），避免 disabled logger 静默吞日志
+- WithRequestID/WithUserID/WithConnID 通过 ctxLogger helper 回退到全局 logger 后链式注入字段
+- middleware.Recover 检查 c.Writer.Written() 后决定是否写 500 JSON（Story 0.6 AppError 未实现）
+- middleware.Logger 使用 defer 写日志，从 logx.Ctx(ctx) 自动继承 userId（由 JWT auth middleware Story 1.3 通过 logx.WithUserID 注入）
+- 中间件顺序 Logger→Recover→RequestID：Logger defer 确保 panic 也产出 access log
 - .golangci.yml 已有完整 forbidigo 配置，无需修改
 - 删除 pkg/logx/doc.go、internal/middleware/doc.go、docs/code-examples/.gitkeep 占位文件
 - 19 个单元测试全部通过（logx 9 + PII 9 + middleware 8 → 实际分别为 logx 7, PII 9, middleware 8 = 24 个子测试）

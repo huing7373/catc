@@ -57,3 +57,12 @@
 | 4 | patch | Recover() 未检查 c.Writer.Written() 就强行写 500 JSON | internal/middleware/recover.go:20 | handler 已写部分响应后 panic，客户端收到混合响应 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过
+
+## [0-5-structured-logging-and-request-correlation-id] Round 2 — 2026-04-17
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | bad_spec | Story 文档声明中间件顺序 Recover→RequestID→Logger，实际已修正为 Logger→Recover→RequestID | 0-5 story:44,130 | 后续开发者按文档回改会重新引入 panic 请求无 access log 的问题 |
+| 2 | bad_spec | Story 文档描述 logx.Ctx 为 zerolog.Ctx 薄封装 + Logger 从 gin.Get 读 userId，实际已改为回退全局 logger + context logger 自动继承 | 0-5 story:108,116,199 | 后续开发者按旧文档接入会走回 disabled logger 的错误路径 |
+
+**构建验证：** ✅ 文档修正，无代码变更
