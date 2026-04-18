@@ -36,6 +36,11 @@
 
 generated: 2026-04-17
 last_updated: 2026-04-18
+# Epic 9 created: 2026-04-18 (new cross-cutting epic for spike-class real-device/human execution work; lets Epic 0 complete without waiting on physical testing)
+# Story 9-1 created: 2026-04-18 (originally Story 0-16; moved from Epic 0 to Epic 9 per user decision)
+# Story 0-15 review: 2026-04-18 (Phase A scaffold only — real-device execution deferred to Story 9-1 under Epic 9)
+# Story 0-15 in-progress: 2026-04-18
+# Story 0-15 created: 2026-04-18
 # Story 0-14 done: 2026-04-18
 # Story 0-14 review: 2026-04-18
 # Story 0-14 in-progress: 2026-04-18
@@ -80,7 +85,7 @@ development_status:
   0-12-session-resume-cache-throttle: done
   0-13-apns-push-platform-pusher-queue-routing-410-cleanup: done
   0-14-ws-message-type-registry-and-version-query: done
-  0-15-spike-op1-watchos-ws-primary-stability-test-matrix: backlog
+  0-15-spike-op1-watchos-ws-primary-stability-test-matrix: review
   epic-0-retrospective: optional
 
   # Epic 1: 身份与账户
@@ -149,3 +154,10 @@ development_status:
   8-1-cold-start-user-detection-cron: backlog
   8-2-recall-push-send-throttle: backlog
   epic-8-retrospective: optional
+
+  # Epic 9: Spike 真机与物理执行（横向 epic；承载所有需要真机 / 人工执行的 spike 类工作。
+  # 不阻塞业务 epic 0-8 的推进 —— Epic 0 可在 0-15 Phase A done 后完成；
+  # 此 epic 独立推进，Epic 4 解锁仍由 9-1 AC9 签字决定。）
+  epic-9: in-progress
+  9-1-spike-op1-real-device-and-hub-loadtest-execution: ready-for-dev
+  epic-9-retrospective: optional

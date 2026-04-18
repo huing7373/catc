@@ -1,0 +1,4 @@
+# Reserved for Story 9.1 Phase B data archiving.
+# Expected artifacts:
+#   cell01.json … cell12.json  — real-device AC2-AC4 matrix telemetry (not ws_loadgen output)
+#   hub-1k.json / hub-3k.json / hub-5k.json / hub-10k.json  — tools/ws_loadgen -report outputs (AC5 hub load test)
