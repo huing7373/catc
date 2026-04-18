@@ -4,6 +4,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/huing/cat/server/internal/config"
+	"github.com/huing/cat/server/internal/cron"
 	"github.com/huing/cat/server/internal/handler"
 	"github.com/huing/cat/server/internal/ws"
 	"github.com/huing/cat/server/pkg/clockx"
@@ -35,7 +36,8 @@ func initialize(cfg *config.Config) *App {
 	})
 
 	clk := clockx.NewRealClock()
-	_ = clk // consumed by services in later stories
+	locker := redisx.NewLocker(redisCli.Cmdable())
+	cronSch := cron.NewScheduler(locker, redisCli.Cmdable(), clk)
 
 	hubStub := ws.NewHubStub()
 
@@ -46,7 +48,7 @@ func initialize(cfg *config.Config) *App {
 	router := buildRouter(cfg, h)
 	httpSrv := newHTTPServer(cfg, router)
 
-	app := NewApp(mongoCli, redisCli, httpSrv)
+	app := NewApp(mongoCli, redisCli, cronSch, httpSrv)
 	app.OnReady(h.health.SetReady)
 	return app
 }

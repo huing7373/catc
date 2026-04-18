@@ -35,8 +35,9 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-17
-last_updated: 2026-04-17
+last_updated: 2026-04-18
 project: server
+# Story 0-8 created: 2026-04-18
 # Story 0-7 created: 2026-04-17
 # Story 0-6 created: 2026-04-17
 project_key: NOKEY
@@ -53,7 +54,7 @@ development_status:
   0-5-structured-logging-and-request-correlation-id: done
   0-6-apperror-and-error-category-registry: done
   0-7-clock-interface-and-virtual-clock: done
-  0-8-cron-scheduler-and-distributed-lock: backlog
+  0-8-cron-scheduler-and-distributed-lock: review
   0-9-ws-hub-skeleton-envelope-broadcaster-interface: backlog
   0-10-ws-upstream-eventid-idempotent-dedup: backlog
   0-11-ws-connect-rate-limit-and-abnormal-device-reject: backlog

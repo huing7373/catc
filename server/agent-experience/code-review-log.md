@@ -106,3 +106,12 @@
 | 2 | patch | NewAppError 公开构造函数不校验 category，包外可构造空/无效 category 的 AppError | internal/dto/error.go:30 | 分类不变量被绕过；添加 validCategories 集合 + panic 守卫 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过
+
+## [0-8-cron-scheduler-and-distributed-lock] Round 1 — 2026-04-18
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | cron.New() 无 Recover 中间件，job panic 向上穿透到 cron worker 导致进程崩溃 | internal/cron/scheduler.go:26 | 任何 job panic 终止整个服务器而非静默跳过该轮执行 |
+| 2 | patch | addLockedJob 用 context.Background() 调 WithLock 和 job body，shutdown 取消信号传不进来 | internal/cron/scheduler.go:57 | Final() 等 cron.Stop() 完成时，阻塞在 Redis I/O 的 job 无法被取消，可能拖过 30s 关机上限 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过
