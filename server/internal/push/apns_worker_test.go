@@ -430,3 +430,86 @@ func TestNewAPNsWorker_NilArgs_Panic(t *testing.T) {
 
 // keep strconv import tidy across future edits
 var _ = strconv.Itoa
+
+// ---- shutdown resilience (review round 2) --------------------------------
+//
+// Every early-return branch in handle() must finalise the stream entry
+// (XACK / XADD dlq / ZADD retry + XACK) through a ctx that survives a
+// cancelled parent. Otherwise a shutdown during quiet.Resolve /
+// RouteTokens / routing-empty would leave the message in the consumer
+// group's pending list forever, because the worker only reads
+// XREADGROUP ... ">" and never reclaims PEL entries on restart.
+
+// assertPELEmpty fails the test if the consumer group still has pending
+// entries for the stream. Exercises miniredis's XPENDING semantics.
+func assertPELEmpty(t *testing.T, cmd redis.Cmdable, stream, group string) {
+	t.Helper()
+	pending, err := cmd.XPending(context.Background(), stream, group).Result()
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, pending.Count, "message must not be stuck in PEL")
+}
+
+func TestHandle_DecodeError_CancelledCtx_StillDlqAndAcks(t *testing.T) {
+	t.Parallel()
+	_, cmd, w, _ := setupWorkerEnv(t, &fakeSender{}, nil, EmptyQuietHoursResolver{}, &fakeDeleter{})
+	primeRawQueue(t, cmd, "not-json")
+
+	// Read the message under a live ctx, then cancel before calling
+	// handle so every subsequent Redis write goes through writeCtxFor.
+	ctx, cancel := context.WithCancel(context.Background())
+	c := redisx.NewStreamConsumer(cmd, w.cfg.StreamKey, w.cfg.ConsumerGroup, "t-reader", 200*time.Millisecond, 10)
+	msgs, err := c.Read(ctx)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	cancel()
+	w.handle(ctx, c, msgs[0])
+
+	dlq, err := cmd.XLen(context.Background(), "apns:dlq").Result()
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, dlq, "decode-error must still reach DLQ under cancelled ctx")
+	assertPELEmpty(t, cmd, w.cfg.StreamKey, w.cfg.ConsumerGroup)
+}
+
+func TestHandle_RouteError_CancelledCtx_SchedulesRetry(t *testing.T) {
+	t.Parallel()
+	mr := miniredis.RunT(t)
+	cmd := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { cmd.Close() })
+
+	clk := clockx.NewFakeClock(time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC))
+	// Route error path: TokenProvider returns an error.
+	router := NewAPNsRouter(&fakeTokenProvider{err: errors.New("mongo transient")}, "x", "y")
+	w := NewAPNsWorker(defaultWorkerCfg(), cmd, &fakeSender{}, router, EmptyQuietHoursResolver{}, &fakeDeleter{}, clk)
+
+	seed := redisx.NewStreamConsumer(cmd, w.cfg.StreamKey, w.cfg.ConsumerGroup, "seed", 50*time.Millisecond, 10)
+	require.NoError(t, seed.EnsureGroup(context.Background()))
+	primeQueue(t, cmd, clk, "u1", PushPayload{Kind: PushKindAlert, Title: "hi"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	c := redisx.NewStreamConsumer(cmd, w.cfg.StreamKey, w.cfg.ConsumerGroup, "t-reader", 200*time.Millisecond, 10)
+	msgs, err := c.Read(ctx)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	cancel()
+	w.handle(ctx, c, msgs[0])
+
+	assert.EqualValues(t, 1, cmd.ZCard(context.Background(), "apns:retry").Val(),
+		"route error must schedule retry even when ctx is cancelled")
+	assertPELEmpty(t, cmd, w.cfg.StreamKey, w.cfg.ConsumerGroup)
+}
+
+func TestHandle_NoTokens_CancelledCtx_StillAcks(t *testing.T) {
+	t.Parallel()
+	_, cmd, w, clk := setupWorkerEnv(t, &fakeSender{}, nil, EmptyQuietHoursResolver{}, &fakeDeleter{})
+	primeQueue(t, cmd, clk, "u1", PushPayload{Kind: PushKindAlert, Title: "hi"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	c := redisx.NewStreamConsumer(cmd, w.cfg.StreamKey, w.cfg.ConsumerGroup, "t-reader", 200*time.Millisecond, 10)
+	msgs, err := c.Read(ctx)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	cancel()
+	w.handle(ctx, c, msgs[0])
+
+	assertPELEmpty(t, cmd, w.cfg.StreamKey, w.cfg.ConsumerGroup)
+}

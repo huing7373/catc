@@ -227,13 +227,40 @@ func (w *APNsWorker) loop(ctx context.Context, c *redisx.StreamConsumer) {
 	}
 }
 
+// shutdownWriteBudget bounds Redis-write work that has to outlive a
+// cancelled parent ctx (finalising XACK / ZADD retry / XADD dlq during
+// graceful shutdown). 2s is comfortably inside the App.Final 5s budget
+// for this Runnable (architecture §Graceful Shutdown line 218).
+const shutdownWriteBudget = 2 * time.Second
+
+// writeCtxFor returns a ctx appropriate for final Redis writes: the
+// original parent if still live, or a detached Background-with-timeout
+// if the parent was already cancelled. The second return value is always
+// safe to call — either the real cancel or a no-op — so callers can
+// `defer cancel()` without branching.
+//
+// This is the guardrail for "message stuck in PEL forever" — EVERY path
+// in handle() that finishes the consumer-group entry (ACK / XADD dlq /
+// ZADD retry + XACK) must use this, not the raw incoming ctx, because a
+// shutdown wave may arrive between the XREADGROUP and any of those
+// writes. The worker only reads XREADGROUP ... ">", so messages that
+// fail to ACK during shutdown are never reclaimed on restart.
+func (w *APNsWorker) writeCtxFor(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent.Err() == nil {
+		return parent, func() {}
+	}
+	return context.WithTimeout(context.Background(), shutdownWriteBudget)
+}
+
 func (w *APNsWorker) handle(ctx context.Context, c *redisx.StreamConsumer, m redis.XMessage) {
 	raw, _ := m.Values["msg"].(string)
 	var qm queueMessage
 	if err := json.Unmarshal([]byte(raw), &qm); err != nil {
 		log.Error().Err(err).Str("action", "apns_decode_error").Str("streamId", m.ID).Msg("decode error → dlq")
-		w.xaddDLQ(ctx, qm, "decode_error")
-		_ = c.Ack(ctx, m.ID)
+		wctx, cancel := w.writeCtxFor(ctx)
+		defer cancel()
+		w.xaddDLQ(wctx, qm, "decode_error")
+		_ = c.Ack(wctx, m.ID)
 		return
 	}
 
@@ -251,13 +278,17 @@ func (w *APNsWorker) handle(ctx context.Context, c *redisx.StreamConsumer, m red
 	if err != nil {
 		log.Warn().Err(err).Str("action", "apns_route_error").
 			Str("userId", string(qm.UserID)).Msg("route error; will retry/dlq")
-		w.retryOrDLQ(ctx, c, m.ID, qm)
+		wctx, cancel := w.writeCtxFor(ctx)
+		defer cancel()
+		w.retryOrDLQ(wctx, c, m.ID, qm)
 		return
 	}
 	if len(tokens) == 0 {
 		log.Info().Str("action", "apns_no_tokens").Str("userId", string(qm.UserID)).
 			Msg("no registered tokens; ack without send")
-		_ = c.Ack(ctx, m.ID)
+		wctx, cancel := w.writeCtxFor(ctx)
+		defer cancel()
+		_ = c.Ack(wctx, m.ID)
 		return
 	}
 
@@ -325,21 +356,15 @@ func (w *APNsWorker) handle(ctx context.Context, c *redisx.StreamConsumer, m red
 		}
 	}
 
-	// On shutdown the caller's ctx is Done; any Redis command using it
-	// would fail and we'd abandon the message in PEL. Use a detached
-	// short-budget ctx for the finalising writes so retry/ack survive
-	// the cancellation wave.
-	writeCtx := ctx
-	if ctx.Err() != nil {
-		var cancel context.CancelFunc
-		writeCtx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-	}
+	// Same shutdown-resilience contract as the early return branches —
+	// see writeCtxFor godoc for why the raw ctx is unsafe here.
+	wctx, cancel := w.writeCtxFor(ctx)
+	defer cancel()
 	if anyRetryable {
-		w.retryOrDLQ(writeCtx, c, m.ID, qm)
+		w.retryOrDLQ(wctx, c, m.ID, qm)
 		return
 	}
-	_ = c.Ack(writeCtx, m.ID)
+	_ = c.Ack(wctx, m.ID)
 }
 
 // retryOrDLQ branches on whether attempts remain: schedule a retry

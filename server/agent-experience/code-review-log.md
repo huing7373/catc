@@ -192,3 +192,11 @@
 | 2 | patch | `apns_token_cleanup_job` 把保留期硬编码为 `tokenCleanupRetentionDays = 30`，完全忽略 config 新增的 `cfg.APNs.TokenExpiryDays`（且已经过 `validateAPNs` 强校验） | internal/cron/apns_token_cleanup_job.go:13-24 | 运营方把 token_expiry_days 改成非默认值（例如 7 天合规窗口）后，夜间作业仍按 30 天裁断，NFR-SEC-7 合规窗口与配置脱节，等效于"config 是装饰"；job 签名增加 `retention time.Duration` 参数，Scheduler 构造签名传入 `cfg.APNs.TokenExpiryDays*24h`，新增 TestApnsTokenCleanupJob_CutoffNonDefaultRetention 锚定端到端一致性 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go vet -tags=integration ./...` 通过 + `go test -tags=integration ./internal/push/ ./internal/cron/` 通过
+
+## [0-13-apns-push-platform-pusher-queue-routing-410-cleanup] Round 2 — 2026-04-18
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | Round 1 的 detached writeCtx 只套在 Send 之后的收尾分支（原 handle 尾部），decode error / RouteTokens error / 无 token 三条早期分支仍然用原始（可能已取消的）ctx 做 xaddDLQ / retryOrDLQ / Ack；若 shutdown 恰在 quiet.Resolve / RouteTokens 期间到达，这几处 Redis 写全部失败，消息仍滞留 PEL；而 worker 只 `XREADGROUP ... ">"` 从不回收 PEL，等价于数据丢失 | internal/push/apns_worker.go:233,250,257 | 提取 `writeCtxFor(parent)` helper（parent 未 Done 时直接返回 + no-op cancel，否则 `context.Background()+2s`），覆盖 handle 的每一条收尾路径；新增 3 个单元测试（decode / route-err / no-token）在 `ctx` 已 cancel 的前提下断言 `XPENDING.Count == 0`，锁死 PEL 无残留契约 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go test -tags=integration ./internal/push/ ./internal/cron/` 通过
