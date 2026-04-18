@@ -1,6 +1,6 @@
 # Story 0.10: WS 上行 eventId 幂等去重
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
