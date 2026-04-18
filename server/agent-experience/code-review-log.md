@@ -183,3 +183,12 @@
 | 2 | patch | `dispatcher.Register("session.resume", handler)` 无条件在所有模式下执行，release 模式里 handler 返回的 6 个字段全部来自 Empty*Provider（user=null / friends=[] / ...），与合法"新注册无好友"账号状态不可区分 | cmd/cat/initialize.go:61-69 | Story 1.1 真实 UserProvider 上线前的任何 release 部署都会把占位数据当真账户状态回给客户端，客户端 UI 会长期显示空帐号视图；gate 到 debug 模式（Story 0.15 Spike-OP1 的集成测试路径），release 模式明确不注册 + log.Info 说明；Story 1.1 起逐个 provider 真实化时再放开该 gate |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go vet -tags=integration ./...` 通过
+
+## [0-13-apns-push-platform-pusher-queue-routing-410-cleanup] Round 1 — 2026-04-18
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | `sender.Send` 返回 `context.Canceled` / `DeadlineExceeded` 时 handle 直接 return，既未 XACK 也未 scheduleRetry；而 worker 只 `XREADGROUP ... ">"`（不回收 PEL 中的旧条目） | internal/push/apns_worker.go:267-270 | 进程关闭瞬间正在飞的 APNs 请求永远滞留在 consumer group 的 Pending Entries List，重启后不被重投 → 真正的消息丢失路径；改为 break 标记 anyRetryable，并在 ctx 已取消时用 `context.Background()` + 2s 兜底 ctx 做最终的 retryOrDLQ / Ack 写入，保证优雅关机也能把 PEL 排空 |
+| 2 | patch | `apns_token_cleanup_job` 把保留期硬编码为 `tokenCleanupRetentionDays = 30`，完全忽略 config 新增的 `cfg.APNs.TokenExpiryDays`（且已经过 `validateAPNs` 强校验） | internal/cron/apns_token_cleanup_job.go:13-24 | 运营方把 token_expiry_days 改成非默认值（例如 7 天合规窗口）后，夜间作业仍按 30 天裁断，NFR-SEC-7 合规窗口与配置脱节，等效于"config 是装饰"；job 签名增加 `retention time.Duration` 参数，Scheduler 构造签名传入 `cfg.APNs.TokenExpiryDays*24h`，新增 TestApnsTokenCleanupJob_CutoffNonDefaultRetention 锚定端到端一致性 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go vet -tags=integration ./...` 通过 + `go test -tags=integration ./internal/push/ ./internal/cron/` 通过

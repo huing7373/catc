@@ -8,6 +8,7 @@ import (
 	"github.com/robfig/cron/v3"
 	"github.com/rs/zerolog/log"
 
+	"github.com/huing/cat/server/internal/push"
 	"github.com/huing/cat/server/pkg/clockx"
 	"github.com/huing/cat/server/pkg/redisx"
 )
@@ -15,20 +16,37 @@ import (
 const defaultLockTTL = 55 * time.Second
 
 type Scheduler struct {
-	cron     *cron.Cron
-	locker   *redisx.Locker
-	redisCmd redis.Cmdable
-	clock    clockx.Clock
-	cancel   context.CancelFunc
-	ctx      context.Context
+	cron                 *cron.Cron
+	locker               *redisx.Locker
+	redisCmd             redis.Cmdable
+	clock                clockx.Clock
+	tokenCleaner         push.TokenCleaner
+	tokenExpiryRetention time.Duration
+	cancel               context.CancelFunc
+	ctx                  context.Context
 }
 
-func NewScheduler(locker *redisx.Locker, redisCmd redis.Cmdable, clock clockx.Clock) *Scheduler {
+// NewScheduler accepts the push.TokenCleaner used by the apns_token_cleanup
+// job plus the operator-configured retention window (cfg.APNs.TokenExpiryDays
+// converted to Duration). Epic 0 passes push.EmptyTokenCleaner{}; Story 1.4
+// swaps in a real repository without changing this signature further.
+//
+// tokenExpiry must be > 0. Validation is enforced by config.validateAPNs; a
+// non-positive value here is a programming error, not a runtime condition.
+func NewScheduler(locker *redisx.Locker, redisCmd redis.Cmdable, clock clockx.Clock, tokenCleaner push.TokenCleaner, tokenExpiry time.Duration) *Scheduler {
+	if tokenCleaner == nil {
+		panic("cron.NewScheduler: tokenCleaner must not be nil")
+	}
+	if tokenExpiry <= 0 {
+		panic("cron.NewScheduler: tokenExpiry must be > 0")
+	}
 	return &Scheduler{
-		cron:     cron.New(cron.WithChain(cron.Recover(cronLogger{}))),
-		locker:   locker,
-		redisCmd: redisCmd,
-		clock:    clock,
+		cron:                 cron.New(cron.WithChain(cron.Recover(cronLogger{}))),
+		locker:               locker,
+		redisCmd:             redisCmd,
+		clock:                clock,
+		tokenCleaner:         tokenCleaner,
+		tokenExpiryRetention: tokenExpiry,
 	}
 }
 
@@ -53,6 +71,9 @@ func (s *Scheduler) Final(_ context.Context) error {
 func (s *Scheduler) registerJobs() {
 	s.addLockedJob("@every 1m", "heartbeat_tick", func(ctx context.Context) error {
 		return heartbeatTick(ctx, s.redisCmd, s.clock)
+	})
+	s.addLockedJob("@daily", "apns_token_cleanup", func(ctx context.Context) error {
+		return apnsTokenCleanupJob(ctx, s.tokenCleaner, s.clock, s.tokenExpiryRetention)
 	})
 }
 

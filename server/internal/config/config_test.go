@@ -75,6 +75,55 @@ base_url = "https://cdn.example.com"
 	assert.Equal(t, 2592000, cfg.JWT.RefreshExpirySec)
 	assert.NotEmpty(t, cfg.Hash)
 	assert.Len(t, cfg.Hash, 8)
+
+	// APNs defaults applied even when the explicit [apns] section only
+	// sets the bare identity fields.
+	assert.Equal(t, "KEY123", cfg.APNs.KeyID)
+	assert.Equal(t, "TEAM123", cfg.APNs.TeamID)
+	assert.Equal(t, "apns:queue", cfg.APNs.StreamKey)
+	assert.Equal(t, "apns:dlq", cfg.APNs.DLQKey)
+	assert.Equal(t, "apns:retry", cfg.APNs.RetryZSetKey)
+	assert.Equal(t, "apns_workers", cfg.APNs.ConsumerGroup)
+	assert.Equal(t, 2, cfg.APNs.WorkerCount)
+	assert.Equal(t, 300, cfg.APNs.IdemTTLSec)
+	assert.Equal(t, 1000, cfg.APNs.ReadBlockMs)
+	assert.Equal(t, 10, cfg.APNs.ReadCount)
+	assert.Equal(t, []int{1000, 3000, 9000}, cfg.APNs.RetryBackoffsMs)
+	assert.Equal(t, 4, cfg.APNs.MaxAttempts)
+	assert.Equal(t, 30, cfg.APNs.TokenExpiryDays)
+	assert.False(t, cfg.APNs.Enabled, "default enabled must be false — release must opt in")
+}
+
+// TestMustLoad_APNsDefaultsAppliedWhenSectionOmitted verifies that an
+// override config without an [apns] section still boots. Regression guard
+// mirroring the [ws] precedent.
+func TestMustLoad_APNsDefaultsAppliedWhenSectionOmitted(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "override.toml")
+	content := `
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[redis]
+addr = "localhost:6379"
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	cfg := MustLoad(path)
+
+	assert.Equal(t, "apns:queue", cfg.APNs.StreamKey)
+	assert.Equal(t, "apns:dlq", cfg.APNs.DLQKey)
+	assert.Equal(t, "apns:retry", cfg.APNs.RetryZSetKey)
+	assert.Equal(t, "apns_workers", cfg.APNs.ConsumerGroup)
+	assert.Equal(t, 2, cfg.APNs.WorkerCount)
+	assert.Equal(t, 300, cfg.APNs.IdemTTLSec)
+	assert.Equal(t, []int{1000, 3000, 9000}, cfg.APNs.RetryBackoffsMs)
+	assert.Equal(t, 4, cfg.APNs.MaxAttempts)
+	assert.Equal(t, 30, cfg.APNs.TokenExpiryDays)
+	assert.False(t, cfg.APNs.Enabled)
 }
 
 // TestMustLoad_OverrideWithoutWSSection verifies that an override config

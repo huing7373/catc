@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/huing/cat/server/internal/push"
 	"github.com/huing/cat/server/pkg/clockx"
 	"github.com/huing/cat/server/pkg/redisx"
 )
@@ -28,7 +29,7 @@ func setupTestScheduler(t *testing.T) (*miniredis.Miniredis, *Scheduler) {
 
 	locker := redisx.NewLocker(cli)
 	clock := clockx.NewFakeClock(time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC))
-	sch := NewScheduler(locker, cli, clock)
+	sch := NewScheduler(locker, cli, clock, push.EmptyTokenCleaner{}, 30*24*time.Hour)
 	return mr, sch
 }
 

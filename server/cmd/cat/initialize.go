@@ -10,6 +10,7 @@ import (
 	"github.com/huing/cat/server/internal/config"
 	"github.com/huing/cat/server/internal/cron"
 	"github.com/huing/cat/server/internal/handler"
+	"github.com/huing/cat/server/internal/push"
 	"github.com/huing/cat/server/internal/ws"
 	"github.com/huing/cat/server/pkg/clockx"
 	"github.com/huing/cat/server/pkg/logx"
@@ -41,7 +42,48 @@ func initialize(cfg *config.Config) *App {
 
 	clk := clockx.NewRealClock()
 	locker := redisx.NewLocker(redisCli.Cmdable())
-	cronSch := cron.NewScheduler(locker, redisCli.Cmdable(), clk)
+	cronSch := cron.NewScheduler(
+		locker, redisCli.Cmdable(), clk, push.EmptyTokenCleaner{},
+		time.Duration(cfg.APNs.TokenExpiryDays)*24*time.Hour,
+	)
+
+	// Push platform — APNs worker + Pusher façade. When apns.enabled=false
+	// (default / debug), NoopPusher keeps downstream service code safe
+	// without opening any APNs HTTP/2 connection. Real impl opts in via
+	// release-deploy config (key_path + key_id + team_id + topics).
+	var pusher push.Pusher = push.NoopPusher{}
+	var apnsWorker *push.APNsWorker
+	if cfg.APNs.Enabled {
+		sender, err := push.NewApnsClient(
+			cfg.APNs.KeyPath, cfg.APNs.KeyID, cfg.APNs.TeamID,
+			cfg.Server.Mode == "release",
+		)
+		if err != nil {
+			log.Fatal().Err(err).Msg("apns client init failed")
+		}
+		streamPusher := redisx.NewStreamPusher(redisCli.Cmdable(), cfg.APNs.StreamKey)
+		pusher = push.NewRedisStreamsPusher(
+			streamPusher, redisCli.Cmdable(), clk,
+			time.Duration(cfg.APNs.IdemTTLSec)*time.Second,
+		)
+		router := push.NewAPNsRouter(push.EmptyTokenProvider{}, cfg.APNs.WatchTopic, cfg.APNs.IphoneTopic)
+		apnsWorker = push.NewAPNsWorker(push.APNsWorkerConfig{
+			InstanceID:      locker.InstanceID(),
+			StreamKey:       cfg.APNs.StreamKey,
+			DLQKey:          cfg.APNs.DLQKey,
+			RetryZSetKey:    cfg.APNs.RetryZSetKey,
+			ConsumerGroup:   cfg.APNs.ConsumerGroup,
+			WorkerCount:     cfg.APNs.WorkerCount,
+			ReadBlock:       time.Duration(cfg.APNs.ReadBlockMs) * time.Millisecond,
+			ReadCount:       int64(cfg.APNs.ReadCount),
+			RetryBackoffsMs: cfg.APNs.RetryBackoffsMs,
+			MaxAttempts:     cfg.APNs.MaxAttempts,
+		}, redisCli.Cmdable(), sender, router, push.EmptyQuietHoursResolver{}, push.EmptyTokenDeleter{}, clk)
+		log.Info().Msg("apns push platform enabled")
+	} else {
+		log.Info().Msg("apns disabled (cfg.apns.enabled=false); NoopPusher in use")
+	}
+	_ = pusher // Epic 0: no service consumes yet; Story 5.2/6.2/8.2/1.5 will.
 
 	wsHub := ws.NewHub(ws.HubConfig{
 		PingInterval:   time.Duration(cfg.WS.PingIntervalSec) * time.Second,
@@ -112,7 +154,17 @@ func initialize(cfg *config.Config) *App {
 	router := buildRouter(cfg, h)
 	httpSrv := newHTTPServer(cfg, router)
 
-	app := NewApp(mongoCli, redisCli, cronSch, wsHub, httpSrv)
+	// Runs order: mongo, redis, cron, wsHub, [apnsWorker?], http.
+	// Reverse Final order matches architecture §Graceful Shutdown line 218
+	// (HTTP → wsHub → cron → APNs worker → redis → mongo). Keeping the
+	// worker AFTER cron in positive order puts its Final BEFORE cron's —
+	// the worker drains in-flight APNs sends first, then cron stops.
+	var app *App
+	if apnsWorker != nil {
+		app = NewApp(mongoCli, redisCli, cronSch, wsHub, apnsWorker, httpSrv)
+	} else {
+		app = NewApp(mongoCli, redisCli, cronSch, wsHub, httpSrv)
+	}
 	app.OnReady(h.health.SetReady)
 	return app
 }

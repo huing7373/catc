@@ -68,10 +68,24 @@ type WSCfg struct {
 }
 
 type APNsCfg struct {
-	KeyID    string `toml:"key_id"`
-	TeamID   string `toml:"team_id"`
-	BundleID string `toml:"bundle_id"`
-	KeyPath  string `toml:"key_path"`
+	KeyID           string `toml:"key_id"`
+	TeamID          string `toml:"team_id"`
+	BundleID        string `toml:"bundle_id"`
+	KeyPath         string `toml:"key_path"`
+	WatchTopic      string `toml:"watch_topic"`
+	IphoneTopic     string `toml:"iphone_topic"`
+	StreamKey       string `toml:"stream_key"`
+	DLQKey          string `toml:"dlq_key"`
+	RetryZSetKey    string `toml:"retry_zset_key"`
+	ConsumerGroup   string `toml:"consumer_group"`
+	WorkerCount     int    `toml:"worker_count"`
+	IdemTTLSec      int    `toml:"idem_ttl_sec"`
+	ReadBlockMs     int    `toml:"read_block_ms"`
+	ReadCount       int    `toml:"read_count"`
+	RetryBackoffsMs []int  `toml:"retry_backoffs_ms"`
+	MaxAttempts     int    `toml:"max_attempts"`
+	TokenExpiryDays int    `toml:"token_expiry_days"`
+	Enabled         bool   `toml:"enabled"`
 }
 
 type CDNCfg struct {
@@ -120,6 +134,39 @@ func (c *Config) applyDefaults() {
 	if c.WS.ResumeCacheTTLSec == 0 {
 		c.WS.ResumeCacheTTLSec = 60
 	}
+	if c.APNs.StreamKey == "" {
+		c.APNs.StreamKey = "apns:queue"
+	}
+	if c.APNs.DLQKey == "" {
+		c.APNs.DLQKey = "apns:dlq"
+	}
+	if c.APNs.RetryZSetKey == "" {
+		c.APNs.RetryZSetKey = "apns:retry"
+	}
+	if c.APNs.ConsumerGroup == "" {
+		c.APNs.ConsumerGroup = "apns_workers"
+	}
+	if c.APNs.WorkerCount == 0 {
+		c.APNs.WorkerCount = 2
+	}
+	if c.APNs.IdemTTLSec == 0 {
+		c.APNs.IdemTTLSec = 300
+	}
+	if c.APNs.ReadBlockMs == 0 {
+		c.APNs.ReadBlockMs = 1000
+	}
+	if c.APNs.ReadCount == 0 {
+		c.APNs.ReadCount = 10
+	}
+	if len(c.APNs.RetryBackoffsMs) == 0 {
+		c.APNs.RetryBackoffsMs = []int{1000, 3000, 9000}
+	}
+	if c.APNs.MaxAttempts == 0 {
+		c.APNs.MaxAttempts = 4
+	}
+	if c.APNs.TokenExpiryDays == 0 {
+		c.APNs.TokenExpiryDays = 30
+	}
 }
 
 func (c *Config) mustValidate() {
@@ -147,5 +194,58 @@ func (c *Config) mustValidate() {
 	if c.WS.ResumeCacheTTLSec <= 0 {
 		log.Fatal().Int("resume_cache_ttl_sec", c.WS.ResumeCacheTTLSec).
 			Msg("config: ws.resume_cache_ttl_sec must be > 0")
+	}
+	c.validateAPNs()
+}
+
+// validateAPNs enforces positive-integer invariants on APNs worker /
+// retry knobs always, and — when push is explicitly enabled — requires
+// the production secrets (key_path / key_id / team_id) and per-platform
+// topics to be provided. Disable the push platform with `enabled = false`
+// rather than zeroing numeric fields (0.11 / 0.12 discipline).
+func (c *Config) validateAPNs() {
+	if c.APNs.WorkerCount <= 0 {
+		log.Fatal().Int("worker_count", c.APNs.WorkerCount).Msg("config: apns.worker_count must be > 0")
+	}
+	if c.APNs.IdemTTLSec <= 0 {
+		log.Fatal().Int("idem_ttl_sec", c.APNs.IdemTTLSec).Msg("config: apns.idem_ttl_sec must be > 0")
+	}
+	if c.APNs.ReadBlockMs <= 0 {
+		log.Fatal().Int("read_block_ms", c.APNs.ReadBlockMs).Msg("config: apns.read_block_ms must be > 0")
+	}
+	if c.APNs.ReadCount <= 0 {
+		log.Fatal().Int("read_count", c.APNs.ReadCount).Msg("config: apns.read_count must be > 0")
+	}
+	if len(c.APNs.RetryBackoffsMs) == 0 {
+		log.Fatal().Msg("config: apns.retry_backoffs_ms must be non-empty")
+	}
+	for _, ms := range c.APNs.RetryBackoffsMs {
+		if ms <= 0 {
+			log.Fatal().Int("backoff_ms", ms).Msg("config: apns.retry_backoffs_ms entries must be > 0")
+		}
+	}
+	if c.APNs.MaxAttempts <= 0 {
+		log.Fatal().Int("max_attempts", c.APNs.MaxAttempts).Msg("config: apns.max_attempts must be > 0")
+	}
+	if c.APNs.TokenExpiryDays <= 0 {
+		log.Fatal().Int("token_expiry_days", c.APNs.TokenExpiryDays).Msg("config: apns.token_expiry_days must be > 0")
+	}
+	if !c.APNs.Enabled {
+		return
+	}
+	if c.APNs.KeyPath == "" {
+		log.Fatal().Msg("config: apns.enabled=true requires apns.key_path")
+	}
+	if c.APNs.KeyID == "" {
+		log.Fatal().Msg("config: apns.enabled=true requires apns.key_id")
+	}
+	if c.APNs.TeamID == "" {
+		log.Fatal().Msg("config: apns.enabled=true requires apns.team_id")
+	}
+	if c.APNs.WatchTopic == "" {
+		log.Fatal().Msg("config: apns.enabled=true requires apns.watch_topic")
+	}
+	if c.APNs.IphoneTopic == "" {
+		log.Fatal().Msg("config: apns.enabled=true requires apns.iphone_topic")
 	}
 }

@@ -43,6 +43,20 @@ key_id = ""
 team_id = ""
 bundle_id = ""
 key_path = ""
+watch_topic = ""
+iphone_topic = ""
+stream_key = "apns:queue"
+dlq_key = "apns:dlq"
+retry_zset_key = "apns:retry"
+consumer_group = "apns_workers"
+worker_count = 2
+idem_ttl_sec = 300
+read_block_ms = 1000
+read_count = 10
+retry_backoffs_ms = [1000, 3000, 9000]
+max_attempts = 4
+token_expiry_days = 30
+enabled = false
 
 [cdn]
 base_url = ""
