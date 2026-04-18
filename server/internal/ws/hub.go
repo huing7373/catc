@@ -70,14 +70,14 @@ func (h *Hub) Register(client *Client) {
 func (h *Hub) Unregister(connID ConnID) {
 	if v, loaded := h.clients.LoadAndDelete(connID); loaded {
 		c := v.(*Client)
-		c.closeSend()
+		c.stop()
 		h.count.Add(-1)
 	}
 }
 
 func (h *Hub) unregisterClient(c *Client) {
 	if _, loaded := h.clients.LoadAndDelete(c.connID); loaded {
-		c.closeSend()
+		c.stop()
 		c.conn.Close()
 		h.count.Add(-1)
 	}
@@ -104,27 +104,30 @@ type Client struct {
 	userID     UserID
 	conn       *websocket.Conn
 	send       chan []byte
+	done       chan struct{}
 	hub        *Hub
 	dispatcher *Dispatcher
 	closeOnce  sync.Once
-	closed     atomic.Bool
 }
 
 func (c *Client) ConnID() ConnID { return c.connID }
 func (c *Client) UserID() UserID { return c.userID }
 
-func (c *Client) closeSend() {
-	c.closeOnce.Do(func() {
-		c.closed.Store(true)
-		close(c.send)
-	})
+// stop signals the client to shut down. Safe to call from any goroutine, any
+// number of times. It closes the done channel (once) which causes writePump to
+// drain and exit. The send channel is never closed — publishers simply see
+// a full channel or a done signal and silently drop.
+func (c *Client) stop() {
+	c.closeOnce.Do(func() { close(c.done) })
 }
 
+// trySend enqueues msg for delivery. Returns false (silently drops) if the
+// client is stopped or the send buffer is full. Because send is never closed,
+// this cannot panic.
 func (c *Client) trySend(msg []byte) bool {
-	if c.closed.Load() {
-		return false
-	}
 	select {
+	case <-c.done:
+		return false
 	case c.send <- msg:
 		return true
 	default:
@@ -179,11 +182,9 @@ func (h *Hub) writePump(c *Client) {
 
 	for {
 		select {
-		case msg, ok := <-c.send:
-			if !ok {
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
+		case <-c.done:
+			return
+		case msg := <-c.send:
 			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				return
 			}

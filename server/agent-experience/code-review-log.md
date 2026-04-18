@@ -132,3 +132,11 @@
 | 2 | patch | GoroutineCount() 返回 连接数×2，但 health_handler 用 MaxConnections（连接上限）做比较阈值，~50% 连接数时就报不健康 | cmd/cat/initialize.go:69 | 服务在远未达连接上限时被探针标为不健康，触发误报告警或负载均衡摘除 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过
+
+## [0-9-ws-hub-skeleton-envelope-broadcaster-interface] Round 2 — 2026-04-18
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | atomic bool 检查 + channel send 不是原子操作，closed.Load()=false 后另一 goroutine 执行 close(send)，前者进入 send 仍 panic | internal/ws/hub.go:116-133 | Round 1 修复未彻底消除竞态窗口；改为 done channel 驱动退出，send 永不关闭，trySend 用 select done/send/default 三路复用 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过

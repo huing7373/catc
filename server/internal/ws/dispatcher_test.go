@@ -20,7 +20,7 @@ func TestDispatcher_KnownType(t *testing.T) {
 	})
 
 	hub := NewHub(HubConfig{SendBufSize: 16}, clockx.NewRealClock())
-	c := &Client{connID: "c1", userID: "u1", send: make(chan []byte, 16), hub: hub}
+	c := &Client{connID: "c1", userID: "u1", send: make(chan []byte, 16), done: make(chan struct{}), hub: hub}
 	hub.Register(c)
 
 	raw := `{"id":"req-1","type":"debug.echo","payload":{"msg":"hello"}}`
@@ -44,7 +44,7 @@ func TestDispatcher_UnknownType(t *testing.T) {
 
 	d := NewDispatcher()
 	hub := NewHub(HubConfig{SendBufSize: 16}, clockx.NewRealClock())
-	c := &Client{connID: "c1", userID: "u1", send: make(chan []byte, 16), hub: hub}
+	c := &Client{connID: "c1", userID: "u1", send: make(chan []byte, 16), done: make(chan struct{}), hub: hub}
 	hub.Register(c)
 
 	raw := `{"id":"req-2","type":"nonexistent.action","payload":{}}`
@@ -69,7 +69,7 @@ func TestDispatcher_InvalidEnvelope(t *testing.T) {
 
 	d := NewDispatcher()
 	hub := NewHub(HubConfig{SendBufSize: 16}, clockx.NewRealClock())
-	c := &Client{connID: "c1", userID: "u1", send: make(chan []byte, 16), hub: hub}
+	c := &Client{connID: "c1", userID: "u1", send: make(chan []byte, 16), done: make(chan struct{}), hub: hub}
 	hub.Register(c)
 
 	d.Dispatch(context.Background(), c, []byte(`not-json`))

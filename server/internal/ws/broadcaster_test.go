@@ -16,9 +16,9 @@ func TestInMemoryBroadcaster_BroadcastToUser(t *testing.T) {
 	hub := NewHub(HubConfig{SendBufSize: 16}, clockx.NewRealClock())
 	b := NewInMemoryBroadcaster(hub)
 
-	c1 := &Client{connID: "c1", userID: "alice", send: make(chan []byte, 16)}
-	c2 := &Client{connID: "c2", userID: "alice", send: make(chan []byte, 16)}
-	c3 := &Client{connID: "c3", userID: "bob", send: make(chan []byte, 16)}
+	c1 := &Client{connID: "c1", userID: "alice", send: make(chan []byte, 16), done: make(chan struct{})}
+	c2 := &Client{connID: "c2", userID: "alice", send: make(chan []byte, 16), done: make(chan struct{})}
+	c3 := &Client{connID: "c3", userID: "bob", send: make(chan []byte, 16), done: make(chan struct{})}
 
 	hub.Register(c1)
 	hub.Register(c2)

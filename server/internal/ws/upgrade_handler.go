@@ -77,6 +77,7 @@ func (h *UpgradeHandler) Handle(c *gin.Context) {
 		userID:     userID,
 		conn:       conn,
 		send:       make(chan []byte, h.hub.cfg.SendBufSize),
+		done:       make(chan struct{}),
 		hub:        h.hub,
 		dispatcher: h.dispatcher,
 	}
