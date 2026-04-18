@@ -36,6 +36,7 @@
 
 generated: 2026-04-17
 last_updated: 2026-04-18
+# Story 0-13 done: 2026-04-18
 # Story 0-13 review: 2026-04-18
 # Story 0-13 in-progress: 2026-04-18
 # Story 0-13 created: 2026-04-18
@@ -73,7 +74,7 @@ development_status:
   0-10-ws-upstream-eventid-idempotent-dedup: done
   0-11-ws-connect-rate-limit-and-abnormal-device-reject: done
   0-12-session-resume-cache-throttle: done
-  0-13-apns-push-platform-pusher-queue-routing-410-cleanup: review
+  0-13-apns-push-platform-pusher-queue-routing-410-cleanup: done
   0-14-ws-message-type-registry-and-version-query: backlog
   0-15-spike-op1-watchos-ws-primary-stability-test-matrix: backlog
   epic-0-retrospective: optional

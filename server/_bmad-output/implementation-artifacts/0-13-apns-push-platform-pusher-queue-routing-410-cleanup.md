@@ -1,6 +1,6 @@
 # Story 0.13: APNs 推送平台（Pusher 接口 + 队列 + 路由 + 410 清理）
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
