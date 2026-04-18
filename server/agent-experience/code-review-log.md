@@ -165,3 +165,12 @@
 | 2 | patch | 用 INCR + EXPIRE NX 实现声称的"滑动窗口 60s ≤ 5"；TTL 仅首次设置，语义其实是固定窗口 | pkg/redisx/conn_ratelimit.go:75-78 | 客户端可以在窗口关闭前 5 次 + 窗口 reset 后立即 5 次 = 短时 10 次，绕过 NFR-SCALE-5 保证；改为 sorted set（ZADD 时间戳 + ZREMRANGEBYSCORE + ZCARD）做真正的滑动窗口，构造期注入 clockx.Clock 以便 FakeClock 驱动测试 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go test -tags=integration ./internal/ws/... ./tools/...` 通过
+
+## [0-11-ws-connect-rate-limit-and-abnormal-device-reject] Round 2 — 2026-04-18
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | ZRemRangeByScore 用 `(cutoff` 保留 score == cutoff 的最老项，blocked 分支的 `d > 0 && d <= window` 守卫在 d == 0 时 retry 回退到 r.window | pkg/redisx/conn_ratelimit.go:122 | 客户端在"下一瞬间就该放行"的边界点反收到 60s Retry-After，按 header 退避被额外锁一个窗口；改 `d <= 0 → retry = 1ms`（ceilSeconds 向上取 1s）作为防御 |
+| 2 | patch | ZSET 用 nanosecond Unix 时间戳作 score；float64 仅精确表示到 2^53 ≈ 9e15，1.7e18 级时间戳 round-trip 损失百纳秒级精度 | pkg/redisx/conn_ratelimit.go:98-106 | ageoutAt − now 的整数算术依赖 float→int round-trip，边界 d 本应为 0 的场景会出现伪正数或伪负数，让 Round 1 的回归测试伪通过；改为 Unix millisecond（1.7e12 < 2^53，精确表示），一并让上一条 d==0 边界成为可确定复现的测试条件 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go test -tags=integration ./internal/ws/... ./tools/...` 通过

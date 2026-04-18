@@ -30,26 +30,38 @@ type ConnectDecision struct {
 
 // RedisConnectRateLimiter enforces a TRUE sliding window on WS connect
 // attempts per user, backed by a Redis sorted set whose scores are attempt
-// timestamps (nanoseconds). An earlier INCR+EXPIRE-NX implementation was
-// correctly flagged as a fixed window (boundary bypass: 5 connects just
+// timestamps (Unix milliseconds). An earlier INCR+EXPIRE-NX implementation
+// was correctly flagged as a fixed window (boundary bypass: 5 connects just
 // before expiry + 5 connects immediately after reset → 10 within ~2s).
+//
+// Milliseconds (not nanoseconds) for the ZSET score: Redis sorted set
+// scores are double-precision floats (IEEE 754), which represent integers
+// exactly only up to 2^53. Nanosecond Unix timestamps (~1.7e18 today)
+// exceed that, so round-tripping a ns score through Redis loses ~hundreds
+// of ns of precision — causing the ageoutAt-vs-now math below to miss the
+// boundary by a few nanoseconds. Millisecond Unix timestamps (~1.7e12)
+// stay safely under 2^53 through the 2100s, so the ZRange score readback
+// equals the value that was ZADDed, and d == 0 at the exact boundary is a
+// reliable (not rounding-influenced) signal.
 //
 // Key space (separated from blacklist:device:* / lock:cron:* / event:* per D16):
 //
-//	ratelimit:ws:{userID}  →  ZSET { member = "<nanos>:<uuid>", score = <nanos> }
+//	ratelimit:ws:{userID}  →  ZSET { member = "<ms>:<uuid>", score = <ms> }
 //
 // Algorithm (single pipeline — ZADD is atomic, the ZREMRANGEBYSCORE is a
 // read-before-write from the same replica's perspective):
 //
 //  1. ZREMRANGEBYSCORE key -inf (cutoff   → drop entries older than window
-//  2. ZADD             key score=now member=now:uuid
+//  2. ZADD             key score=now_ms member=ms:uuid
 //  3. ZCARD            key                 → count within window
 //  4. ZRANGE           key 0 0 WITHSCORES  → oldest in-window entry
 //  5. PEXPIRE          key window          → GC dormant users' keys
 //
 // newCount > threshold → Allowed=false. RetryAfter is computed from the
 // oldest in-window entry (ageoutAt − now) so the client waits the *minimum*
-// time until a slot frees up, not a full window.
+// time until a slot frees up, not a full window. A sub-millisecond/boundary
+// result is clamped to 1 ms so the upstream ceilSeconds yields a usable
+// (≥ 1s) Retry-After header rather than falling through to the full window.
 //
 // Count is NOT capped at threshold — keeping the true value lets audit logs
 // describe the real scale of a misbehaving client (the J4 scenario: a single
@@ -91,19 +103,19 @@ func connRateKey(userID string) string {
 func (r *RedisConnectRateLimiter) AcquireConnectSlot(ctx context.Context, userID string) (ConnectDecision, error) {
 	key := connRateKey(userID)
 	now := r.clock.Now()
-	nowNanos := now.UnixNano()
-	cutoff := now.Add(-r.window).UnixNano()
+	nowMillis := now.UnixMilli()
+	cutoff := now.Add(-r.window).UnixMilli()
 
-	// Member must be unique per attempt — two attempts at the same nanosecond
+	// Member must be unique per attempt — two attempts at the same millisecond
 	// would otherwise collapse into a single ZSET entry (ZADD is set-valued).
-	member := strconv.FormatInt(nowNanos, 10) + ":" + uuid.New().String()
+	member := strconv.FormatInt(nowMillis, 10) + ":" + uuid.New().String()
 
 	pipe := r.cmd.Pipeline()
 	// Remove entries strictly older than (now - window). Entries at exactly
 	// score == cutoff are the just-turned-60s-old boundary — keep them
 	// in-window (conservative: reject rather than risk missing a burst).
 	pipe.ZRemRangeByScore(ctx, key, "-inf", "("+strconv.FormatInt(cutoff, 10))
-	pipe.ZAdd(ctx, key, redis.Z{Score: float64(nowNanos), Member: member})
+	pipe.ZAdd(ctx, key, redis.Z{Score: float64(nowMillis), Member: member})
 	zcardCmd := pipe.ZCard(ctx, key)
 	zrangeCmd := pipe.ZRangeWithScores(ctx, key, 0, 0)
 	pipe.PExpire(ctx, key, r.window)
@@ -117,15 +129,27 @@ func (r *RedisConnectRateLimiter) AcquireConnectSlot(ctx context.Context, userID
 	}
 
 	// Blocked: retry = time until the oldest in-window entry ages out.
-	// Fallback to full window if ZSet is unexpectedly empty (race with
-	// another replica's ZRem — rare, conservative).
+	// Defaults to full window only when the ZSET is unexpectedly empty
+	// (theoretically impossible — we just ZADDed ourselves).
 	retry := r.window
 	oldest := zrangeCmd.Val()
 	if len(oldest) > 0 {
-		oldestNanos := int64(oldest[0].Score)
-		ageoutAt := oldestNanos + r.window.Nanoseconds()
-		if d := time.Duration(ageoutAt - nowNanos); d > 0 && d <= r.window {
+		oldestMillis := int64(oldest[0].Score)
+		ageoutMillis := oldestMillis + r.window.Milliseconds()
+		d := time.Duration(ageoutMillis-nowMillis) * time.Millisecond
+		switch {
+		case d <= 0:
+			// Boundary: oldest retained entry has score == cutoff, so its
+			// ageout instant equals now. The old `d > 0` guard here fell
+			// through to retry = full window, handing the client a 60s
+			// Retry-After at the precise moment the slot would free —
+			// review round 2 fix. A 1 ms hint is rounded up to 1 second
+			// by ceilSeconds, giving the client a real "try again soon".
+			retry = time.Millisecond
+		case d <= r.window:
 			retry = d
+			// default: d > window is impossible (ZRem removed older); keep
+			// retry = r.window safety net.
 		}
 	}
 

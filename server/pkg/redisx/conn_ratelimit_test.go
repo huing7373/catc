@@ -24,7 +24,7 @@ func TestRedisConnectRateLimiter_AllowsUnderThreshold(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 1; i <= 5; i++ {
-		fc.Advance(time.Millisecond) // distinct timestamps per attempt
+		fc.Advance(time.Millisecond) // distinct ms-level scores per attempt
 		d, err := rl.AcquireConnectSlot(ctx, "u1")
 		require.NoError(t, err)
 		assert.True(t, d.Allowed, "attempt %d must be allowed", i)
@@ -90,17 +90,17 @@ func TestRedisConnectRateLimiter_SlidingWindow_NoBoundaryBypass(t *testing.T) {
 	rl := NewConnectRateLimiter(cmd, fc, 5, 60*time.Second)
 	ctx := context.Background()
 
-	// Burst of 5 rapid connects (1μs apart — effectively simultaneous).
+	// Burst of 5 rapid connects spread 1ms apart (distinct scores).
 	for i := 1; i <= 5; i++ {
-		fc.Advance(time.Microsecond)
+		fc.Advance(time.Millisecond)
 		d, err := rl.AcquireConnectSlot(ctx, "u1")
 		require.NoError(t, err)
 		require.True(t, d.Allowed, "burst #%d must succeed", i)
 	}
 
-	// Advance to just before the oldest entry ages out (59.999s past the
-	// last burst attempt, so still inside the window for all 5).
-	fc.Advance(59*time.Second + 999*time.Millisecond)
+	// Advance to just before the oldest entry ages out (~60s past the
+	// first burst attempt, so still inside the window for all 5).
+	fc.Advance(59*time.Second + 990*time.Millisecond)
 
 	d, err := rl.AcquireConnectSlot(ctx, "u1")
 	require.NoError(t, err)
@@ -130,6 +130,43 @@ func TestRedisConnectRateLimiter_RetryAfterTracksOldestEntry(t *testing.T) {
 	require.False(t, d.Allowed)
 	assert.InDelta(t, (10 * time.Second).Seconds(), d.RetryAfter.Seconds(), 1.5,
 		"retry-after must track the oldest in-window entry, not the full window")
+}
+
+// TestRedisConnectRateLimiter_RetryAfterAtExactBoundary_IsSmall reproduces
+// the round-2 review finding: when the oldest in-window entry is at exactly
+// score == cutoff, the ageout delta is 0 and the naive guard (`d > 0`) falls
+// back to the full window, handing the client a 60s Retry-After at the
+// precise moment the slot is ~about to free. Must return a near-zero wait.
+func TestRedisConnectRateLimiter_RetryAfterAtExactBoundary_IsSmall(t *testing.T) {
+	t.Parallel()
+	_, cmd := setupMiniredis(t)
+	fc := newTestFakeClock()
+	rl := NewConnectRateLimiter(cmd, fc, 5, 60*time.Second)
+	ctx := context.Background()
+
+	// Seed 6 attempts spaced 1 ms apart (the 6th is already blocked; all 6
+	// land in the ZSET for later accounting). Millisecond granularity is
+	// required so ZSET float64 scores round-trip exactly — see conn_ratelimit.go
+	// "Milliseconds (not nanoseconds)" design note.
+	for i := 1; i <= 6; i++ {
+		fc.Advance(time.Millisecond)
+		_, err := rl.AcquireConnectSlot(ctx, "u1")
+		require.NoError(t, err)
+	}
+
+	// Advance so the next attempt's cutoff lands exactly on the second
+	// seeded entry (t0+2ms). After ZRem (exclusive upper) t0+1ms is dropped
+	// and t0+2ms is retained → oldest retained score == cutoff → d == 0.
+	// Current clock is t0+6ms; jump to t0+60s+2ms.
+	fc.Advance(60*time.Second - 4*time.Millisecond)
+
+	d, err := rl.AcquireConnectSlot(ctx, "u1")
+	require.NoError(t, err)
+	require.False(t, d.Allowed, "six entries still in-window → must block")
+
+	assert.Greater(t, d.RetryAfter, time.Duration(0))
+	assert.Less(t, d.RetryAfter, time.Second,
+		"boundary (d==0) must NOT hand the client a full-window Retry-After")
 }
 
 func TestRedisConnectRateLimiter_IndependentUsers(t *testing.T) {
