@@ -1,6 +1,6 @@
 # Story 10.1: 联调 MVP — 房间 + 动作 3 消息集 + 内存 RoomManager
 
-Status: review
+Status: done
 
 Epic: **Epic 10 — 客户端联调最小集成（手表+iOS MVP）**（横向 epic；2026-04-18 用户决策新增，不在 `epics.md` 原规划档案内）
 
