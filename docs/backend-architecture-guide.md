@@ -637,6 +637,22 @@ func skinListCacheKey(uid ids.UserID) string     { return "skins:owned:" + strin
 **背压**：`Client.send` chan 满→关闭该连接；**不能**阻塞 hub。
 **心跳**：30s 一个 ping；60s 无 pong 关闭连接。
 
+### 12.1 Message Registry（Story 0.14）
+
+WS 消息类型的**唯一真相源**：`internal/dto/ws_messages.go`（`WSMessages` + `WSMessagesByType`）。本文件只描述模式；**当前已注册类型列表**在 `docs/api/ws-message-registry.md`（人类可读）和 `docs/api/openapi.yaml`（HTTP 端 `GET /v1/platform/ws-registry` schema）。
+
+CI 漂移守门（双 gate，不得简化）：
+
+1. **编译时 / 单元测试**：`internal/dto/ws_messages_test.go` 核对 `dto.WSMessages` 与 `*ws.Dispatcher.RegisteredTypes()` 一致（debug/release 两种模式各一个 case）。
+2. **运行时 fail-fast**：`cmd/cat/initialize.go` 的 `validateRegistryConsistency` 在 `initialize()` 返回前校验；漂移则 `log.Fatal`。
+
+新增消息四步走（出错顺序会被 CI 挡下，这是设计）：
+
+1. `dto.WSMessages` 追加 entry（含 `Type/Version/Direction/RequiresAuth/RequiresDedup/DebugOnly/Description`）。
+2. `cmd/cat/initialize.go` 调 `dispatcher.Register` / `RegisterDedup`。
+3. `docs/api/ws-message-registry.md` 追加 `### <type>` 段。
+4. `bash scripts/build.sh --test` 绿。
+
 ---
 
 ## 13. 中间件（`internal/middleware/`）

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 
 	"github.com/rs/zerolog/log"
 
@@ -61,6 +62,27 @@ func (d *Dispatcher) RegisterDedup(msgType string, fn HandlerFunc) {
 	}
 	d.types[msgType] = true
 	d.handlers[msgType] = dedupMiddleware(d.dedupStore, d.clock, fn)
+}
+
+// RegisteredTypes returns the sorted list of message types bound to this
+// dispatcher via Register or RegisterDedup. The return value is a fresh
+// slice — callers may mutate it without affecting dispatcher state.
+//
+// Used by Story 0.14 AC4 (dto.TestWSMessages_ConsistencyWithDispatcher_*)
+// and AC15 (cmd/cat validateRegistryConsistency). Not on the message-handling
+// hot path.
+//
+// Concurrency: reads d.types without locking. Dispatcher registration happens
+// exclusively in cmd/cat/initialize.go before any Hub readPump goroutine
+// starts; callers MUST invoke RegisteredTypes only after initialize() returns
+// (i.e. before Hub.Start). Calling after Hub.Start is undefined.
+func (d *Dispatcher) RegisteredTypes() []string {
+	out := make([]string, 0, len(d.types))
+	for t := range d.types {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (d *Dispatcher) Dispatch(ctx context.Context, c *Client, raw []byte) {

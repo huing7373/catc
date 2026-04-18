@@ -183,6 +183,61 @@ func TestDispatcher_NonAppErrorFallsBackToInternalError(t *testing.T) {
 	assert.Equal(t, "boom", resp.Error.Message)
 }
 
+func TestDispatcher_RegisteredTypes(t *testing.T) {
+	t.Parallel()
+
+	noop := func(_ context.Context, _ *Client, env Envelope) (json.RawMessage, error) {
+		return env.Payload, nil
+	}
+
+	tests := []struct {
+		name   string
+		build  func(d *Dispatcher)
+		expect []string
+	}{
+		{
+			name:   "empty_dispatcher",
+			build:  func(_ *Dispatcher) {},
+			expect: []string{},
+		},
+		{
+			name: "single_register",
+			build: func(d *Dispatcher) {
+				d.Register("debug.echo", noop)
+			},
+			expect: []string{"debug.echo"},
+		},
+		{
+			name: "register_and_register_dedup_sorted",
+			build: func(d *Dispatcher) {
+				d.Register("session.resume", noop)
+				d.RegisterDedup("debug.echo.dedup", noop)
+				d.Register("debug.echo", noop)
+			},
+			expect: []string{"debug.echo", "debug.echo.dedup", "session.resume"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			d := newTestDispatcher(newFakeDedupStore())
+			tt.build(d)
+
+			got := d.RegisteredTypes()
+			assert.Equal(t, tt.expect, got)
+
+			// Mutation of the returned slice must not affect internal state.
+			if len(got) > 0 {
+				got[0] = "mutated.type"
+				again := d.RegisteredTypes()
+				assert.NotEqual(t, "mutated.type", again[0], "returned slice must be a fresh copy")
+			}
+		})
+	}
+}
+
 func TestDispatcher_DedupPath(t *testing.T) {
 	t.Parallel()
 

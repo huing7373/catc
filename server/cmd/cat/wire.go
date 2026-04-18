@@ -17,6 +17,7 @@ import (
 type handlers struct {
 	health    *handler.HealthHandler
 	wsUpgrade *ws.UpgradeHandler
+	platform  *handler.PlatformHandler
 }
 
 func buildRouter(_ *config.Config, h *handlers) *gin.Engine {
@@ -27,6 +28,10 @@ func buildRouter(_ *config.Config, h *handlers) *gin.Engine {
 	r.Use(middleware.RequestID())
 	r.GET("/healthz", h.health.Healthz)
 	r.GET("/readyz", h.health.Readyz)
+	// Bootstrap endpoint — intentionally OUTSIDE the future /v1/* JWT group
+	// (architecture line 814). Clients hit this pre-auth to verify protocol
+	// compatibility (FR59 / Story 0.14 AC6).
+	r.GET("/v1/platform/ws-registry", h.platform.WSRegistry)
 	r.GET("/ws", h.wsUpgrade.Handle)
 	return r
 }

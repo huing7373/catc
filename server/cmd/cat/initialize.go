@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sort"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/huing/cat/server/internal/config"
 	"github.com/huing/cat/server/internal/cron"
+	"github.com/huing/cat/server/internal/dto"
 	"github.com/huing/cat/server/internal/handler"
 	"github.com/huing/cat/server/internal/push"
 	"github.com/huing/cat/server/internal/ws"
@@ -146,9 +149,20 @@ func initialize(cfg *config.Config) *App {
 	)
 	upgradeHandler := ws.NewUpgradeHandler(wsHub, dispatcher, validator, blacklist, connLimiter)
 
+	// Registry-drift fail-fast (Story 0.14 AC15): every dispatcher
+	// registration MUST have a dto.WSMessages entry, and every non-DebugOnly
+	// entry MUST be registered in release mode. Unit tests cover this at CI
+	// time; the runtime check catches feature-flag drift (e.g. a conditional
+	// Register gated on an env var). Failing fast beats serving a registry
+	// response that lies about what the dispatcher accepts.
+	if err := validateRegistryConsistency(dispatcher, cfg.Server.Mode); err != nil {
+		log.Fatal().Err(err).Msg("ws message registry drift detected")
+	}
+
 	h := &handlers{
 		health:    handler.NewHealthHandler(mongoCli, redisCli, wsHub, redisCli.Cmdable(), cfg.WS.MaxConnections*2),
 		wsUpgrade: upgradeHandler,
+		platform:  handler.NewPlatformHandler(clk, cfg.Server.Mode),
 	}
 
 	router := buildRouter(cfg, h)
@@ -167,4 +181,68 @@ func initialize(cfg *config.Config) *App {
 	}
 	app.OnReady(h.health.SetReady)
 	return app
+}
+
+// validateRegistryConsistency fails fast if the dispatcher's registered
+// types drift from the dto.WSMessages source of truth. Invariants:
+//
+//  1. Every dispatcher registration has a matching dto.WSMessages entry
+//     (regardless of mode).
+//  2. In debug mode: every dto.WSMessages entry (DebugOnly or not) is
+//     registered. A missing registration is drift — the registry endpoint
+//     still advertises the type, but the dispatcher would return
+//     UNKNOWN_MESSAGE_TYPE when a client sends it.
+//  3. In release mode: every non-DebugOnly dto.WSMessages entry is
+//     registered; no DebugOnly entry is registered (DebugOnly entries are
+//     deliberately absent in release — that is their purpose).
+//
+// Kept unexported and in cmd/cat so it can read cfg.Server.Mode directly;
+// unit tests in initialize_test.go mirror each invariant per mode.
+func validateRegistryConsistency(d *ws.Dispatcher, mode string) error {
+	registered := make(map[string]bool, len(d.RegisteredTypes()))
+	for _, t := range d.RegisteredTypes() {
+		registered[t] = true
+	}
+
+	known := dto.WSMessagesByType
+	var unknownRegistered, missingInDebug, missingInRelease, forbiddenInRelease []string
+
+	for t := range registered {
+		if _, ok := known[t]; !ok {
+			unknownRegistered = append(unknownRegistered, t)
+		}
+	}
+
+	if mode == "debug" {
+		for _, meta := range dto.WSMessages {
+			if !registered[meta.Type] {
+				missingInDebug = append(missingInDebug, meta.Type)
+			}
+		}
+	} else {
+		for _, meta := range dto.WSMessages {
+			if meta.DebugOnly {
+				if registered[meta.Type] {
+					forbiddenInRelease = append(forbiddenInRelease, meta.Type)
+				}
+				continue
+			}
+			if !registered[meta.Type] {
+				missingInRelease = append(missingInRelease, meta.Type)
+			}
+		}
+	}
+
+	sort.Strings(unknownRegistered)
+	sort.Strings(missingInDebug)
+	sort.Strings(missingInRelease)
+	sort.Strings(forbiddenInRelease)
+
+	if len(unknownRegistered) == 0 && len(missingInDebug) == 0 && len(missingInRelease) == 0 && len(forbiddenInRelease) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"ws registry drift: unknownRegistered=%v missingInDebug=%v missingInRelease=%v debugOnlyInRelease=%v",
+		unknownRegistered, missingInDebug, missingInRelease, forbiddenInRelease,
+	)
 }

@@ -1,0 +1,97 @@
+openapi: 3.0.3
+info:
+  title: Cat Backend API
+  version: "0.14.0-epic0"
+  description: >
+    HTTP API surface for the 裤衩猫 backend. WebSocket envelope/message
+    protocol is defined in docs/api/ws-message-registry.md (source of truth
+    internal/dto/ws_messages.go). This file currently formalizes only the
+    unauthenticated platform-bootstrap endpoint used by Watch / iPhone
+    clients on upgrade to verify protocol compatibility (FR59 / Story 0.14).
+    /healthz and /readyz are infra endpoints, intentionally omitted.
+servers:
+  - url: https://api.example.invalid
+    description: Placeholder — replaced per-environment in deploy manifests.
+paths:
+  /v1/platform/ws-registry:
+    get:
+      summary: List supported WS message types with versions
+      description: >
+        Returns the set of WebSocket envelope.type values the server
+        currently understands, plus per-message metadata (version,
+        direction, auth requirement, dedup requirement). Intentionally
+        unauthenticated: clients hit this pre-auth on every app launch to
+        decide whether the server speaks their protocol dialect. Response
+        is filtered by server mode — debug-only message types never appear
+        in release-mode responses.
+      operationId: getWSRegistry
+      responses:
+        "200":
+          description: Registry snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WSRegistryResponse"
+components:
+  schemas:
+    WSRegistryResponse:
+      type: object
+      required:
+        - apiVersion
+        - serverTime
+        - messages
+      properties:
+        apiVersion:
+          type: string
+          description: >
+            Envelope version of THIS endpoint's response schema. Bumped
+            only when fields are removed/renamed; additive changes keep
+            the same value. Story 0.14 ships v1.
+          example: "v1"
+        serverTime:
+          type: string
+          format: date-time
+          description: >
+            RFC3339 UTC timestamp at which the response was produced.
+            Sourced from the Clock interface (M9) so fake-clock tests can
+            pin this value. Nanoseconds are stripped.
+          example: "2026-04-18T12:34:56Z"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/WSRegistryMessage"
+          description: >
+            Registered WS message types. Empty array (never null) when the
+            server is in release mode and all registered types are
+            DebugOnly.
+    WSRegistryMessage:
+      type: object
+      required:
+        - type
+        - version
+        - direction
+        - requiresAuth
+        - requiresDedup
+      properties:
+        type:
+          type: string
+          pattern: "^[a-z0-9]+(?:\\.[a-z0-9]+)*$"
+          description: Canonical envelope.type; P3 domain.action convention.
+          example: "session.resume"
+        version:
+          type: string
+          pattern: "^v\\d+$"
+          description: Per-message version. MVP uses "v1" uniformly.
+          example: "v1"
+        direction:
+          type: string
+          enum: [up, down, bi]
+          description: Message flow direction.
+        requiresAuth:
+          type: boolean
+          description: Whether the dispatcher rejects the message pre-auth.
+        requiresDedup:
+          type: boolean
+          description: >
+            Whether the dispatcher wraps the handler in dedup middleware
+            (NFR-SEC-9). Corresponds to RegisterDedup vs Register.

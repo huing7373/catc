@@ -44,6 +44,13 @@ if ! bash "$REPO_ROOT/scripts/check_time_now.sh" 2>&1; then
   exit 1
 fi
 
+# OpenAPI structural validation is performed in-lane as a Go test
+# (TestOpenAPISpec_* in cmd/cat) rather than an external swagger CLI: the
+# go-swagger v0.31.0 CLI only validates Swagger 2.0, not OpenAPI 3.0.3,
+# which is what docs/api/openapi.yaml uses (Story 0.14 AC8). The Go test
+# runs automatically under `go test ./...` below, so CI still blocks on
+# invalid specs at the same severity as any other test failure.
+
 BUILD_VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS="-X main.buildVersion=${BUILD_VERSION}"
 
