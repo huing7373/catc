@@ -10,11 +10,13 @@ import (
 	"github.com/huing/cat/server/internal/config"
 	"github.com/huing/cat/server/internal/handler"
 	"github.com/huing/cat/server/internal/middleware"
+	"github.com/huing/cat/server/internal/ws"
 	"github.com/rs/zerolog/log"
 )
 
 type handlers struct {
-	health *handler.HealthHandler
+	health    *handler.HealthHandler
+	wsUpgrade *ws.UpgradeHandler
 }
 
 func buildRouter(_ *config.Config, h *handlers) *gin.Engine {
@@ -25,12 +27,13 @@ func buildRouter(_ *config.Config, h *handlers) *gin.Engine {
 	r.Use(middleware.RequestID())
 	r.GET("/healthz", h.health.Healthz)
 	r.GET("/readyz", h.health.Readyz)
+	r.GET("/ws", h.wsUpgrade.Handle)
 	return r
 }
 
 type httpServer struct {
-	srv     *http.Server
-	ready   chan struct{}
+	srv   *http.Server
+	ready chan struct{}
 }
 
 func newHTTPServer(cfg *config.Config, router *gin.Engine) *httpServer {

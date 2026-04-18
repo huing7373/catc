@@ -17,6 +17,7 @@ import (
 	"github.com/huing/cat/server/internal/handler"
 	"github.com/huing/cat/server/internal/testutil"
 	"github.com/huing/cat/server/internal/ws"
+	"github.com/huing/cat/server/pkg/clockx"
 	"github.com/huing/cat/server/pkg/mongox"
 	"github.com/huing/cat/server/pkg/redisx"
 )
@@ -30,7 +31,7 @@ func setupIntegrationHandler(t *testing.T) (*handler.HealthHandler, *gin.Engine,
 	mongoWrapper := mongox.WrapClient(mongoCli, "testdb")
 	redisWrapper := redisx.WrapClient(redisCli)
 
-	h := handler.NewHealthHandler(mongoWrapper, redisWrapper, ws.NewHubStub(), redisCli, 10000)
+	h := handler.NewHealthHandler(mongoWrapper, redisWrapper, ws.NewHub(ws.HubConfig{}, clockx.NewRealClock()), redisCli, 10000)
 	h.SetReady()
 
 	gin.SetMode(gin.TestMode)
@@ -68,7 +69,7 @@ func TestIntegration_Healthz_MongoDown(t *testing.T) {
 	mongoWrapper := mongox.WrapClient(mongoCli, "testdb")
 	redisWrapper := redisx.WrapClient(redisCli)
 
-	h := handler.NewHealthHandler(mongoWrapper, redisWrapper, ws.NewHubStub(), redisCli, 10000)
+	h := handler.NewHealthHandler(mongoWrapper, redisWrapper, ws.NewHub(ws.HubConfig{}, clockx.NewRealClock()), redisCli, 10000)
 	h.SetReady()
 
 	gin.SetMode(gin.TestMode)
@@ -131,7 +132,7 @@ func TestIntegration_Healthz_WithCronTick(t *testing.T) {
 
 	mongoWrapper := mongox.WrapClient(mongoCli, "testdb")
 	redisWrapper := redisx.WrapClient(redisCli)
-	h := handler.NewHealthHandler(mongoWrapper, redisWrapper, ws.NewHubStub(), redisCli, 10000)
+	h := handler.NewHealthHandler(mongoWrapper, redisWrapper, ws.NewHub(ws.HubConfig{}, clockx.NewRealClock()), redisCli, 10000)
 	h.SetReady()
 
 	gin.SetMode(gin.TestMode)

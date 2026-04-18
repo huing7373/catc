@@ -123,3 +123,12 @@
 | 1 | patch | Start 用 context.Background() 而非继承 App.Run 传入的 ctx，shutdown cancel 在 Final() 调用前不可达 | internal/cron/scheduler.go:37 | shutdown 信号到达到 Final() 被调用之间的窗口期，运行中的 job 无法感知取消 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过
+
+## [0-9-ws-hub-skeleton-envelope-broadcaster-interface] Round 1 — 2026-04-18
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | Unregister/unregisterClient 直接 close(c.send)，并发 publisher（BroadcastToUser/Dispatcher.sendResponse）仍在 select-send，触发 send on closed channel panic | internal/ws/hub.go:70-80 | 客户端正常断连时若有广播或 handler 响应在飞，进程级 panic 崩溃 |
+| 2 | patch | GoroutineCount() 返回 连接数×2，但 health_handler 用 MaxConnections（连接上限）做比较阈值，~50% 连接数时就报不健康 | cmd/cat/initialize.go:69 | 服务在远未达连接上限时被探针标为不健康，触发误报告警或负载均衡摘除 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过

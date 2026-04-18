@@ -25,6 +25,7 @@ type ServerCfg struct {
 	Host string `toml:"host"`
 	Port int    `toml:"port"`
 	TLS  bool   `toml:"tls"`
+	Mode string `toml:"mode"`
 }
 
 type LogCfg struct {
@@ -56,6 +57,9 @@ type JWTCfg struct {
 
 type WSCfg struct {
 	MaxConnections int `toml:"max_connections"`
+	PingIntervalSec int `toml:"ping_interval_sec"`
+	PongTimeoutSec  int `toml:"pong_timeout_sec"`
+	SendBufSize     int `toml:"send_buf_size"`
 }
 
 type APNsCfg struct {

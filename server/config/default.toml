@@ -2,6 +2,7 @@
 host = ""
 port = 0
 tls = false
+mode = "release"
 
 [log]
 level = ""
@@ -28,6 +29,9 @@ refresh_expiry_sec = 2592000
 
 [ws]
 max_connections = 10000
+ping_interval_sec = 30
+pong_timeout_sec = 60
+send_buf_size = 256
 
 [apns]
 key_id = ""

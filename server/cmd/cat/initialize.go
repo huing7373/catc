@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"time"
+
 	"github.com/rs/zerolog/log"
 
 	"github.com/huing/cat/server/internal/config"
@@ -39,16 +43,37 @@ func initialize(cfg *config.Config) *App {
 	locker := redisx.NewLocker(redisCli.Cmdable())
 	cronSch := cron.NewScheduler(locker, redisCli.Cmdable(), clk)
 
-	hubStub := ws.NewHubStub()
+	wsHub := ws.NewHub(ws.HubConfig{
+		PingInterval:   time.Duration(cfg.WS.PingIntervalSec) * time.Second,
+		PongTimeout:    time.Duration(cfg.WS.PongTimeoutSec) * time.Second,
+		SendBufSize:    cfg.WS.SendBufSize,
+		MaxConnections: cfg.WS.MaxConnections,
+	}, clk)
+
+	dispatcher := ws.NewDispatcher()
+
+	var validator ws.TokenValidator
+	if cfg.Server.Mode == "debug" {
+		validator = ws.NewDebugValidator()
+		dispatcher.Register("debug.echo", func(_ context.Context, _ *ws.Client, env ws.Envelope) (json.RawMessage, error) {
+			return env.Payload, nil
+		})
+		log.Info().Msg("debug mode: debug.echo handler registered")
+	} else {
+		validator = ws.NewStubValidator()
+	}
+
+	upgradeHandler := ws.NewUpgradeHandler(wsHub, dispatcher, validator)
 
 	h := &handlers{
-		health: handler.NewHealthHandler(mongoCli, redisCli, hubStub, redisCli.Cmdable(), cfg.WS.MaxConnections),
+		health:    handler.NewHealthHandler(mongoCli, redisCli, wsHub, redisCli.Cmdable(), cfg.WS.MaxConnections*2),
+		wsUpgrade: upgradeHandler,
 	}
 
 	router := buildRouter(cfg, h)
 	httpSrv := newHTTPServer(cfg, router)
 
-	app := NewApp(mongoCli, redisCli, cronSch, httpSrv)
+	app := NewApp(mongoCli, redisCli, cronSch, wsHub, httpSrv)
 	app.OnReady(h.health.SetReady)
 	return app
 }
