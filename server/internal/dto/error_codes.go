@@ -34,6 +34,7 @@ var (
 	ErrBlindboxNotFound          = register("BLINDBOX_NOT_FOUND", "blindbox not found", http.StatusNotFound, CategoryClientError)
 	ErrSkinNotOwned              = register("SKIN_NOT_OWNED", "skin not owned", http.StatusForbidden, CategoryClientError)
 	ErrRateLimitExceeded         = register("RATE_LIMIT_EXCEEDED", "rate limit exceeded", http.StatusTooManyRequests, CategoryRetryAfter)
+	ErrEventProcessing           = register("EVENT_PROCESSING", "event still processing", http.StatusTooManyRequests, CategoryRetryAfter)
 	ErrDeviceBlacklisted         = register("DEVICE_BLACKLISTED", "device blacklisted", http.StatusForbidden, CategoryFatal)
 	ErrInternalError             = register("INTERNAL_ERROR", "internal server error", http.StatusInternalServerError, CategoryRetryable)
 	ErrValidationError           = register("VALIDATION_ERROR", "validation error", http.StatusBadRequest, CategoryClientError)

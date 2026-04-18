@@ -3,22 +3,64 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/huing/cat/server/internal/dto"
+	"github.com/huing/cat/server/pkg/clockx"
 )
 
 type HandlerFunc func(ctx context.Context, client *Client, env Envelope) (json.RawMessage, error)
 
 type Dispatcher struct {
-	handlers map[string]HandlerFunc
+	handlers   map[string]HandlerFunc
+	types      map[string]bool
+	dedupStore DedupStore
+	clock      clockx.Clock
 }
 
-func NewDispatcher() *Dispatcher {
-	return &Dispatcher{handlers: make(map[string]HandlerFunc)}
+// NewDispatcher constructs a Dispatcher. store may be nil (the dispatcher will
+// still accept non-dedup Register calls), but RegisterDedup panics if store is
+// nil. clock is required — dedup middleware uses it for durationMs logging
+// (M9: no direct time.Now in internal/ws business code).
+func NewDispatcher(store DedupStore, clock clockx.Clock) *Dispatcher {
+	if clock == nil {
+		panic("ws.NewDispatcher: clock is required")
+	}
+	return &Dispatcher{
+		handlers:   make(map[string]HandlerFunc),
+		types:      make(map[string]bool),
+		dedupStore: store,
+		clock:      clock,
+	}
 }
 
+// Register binds a non-dedup handler (authoritative-read RPCs such as
+// users.me, friends.list, session.resume). Panics if msgType is already
+// registered via Register or RegisterDedup (prevents configuration drift).
 func (d *Dispatcher) Register(msgType string, fn HandlerFunc) {
+	if d.types[msgType] {
+		panic("ws.Dispatcher: msgType already registered: " + msgType)
+	}
+	d.types[msgType] = true
 	d.handlers[msgType] = fn
+}
+
+// RegisterDedup binds an authoritative-write handler wrapped in dedup
+// middleware. Required for blindbox.redeem / touch.send / friend.accept /
+// friend.delete / friend.block / friend.unblock / skin.equip / profile.update
+// per NFR-SEC-9. Panics if the dispatcher was constructed without a store or
+// the msgType is already registered.
+func (d *Dispatcher) RegisterDedup(msgType string, fn HandlerFunc) {
+	if d.dedupStore == nil {
+		panic("ws.Dispatcher: RegisterDedup called on dispatcher without DedupStore")
+	}
+	if d.types[msgType] {
+		panic("ws.Dispatcher: msgType already registered: " + msgType)
+	}
+	d.types[msgType] = true
+	d.handlers[msgType] = dedupMiddleware(d.dedupStore, d.clock, fn)
 }
 
 func (d *Dispatcher) Dispatch(ctx context.Context, c *Client, raw []byte) {
@@ -39,7 +81,12 @@ func (d *Dispatcher) Dispatch(ctx context.Context, c *Client, raw []byte) {
 
 	payload, err := fn(ctx, c, env)
 	if err != nil {
-		resp := NewErrorResponse(env.ID, env.Type, "INTERNAL_ERROR", err.Error())
+		code, message := "INTERNAL_ERROR", err.Error()
+		var ae *dto.AppError
+		if errors.As(err, &ae) {
+			code, message = ae.Code, ae.Message
+		}
+		resp := NewErrorResponse(env.ID, env.Type, code, message)
 		d.sendResponse(c, resp)
 		return
 	}

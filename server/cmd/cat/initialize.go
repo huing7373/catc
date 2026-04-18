@@ -50,15 +50,18 @@ func initialize(cfg *config.Config) *App {
 		MaxConnections: cfg.WS.MaxConnections,
 	}, clk)
 
-	dispatcher := ws.NewDispatcher()
+	dedupStore := redisx.NewDedupStore(redisCli.Cmdable(), time.Duration(cfg.WS.DedupTTLSec)*time.Second)
+	dispatcher := ws.NewDispatcher(dedupStore, clk)
 
 	var validator ws.TokenValidator
 	if cfg.Server.Mode == "debug" {
 		validator = ws.NewDebugValidator()
-		dispatcher.Register("debug.echo", func(_ context.Context, _ *ws.Client, env ws.Envelope) (json.RawMessage, error) {
+		echoFn := func(_ context.Context, _ *ws.Client, env ws.Envelope) (json.RawMessage, error) {
 			return env.Payload, nil
-		})
-		log.Info().Msg("debug mode: debug.echo handler registered")
+		}
+		dispatcher.Register("debug.echo", echoFn)
+		dispatcher.RegisterDedup("debug.echo.dedup", echoFn)
+		log.Info().Msg("debug mode: debug.echo and debug.echo.dedup handlers registered")
 	} else {
 		validator = ws.NewStubValidator()
 	}

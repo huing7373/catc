@@ -29,7 +29,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *ws.Hub) {
 		SendBufSize:  64,
 	}, clockx.NewRealClock())
 
-	dispatcher := ws.NewDispatcher()
+	dispatcher := ws.NewDispatcher(nil, clockx.NewRealClock())
 	dispatcher.Register("debug.echo", func(_ context.Context, _ *ws.Client, env ws.Envelope) (json.RawMessage, error) {
 		return env.Payload, nil
 	})

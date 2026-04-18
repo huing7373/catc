@@ -32,6 +32,7 @@ max_connections = 10000
 ping_interval_sec = 30
 pong_timeout_sec = 60
 send_buf_size = 256
+dedup_ttl_sec = 300
 
 [apns]
 key_id = ""

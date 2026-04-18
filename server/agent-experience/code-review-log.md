@@ -140,3 +140,11 @@
 | 1 | patch | atomic bool 检查 + channel send 不是原子操作，closed.Load()=false 后另一 goroutine 执行 close(send)，前者进入 send 仍 panic | internal/ws/hub.go:116-133 | Round 1 修复未彻底消除竞态窗口；改为 done channel 驱动退出，send 永不关闭，trySend 用 select done/send/default 三路复用 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过
+
+## [0-10-ws-upstream-eventid-idempotent-dedup] Round 1 — 2026-04-18
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | dedup middleware 直接用 env.ID 作 Redis key，未按 (userId, msgType) 命名空间隔离 | internal/ws/dedup.go:58-71 | 不同用户或不同 RPC 在 5min TTL 内复用相同客户端生成 ID（如 "1", "2"）会互相 EVENT_PROCESSING / 重放对方响应，破坏幂等正确性；scope 为 "{userId}:{msgType}:{eventID}" |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go test -tags=integration` 通过

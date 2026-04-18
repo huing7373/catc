@@ -56,10 +56,11 @@ type JWTCfg struct {
 }
 
 type WSCfg struct {
-	MaxConnections int `toml:"max_connections"`
+	MaxConnections  int `toml:"max_connections"`
 	PingIntervalSec int `toml:"ping_interval_sec"`
 	PongTimeoutSec  int `toml:"pong_timeout_sec"`
 	SendBufSize     int `toml:"send_buf_size"`
+	DedupTTLSec     int `toml:"dedup_ttl_sec"`
 }
 
 type APNsCfg struct {

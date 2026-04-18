@@ -18,6 +18,7 @@
 | `BLINDBOX_NOT_FOUND` | client_error | 404 | blindbox not found |
 | `SKIN_NOT_OWNED` | client_error | 403 | skin not owned |
 | `RATE_LIMIT_EXCEEDED` | retry_after | 429 | rate limit exceeded |
+| `EVENT_PROCESSING` | retry_after | 429 | event still processing |
 | `DEVICE_BLACKLISTED` | fatal | 403 | device blacklisted |
 | `INTERNAL_ERROR` | retryable | 500 | internal server error |
 | `VALIDATION_ERROR` | client_error | 400 | validation error |
