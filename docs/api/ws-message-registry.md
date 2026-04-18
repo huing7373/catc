@@ -116,3 +116,71 @@ Dedup: **required**.
 **Request payload:** arbitrary JSON.
 
 **Response payload:** first-invocation payload, cached.
+
+### room.join (bi, v1, auth required)
+
+**MVP only — to be removed wholesale when Epic 4.1 ships.**
+
+Client joins a room by id. The server adds the caller to its in-memory `RoomManager`, evicting them from any previous room they occupied. The response payload carries a snapshot of all **other** members currently in the room (self excluded). No `member.join` broadcast is emitted — Epic 4.1's full presence stack will handle join/leave fan-out.
+
+Dedup: not required.
+
+**Request payload:**
+
+```json
+{ "roomId": "<string, 1-64 bytes>" }
+```
+
+**Response payload:**
+
+```json
+{
+  "roomId":  "<string>",
+  "members": [
+    { "userId": "<string>", "action": "<string, possibly empty>", "tsMs": <int64, 0 if no action yet> }
+  ]
+}
+```
+
+`members` is always serialized as an array (possibly empty `[]`), never `null`.
+
+**Errors:** `VALIDATION_ERROR` — `roomId required` | `roomId exceeds 64 bytes` | `roomId must be valid UTF-8` | `invalid room.join payload`.
+
+### action.update (up, v1, auth required)
+
+**MVP only — to be removed wholesale when Epic 4.1 ships.**
+
+Client publishes its current action string to the room it currently occupies. The server stores the value (for subsequent `room.join` snapshots) and fans out an `action.broadcast` push to every other member. The caller receives an empty ack, not a broadcast of its own message.
+
+Dedup: not required (this story has no idempotency guarantee — clients may replay, and every replay rebroadcasts).
+
+**Request payload:**
+
+```json
+{ "action": "<string, 1-64 bytes>" }
+```
+
+**Response payload:** `{}` (empty object).
+
+**Errors:**
+
+- `VALIDATION_ERROR` — `action required` | `action exceeds 64 bytes` | `action must be valid UTF-8` | `invalid action.update payload`
+- `VALIDATION_ERROR` — `user not in any room` (client called `action.update` before `room.join`)
+
+### action.broadcast (down, v1, auth required)
+
+**MVP only — to be removed wholesale when Epic 4.1 ships.**
+
+Server → client push carrying another member's latest action. Fanned out from `action.update` to every room peer excluding the sender. `action.broadcast` is **never** upstream — clients must not send it, and the dispatcher has no handler for it.
+
+**Push payload:**
+
+```json
+{
+  "userId": "<string>",
+  "action": "<string>",
+  "tsMs":   <int64, server clock.Now().UnixMilli() at the moment action.update fired>
+}
+```
+
+No response shape — downstream pushes carry no `id` and no `ok` field (see **Envelope Shapes → Downstream push** above).

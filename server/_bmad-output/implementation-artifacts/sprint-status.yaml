@@ -36,6 +36,10 @@
 
 generated: 2026-04-17
 last_updated: 2026-04-18
+# Story 10-1 review: 2026-04-18
+# Story 10-1 in-progress: 2026-04-18
+# Epic 10 created: 2026-04-18 (new cross-cutting epic for client-integration MVP; 3 DebugOnly WS messages — room.join / action.update / action.broadcast — with in-memory RoomManager; removed wholesale when Epic 4.1 ships, NOT a seed for Epic 4)
+# Story 10-1 created: 2026-04-18 (integration MVP — room + action 3-message set + in-memory RoomManager + Hub ClientObserver hook)
 # Epic 0 done: 2026-04-18 (all stories 0-1..0-15 done; retrospective optional)
 # Story 0-15 done: 2026-04-18 (Phase A scaffold — real-device execution deferred to Story 9-1 under Epic 9)
 # Epic 9 created: 2026-04-18 (new cross-cutting epic for spike-class real-device/human execution work; lets Epic 0 complete without waiting on physical testing)
@@ -163,3 +167,12 @@ development_status:
   epic-9: in-progress
   9-1-spike-op1-real-device-and-hub-loadtest-execution: ready-for-dev
   epic-9-retrospective: optional
+
+  # Epic 10: 客户端联调最小集成（手表+iOS MVP）
+  # 横向 epic；3 条 DebugOnly WS 消息（room.join / action.update / action.broadcast）+ 内存 RoomManager，
+  # 让真机 Apple Watch + iPhone 客户端能立刻开始联调，不用等 Epic 4.1-4.5 的完整 presence/room 落地。
+  # Epic 4.1 上线时本 epic 的核心代码（room_mvp.go + 3 条消息）整块删除，NOT 翻 DebugOnly flag 转正。
+  # 注意：Epic 4 解锁仍硬依赖 Story 9-1 AC9 签字，与本 epic 无关。
+  epic-10: in-progress
+  10-1-integration-mvp-room-and-action: review
+  epic-10-retrospective: optional

@@ -34,3 +34,13 @@
 | 2 | patch | `reconnectRatio = reconnectAttempts / connectSuccess` 分母把"所有成功 dial"（含每次重连成功）都算进去，但文档语义是"% 会话被迫重连" | server/tools/ws_loadgen/main.go:116（Summary godoc round 1 版）+ docs/spikes/op1-ws-stability.md:91 / :232 | 系统性低估 churn 约 `R/(N+R)`。1000 worker × 50 次重连的例子下，公式给出 50/1050 = 4.76% < 5%，判"稳态"；但按文档语义实际 50/1000 = 5% 已触达边界。§7 ADR-003 的稳态/非稳态标签因此在 50-60 次重连的窗口区间不可靠，可能让本应 fail 的 10k 压测假通过 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过（含 `long_lived` smoke 再验证："无服务器"下 16 次启动期 dial fail 现在 `reconnectAttempts=0`，round 1 版本会错报为 16）
+
+---
+
+## [10-1-integration-mvp-room-and-action] Round 1 — 2026-04-18
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | `HandleJoin` 把 `connMap[newConn]=userID` 新增之后，旧 conn 的 `connMap` 条目与 room.members 内的旧 `Member.ConnID` 都没清理；`OnDisconnect` 又仅用 `userLoc` 判断是否还在 room，不核对 `member.ConnID == connID` | server/internal/ws/room_mvp.go:173-178（idempotent 分支未清 stale connMap）+ 154-156（switch-room 分支同问题）+ OnDisconnect 293-298（缺 member.ConnID 二次校验） | 同一 user 在旧 socket 尚未完成 disconnect 前用新 socket 重连并 `room.join`：短暂（毫秒级）之后旧 socket 的 `OnDisconnect` 会查到 `userLoc[user]` 仍指向当前房间，按原逻辑走 `leaveRoomLocked`，把 user 从**新 session 正常在用的**房间里踢掉；后续 `action.update` 报 `VALIDATION_ERROR: user not in any room`、peers 停收广播，直到 client 察觉并手动再 join。真机 watch ↔ iOS 联调最常触发该 race（Wi-Fi 切换、wake from sleep、process relaunch 都能在毫秒级重建 socket） |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过（`TestRoomManager_Rejoin_SameRoom_StaleDisconnectDoesNotEvict` + `TestRoomManager_Rejoin_SwitchRoom_StaleDisconnectDoesNotEvict` 两条新 regression 测试锁死修复；`go vet -tags=integration ./...` 亦绿）

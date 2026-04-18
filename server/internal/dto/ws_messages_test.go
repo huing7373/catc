@@ -95,18 +95,27 @@ func newDispatcher() *ws.Dispatcher {
 func TestWSMessages_ConsistencyWithDispatcher_DebugMode(t *testing.T) {
 	t.Parallel()
 
-	// Mirrors cmd/cat/initialize.go lines 113-129 (debug branch): registers
-	// debug.echo, debug.echo.dedup, and session.resume.
+	// Mirrors cmd/cat/initialize.go debug branch: registers every WSMessages
+	// entry whose Direction is up/bi. Direction=down entries (e.g.
+	// action.broadcast) are server→client pushes that never flow through
+	// Dispatch — they live in WSMessages only for the registry endpoint —
+	// so the dispatcher deliberately has no handler for them.
 	d := newDispatcher()
 	d.Register("debug.echo", noopHandler)
 	d.RegisterDedup("debug.echo.dedup", noopHandler)
 	d.Register("session.resume", noopHandler)
+	d.Register("room.join", noopHandler)
+	d.Register("action.update", noopHandler)
 
 	got := d.RegisteredTypes()
 
-	// Expected = every WSMessages entry (DebugOnly included because mode=debug).
+	// Expected = every WSMessages entry with Direction != down (DebugOnly
+	// included because mode=debug).
 	want := make([]string, 0, len(dto.WSMessages))
 	for _, meta := range dto.WSMessages {
+		if meta.Direction == dto.WSDirectionDown {
+			continue
+		}
 		want = append(want, meta.Type)
 	}
 	sort.Strings(want)
@@ -119,18 +128,22 @@ func TestWSMessages_ConsistencyWithDispatcher_DebugMode(t *testing.T) {
 func TestWSMessages_ConsistencyWithDispatcher_ReleaseMode(t *testing.T) {
 	t.Parallel()
 
-	// Mirrors cmd/cat/initialize.go lines 131-138 (release branch): registers
-	// nothing beyond the WS hub. This will grow from Story 1.1 onward.
+	// Mirrors cmd/cat/initialize.go release branch: registers nothing
+	// beyond the WS hub. This will grow from Story 1.1 onward.
 	d := newDispatcher()
 
 	got := d.RegisteredTypes()
 
-	// Expected = every non-DebugOnly WSMessages entry.
+	// Expected = every non-DebugOnly WSMessages entry with Direction != down.
 	want := make([]string, 0)
 	for _, meta := range dto.WSMessages {
-		if !meta.DebugOnly {
-			want = append(want, meta.Type)
+		if meta.DebugOnly {
+			continue
 		}
+		if meta.Direction == dto.WSDirectionDown {
+			continue
+		}
+		want = append(want, meta.Type)
 	}
 	sort.Strings(want)
 

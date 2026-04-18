@@ -74,6 +74,33 @@ var WSMessages = []WSMessageMeta{
 		DebugOnly:     true,
 		Description:   "Debug-only: exercises the dedup middleware; idempotent replay of envelope.id returns cached result.",
 	},
+	{
+		Type:          "room.join",
+		Version:       "v1",
+		Direction:     WSDirectionBi,
+		RequiresAuth:  true,
+		RequiresDedup: false,
+		DebugOnly:     true,
+		Description:   "Client joins a room and receives a members snapshot. MVP only, removed when Epic 4.1 ships.",
+	},
+	{
+		Type:          "action.update",
+		Version:       "v1",
+		Direction:     WSDirectionUp,
+		RequiresAuth:  true,
+		RequiresDedup: false,
+		DebugOnly:     true,
+		Description:   "Client publishes current action; server fans out to other room members. MVP only, removed when Epic 4.1 ships.",
+	},
+	{
+		Type:          "action.broadcast",
+		Version:       "v1",
+		Direction:     WSDirectionDown,
+		RequiresAuth:  true,
+		RequiresDedup: false,
+		DebugOnly:     true,
+		Description:   "Server push: another room member's current action. MVP only, removed when Epic 4.1 ships.",
+	},
 }
 
 // WSMessagesByType is an O(1) lookup map keyed by Type, built once at package

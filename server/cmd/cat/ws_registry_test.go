@@ -93,7 +93,10 @@ func TestWSRegistryEndpoint_DebugMode(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "v1", resp.APIVersion)
 
-	require.Len(t, resp.Messages, 3)
+	// Debug mode surfaces every WSMessages entry (regardless of Direction):
+	// the registry endpoint is a discovery surface for clients, so it must
+	// advertise downstream-only pushes too. Count matches len(dto.WSMessages).
+	require.Len(t, resp.Messages, len(dto.WSMessages))
 	gotTypes := make(map[string]handler.WSRegistryMessage, len(resp.Messages))
 	for _, m := range resp.Messages {
 		gotTypes[m.Type] = m
@@ -101,6 +104,10 @@ func TestWSRegistryEndpoint_DebugMode(t *testing.T) {
 	assert.Contains(t, gotTypes, "session.resume")
 	assert.Contains(t, gotTypes, "debug.echo")
 	assert.Contains(t, gotTypes, "debug.echo.dedup")
+	// Story 10.1 联调 MVP additions:
+	assert.Contains(t, gotTypes, "room.join")
+	assert.Contains(t, gotTypes, "action.update")
+	assert.Contains(t, gotTypes, "action.broadcast")
 
 	assert.False(t, gotTypes["session.resume"].RequiresDedup, "session.resume must NOT require dedup")
 	assert.True(t, gotTypes["debug.echo.dedup"].RequiresDedup, "debug.echo.dedup MUST require dedup")

@@ -38,7 +38,36 @@ func TestValidateRegistryConsistency_DebugModeFullyRegistered(t *testing.T) {
 	d.Register("debug.echo", noopHandler)
 	d.RegisterDedup("debug.echo.dedup", noopHandler)
 	d.Register("session.resume", noopHandler)
+	d.Register("room.join", noopHandler)
+	d.Register("action.update", noopHandler)
+	// action.broadcast is Direction=down; MUST NOT be registered. The
+	// drift check exempts downstream-only types (Story 10.1).
 
+	require.NoError(t, validateRegistryConsistency(d, "debug"))
+}
+
+func TestValidateRegistryConsistency_DownstreamOnlyExempt(t *testing.T) {
+	t.Parallel()
+
+	// action.broadcast is Direction=down: it lives in dto.WSMessages so the
+	// /v1/platform/ws-registry endpoint advertises it, but it never flows
+	// through Dispatcher (server→client push). The consistency check must
+	// therefore exempt it from the "must be registered in debug mode"
+	// requirement. Equally, registering a downstream type would also be
+	// wrong — but that case is already caught by unknownRegistered in the
+	// existing machinery (action.broadcast IS in WSMessages, so it
+	// wouldn't trip unknownRegistered; the exemption is one-sided — we
+	// don't test registering a downstream type because it would panic at
+	// Dispatch time anyway when Direction conventions are respected).
+	d := newStubDispatcher()
+	d.Register("debug.echo", noopHandler)
+	d.RegisterDedup("debug.echo.dedup", noopHandler)
+	d.Register("session.resume", noopHandler)
+	d.Register("room.join", noopHandler)
+	d.Register("action.update", noopHandler)
+
+	// Debug mode must accept this configuration despite action.broadcast
+	// being in WSMessages but not registered.
 	require.NoError(t, validateRegistryConsistency(d, "debug"))
 }
 

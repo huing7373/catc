@@ -112,6 +112,8 @@ func initialize(cfg *config.Config) *App {
 		RoomSnapshot: ws.EmptyRoomSnapshotProvider{},
 	})
 
+	broadcaster := ws.NewInMemoryBroadcaster(wsHub)
+
 	var validator ws.TokenValidator
 	if cfg.Server.Mode == "debug" {
 		validator = ws.NewDebugValidator()
@@ -129,7 +131,18 @@ func initialize(cfg *config.Config) *App {
 		// real and this guard can be removed along with the EmptyProviders
 		// that feed it).
 		dispatcher.Register("session.resume", sessionResumeHandler.Handle)
-		log.Info().Msg("debug mode: debug.echo, debug.echo.dedup, and session.resume handlers registered")
+
+		// Story 10.1 联调 MVP: room.join / action.update handlers + an
+		// in-memory RoomManager. action.broadcast is Direction=down (no
+		// handler). RoomManager observes Hub disconnects to clean up
+		// rooms on client drop. The entire wiring below — and
+		// room_mvp.go — disappears when Epic 4.1 ships.
+		roomManager := ws.NewRoomManager(clk, broadcaster)
+		wsHub.AddObserver(roomManager)
+		dispatcher.Register("room.join", roomManager.HandleJoin)
+		dispatcher.Register("action.update", roomManager.HandleActionUpdate)
+
+		log.Info().Msg("debug mode: debug.echo, debug.echo.dedup, session.resume, room.join, action.update handlers registered")
 	} else {
 		validator = ws.NewStubValidator()
 		// Cast the unused handler and cache to a blank assignment so linters
@@ -188,13 +201,16 @@ func initialize(cfg *config.Config) *App {
 //
 //  1. Every dispatcher registration has a matching dto.WSMessages entry
 //     (regardless of mode).
-//  2. In debug mode: every dto.WSMessages entry (DebugOnly or not) is
+//  2. In debug mode: every dto.WSMessages entry with Direction up/bi is
 //     registered. A missing registration is drift — the registry endpoint
 //     still advertises the type, but the dispatcher would return
-//     UNKNOWN_MESSAGE_TYPE when a client sends it.
-//  3. In release mode: every non-DebugOnly dto.WSMessages entry is
-//     registered; no DebugOnly entry is registered (DebugOnly entries are
-//     deliberately absent in release — that is their purpose).
+//     UNKNOWN_MESSAGE_TYPE when a client sends it. Direction=down entries
+//     are server→client pushes that never flow through Dispatch, so they
+//     are exempt from the "must be registered" requirement (Story 10.1).
+//  3. In release mode: every non-DebugOnly dto.WSMessages entry with
+//     Direction up/bi is registered; no DebugOnly entry is registered
+//     (DebugOnly entries are deliberately absent in release — that is
+//     their purpose). Direction=down entries are exempt as in debug.
 //
 // Kept unexported and in cmd/cat so it can read cfg.Server.Mode directly;
 // unit tests in initialize_test.go mirror each invariant per mode.
@@ -215,6 +231,11 @@ func validateRegistryConsistency(d *ws.Dispatcher, mode string) error {
 
 	if mode == "debug" {
 		for _, meta := range dto.WSMessages {
+			if meta.Direction == dto.WSDirectionDown {
+				// downstream-only pushes never go through Dispatch; they
+				// live in WSMessages purely for the registry endpoint.
+				continue
+			}
 			if !registered[meta.Type] {
 				missingInDebug = append(missingInDebug, meta.Type)
 			}
@@ -225,6 +246,9 @@ func validateRegistryConsistency(d *ws.Dispatcher, mode string) error {
 				if registered[meta.Type] {
 					forbiddenInRelease = append(forbiddenInRelease, meta.Type)
 				}
+				continue
+			}
+			if meta.Direction == dto.WSDirectionDown {
 				continue
 			}
 			if !registered[meta.Type] {

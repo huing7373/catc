@@ -19,11 +19,26 @@ type HubConfig struct {
 	MaxConnections int
 }
 
+// ClientObserver receives notifications when a client disconnects. Used by
+// post-connect bookkeeping that lives outside internal/ws (e.g. Story 10.1
+// RoomManager removes the user from its in-memory room map; Epic 4.1 Presence
+// will implement this interface too).
+//
+// Implementations MUST be non-blocking and MUST NOT panic — observers fan out
+// from Hub.unregisterClient / Hub.Unregister inside the read-pump defer, so a
+// slow observer would hold up connection cleanup and a panicking observer
+// would crash the read goroutine. All bookkeeping should happen under the
+// observer's own lock, not the Hub's.
+type ClientObserver interface {
+	OnDisconnect(connID ConnID, userID UserID)
+}
+
 type Hub struct {
-	cfg     HubConfig
-	clock   clockx.Clock
-	clients sync.Map // connID → *Client
-	count   atomic.Int64
+	cfg       HubConfig
+	clock     clockx.Clock
+	clients   sync.Map // connID → *Client
+	count     atomic.Int64
+	observers []ClientObserver // set-at-init, read-only at runtime (see AddObserver)
 }
 
 func NewHub(cfg HubConfig, clock clockx.Clock) *Hub {
@@ -62,6 +77,23 @@ func (h *Hub) GoroutineCount() int {
 	return int(h.count.Load()) * 2
 }
 
+// AddObserver subscribes obs to post-disconnect notifications. MUST be called
+// during initialize() before Hub.Start / any connection is accepted — the
+// observers slice is read without locking on the disconnect path and so must
+// be frozen once serving begins. This mirrors Dispatcher.Register's
+// init-time-only contract (see dispatcher.go RegisteredTypes godoc).
+func (h *Hub) AddObserver(obs ClientObserver) {
+	h.observers = append(h.observers, obs)
+}
+
+// notifyDisconnect fans out to observers. Called from Unregister and
+// unregisterClient after LoadAndDelete succeeds, so at-most-once per client.
+func (h *Hub) notifyDisconnect(c *Client) {
+	for _, obs := range h.observers {
+		obs.OnDisconnect(c.connID, c.userID)
+	}
+}
+
 func (h *Hub) Register(client *Client) {
 	h.clients.Store(client.connID, client)
 	h.count.Add(1)
@@ -72,6 +104,7 @@ func (h *Hub) Unregister(connID ConnID) {
 		c := v.(*Client)
 		c.stop()
 		h.count.Add(-1)
+		h.notifyDisconnect(c)
 	}
 }
 
@@ -80,6 +113,7 @@ func (h *Hub) unregisterClient(c *Client) {
 		c.stop()
 		c.conn.Close()
 		h.count.Add(-1)
+		h.notifyDisconnect(c)
 	}
 }
 
