@@ -1,6 +1,7 @@
 # Build output
 build/
 *.out
+.gocache/
 
 # Local config (not committed)
 config/local.toml

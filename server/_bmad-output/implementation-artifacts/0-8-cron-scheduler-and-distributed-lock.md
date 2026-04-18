@@ -1,6 +1,6 @@
 # Story 0.8: Cron 调度 + 分布式锁
 
-Status: review
+Status: done
 
 ## Story
 
