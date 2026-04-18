@@ -86,7 +86,7 @@ func TestDedupMiddleware_FirstSuccess(t *testing.T) {
 	assert.JSONEq(t, `{"ok":1}`, string(payload))
 	assert.Equal(t, 1, called)
 
-	stored := store.results["u1:t:e1"]
+	stored := store.results[scopedDedupKey("u1", "t", "e1")]
 	assert.True(t, stored.OK)
 	assert.JSONEq(t, `{"ok":1}`, string(stored.Payload))
 }
@@ -105,7 +105,7 @@ func TestDedupMiddleware_FirstAppError(t *testing.T) {
 	require.True(t, errors.As(err, &ae))
 	assert.Equal(t, "FRIEND_BLOCKED", ae.Code)
 
-	stored := store.results["u1:t:e2"]
+	stored := store.results[scopedDedupKey("u1", "t", "e2")]
 	assert.False(t, stored.OK)
 	assert.Equal(t, "FRIEND_BLOCKED", stored.ErrorCode)
 	assert.Equal(t, "user is blocked", stored.ErrorMessage)
@@ -123,7 +123,7 @@ func TestDedupMiddleware_FirstPanic(t *testing.T) {
 		r := recover()
 		require.NotNil(t, r, "middleware must re-raise panic so readPump recovery logs it")
 
-		stored := store.results["u1:t:e3"]
+		stored := store.results[scopedDedupKey("u1", "t", "e3")]
 		assert.False(t, stored.OK)
 		assert.Equal(t, "INTERNAL_ERROR", stored.ErrorCode)
 		assert.Contains(t, stored.ErrorMessage, "boom")
@@ -136,8 +136,9 @@ func TestDedupMiddleware_FirstPanic(t *testing.T) {
 func TestDedupMiddleware_ReplayCachedSuccess(t *testing.T) {
 	t.Parallel()
 	store := newFakeDedupStore()
-	store.acquired["u1:t:e4"] = true
-	store.results["u1:t:e4"] = DedupResult{OK: true, Payload: json.RawMessage(`{"n":1}`)}
+	key := scopedDedupKey("u1", "t", "e4")
+	store.acquired[key] = true
+	store.results[key] = DedupResult{OK: true, Payload: json.RawMessage(`{"n":1}`)}
 
 	called := 0
 	fn := func(_ context.Context, _ *Client, _ Envelope) (json.RawMessage, error) {
@@ -155,8 +156,9 @@ func TestDedupMiddleware_ReplayCachedSuccess(t *testing.T) {
 func TestDedupMiddleware_ReplayCachedFailure(t *testing.T) {
 	t.Parallel()
 	store := newFakeDedupStore()
-	store.acquired["u1:t:e5"] = true
-	store.results["u1:t:e5"] = DedupResult{OK: false, ErrorCode: "FRIEND_BLOCKED", ErrorMessage: "user is blocked"}
+	key := scopedDedupKey("u1", "t", "e5")
+	store.acquired[key] = true
+	store.results[key] = DedupResult{OK: false, ErrorCode: "FRIEND_BLOCKED", ErrorMessage: "user is blocked"}
 
 	mw := dedupMiddleware(store, clockx.NewRealClock(), func(_ context.Context, _ *Client, _ Envelope) (json.RawMessage, error) {
 		t.Fatal("handler must not be called")
@@ -174,7 +176,7 @@ func TestDedupMiddleware_ReplayCachedFailure(t *testing.T) {
 func TestDedupMiddleware_ReplayNotFoundReturnsEventProcessing(t *testing.T) {
 	t.Parallel()
 	store := newFakeDedupStore()
-	store.acquired["u1:t:e6"] = true // already claimed, no result yet
+	store.acquired[scopedDedupKey("u1", "t", "e6")] = true // already claimed, no result yet
 
 	mw := dedupMiddleware(store, clockx.NewRealClock(), func(_ context.Context, _ *Client, _ Envelope) (json.RawMessage, error) {
 		t.Fatal("handler must not be called")
@@ -240,12 +242,62 @@ func TestDedupMiddleware_KeyScopedByUserAndType(t *testing.T) {
 
 	assert.Equal(t, 3, called, "handler must run once per (user, msgType, eventId) tuple")
 	assert.Len(t, store.results, 3)
-	assert.Contains(t, store.results, "userA:blindbox.redeem:1")
-	assert.Contains(t, store.results, "userB:blindbox.redeem:1")
-	assert.Contains(t, store.results, "userA:touch.send:1")
+	assert.Contains(t, store.results, scopedDedupKey("userA", "blindbox.redeem", "1"))
+	assert.Contains(t, store.results, scopedDedupKey("userB", "blindbox.redeem", "1"))
+	assert.Contains(t, store.results, scopedDedupKey("userA", "touch.send", "1"))
 
 	// Same user + same type + same ID must dedupe.
 	_, err = mw(context.Background(), userA, testEnvelope("1", "blindbox.redeem", `{}`))
 	require.NoError(t, err)
 	assert.Equal(t, 3, called, "true replay must not re-run handler")
+}
+
+// TestDedupMiddleware_DelimiterInFieldsDoesNotCollide proves scopedDedupKey
+// is injective when any field contains the ":" separator. Naive ":"-join
+// would map both ("a:b", "c", "d") and ("a", "b:c", "d") to "a:b:c:d" — the
+// length-prefix encoding must distinguish them.
+//
+// This matters because debugValidator copies the bearer token directly into
+// userID and Envelope.Type has no format validation, so `:` can appear in
+// both fields at runtime.
+func TestDedupMiddleware_DelimiterInFieldsDoesNotCollide(t *testing.T) {
+	t.Parallel()
+	store := newFakeDedupStore()
+
+	called := 0
+	mw := dedupMiddleware(store, clockx.NewRealClock(), func(_ context.Context, _ *Client, _ Envelope) (json.RawMessage, error) {
+		called++
+		return json.RawMessage(`{}`), nil
+	})
+
+	hub := NewHub(HubConfig{SendBufSize: 16}, clockx.NewRealClock())
+	userAB := &Client{connID: "c1", userID: "a:b", send: make(chan []byte, 16), done: make(chan struct{}), hub: hub}
+	userA := &Client{connID: "c2", userID: "a", send: make(chan []byte, 16), done: make(chan struct{}), hub: hub}
+	hub.Register(userAB)
+	hub.Register(userA)
+
+	// Triple 1: (userID="a:b", type="c", id="d").
+	_, err := mw(context.Background(), userAB, testEnvelope("d", "c", `{}`))
+	require.NoError(t, err)
+
+	// Triple 2: (userID="a", type="b:c", id="d"). Naive ":"-join of both
+	// triples produces identical "a:b:c:d" — length-prefix encoding must not.
+	_, err = mw(context.Background(), userA, testEnvelope("d", "b:c", `{}`))
+	require.NoError(t, err)
+
+	// Triple 3: move the boundary again — (userID="a", type="b", id="c:d").
+	_, err = mw(context.Background(), userA, testEnvelope("c:d", "b", `{}`))
+	require.NoError(t, err)
+
+	assert.Equal(t, 3, called, "distinct triples must not dedupe despite naive concat producing identical key")
+	assert.Len(t, store.results, 3, "three different scoped keys must be persisted")
+
+	// Self-check: the helper itself must not emit identical keys for the
+	// three triples above.
+	k1 := scopedDedupKey("a:b", "c", "d")
+	k2 := scopedDedupKey("a", "b:c", "d")
+	k3 := scopedDedupKey("a", "b", "c:d")
+	assert.NotEqual(t, k1, k2)
+	assert.NotEqual(t, k2, k3)
+	assert.NotEqual(t, k1, k3)
 }

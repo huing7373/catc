@@ -5,6 +5,7 @@ package ws_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -115,9 +116,16 @@ func TestIntegration_WS_DedupIdempotency(t *testing.T) {
 	assert.Equal(t, "evt-1", first.ID)
 	assert.JSONEq(t, `{"n":1}`, string(first.Payload))
 
-	// Redis keys are scoped by (userId, msgType, eventId) to prevent cross-
-	// user / cross-action collisions on reused client-generated ids.
-	scoped := "dedup-user:debug.echo.dedup:evt-1"
+	// Redis keys are scoped by (userId, msgType, eventId) with length-prefix
+	// encoding to prevent cross-user / cross-action collisions on reused
+	// client-generated ids and to remain injective when any field contains
+	// ":". Reproduce the server-side key shape here.
+	scoped := fmt.Sprintf(
+		"%d:%s:%d:%s:%d:%s",
+		len("dedup-user"), "dedup-user",
+		len("debug.echo.dedup"), "debug.echo.dedup",
+		len("evt-1"), "evt-1",
+	)
 	marker, err := ts.mr.Get("event:" + scoped)
 	require.NoError(t, err)
 	assert.Equal(t, "done", marker)

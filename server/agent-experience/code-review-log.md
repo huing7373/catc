@@ -148,3 +148,11 @@
 | 1 | patch | dedup middleware 直接用 env.ID 作 Redis key，未按 (userId, msgType) 命名空间隔离 | internal/ws/dedup.go:58-71 | 不同用户或不同 RPC 在 5min TTL 内复用相同客户端生成 ID（如 "1", "2"）会互相 EVENT_PROCESSING / 重放对方响应，破坏幂等正确性；scope 为 "{userId}:{msgType}:{eventID}" |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go test -tags=integration` 通过
+
+## [0-10-ws-upstream-eventid-idempotent-dedup] Round 2 — 2026-04-18
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | Round 1 用 "userId:msgType:eventId" 普通冒号拼接，字段本身含冒号（debugValidator 把 bearer token 原样当 userID；Envelope.Type 无格式校验）时仍会映射到相同 key | internal/ws/dedup.go:62 | ("a:b","c","d") 与 ("a","b:c","d") 都 → "a:b:c:d"，跨三元组仍可能 EVENT_PROCESSING 或重放他人缓存；改为 length-prefix 编码 "len:v:len:v:len:v" 使函数注射 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go test -tags=integration` 通过

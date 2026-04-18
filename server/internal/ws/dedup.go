@@ -13,6 +13,18 @@ import (
 	"github.com/huing/cat/server/pkg/redisx"
 )
 
+// scopedDedupKey returns a collision-free identifier for (userID, msgType,
+// eventID). Plain ":"-join is NOT injective when any field contains ":" —
+// e.g. ("a:b", "c", "d") and ("a", "b:c", "d") both collapse to "a:b:c:d".
+// Debug-mode userIDs come straight from the bearer token and Envelope.Type is
+// not format-validated, so this guard must be unconditional. Length-prefix
+// encoding (len + ":" + value, per segment) is provably injective: any
+// differing triple yields either a different first-segment length prefix or a
+// differing byte at the first position where the triples disagree.
+func scopedDedupKey(userID, msgType, eventID string) string {
+	return fmt.Sprintf("%d:%s:%d:%s:%d:%s", len(userID), userID, len(msgType), msgType, len(eventID), eventID)
+}
+
 // DedupResult is the handler-outcome value cached under an eventId. Aliased
 // from pkg/redisx so the internal/ws consumer interface and the pkg/redisx
 // implementation refer to the same concrete type (Go uses nominal typing for
@@ -59,7 +71,7 @@ func dedupMiddleware(store DedupStore, clock clockx.Clock, fn HandlerFunc) Handl
 		// same authenticated user replaying the same RPC — clients commonly
 		// reuse short per-connection IDs like "1", "2" and different users or
 		// different actions must not dedupe against each other.
-		scopedID := string(client.userID) + ":" + env.Type + ":" + env.ID
+		scopedID := scopedDedupKey(string(client.userID), env.Type, env.ID)
 
 		acquired, err := store.Acquire(ctx, scopedID)
 		if err != nil {
