@@ -88,7 +88,15 @@ SWITCHED: YYYY-MM-DD <HH:MM> — reason: <具体瓶颈 + 复现命令>
 - ✅ **适用场景：** §7 Hub 压测（AC6 / ADR-003）—— `long_lived` scenario 的 `connectLatencyMs` + `echoRttMs` 是 hub 稳态容量的直接度量
 - ❌ **不适用场景：** §5 cell 表的 `connectColdMs*` / `reconnectRaiseWristMs*` —— 这些列只能由真机 Watch 客户端遥测写出
 
-**`long_lived` 的 `reconnectAttempts` 指标：** 工具在 read/write/echo 错误时会自动重连并保持 N 不塌陷（round 1 review 修复）。若 `reconnectAttempts` / `connectSuccess` 比率偏高（> 5%），说明 hub 在该并发档位下无法维持稳态，p95/p99 读数需加注"非稳态"标签。
+**`long_lived` 的 `reconnectAttempts` 指标（round 2 review 修正后口径）：** 工具在 read/write/echo 错误时会自动重连并保持 N 不塌陷（round 1 review 修复）。`reconnectAttempts` 只在 worker 已经有过一次成功会话之后才累加（启动期反复 dial 失败的初次建连重试**不**算 reconnect；见 `Summary.ReconnectAttempts` godoc）。**稳态判据（正确分母）：**
+
+```
+reconnectRatio = ReconnectAttempts / Config.Concurrent
+```
+
+- 语义："每 worker 在本次运行中的平均重连次数"
+- 阈值：`≤ 0.05`（平均不到每 20 个 worker 一次重连）→ 稳态；`> 0.05` → 非稳态 ⚠，p95/p99 读数不能作为 `broadcastLatencyP99 ≤ 3s` gate 的直接输入
+- **不要**用 `ReconnectAttempts / ConnectSuccess` —— 分母 `ConnectSuccess` 自身包含了所有成功的重连，会系统性稀释 ratio 约 `R/(N+R)`（round 1 原文档的缺陷，round 2 修正）
 
 ---
 
@@ -229,7 +237,16 @@ bash scripts/build.sh && ./build/catserver --config config/default.toml
 | 5000 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
 | 10000 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
 
-**`reconnectRatio` 判据（round 1 review 引入）：** `reconnectRatio = reconnectAttempts / connectSuccess`。若 > 0.05（>5% 的会话被迫重连），说明该档位下 hub 已无法维持稳态，表内其他 p95/p99 读数需加注 "⚠️ 非稳态"，不可用作 `broadcastLatencyP99 ≤ 3000ms` 判据的直接输入。详见 `tools/ws_loadgen` `long_lived` scenario 的 `Summary.ReconnectAttempts` 字段。
+**`reconnectRatio` 判据（round 2 review 修正后口径）：**
+
+```
+reconnectRatio = reconnectAttempts / concurrent
+```
+
+- 分母是**配置的 worker 总数**（固定 = N，本表的 1k/3k/5k/10k），**不是** `connectSuccess`（后者包含了重连成功次数，会稀释分母约 `R/(N+R)`，系统性低估 churn）
+- 分子 `reconnectAttempts` 仅在 worker 已有一次成功会话之后才累加（启动期 dial-fail 的初次建连重试不算；见 `tools/ws_loadgen` `Summary.ReconnectAttempts` godoc）
+- 阈值：`> 0.05` → 该档位 hub 未能维持稳态，本行 `broadcastLatencyP95/P99` 读数须加 "⚠️ 非稳态" 标签，**不**可用作 ADR-003 `broadcastLatencyP99 ≤ 3000ms` gate 的直接输入
+- 反例说明 round 1 的缺陷：若 1000 workers 中 50 个各重连 1 次，旧公式 `50/(1000+50)=4.76%` 判"稳态"；新公式 `50/1000=5.0%` 触发"非稳态"，符合文档原意
 
 **goroutineCount 测量：** 从 healthcheck 路由或直接 `Hub.GoroutineCount()` 读（= `ConnectionCount() × 2`，readPump + writePump）。
 

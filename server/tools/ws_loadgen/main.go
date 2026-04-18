@@ -113,12 +113,25 @@ type ErrorCounts struct {
 
 // Summary is the final JSON record written to -report (or stdout).
 //
-// ReconnectAttempts counts the outer-loop cycles in long_lived after the
-// first successful connect — i.e. how many times a worker's session ended
-// (read/write/echo error) and had to re-dial. A non-zero value means the
-// steady-state concurrency was disturbed; if it is a large fraction of
-// ConnectSuccess, the run did NOT hold the configured N for the full
-// duration and p95/p99 numbers should be read with that in mind.
+// ReconnectAttempts counts long_lived outer-loop iterations that happen AFTER
+// a worker has had at least one successful session. Each increment represents
+// one "reconnect attempt"; that attempt itself may succeed (session runs
+// again) or fail (dial error / rate limit) — both count. Pre-first-success
+// retries are deliberately excluded (a worker that never gets an initial
+// connect contributes 0), so the counter is scoped to "how much session
+// churn the run experienced", not "how many dials were tried".
+//
+// The documented stability judgement in docs/spikes/op1-ws-stability.md §7
+// uses a per-worker denominator, NOT ConnectSuccess (which is inflated by
+// successful reconnects themselves, so using it as the denominator
+// systematically under-reports churn by ~R/(N+R) where R is reconnects):
+//
+//	reconnectRatio = ReconnectAttempts / Config.Concurrent
+//
+// > 0.05 means the run averaged more than 1 reconnect per 20 workers.
+// Above that threshold the configured N was not held steady; p95/p99
+// readings must be labelled non-steady and cannot feed the ADR-003
+// broadcastLatencyP99 ≤ 3 s gate directly.
 type Summary struct {
 	StartedAt         time.Time   `json:"startedAt"`
 	FinishedAt        time.Time   `json:"finishedAt"`
@@ -412,26 +425,37 @@ func workerLongLived(
 	okCount, errCount, echoCount, reconnects *atomic.Int64,
 	errs *errCounter,
 ) {
-	first := true
+	// everSucceeded flips to true the first time this worker's dial lands a
+	// usable session. Only iterations after that first success count as
+	// reconnect attempts — a worker that never manages an initial connect
+	// contributes 0 to ReconnectAttempts, matching the Summary godoc.
+	everSucceeded := false
 	for ctx.Err() == nil {
-		if !first {
+		if everSucceeded {
 			reconnects.Add(1)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(reconnectBackoff):
-			}
 		}
-		first = false
-		runLongLivedSession(ctx, f, logger, token, connectLat, echoRtt, okCount, errCount, echoCount, errs)
+		connected := runLongLivedSession(ctx, f, logger, token, connectLat, echoRtt, okCount, errCount, echoCount, errs)
+		if connected {
+			everSucceeded = true
+		}
+		// Backoff before the next iteration regardless of outcome: a failed
+		// dial retry without a pause would spin the CPU and hammer the
+		// Story 0.11 rate limiter; a successful session that just ended
+		// should not reconnect instantaneously either, since most real
+		// disconnect causes (network blip, rate-limit window) are relieved
+		// by a small wait.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(reconnectBackoff):
+		}
 	}
 }
 
-// runLongLivedSession is one dial → echo-loop → teardown cycle. It always
-// returns (never blocks past ctx) so the outer worker loop can decide whether
-// to reconnect. Errors are accounted for via the shared counters; the return
-// value is intentionally void — "should we reconnect?" is a property of ctx,
-// not of this session's outcome.
+// runLongLivedSession is one dial → echo-loop → teardown cycle. Returns true
+// iff the dial succeeded (so the outer worker can distinguish "initial-
+// connect retry" from "post-success reconnect" for the ReconnectAttempts
+// metric). Errors are accounted for via the shared counters.
 func runLongLivedSession(
 	ctx context.Context,
 	f flags,
@@ -440,13 +464,13 @@ func runLongLivedSession(
 	connectLat, echoRtt *sampleBuffer,
 	okCount, errCount, echoCount *atomic.Int64,
 	errs *errCounter,
-) {
+) bool {
 	conn, connMs, err := dial(ctx, f.url, token)
 	if err != nil {
 		errCount.Add(1)
 		classifyDialError(err, errs)
 		logger.Debug().Err(err).Msg("dial failed; will retry after backoff")
-		return
+		return false
 	}
 	defer conn.Close()
 	okCount.Add(1)
@@ -459,13 +483,13 @@ func runLongLivedSession(
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return true
 		case <-ticker.C:
 			rtt, err := sendEcho(conn)
 			if err != nil {
 				classifyEchoError(err, errs)
 				logger.Debug().Err(err).Msg("echo failed; will reconnect")
-				return
+				return true
 			}
 			echoRtt.add(rtt)
 			echoCount.Add(1)
