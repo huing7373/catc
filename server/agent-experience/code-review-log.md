@@ -156,3 +156,12 @@
 | 1 | patch | Round 1 用 "userId:msgType:eventId" 普通冒号拼接，字段本身含冒号（debugValidator 把 bearer token 原样当 userID；Envelope.Type 无格式校验）时仍会映射到相同 key | internal/ws/dedup.go:62 | ("a:b","c","d") 与 ("a","b:c","d") 都 → "a:b:c:d"，跨三元组仍可能 EVENT_PROCESSING 或重放他人缓存；改为 length-prefix 编码 "len:v:len:v:len:v" 使函数注射 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go test -tags=integration` 通过
+
+## [0-11-ws-connect-rate-limit-and-abnormal-device-reject] Round 1 — 2026-04-18
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | 新增必填 `ws.*` 字段却只有 `mustValidate` 严格校验，未提供 applyDefaults；MustLoad 仅解析单文件不 merge default.toml | internal/config/config.go:96-113 | 现有的 config/local.toml / local.toml.example 省略 [ws] 段的启动路径直接 `log.Fatal`，破坏"override 配置不必重复默认值"的既有契约；改为在 validate 前 applyDefaults 填零值 |
+| 2 | patch | 用 INCR + EXPIRE NX 实现声称的"滑动窗口 60s ≤ 5"；TTL 仅首次设置，语义其实是固定窗口 | pkg/redisx/conn_ratelimit.go:75-78 | 客户端可以在窗口关闭前 5 次 + 窗口 reset 后立即 5 次 = 短时 10 次，绕过 NFR-SCALE-5 保证；改为 sorted set（ZADD 时间戳 + ZREMRANGEBYSCORE + ZCARD）做真正的滑动窗口，构造期注入 clockx.Clock 以便 FakeClock 驱动测试 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go test -tags=integration ./internal/ws/... ./tools/...` 通过

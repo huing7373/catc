@@ -43,6 +43,9 @@ refresh_expiry_sec = 2592000
 
 [ws]
 max_connections = 10000
+connect_rate_per_window = 5
+connect_rate_window_sec = 60
+blacklist_default_ttl_sec = 86400
 
 [apns]
 key_id = "KEY123"
@@ -74,6 +77,33 @@ base_url = "https://cdn.example.com"
 	assert.Len(t, cfg.Hash, 8)
 }
 
+// TestMustLoad_OverrideWithoutWSSection verifies that an override config
+// omitting [ws] entirely still loads — applyDefaults must fill the fields
+// before validation. Regression guard for the review-round-1 finding: a
+// thin local.toml without [ws] used to fail startup with
+// "ws.connect_rate_per_window must be > 0".
+func TestMustLoad_OverrideWithoutWSSection(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "override.toml")
+	content := `
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[redis]
+addr = "localhost:6379"
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	cfg := MustLoad(path)
+
+	assert.Equal(t, 5, cfg.WS.ConnectRatePerWindow)
+	assert.Equal(t, 60, cfg.WS.ConnectRateWindowSec)
+	assert.Equal(t, 86400, cfg.WS.BlacklistDefaultTTLSec)
+}
+
 func TestMustLoad_HashDeterministic(t *testing.T) {
 	t.Parallel()
 
@@ -82,6 +112,11 @@ func TestMustLoad_HashDeterministic(t *testing.T) {
 	content := `
 [server]
 port = 9090
+
+[ws]
+connect_rate_per_window = 5
+connect_rate_window_sec = 60
+blacklist_default_ttl_sec = 86400
 `
 	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
 

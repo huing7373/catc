@@ -56,11 +56,14 @@ type JWTCfg struct {
 }
 
 type WSCfg struct {
-	MaxConnections  int `toml:"max_connections"`
-	PingIntervalSec int `toml:"ping_interval_sec"`
-	PongTimeoutSec  int `toml:"pong_timeout_sec"`
-	SendBufSize     int `toml:"send_buf_size"`
-	DedupTTLSec     int `toml:"dedup_ttl_sec"`
+	MaxConnections         int `toml:"max_connections"`
+	PingIntervalSec        int `toml:"ping_interval_sec"`
+	PongTimeoutSec         int `toml:"pong_timeout_sec"`
+	SendBufSize            int `toml:"send_buf_size"`
+	DedupTTLSec            int `toml:"dedup_ttl_sec"`
+	ConnectRatePerWindow   int `toml:"connect_rate_per_window"`
+	ConnectRateWindowSec   int `toml:"connect_rate_window_sec"`
+	BlacklistDefaultTTLSec int `toml:"blacklist_default_ttl_sec"`
 }
 
 type APNsCfg struct {
@@ -89,12 +92,49 @@ func MustLoad(path string) *Config {
 	}
 
 	c.Hash = hash
+	c.applyDefaults()
 	c.mustValidate()
 	return &c
+}
+
+// applyDefaults fills zero-valued fields with compile-time defaults so that
+// override configs (e.g. config/local.toml) that omit a section keep
+// working after new keys are added. Without this step, adding a required
+// key forces every existing override config to add it or fail at startup —
+// a real regression for any environment using a thin override file.
+//
+// default.toml remains the documented source of truth for operators; these
+// compile-time defaults only engage when both the user's file and
+// default.toml omit the key (which should not happen for default.toml).
+func (c *Config) applyDefaults() {
+	if c.WS.ConnectRatePerWindow == 0 {
+		c.WS.ConnectRatePerWindow = 5
+	}
+	if c.WS.ConnectRateWindowSec == 0 {
+		c.WS.ConnectRateWindowSec = 60
+	}
+	if c.WS.BlacklistDefaultTTLSec == 0 {
+		c.WS.BlacklistDefaultTTLSec = 86400
+	}
 }
 
 func (c *Config) mustValidate() {
 	if c.Server.Port < 0 {
 		log.Fatal().Int("port", c.Server.Port).Msg("config: server.port must be >= 0")
+	}
+	// Post-applyDefaults: a still-<=0 value means the operator explicitly set
+	// a negative (e.g. -1 to "disable"). Fail loudly rather than silently
+	// re-opening the J4 WS-storm failure mode with no rate limiter.
+	if c.WS.ConnectRatePerWindow <= 0 {
+		log.Fatal().Int("connect_rate_per_window", c.WS.ConnectRatePerWindow).
+			Msg("config: ws.connect_rate_per_window must be > 0")
+	}
+	if c.WS.ConnectRateWindowSec <= 0 {
+		log.Fatal().Int("connect_rate_window_sec", c.WS.ConnectRateWindowSec).
+			Msg("config: ws.connect_rate_window_sec must be > 0")
+	}
+	if c.WS.BlacklistDefaultTTLSec <= 0 {
+		log.Fatal().Int("blacklist_default_ttl_sec", c.WS.BlacklistDefaultTTLSec).
+			Msg("config: ws.blacklist_default_ttl_sec must be > 0")
 	}
 }

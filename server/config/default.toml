@@ -33,6 +33,9 @@ ping_interval_sec = 30
 pong_timeout_sec = 60
 send_buf_size = 256
 dedup_ttl_sec = 300
+connect_rate_per_window = 5
+connect_rate_window_sec = 60
+blacklist_default_ttl_sec = 86400
 
 [apns]
 key_id = ""

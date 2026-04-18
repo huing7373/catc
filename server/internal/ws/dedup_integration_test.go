@@ -56,7 +56,7 @@ func setupDedupServer(t *testing.T) *dedupTestServer {
 	})
 
 	validator := ws.NewDebugValidator()
-	upgradeHandler := ws.NewUpgradeHandler(hub, dispatcher, validator)
+	upgradeHandler := ws.NewUpgradeHandler(hub, dispatcher, validator, nil, nil)
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

@@ -35,7 +35,9 @@ func setupTestServer(t *testing.T) (*httptest.Server, *ws.Hub) {
 	})
 
 	validator := ws.NewDebugValidator()
-	upgradeHandler := ws.NewUpgradeHandler(hub, dispatcher, validator)
+	// nil blacklist + nil limiter keeps Story 0.9/0.10 regression suite
+	// insulated from the Story 0.11 guards (exercised in separate tests).
+	upgradeHandler := ws.NewUpgradeHandler(hub, dispatcher, validator, nil, nil)
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

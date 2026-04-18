@@ -66,7 +66,14 @@ func initialize(cfg *config.Config) *App {
 		validator = ws.NewStubValidator()
 	}
 
-	upgradeHandler := ws.NewUpgradeHandler(wsHub, dispatcher, validator)
+	blacklist := redisx.NewBlacklist(redisCli.Cmdable())
+	connLimiter := redisx.NewConnectRateLimiter(
+		redisCli.Cmdable(),
+		clk,
+		int64(cfg.WS.ConnectRatePerWindow),
+		time.Duration(cfg.WS.ConnectRateWindowSec)*time.Second,
+	)
+	upgradeHandler := ws.NewUpgradeHandler(wsHub, dispatcher, validator, blacklist, connLimiter)
 
 	h := &handlers{
 		health:    handler.NewHealthHandler(mongoCli, redisCli, wsHub, redisCli.Cmdable(), cfg.WS.MaxConnections*2),
