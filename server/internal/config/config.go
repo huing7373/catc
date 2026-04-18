@@ -64,6 +64,7 @@ type WSCfg struct {
 	ConnectRatePerWindow   int `toml:"connect_rate_per_window"`
 	ConnectRateWindowSec   int `toml:"connect_rate_window_sec"`
 	BlacklistDefaultTTLSec int `toml:"blacklist_default_ttl_sec"`
+	ResumeCacheTTLSec      int `toml:"resume_cache_ttl_sec"`
 }
 
 type APNsCfg struct {
@@ -116,6 +117,9 @@ func (c *Config) applyDefaults() {
 	if c.WS.BlacklistDefaultTTLSec == 0 {
 		c.WS.BlacklistDefaultTTLSec = 86400
 	}
+	if c.WS.ResumeCacheTTLSec == 0 {
+		c.WS.ResumeCacheTTLSec = 60
+	}
 }
 
 func (c *Config) mustValidate() {
@@ -136,5 +140,12 @@ func (c *Config) mustValidate() {
 	if c.WS.BlacklistDefaultTTLSec <= 0 {
 		log.Fatal().Int("blacklist_default_ttl_sec", c.WS.BlacklistDefaultTTLSec).
 			Msg("config: ws.blacklist_default_ttl_sec must be > 0")
+	}
+	// session.resume cache TTL is the NFR-PERF-6 60s window; a non-positive
+	// value would make Put reject at Redis-command time (invalid TTL) and
+	// every resume would hit the providers — FR42 regression. Fail fast.
+	if c.WS.ResumeCacheTTLSec <= 0 {
+		log.Fatal().Int("resume_cache_ttl_sec", c.WS.ResumeCacheTTLSec).
+			Msg("config: ws.resume_cache_ttl_sec must be > 0")
 	}
 }

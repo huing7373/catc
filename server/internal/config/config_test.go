@@ -102,6 +102,7 @@ addr = "localhost:6379"
 	assert.Equal(t, 5, cfg.WS.ConnectRatePerWindow)
 	assert.Equal(t, 60, cfg.WS.ConnectRateWindowSec)
 	assert.Equal(t, 86400, cfg.WS.BlacklistDefaultTTLSec)
+	assert.Equal(t, 60, cfg.WS.ResumeCacheTTLSec)
 }
 
 func TestMustLoad_HashDeterministic(t *testing.T) {

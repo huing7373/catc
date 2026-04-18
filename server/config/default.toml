@@ -36,6 +36,7 @@ dedup_ttl_sec = 300
 connect_rate_per_window = 5
 connect_rate_window_sec = 60
 blacklist_default_ttl_sec = 86400
+resume_cache_ttl_sec = 60
 
 [apns]
 key_id = ""
