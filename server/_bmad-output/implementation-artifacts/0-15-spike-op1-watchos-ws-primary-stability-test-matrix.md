@@ -1,6 +1,6 @@
 # Story 0.15: Spike-OP1 — watchOS WS-primary 稳定性真机测试矩阵（Phase A：服务端脚手架）
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 

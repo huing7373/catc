@@ -36,6 +36,8 @@
 
 generated: 2026-04-17
 last_updated: 2026-04-18
+# Epic 0 done: 2026-04-18 (all stories 0-1..0-15 done; retrospective optional)
+# Story 0-15 done: 2026-04-18 (Phase A scaffold — real-device execution deferred to Story 9-1 under Epic 9)
 # Epic 9 created: 2026-04-18 (new cross-cutting epic for spike-class real-device/human execution work; lets Epic 0 complete without waiting on physical testing)
 # Story 9-1 created: 2026-04-18 (originally Story 0-16; moved from Epic 0 to Epic 9 per user decision)
 # Story 0-15 review: 2026-04-18 (Phase A scaffold only — real-device execution deferred to Story 9-1 under Epic 9)
@@ -70,7 +72,7 @@ story_location: "{project-root}/_bmad-output/implementation-artifacts"
 
 development_status:
   # Epic 0: 服务端骨架与平台基线
-  epic-0: in-progress
+  epic-0: done
   0-1-project-skeleton-and-dev-toolchain: done
   0-2-app-entry-and-runnable-lifecycle: done
   0-3-infra-connectivity-and-clients: done
@@ -85,7 +87,7 @@ development_status:
   0-12-session-resume-cache-throttle: done
   0-13-apns-push-platform-pusher-queue-routing-410-cleanup: done
   0-14-ws-message-type-registry-and-version-query: done
-  0-15-spike-op1-watchos-ws-primary-stability-test-matrix: review
+  0-15-spike-op1-watchos-ws-primary-stability-test-matrix: done
   epic-0-retrospective: optional
 
   # Epic 1: 身份与账户
