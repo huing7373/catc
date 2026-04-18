@@ -34,8 +34,8 @@ func NewScheduler(locker *redisx.Locker, redisCmd redis.Cmdable, clock clockx.Cl
 
 func (s *Scheduler) Name() string { return "cron_scheduler" }
 
-func (s *Scheduler) Start(_ context.Context) error {
-	s.ctx, s.cancel = context.WithCancel(context.Background())
+func (s *Scheduler) Start(ctx context.Context) error {
+	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.registerJobs()
 	s.cron.Start()
 	log.Info().Str("instanceId", s.locker.InstanceID()).Msg("cron scheduler started")

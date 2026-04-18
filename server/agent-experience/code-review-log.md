@@ -115,3 +115,11 @@
 | 2 | patch | addLockedJob 用 context.Background() 调 WithLock 和 job body，shutdown 取消信号传不进来 | internal/cron/scheduler.go:57 | Final() 等 cron.Stop() 完成时，阻塞在 Redis I/O 的 job 无法被取消，可能拖过 30s 关机上限 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过
+
+## [0-8-cron-scheduler-and-distributed-lock] Round 2 — 2026-04-18
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | Start 用 context.Background() 而非继承 App.Run 传入的 ctx，shutdown cancel 在 Final() 调用前不可达 | internal/cron/scheduler.go:37 | shutdown 信号到达到 Final() 被调用之间的窗口期，运行中的 job 无法感知取消 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过
