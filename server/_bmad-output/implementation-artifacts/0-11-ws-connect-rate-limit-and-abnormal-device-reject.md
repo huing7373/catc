@@ -1,6 +1,6 @@
 # Story 0.11: WS 建连频率限流 + 异常设备拒连
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
