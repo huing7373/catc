@@ -1,6 +1,6 @@
 # Story 0.14: WS 消息类型注册表与版本查询
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
