@@ -209,3 +209,11 @@
 | 2 | patch | RefreshToken Step 6/7 顺序是 UpsertSession → Revoke(oldJTI)，一旦 blacklist 写失败，session.current_jti 已指向客户端未接收的 newJTI，下次同一 oldJTI 的 retry 必命中 reuse detection 烧掉 newJTI | internal/service/auth_service.go:617-627 | 单次瞬时的 Redis 写失败会把合法用户直接踢回 SIWA；改为 Revoke FIRST → UpsertSession LAST：Revoke 失败 ⇒ 500 + session 不动，客户端可用同一 oldJTI 重试自愈；反向的 Revoke OK + UpsertSession Mongo 失败是接受的复合故障长尾 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go vet -tags=integration ./cmd/cat/... ./internal/repository/...` 通过
+
+## [1-2-refresh-token-revoke-per-device-session] Round 2 — 2026-04-19
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | Manager 新加 `issueClock` 字段与"Issue / Verify 共用注入时钟"的 godoc，但 `Verify` 的 `jwt.ParseWithClaims` 只传了 `WithIssuer + WithExpirationRequired`，没传 `WithTimeFunc(m.issueClock.Now)` —— Issue 走 FakeClock，Verify 退回 `time.Now()` | pkg/jwtx/manager.go:159,173 | refresh/expiry 集成测试的 FakeClock 夹具无效：token 发行时间走 2026-04-19 12:00 UTC 假时钟，15 分钟后真实墙钟把 access token 看成"已过期"；短 TTL 相关路径会在 CI 非此时此刻运行时回归；补 `jwt.WithTimeFunc(m.issueClock.Now)` + 两个单测 (`TestManager_VerifyAndIssue_ShareInjectedClock` / `TestManager_Verify_ExpiredAgainstInjectedClock`) 锁定双向契约 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go vet -tags=integration ./cmd/cat/... ./internal/repository/... ./pkg/...` 通过

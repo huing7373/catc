@@ -13,6 +13,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/huing/cat/server/pkg/clockx"
 )
 
 func writeKeyFile(t *testing.T, dir, name string, key *rsa.PrivateKey) string {
@@ -310,6 +312,59 @@ func TestManager_Issue_PreservesRegisteredClaimsID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "jti-rolling-rotation-sentinel", got.ID,
 		"Issue must not overwrite caller-supplied RegisteredClaims.ID (jti)")
+}
+
+// TestManager_VerifyAndIssue_ShareInjectedClock locks the round-2
+// review contract: Issue stamps IssuedAt / ExpiresAt through
+// m.issueClock, Verify must run jwt's exp-check through the SAME
+// clock. A token issued at fake-now with a short expiry must be
+// accepted by Verify at fake-now (not "expired" because the real
+// wall clock happens to have passed fake-now + expiry).
+func TestManager_VerifyAndIssue_ShareInjectedClock(t *testing.T) {
+	t.Parallel()
+	m, _, _ := setupManager(t)
+
+	// Pin the clock deep in the past so, if Verify silently reached
+	// for time.Now(), the issued token's exp (= pinned + 15min) would
+	// sit in the reviewer's nightmare window ≪ real wall clock →
+	// "expired" failure. The pinned time is a fixed literal so this
+	// test is deterministic across runs.
+	pinned := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	m.issueClock = clockx.NewFakeClock(pinned)
+
+	claims := CustomClaims{UserID: "u1", TokenType: "access"}
+	tokenStr, err := m.Issue(claims)
+	require.NoError(t, err)
+
+	got, err := m.Verify(tokenStr)
+	require.NoError(t, err, "Verify MUST use the injected clock; real wall clock is years past 2020-01-01 + 15min")
+	assert.Equal(t, "u1", got.UserID)
+	// Belt-and-suspenders: confirm exp really is set back in 2020.
+	require.NotNil(t, got.ExpiresAt)
+	assert.True(t, got.ExpiresAt.Time.Before(time.Date(2020, 1, 2, 0, 0, 0, 0, time.UTC)),
+		"token exp must be anchored to the injected clock, got %s", got.ExpiresAt.Time)
+}
+
+// TestManager_Verify_ExpiredAgainstInjectedClock confirms the other
+// direction: advance the injected clock past exp and Verify must
+// produce an "expired" error.
+func TestManager_Verify_ExpiredAgainstInjectedClock(t *testing.T) {
+	t.Parallel()
+	m, _, _ := setupManager(t)
+
+	base := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+	fake := clockx.NewFakeClock(base)
+	m.issueClock = fake
+
+	tokenStr, err := m.Issue(CustomClaims{UserID: "u1", TokenType: "access"})
+	require.NoError(t, err)
+
+	// Advance past the configured access expiry (900s).
+	fake.Advance(2 * time.Hour)
+
+	_, err = m.Verify(tokenStr)
+	require.Error(t, err, "Verify must recognize exp relative to the injected clock")
+	assert.Contains(t, err.Error(), "expired")
 }
 
 func TestManager_Issue_EmptyJTIStaysEmpty(t *testing.T) {

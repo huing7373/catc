@@ -49,13 +49,17 @@ type Options struct {
 // (New) and are populated by NewManagerWithApple for Story 1.1+.
 // VerifyApple panics if called on a sign-only Manager — see its doc.
 //
-// issueClock drives the IssuedAt / ExpiresAt stamps on Issue. New(opts)
-// defaults it to RealClock (time.Now-backed); NewManagerWithApple
-// overrides it with the injected AppleVerifyDeps.Clock so FakeClock
-// tests can drive Issue, Verify, and VerifyApple off the same wall
-// clock. Story 1.2 guards against the "Issue silently uses time.Now in
-// production" footgun (review-antipatterns §4.1): callers on the
-// request path MUST go through NewManagerWithApple.
+// issueClock drives the IssuedAt / ExpiresAt stamps on Issue AND the
+// exp-comparison clock in Verify (jwt.WithTimeFunc). Kept as one field
+// because the two calls MUST share a timebase — otherwise a FakeClock
+// test that pins Issue's "now" would still be at the real wall clock's
+// mercy in Verify, and any token with a non-trivial expiry would start
+// failing Verify as soon as real-now outran fake-now. New(opts)
+// defaults to RealClock (time.Now-backed); NewManagerWithApple
+// overrides with the injected AppleVerifyDeps.Clock so the same clock
+// drives Apple-token Verify (appleClock) and server-token Issue/Verify
+// (issueClock) — production code path must go through
+// NewManagerWithApple, per review-antipatterns §4.1.
 type Manager struct {
 	activeKey     *rsa.PrivateKey
 	activePub     *rsa.PublicKey
@@ -155,7 +159,13 @@ func (m *Manager) Issue(claims CustomClaims) (string, error) {
 	return token.SignedString(m.activeKey)
 }
 
-// Verify parses and validates a JWT. It selects the public key by matching the kid header.
+// Verify parses and validates a JWT. It selects the public key by
+// matching the kid header. Expiration validation runs through
+// m.issueClock so Issue / Verify share a single timebase — a FakeClock
+// test harness that pins "now" for Issue MUST observe the same pinned
+// "now" during Verify, otherwise a token issued at fake-now with a
+// 15-minute access expiry would fail Verify the moment the real wall
+// clock passes fake-now+15min (round-2 review finding).
 func (m *Manager) Verify(tokenStr string) (*CustomClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &CustomClaims{}, func(t *jwt.Token) (any, error) {
 		if t.Method != jwt.SigningMethodRS256 {
@@ -170,7 +180,7 @@ func (m *Manager) Verify(tokenStr string) (*CustomClaims, error) {
 			return m.oldPub, nil
 		}
 		return nil, errors.New("unknown kid: " + kid)
-	}, jwt.WithIssuer(m.issuer), jwt.WithExpirationRequired())
+	}, jwt.WithIssuer(m.issuer), jwt.WithExpirationRequired(), jwt.WithTimeFunc(m.issueClock.Now))
 	if err != nil {
 		return nil, err
 	}
