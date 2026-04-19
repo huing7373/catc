@@ -807,7 +807,100 @@ Authorization: Bearer <accessToken>
 
 ---
 
-## 14. 账户注销场景的 WS 主动断开（Story 1.6 预告）
+## 14. APNs device token 注册（Story 1.4）
+
+Epic 1 第四个 story。负责把 Watch / iPhone 上**操作系统**下发的 APNs device token **绑定**到已登录用户账户上，让未来的 offline push（touch fallback / blindbox drop / cold-start recall）能精确送到这个设备。
+
+### 14.1 Endpoint
+
+- **URL**：`POST /v1/devices/apns-token`
+- **Auth**：Bearer access token（即 `/auth/apple` 或 `/auth/refresh` 的返回值）——**不是** refresh token。走 Story 1.3 的 `/v1/*` JWT middleware。
+- **Body**：
+  ```json
+  {
+    "deviceToken": "<hex string — Apple 原样给什么就上报什么>",
+    "platform": "watch"   // 可选：建议省略；服务端从 JWT 读
+  }
+  ```
+- **Response 200**：`{ "ok": true }`
+- **幂等性**：同 userId + 同 platform 连续调用会**覆盖**上次的 token（upsert）；跨 platform（Watch + iPhone）保留两条独立记录。
+
+### 14.2 触发时机
+
+客户端在以下任一情形调用：
+
+1. 首次成功 SIWA 后，iOS / watchOS `didRegisterForRemoteNotificationsWithDeviceToken` 回调里拿到 token。
+2. iOS / watchOS 下发**新** device token（Apple 保留随时换 token 的权利 —— 系统会再次回调上面那个 method）。
+3. 用户在 App 设置里重新启用通知权限后系统重新下发 token。
+
+**不要**在每次启动都调；没有 token 变化时调只是白烧服务端限流配额。
+
+### 14.3 Body 字段细则
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `deviceToken` | ✅ | Apple 原样给的 hex 字符串。**不要**做大小写转换 / 去空格 / 截断。典型长度 64 hex 字符（= 32 字节原始 token），服务端接受 8-200 字符区间（Apple 未来可能加长）。 |
+| `platform` | ❌ | `"watch"` 或 `"iphone"`。**强烈建议省略** —— 服务端从 JWT `plat` claim 读，权威来源。若客户端执意携带，必须和 JWT 一致；不一致 → 400 `VALIDATION_ERROR`。 |
+
+**不要**发明别的字段（没有 `appVersion` / `locale` / `badge` 等）；服务端 binding 用的是 `required,min=8,max=200,hexadecimal` 严格 validator，任何多余字段被 gin 忽略，但多余字段里的 typo 可能掩盖真正的 `deviceToken` 传错。
+
+### 14.4 失败响应
+
+| HTTP | Code | 客户端应对 |
+|---|---|---|
+| 400 | `VALIDATION_ERROR` | 客户端 bug —— `deviceToken` 不是 hex / `platform` 和 JWT 不匹配 / body 格式错。记 log，**不要**重试；联系后端。 |
+| 401 | `AUTH_TOKEN_EXPIRED` | access token 缺失 / 过期 —— 走 Story 1.2 refresh flow，成功后**重试一次**（同一个 deviceToken）。 |
+| 401 | `AUTH_INVALID_IDENTITY_TOKEN` | access token 损坏 / 错类型 / 无 platform claim（极罕见，仅在 JWT pre-1.2 无 plat 场景）。走 refresh flow；若 refresh 也 401 则引导用户回 SIWA 登录。 |
+| 429 | `RATE_LIMIT_EXCEEDED` | 读 `Retry-After` header（秒），按其值退避后重试。默认阈值 5 次 / 60 秒，已经远高于正常客户端触发频率；触发 429 一般意味着客户端实现 bug。 |
+| 500 | `INTERNAL_ERROR` | 服务端 Redis / Mongo 故障。指数退避重试最多 3 次（1s / 3s / 9s），仍失败则放弃 —— 下一次 token 变化（或 App 重启）会重新触发注册。 |
+
+### 14.5 安全与隐私
+
+- **服务端**：device token 在 Mongo 以 AES-256-GCM 字段级加密存储（NFR-SEC-7），任何落库备份 / 数据迁移导出的密文离开原 key 都不可解密。
+- **日志**：服务端任何 INFO+ 日志里的 device token 都走 `logx.MaskAPNsToken`（首 8 字符 + `...`）。客户端**同样建议** —— 不要把完整 deviceToken 打到 Crashlytics / Sentry 等远端日志。
+- **重置**：用户在系统设置里关闭通知权限 → iOS / watchOS 不再回调 → 服务端会在下一次 APNs 推送拿到 `410 Unregistered` 响应时自动清除该 row（Story 0.13 FR43）。客户端**不需要**主动调"删除 token" API；Story 1.6 账号注销会一并清。
+- **跨设备**：同一 Apple Account 在 Watch + iPhone 两台设备上**独立**存储两条 row，推送时服务端会同时往两者发（Story 5.2+ 场景）。
+
+### 14.6 推荐的 Swift 伪代码
+
+```swift
+// 1. 在 SIWA 成功、且 access token 拿到以后注册 remote notifications。
+UIApplication.shared.registerForRemoteNotifications()
+
+// 2. 在 didRegisterForRemoteNotificationsWithDeviceToken 里
+func application(_ app: UIApplication,
+                 didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+    let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
+    Task {
+        do {
+            try await API.registerApnsToken(hex: hex)   // POST /v1/devices/apns-token
+        } catch APIError.authTokenExpired, APIError.authInvalidIdentityToken {
+            try? await AuthManager.refresh()            // Story 1.2
+            try? await API.registerApnsToken(hex: hex)  // 重试一次
+        } catch APIError.rateLimited(let retryAfter) {
+            try? await Task.sleep(nanoseconds: UInt64(retryAfter) * 1_000_000_000)
+            try? await API.registerApnsToken(hex: hex)
+        } catch {
+            // 500 等：交给下一次 token 变化 / App 重启
+        }
+    }
+}
+
+// 3. Body 不必带 platform —— 服务端从 JWT 读。
+func registerApnsToken(hex: String) async throws {
+    try await http.post("/v1/devices/apns-token", body: ["deviceToken": hex])
+}
+```
+
+### 14.7 观察性
+
+- 服务端成功注册会落 `action=apns_token_register` INFO 日志，字段含 userId / deviceId / platform（**不**含 deviceToken 明文）。
+- Rate-limit 拒绝路径不带 userId 的独立 audit 日志 —— 直接在 Story 1.1 全局 logger 里以 `AppError` 形式输出 `code=RATE_LIMIT_EXCEEDED`。
+- 客户端**不**需要额外向后端上报"已注册"事件。
+
+---
+
+## 15. 账户注销场景的 WS 主动断开（Story 1.6 预告）
 
 Story 1.6 (DELETE `/v1/users/me`) 上线后会触发以下流程，本节让客户端**提前**做好准备：
 

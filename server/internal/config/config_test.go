@@ -130,6 +130,11 @@ bundle_id = "com.test.cat"
 	assert.Equal(t, 4, cfg.APNs.MaxAttempts)
 	assert.Equal(t, 30, cfg.APNs.TokenExpiryDays)
 	assert.False(t, cfg.APNs.Enabled)
+	// Story 1.4 — new APNs defaults.
+	assert.Equal(t, 5, cfg.APNs.RegisterRatePerWindow)
+	assert.Equal(t, 60, cfg.APNs.RegisterRateWindowSec)
+	assert.Equal(t, "", cfg.APNs.TokenEncryptionKeyHex,
+		"encryption key has no compile-time default; release enforcement via validateAPNs")
 }
 
 // TestMustLoad_OverrideWithoutWSSection verifies that an override config

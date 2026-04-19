@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Cat Backend API
-  version: "1.3.0-epic1"
+  version: "1.4.0-epic1"
   description: >
     HTTP API surface for the 裤衩猫 backend. WebSocket envelope/message
     protocol is defined in docs/api/ws-message-registry.md (source of truth
@@ -150,6 +150,98 @@ paths:
                       message: refresh token revoked
         "500":
           description: Internal server error (Redis / Mongo / JWT signing failure; fail-closed).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: INTERNAL_ERROR
+                  message: internal server error
+  /v1/devices/apns-token:
+    post:
+      summary: Register (or re-register) this device's APNs device token
+      description: >
+        Story 1.4. The client calls this whenever iOS / watchOS hands it a
+        fresh APNs device token — initial registration on first sign-in,
+        and whenever the OS rotates the token. The server persists the
+        (userId, platform) → deviceToken binding into the `apns_tokens`
+        Mongo collection with AES-GCM field-level encryption
+        (NFR-SEC-7). `platform` is resolved from the authenticated JWT
+        claim; clients MAY echo it in the body but a mismatch is 400.
+        Repeated calls for the same (userId, platform) pair overwrite
+        the previous token (upsert); Watch and iPhone coexist as
+        separate rows. Failure modes:
+          * 400 VALIDATION_ERROR — body.deviceToken not hex / body.platform
+            mismatches JWT.
+          * 401 AUTH_TOKEN_EXPIRED — missing / non-Bearer Authorization.
+          * 401 AUTH_INVALID_IDENTITY_TOKEN — token failed verification,
+            is a refresh token, or carries no `plat` claim (rare;
+            forces a /auth/refresh round-trip).
+          * 429 RATE_LIMIT_EXCEEDED — per-user sliding-window cap
+            exceeded (default 5/60s). Response carries Retry-After.
+          * 500 INTERNAL_ERROR — Redis / Mongo / sealer failure.
+      operationId: registerApnsToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterApnsTokenRequest"
+      responses:
+        "200":
+          description: Registration succeeded (idempotent — upsert on (userId, platform)).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterApnsTokenResponse"
+        "400":
+          description: Validation error — body.deviceToken not hex, platform mismatch, etc.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: VALIDATION_ERROR
+                  message: validation error
+        "401":
+          description: JWT missing / invalid / wrong type / missing platform claim.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                expired:
+                  summary: Missing or non-Bearer Authorization
+                  value:
+                    error:
+                      code: AUTH_TOKEN_EXPIRED
+                      message: token expired
+                invalid:
+                  summary: Token verification / type / claim failed
+                  value:
+                    error:
+                      code: AUTH_INVALID_IDENTITY_TOKEN
+                      message: invalid identity token
+        "429":
+          description: >
+            Per-user register rate-limit hit. Respect Retry-After before retrying.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds the client should wait before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: RATE_LIMIT_EXCEEDED
+                  message: rate limit exceeded
+        "500":
+          description: Internal server error (Redis / Mongo / sealer failure; fail-closed).
           content:
             application/json:
               schema:
@@ -368,6 +460,45 @@ components:
           type: string
           nullable: true
           description: IANA tz; set via Story 1.5; nil until then.
+    RegisterApnsTokenRequest:
+      type: object
+      required:
+        - deviceToken
+      properties:
+        deviceToken:
+          type: string
+          minLength: 8
+          maxLength: 200
+          pattern: "^[0-9a-fA-F]+$"
+          description: >
+            APNs device token as a hex-encoded string. Historically a
+            32-byte opaque identifier (64 hex chars) — but Apple reserves
+            the right to change the length, so the validator is liberal
+            on max. Clients MUST NOT lowercase or reformat the value Apple
+            supplied; pass it verbatim. Do NOT log plaintext — server-side
+            logging uses logx.MaskAPNsToken (first 8 chars + "...").
+        platform:
+          type: string
+          enum: [watch, iphone]
+          description: >
+            Optional — the server authoritatively reads platform from the
+            JWT claim. If the client supplies this field it MUST match
+            the JWT value; a mismatch returns 400 VALIDATION_ERROR. The
+            field exists only for log clarity; new integrations should
+            omit it.
+      example:
+        deviceToken: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        platform: "watch"
+    RegisterApnsTokenResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+          description: Always true on 200. Deliberately minimal — re-register is idempotent.
+      example:
+        ok: true
     ErrorResponse:
       type: object
       required:

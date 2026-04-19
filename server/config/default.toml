@@ -57,6 +57,13 @@ retry_backoffs_ms = [1000, 3000, 9000]
 max_attempts = 4
 token_expiry_days = 30
 enabled = false
+# Story 1.4 — AES-256 at-rest encryption key (64 hex chars = 32 bytes).
+# REQUIRED in release mode regardless of `enabled` (staging may persist
+# tokens without pushing). Debug / test deployments fall back to a
+# dev-only zero key; release boot fails fast if this stays empty.
+token_encryption_key_hex = ""
+register_rate_per_window = 5
+register_rate_window_sec = 60
 
 [apple]
 bundle_id = ""

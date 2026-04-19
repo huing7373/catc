@@ -316,6 +316,75 @@ func TestMongoUserRepo_Integration(t *testing.T) {
 		assert.ErrorIs(t, err, repository.ErrSessionStale,
 			"absent user is conflated with CAS mismatch — service semantic is identical")
 	})
+
+	// Story 1.4 — SetSessionHasApnsToken coverage.
+	t.Run("SetSessionHasApnsToken_HappyPath", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:apns-flag-happy")
+		require.NoError(t, repo.Insert(ctx, u))
+		dev := "00000000-0000-4000-8000-0000000001a1"
+		require.NoError(t, repo.UpsertSession(ctx, u.ID, dev, domain.Session{
+			CurrentJTI: "jti-apns", IssuedAt: clk.Now(),
+		}))
+
+		require.NoError(t, repo.SetSessionHasApnsToken(ctx, u.ID, dev, true))
+
+		got, ok, err := repo.GetSession(ctx, u.ID, dev)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.True(t, got.HasApnsToken, "flag must round-trip true")
+		assert.Equal(t, "jti-apns", got.CurrentJTI, "existing session fields preserved")
+	})
+
+	t.Run("SetSessionHasApnsToken_UnknownUser", func(t *testing.T) {
+		err := repo.SetSessionHasApnsToken(ctx, ids.NewUserID(),
+			"00000000-0000-4000-8000-0000000001a2", true)
+		assert.ErrorIs(t, err, repository.ErrUserNotFound)
+	})
+
+	// Mongo's dotted $set auto-creates a sub-document when none exists —
+	// AC7 accepts that as a no-op-equivalent. The test below locks the
+	// semantic so a future UpdateOne-with-filter refactor does not
+	// accidentally re-introduce TOCTOU.
+	t.Run("SetSessionHasApnsToken_UnknownSession_AutoCreatesMinimalSubDoc", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:apns-flag-missing-sess")
+		require.NoError(t, repo.Insert(ctx, u))
+		dev := "00000000-0000-4000-8000-0000000001a3"
+
+		require.NoError(t, repo.SetSessionHasApnsToken(ctx, u.ID, dev, true),
+			"missing session sub-doc must be treated as no-op (nil)")
+
+		got, ok, err := repo.GetSession(ctx, u.ID, dev)
+		require.NoError(t, err)
+		require.True(t, ok,
+			"Mongo dotted $set auto-creates the sub-document — expected by AC7")
+		assert.True(t, got.HasApnsToken)
+		assert.Equal(t, "", got.CurrentJTI,
+			"residual sub-doc has empty jti — Story 1.2 CAS path rejects empty expected jti")
+	})
+
+	t.Run("SetSessionHasApnsToken_InvalidDeviceID", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:apns-flag-bad-devid")
+		require.NoError(t, repo.Insert(ctx, u))
+		err := repo.SetSessionHasApnsToken(ctx, u.ID, "bad.device", true)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reserved path characters")
+	})
+
+	t.Run("SetSessionHasApnsToken_TogglesFalse", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:apns-flag-toggle")
+		require.NoError(t, repo.Insert(ctx, u))
+		dev := "00000000-0000-4000-8000-0000000001a4"
+		require.NoError(t, repo.UpsertSession(ctx, u.ID, dev, domain.Session{
+			CurrentJTI: "jti", IssuedAt: clk.Now(),
+		}))
+		require.NoError(t, repo.SetSessionHasApnsToken(ctx, u.ID, dev, true))
+		require.NoError(t, repo.SetSessionHasApnsToken(ctx, u.ID, dev, false))
+
+		got, ok, err := repo.GetSession(ctx, u.ID, dev)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.False(t, got.HasApnsToken)
+	})
 }
 
 func newSeedUser(clk clockx.Clock, hash string) *domain.User {

@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 
@@ -93,6 +94,19 @@ type APNsCfg struct {
 	MaxAttempts     int    `toml:"max_attempts"`
 	TokenExpiryDays int    `toml:"token_expiry_days"`
 	Enabled         bool   `toml:"enabled"`
+
+	// Story 1.4 — APNs device token at-rest encryption + register rate
+	// limit. TokenEncryptionKeyHex is a 64-char hex string that decodes
+	// to exactly 32 bytes (AES-256). In release mode it is REQUIRED
+	// regardless of APNs.Enabled (see validateAPNs below): a staging
+	// deployment with Enabled=false may still persist tokens, and
+	// writing them sealed with a dev all-zero key would let anyone who
+	// stole the Mongo backup decrypt them. The debug bootstrap in
+	// cmd/cat/initialize.go's mustBuildApnsTokenRepo falls back to an
+	// all-zero key only when NOT in release mode.
+	TokenEncryptionKeyHex string `toml:"token_encryption_key_hex"`
+	RegisterRatePerWindow int    `toml:"register_rate_per_window"`
+	RegisterRateWindowSec int    `toml:"register_rate_window_sec"`
 }
 
 // AppleCfg holds the Sign in with Apple verification knobs (Story 1.1).
@@ -188,6 +202,15 @@ func (c *Config) applyDefaults() {
 	if c.APNs.TokenExpiryDays == 0 {
 		c.APNs.TokenExpiryDays = 30
 	}
+	// Story 1.4 — per-user APNs register rate (PRD NFR-SCALE-8).
+	if c.APNs.RegisterRatePerWindow == 0 {
+		c.APNs.RegisterRatePerWindow = 5
+	}
+	if c.APNs.RegisterRateWindowSec == 0 {
+		c.APNs.RegisterRateWindowSec = 60
+	}
+	// TokenEncryptionKeyHex has NO compile-time default — release mode
+	// must set it explicitly (validateAPNs fails fast otherwise).
 	// Apple SIWA defaults — JWKS endpoint and cache knobs are operational
 	// constants; only BundleID has no sane compile-time default (it is the
 	// per-deployment app identity, must be set explicitly like APNs.KeyID).
@@ -286,6 +309,32 @@ func (c *Config) validateAPNs() {
 	}
 	if c.APNs.TokenExpiryDays <= 0 {
 		log.Fatal().Int("token_expiry_days", c.APNs.TokenExpiryDays).Msg("config: apns.token_expiry_days must be > 0")
+	}
+	// Story 1.4 — positive-int invariants regardless of Enabled (these
+	// knobs drive the per-user register limiter, which runs as long as
+	// the /v1/* route is reachable; review-antipatterns §4.1).
+	if c.APNs.RegisterRatePerWindow <= 0 {
+		log.Fatal().Int("register_rate_per_window", c.APNs.RegisterRatePerWindow).
+			Msg("config: apns.register_rate_per_window must be > 0")
+	}
+	if c.APNs.RegisterRateWindowSec <= 0 {
+		log.Fatal().Int("register_rate_window_sec", c.APNs.RegisterRateWindowSec).
+			Msg("config: apns.register_rate_window_sec must be > 0")
+	}
+	// Story 1.4 — encryption key is required in RELEASE mode regardless
+	// of apns.enabled. Encryption at rest and push dispatch are two
+	// orthogonal concepts: staging may persist tokens without actually
+	// pushing them, and writing those tokens under a dev zero key would
+	// be a NFR-SEC-7 violation (see AC9 wiring rationale).
+	if c.Server.Mode == "release" {
+		if c.APNs.TokenEncryptionKeyHex == "" {
+			log.Fatal().Msg("config: release mode requires apns.token_encryption_key_hex (regardless of apns.enabled)")
+		}
+		decoded, err := hex.DecodeString(c.APNs.TokenEncryptionKeyHex)
+		if err != nil || len(decoded) != 32 {
+			log.Fatal().Err(err).Int("decoded_len", len(decoded)).
+				Msg("config: apns.token_encryption_key_hex must decode to exactly 32 bytes (AES-256)")
+		}
 	}
 	if !c.APNs.Enabled {
 		return

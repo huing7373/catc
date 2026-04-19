@@ -292,6 +292,51 @@ func (r *MongoUserRepository) ListDeviceIDs(ctx context.Context, userID ids.User
 	return out, nil
 }
 
+// SetSessionHasApnsToken toggles users.sessions.<deviceId>.has_apns_token.
+// Introduced by Story 1.4 so ApnsTokenService can mark a session as having
+// an APNs token after successful registration.
+//
+// Implementation: single UpdateOne filtered by _id only. The dotted $set
+// on sessions.<deviceId>.has_apns_token either merges into the existing
+// sub-document or creates a minimal one if the session is absent. That
+// auto-creation is acceptable — GetSession would read back
+// current_jti="" / issued_at=zero, and Story 1.2's CAS path already
+// rejects empty expected jti (see UpsertSessionIfJTIMatches), so the
+// residual sub-doc cannot be replayed into a valid session.
+//
+// Semantics:
+//   - userID missing → ErrUserNotFound (only "real error" branch).
+//   - sub-document absent → nil (silent create).
+//
+// A prior TOCTOU-prone design used a two-step exists-check + update;
+// that was replaced with the single UpdateOne to match the AC Review
+// requirement for atomicity (no flaky race with Story 1.6 concurrent
+// deletion).
+func (r *MongoUserRepository) SetSessionHasApnsToken(ctx context.Context, userID ids.UserID, deviceID string, has bool) error {
+	if userID == "" {
+		return errors.New("user repo: set session has_apns_token: empty user id")
+	}
+	if err := validateDeviceID(deviceID); err != nil {
+		return err
+	}
+	now := r.clock.Now()
+	setDoc := bson.M{
+		"sessions." + deviceID + ".has_apns_token": has,
+		"updated_at": now,
+	}
+	res, err := r.coll.UpdateOne(ctx,
+		bson.M{"_id": string(userID)},
+		bson.M{"$set": setDoc},
+	)
+	if err != nil {
+		return fmt.Errorf("user repo: set session has_apns_token: %w", err)
+	}
+	if res.MatchedCount == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
 // ClearDeletion clears the deletion_requested flag and stamps
 // updated_at with the clock. Returns ErrUserNotFound if no row matched
 // (the caller should treat this as a programming error — the service

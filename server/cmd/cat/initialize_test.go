@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/huing/cat/server/internal/handler"
+	"github.com/huing/cat/server/internal/service"
 	"github.com/huing/cat/server/internal/ws"
 	"github.com/huing/cat/server/pkg/clockx"
 	"github.com/huing/cat/server/pkg/jwtx"
@@ -287,6 +289,78 @@ func TestRouter_V1Group_404OnUnknownRoute(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, w.Code,
 		"unknown /v1/* route must 404 (gin tree miss), not 401 (middleware match)")
+}
+
+// --- Story 1.4 wire tests ---
+
+// fakeDeviceService matches handler.DeviceHandlerService so we can wire
+// a real handler.DeviceHandler into buildRouter without pulling Mongo.
+type fakeDeviceService struct {
+	err   error
+	calls int
+}
+
+func (f *fakeDeviceService) RegisterApnsToken(_ context.Context, _ service.RegisterApnsTokenRequest) error {
+	f.calls++
+	return f.err
+}
+
+// newRouterForTestingWithDevice wires a handlers struct that includes a
+// real DeviceHandler backed by a stub svc. Used by the AC9 route tests
+// below so they exercise the production wire.go path.
+func newRouterForTestingWithDevice(jwtAuth gin.HandlerFunc, svc handler.DeviceHandlerService) *gin.Engine {
+	platform := handler.NewPlatformHandler(clockx.NewRealClock(), "release")
+	h := &handlers{
+		platform: platform,
+		jwtAuth:  jwtAuth,
+		device:   handler.NewDeviceHandler(svc),
+	}
+	return buildRouter(nil, h)
+}
+
+// TestInitialize_V1DevicesApnsToken_RegistersRoute proves Story 1.4
+// wire.go change: when h.device is set, POST /v1/devices/apns-token
+// is routed to the device handler. Uses a fake svc so no Mongo /
+// Redis plumbing is needed — we only care that the route exists.
+func TestInitialize_V1DevicesApnsToken_RegistersRoute(t *testing.T) {
+	t.Parallel()
+
+	svc := &fakeDeviceService{}
+	// Mount a happy-path JWT middleware that populates the ctx keys
+	// the handler reads, so we reach the svc (rather than bouncing on
+	// the defense-in-depth 401 branch).
+	v := func(c *gin.Context) {
+		c.Set("middleware.userId", "u1")
+		c.Set("middleware.deviceId", "d1")
+		c.Set("middleware.platform", "watch")
+		c.Next()
+	}
+	r := newRouterForTestingWithDevice(v, svc)
+
+	body, _ := json.Marshal(map[string]any{
+		"deviceToken": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/devices/apns-token", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, 1, svc.calls, "device svc must have been called exactly once")
+}
+
+// TestInitialize_V1DevicesApnsToken_NilDeviceHandler_404 proves the
+// nil-safe guard in buildRouter: when no device handler is wired
+// (pre-Story-1.4 boot paths / tools CLIs) the route is absent.
+func TestInitialize_V1DevicesApnsToken_NilDeviceHandler_404(t *testing.T) {
+	t.Parallel()
+	r := newRouterForTesting(nil, nil)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/devices/apns-token", nil)
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotFound, w.Code,
+		"without h.device wire must NOT register the route (nil-safe)")
 }
 
 func TestValidateRegistryConsistency_DebugOnlyInReleaseFails(t *testing.T) {

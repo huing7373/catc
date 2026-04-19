@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -21,10 +22,12 @@ import (
 	"github.com/huing/cat/server/internal/service"
 	"github.com/huing/cat/server/internal/ws"
 	"github.com/huing/cat/server/pkg/clockx"
+	"github.com/huing/cat/server/pkg/cryptox"
 	"github.com/huing/cat/server/pkg/jwtx"
 	"github.com/huing/cat/server/pkg/logx"
 	"github.com/huing/cat/server/pkg/mongox"
 	"github.com/huing/cat/server/pkg/redisx"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 var buildVersion = "dev"
@@ -51,8 +54,20 @@ func initialize(cfg *config.Config) *App {
 
 	clk := clockx.NewRealClock()
 	locker := redisx.NewLocker(redisCli.Cmdable())
+
+	// --- Story 1.4: APNs device token repo (§21.2 Empty→Real) ---
+	// Built BEFORE cron + push wiring so the same *MongoApnsTokenRepository
+	// satisfies push.TokenProvider / TokenDeleter / TokenCleaner in all
+	// three downstream constructors.
+	apnsTokenRepo := mustBuildApnsTokenRepo(cfg, mongoCli.DB(), clk)
+	if err := apnsTokenRepo.EnsureIndexes(context.Background()); err != nil {
+		log.Fatal().Err(err).Msg("apns_token repo EnsureIndexes failed")
+	}
+	// --- /Story 1.4 ---
+
+	// TokenCleaner real impl — swapped Empty via Story 1.4 (§21.2).
 	cronSch := cron.NewScheduler(
-		locker, redisCli.Cmdable(), clk, push.EmptyTokenCleaner{},
+		locker, redisCli.Cmdable(), clk, apnsTokenRepo,
 		time.Duration(cfg.APNs.TokenExpiryDays)*24*time.Hour,
 	)
 
@@ -75,7 +90,10 @@ func initialize(cfg *config.Config) *App {
 			streamPusher, redisCli.Cmdable(), clk,
 			time.Duration(cfg.APNs.IdemTTLSec)*time.Second,
 		)
-		router := push.NewAPNsRouter(push.EmptyTokenProvider{}, cfg.APNs.WatchTopic, cfg.APNs.IphoneTopic)
+		// TokenProvider real impl — swapped Empty via Story 1.4 (§21.2).
+		router := push.NewAPNsRouter(apnsTokenRepo, cfg.APNs.WatchTopic, cfg.APNs.IphoneTopic)
+		// TokenDeleter real impl — swapped Empty via Story 1.4 (§21.2).
+		// QuietHoursResolver real impl — Story 1.5 fills this.
 		apnsWorker = push.NewAPNsWorker(push.APNsWorkerConfig{
 			InstanceID:      locker.InstanceID(),
 			StreamKey:       cfg.APNs.StreamKey,
@@ -87,7 +105,7 @@ func initialize(cfg *config.Config) *App {
 			ReadCount:       int64(cfg.APNs.ReadCount),
 			RetryBackoffsMs: cfg.APNs.RetryBackoffsMs,
 			MaxAttempts:     cfg.APNs.MaxAttempts,
-		}, redisCli.Cmdable(), sender, router, push.EmptyQuietHoursResolver{}, push.EmptyTokenDeleter{}, clk)
+		}, redisCli.Cmdable(), sender, router, push.EmptyQuietHoursResolver{}, apnsTokenRepo, clk)
 		log.Info().Msg("apns push platform enabled")
 	} else {
 		log.Info().Msg("apns disabled (cfg.apns.enabled=false); NoopPusher in use")
@@ -215,12 +233,24 @@ func initialize(cfg *config.Config) *App {
 
 	httpJWTAuth := buildHTTPJWTAuth(cfg.Server.Mode, jwtMgr)
 
+	// --- Story 1.4: device handler wiring ---
+	apnsRegisterLimiter := redisx.NewUserSlidingWindowLimiter(
+		redisCli.Cmdable(), clk,
+		"ratelimit:apns_token:",
+		int64(cfg.APNs.RegisterRatePerWindow),
+		time.Duration(cfg.APNs.RegisterRateWindowSec)*time.Second,
+	)
+	apnsTokenSvc := service.NewApnsTokenService(apnsTokenRepo, userRepo, apnsRegisterLimiter, clk)
+	deviceHandler := handler.NewDeviceHandler(apnsTokenSvc)
+	// --- /Story 1.4 ---
+
 	h := &handlers{
 		health:    handler.NewHealthHandler(mongoCli, redisCli, wsHub, redisCli.Cmdable(), cfg.WS.MaxConnections*2),
 		wsUpgrade: upgradeHandler,
 		platform:  handler.NewPlatformHandler(clk, cfg.Server.Mode),
 		auth:      authHandler,
 		jwtAuth:   httpJWTAuth,
+		device:    deviceHandler,
 	}
 
 	router := buildRouter(cfg, h)
@@ -338,4 +368,33 @@ func buildHTTPJWTAuth(mode string, verifier middleware.JWTVerifier) gin.HandlerF
 	}
 	log.Info().Msg("debug mode: HTTP JWTAuth NOT mounted (no /v1/* business endpoint yet; debug handlers wire JWTAuth(fakeVerifier) directly)")
 	return nil
+}
+
+// mustBuildApnsTokenRepo constructs the Story 1.4 APNs token repo with
+// an AES-GCM sealer. Release mode requires cfg.APNs.TokenEncryptionKeyHex
+// (enforced earlier by config.validateAPNs — the release-mode check
+// runs regardless of APNs.Enabled so staging deployments cannot
+// accidentally persist tokens under a dev-only key). Debug / test mode
+// falls back to an all-zero 32-byte key so tests that exercise the repo
+// do not need secret plumbing; that branch is NEVER reachable in
+// release (§7.1 debug/release gate).
+func mustBuildApnsTokenRepo(cfg *config.Config, db *mongo.Database, clk clockx.Clock) *repository.MongoApnsTokenRepository {
+	var key []byte
+	if cfg.APNs.TokenEncryptionKeyHex == "" {
+		// Debug / test fallback. validateAPNs would have log.Fatal'd
+		// already in release mode.
+		log.Info().Msg("apns token repo: using dev all-zero encryption key (non-release)")
+		key = make([]byte, 32)
+	} else {
+		decoded, err := hex.DecodeString(cfg.APNs.TokenEncryptionKeyHex)
+		if err != nil {
+			log.Fatal().Err(err).Msg("apns token_encryption_key_hex decode failed")
+		}
+		key = decoded
+	}
+	sealer, err := cryptox.NewAESGCMSealer(key)
+	if err != nil {
+		log.Fatal().Err(err).Msg("apns token sealer init failed")
+	}
+	return repository.NewMongoApnsTokenRepository(db, clk, sealer)
 }

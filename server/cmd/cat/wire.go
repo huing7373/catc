@@ -19,11 +19,12 @@ type handlers struct {
 	wsUpgrade *ws.UpgradeHandler
 	platform  *handler.PlatformHandler
 	auth      *handler.AuthHandler
-	jwtAuth   gin.HandlerFunc // Story 1.3 — mounted on /v1/* group; nil in debug mode
-	// v1Routes lets test harness inject extra /v1/* routes (e.g. an
+	jwtAuth   gin.HandlerFunc       // Story 1.3 — mounted on /v1/* group; nil in debug mode
+	device    *handler.DeviceHandler // Story 1.4 — POST /v1/devices/apns-token
+	// v1Routes lets test harnesses inject extra /v1/* routes (e.g. an
 	// integration-test echo endpoint that reads UserIDFrom). Production
-	// wiring leaves it nil and Story 1.4 will append directly inside
-	// buildRouter as the first real /v1/* endpoint lands.
+	// wiring leaves it nil — Story 1.4 onward adds real routes directly
+	// inside buildRouter via the typed handler fields above.
 	v1Routes func(*gin.RouterGroup)
 }
 
@@ -62,6 +63,17 @@ func buildRouter(_ *config.Config, h *handlers) *gin.Engine {
 	v1 := r.Group("/v1")
 	if h.jwtAuth != nil {
 		v1.Use(h.jwtAuth)
+	}
+	// Story 1.4 — first /v1/* business endpoint. Route registration is
+	// unconditional (always present even when apns.enabled=false) so a
+	// staging client that POSTs here gets 200 / 401 / 429 from the
+	// real handler chain rather than a 404 that triggers useless retry
+	// storms. In debug mode jwtAuth is nil, so the handler's own
+	// defense-in-depth check (UserIDFrom/DeviceIDFrom empty → 401) is
+	// what keeps unauthenticated debug traffic out. See AC9 for the
+	// "why not conditional route" rationale.
+	if h.device != nil {
+		v1.POST("/devices/apns-token", h.device.RegisterApnsToken)
 	}
 	if h.v1Routes != nil {
 		h.v1Routes(v1)
