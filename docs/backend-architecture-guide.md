@@ -808,6 +808,7 @@ type GiftID string
 - [ ] `bash scripts/build.sh --test` 本地过。
 - [ ] 无 `context.TODO()`，业务代码无 `context.Background()`。
 - [ ] 无 `// TODO` 不带 issue 号。
+- [ ] **语义正确性思考题**：如果这段代码运行出了错误结果但没 crash（度量失真 / 守门分支写反 / 比率分母算错 / wire shape 序列化成 null 而非 `[]` ……），**会误导谁**？把那个人（或那类下游代码）明确列到 PR description 或 story Dev Notes 里；能说清楚"谁会被坑"的问题才算审完。Epic 0 三条 P1 review finding 都属此类（0-14 r1 守门跳 debug / 0-15 r1-r2 压测度量语义），功能跑通但定义错会让下游决策建立在错数据上。
 
 ---
 
