@@ -16,6 +16,8 @@
 
 §22 提供快速指引：每次开 session 先读 CLAUDE.md → 架构指南 §21-§22 → sprint-status.yaml → 最新 epic retro → MEMORY.md。
 
+**写 server 代码前额外读 `server/agent-experience/review-antipatterns.md`。** 这是 Epic 0 十九轮 code review 蒸馏出的战术级反模式清单（并发安全 / context 生命周期 / JWT 安全边界 / 配置 fail-fast / 注册表自证 / release-vs-debug gate / redis key injectivity / 滑动窗口 / 中间件顺序 / 度量语义等），开头有 TL;DR 自检清单。发现新反模式时同步更新：原始记录进 `code-review-log.md`，蒸馏条目进 `review-antipatterns.md`。
+
 ## Repo Separation (三端独立)
 
 三个独立目录：`server/` (Go) / `app/` (iOS) / `watch/` (watchOS)。server repo **不**引用 APP/watch，也不被它们引用。跨端契约通过 `docs/api/` 下的文档同步（e.g. `ws-message-registry.md` / `integration-mvp-client-guide.md` / `openapi.yaml`），不通过共享代码。真机联调类工作归 Epic 9，不塞业务 epic。
