@@ -484,6 +484,127 @@ func TestMongoUserRepo_Integration(t *testing.T) {
 		require.True(t, ok, "session must survive quiet hours update")
 		assert.Equal(t, "jti-original", sess.CurrentJTI)
 	})
+
+	// --- Story 1.6 MarkDeletionRequested subtests ---
+
+	t.Run("MarkDeletionRequested_FirstTimeStampsRequestedAt", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:mark-del-first")
+		require.NoError(t, repo.Insert(ctx, u))
+
+		got, firstTime, err := repo.MarkDeletionRequested(ctx, u.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.True(t, firstTime, "firstTime bool must be true on first call")
+		assert.True(t, got.DeletionRequested, "flag must flip true")
+		require.NotNil(t, got.DeletionRequestedAt, "first-write path must stamp deletion_requested_at")
+		assert.Equal(t, clk.Now().UTC(), got.DeletionRequestedAt.UTC(),
+			"deletion_requested_at must equal Clock.Now() on the first write")
+		assert.Equal(t, clk.Now().UTC(), got.UpdatedAt.UTC(),
+			"updated_at must equal Clock.Now() on the first write")
+	})
+
+	t.Run("MarkDeletionRequested_IdempotentPreservesOriginalTimestamp", func(t *testing.T) {
+		// first call at t0
+		t0 := time.Date(2026, 4, 19, 9, 0, 0, 0, time.UTC)
+		clkLocal := clockx.NewFakeClock(t0)
+		repoLocal := repository.NewMongoUserRepository(db, clkLocal)
+
+		u := newSeedUser(clkLocal, "hash:mark-del-idem")
+		require.NoError(t, repoLocal.Insert(ctx, u))
+
+		first, firstTimeA, err := repoLocal.MarkDeletionRequested(ctx, u.ID)
+		require.NoError(t, err)
+		assert.True(t, firstTimeA, "first call returns firstTime=true")
+		require.NotNil(t, first.DeletionRequestedAt)
+		firstStamp := first.DeletionRequestedAt.UTC()
+		firstUpdatedAt := first.UpdatedAt.UTC()
+
+		// Advance clock to t1 >> t0.
+		clkLocal.Advance(12 * time.Hour)
+		assert.True(t, clkLocal.Now().After(t0), "sanity: clock advanced")
+
+		second, firstTimeB, err := repoLocal.MarkDeletionRequested(ctx, u.ID)
+		require.NoError(t, err, "repeat call must be idempotent success, not error")
+		assert.False(t, firstTimeB, "second call returns firstTime=false")
+		require.NotNil(t, second.DeletionRequestedAt)
+
+		assert.Equal(t, firstStamp, second.DeletionRequestedAt.UTC(),
+			"§21.8 #1 lock: deletion_requested_at MUST equal original t0 on repeat call — re-stamping would let callers reset the 30-day SLA")
+		assert.Equal(t, firstUpdatedAt, second.UpdatedAt.UTC(),
+			"idempotent repeat MUST NOT bump updated_at")
+	})
+
+	t.Run("MarkDeletionRequested_UserNotFound", func(t *testing.T) {
+		_, firstTime, err := repo.MarkDeletionRequested(ctx, ids.NewUserID())
+		assert.False(t, firstTime)
+		assert.ErrorIs(t, err, repository.ErrUserNotFound,
+			"missing user must propagate ErrUserNotFound so service can 404")
+	})
+
+	t.Run("MarkDeletionRequested_PreservesSessions", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:mark-del-sessions")
+		require.NoError(t, repo.Insert(ctx, u))
+
+		dev := "00000000-0000-4000-8000-000000000d01"
+		require.NoError(t, repo.UpsertSession(ctx, u.ID, dev, domain.Session{
+			CurrentJTI: "jti-pre-deletion",
+			IssuedAt:   clk.Now(),
+		}))
+
+		_, firstTime, err := repo.MarkDeletionRequested(ctx, u.ID)
+		require.NoError(t, err)
+		assert.True(t, firstTime)
+
+		sess, ok, err := repo.GetSession(ctx, u.ID, dev)
+		require.NoError(t, err)
+		require.True(t, ok, "session must survive mark deletion (dotted $set semantics)")
+		assert.Equal(t, "jti-pre-deletion", sess.CurrentJTI,
+			"current_jti preserved — service layer's revoke step consumes it explicitly")
+	})
+
+	t.Run("MarkDeletionRequested_PreservesFriendCountAndConsents", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:mark-del-preserve")
+		u.FriendCount = 3
+		yes := true
+		u.Consents.StepData = &yes
+		require.NoError(t, repo.Insert(ctx, u))
+
+		got, firstTime, err := repo.MarkDeletionRequested(ctx, u.ID)
+		require.NoError(t, err)
+		assert.True(t, firstTime)
+
+		assert.Equal(t, 3, got.FriendCount, "friend_count preserved")
+		require.NotNil(t, got.Consents.StepData)
+		assert.True(t, *got.Consents.StepData, "consents.step_data preserved")
+	})
+
+	t.Run("MarkDeletionRequested_UpdatedAtDoesNotBumpOnIdempotentRepeat", func(t *testing.T) {
+		t0 := time.Date(2026, 4, 19, 10, 30, 0, 0, time.UTC)
+		clkLocal := clockx.NewFakeClock(t0)
+		repoLocal := repository.NewMongoUserRepository(db, clkLocal)
+
+		u := newSeedUser(clkLocal, "hash:mark-del-updated-at")
+		require.NoError(t, repoLocal.Insert(ctx, u))
+
+		first, _, err := repoLocal.MarkDeletionRequested(ctx, u.ID)
+		require.NoError(t, err)
+		firstUpdatedAt := first.UpdatedAt.UTC()
+
+		clkLocal.Advance(6 * time.Hour)
+
+		second, firstTimeB, err := repoLocal.MarkDeletionRequested(ctx, u.ID)
+		require.NoError(t, err)
+		assert.False(t, firstTimeB)
+
+		assert.Equal(t, firstUpdatedAt, second.UpdatedAt.UTC(),
+			"idempotent path is a pure read — updated_at MUST stay pinned to the first write")
+
+		// Re-fetch via FindByID to confirm no stealth write happened.
+		fresh, err := repoLocal.FindByID(ctx, u.ID)
+		require.NoError(t, err)
+		assert.Equal(t, firstUpdatedAt, fresh.UpdatedAt.UTC(),
+			"independent read confirms no implicit updated_at rewrite")
+	})
 }
 
 func newSeedUser(clk clockx.Clock, hash string) *domain.User {

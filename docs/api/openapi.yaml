@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Cat Backend API
-  version: "1.5.1-epic1"
+  version: "1.6.0-epic1"
   description: >
     HTTP API surface for the 裤衩猫 backend. WebSocket envelope/message
     protocol is defined in docs/api/ws-message-registry.md (source of truth
@@ -242,6 +242,93 @@ paths:
                   message: rate limit exceeded
         "500":
           description: Internal server error (Redis / Mongo / sealer failure; fail-closed).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: INTERNAL_ERROR
+                  message: internal server error
+  /v1/users/me:
+    delete:
+      summary: Request account deletion (FR47, MVP marks only — 30 days manual cleanup)
+      description: >
+        Story 1.6. The authenticated user asks to have their account
+        deleted. MVP semantic: the server marks the user record
+        deletion_requested=true (first-write-wins — a second call does
+        NOT reset the 30-day SLA), revokes every refresh token bound
+        to the user, closes any live WS connection with close code
+        1000 "revoked", and invalidates the 60s session.resume cache.
+        Cascade cleanup (actually deleting users / apns_tokens rows)
+        is handled OUT-OF-BAND by the `process_deletion_queue` ops
+        CLI at least 30 days later (NFR-COMP-5). DELETE has no
+        request body.
+
+        Step-by-step side effects (Story 1.6 §21.3 fail matrix):
+          1. Mongo users.deletion_requested / deletion_requested_at
+             stamped (fail-closed — Mongo write failure returns 500).
+          2. AuthService.RevokeAllUserTokens blacklists every
+             sessions.<device>.current_jti in Redis (fail-open: warn
+             log, main response still 202).
+          3. ws.Hub.DisconnectUser closes all live connections with
+             close code 1000 "revoked" (fail-open).
+          4. redisx.RedisResumeCache.Invalidate DELETEs the cache
+             key (fail-open; 60s TTL self-heal).
+
+        Idempotent: a second DELETE returns the ORIGINAL
+        requested_at timestamp (lock §21.8 #1 — re-stamping would
+        reset the 30-day SLA).
+      operationId: requestAccountDeletion
+      security:
+        - BearerAuth: []
+      responses:
+        "202":
+          description: >
+            Deletion request accepted. First call OR idempotent
+            repeat both land here with status="deletion_requested".
+            requested_at is the UTC RFC3339 timestamp of the FIRST
+            call (never re-stamped).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountDeletionResponse"
+        "401":
+          description: JWT missing / invalid / wrong type.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                expired:
+                  summary: Missing or non-Bearer Authorization
+                  value:
+                    error:
+                      code: AUTH_TOKEN_EXPIRED
+                      message: token expired
+                invalid:
+                  summary: Token verification / type failed
+                  value:
+                    error:
+                      code: AUTH_INVALID_IDENTITY_TOKEN
+                      message: invalid identity token
+        "404":
+          description: >
+            User row missing for the authenticated userId. Theoretically
+            unreachable under normal operation (the JWT is signed on a
+            user row that exists); surfacing this as 404 flags data
+            corruption so ops can investigate. Not a user-probeable
+            case — the JWT proves authorization over exactly this uid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: USER_NOT_FOUND
+                  message: user not found
+        "500":
+          description: Internal server error — Step 1 Mongo write failure (fail-closed).
           content:
             application/json:
               schema:
@@ -499,6 +586,42 @@ components:
           description: Always true on 200. Deliberately minimal — re-register is idempotent.
       example:
         ok: true
+    AccountDeletionResponse:
+      type: object
+      required:
+        - status
+        - requested_at
+        - note
+      properties:
+        status:
+          type: string
+          enum: [deletion_requested]
+          description: >
+            Always "deletion_requested" on success. A repeat DELETE call
+            (already-requested user) returns the same status — the
+            response shape is identical between first call and idempotent
+            repeat by design (clients cannot distinguish; idempotency
+            is a server contract).
+        requested_at:
+          type: string
+          format: date-time
+          description: >
+            UTC RFC3339 timestamp of the FIRST call on this user. A
+            second DELETE does NOT update this value — re-stamping
+            would reset the 30-day manual-cleanup SLA (§21.8 #1).
+            Serialized as Z-suffixed UTC regardless of server timezone.
+          example: "2026-04-19T12:00:00Z"
+        note:
+          type: string
+          description: >
+            MVP-era human-readable note explaining the 30-day window.
+            Locked to `"30 days manual cleanup per MVP policy"` — client
+            may display verbatim to the user.
+          example: "30 days manual cleanup per MVP policy"
+      example:
+        status: "deletion_requested"
+        requested_at: "2026-04-19T12:00:00Z"
+        note: "30 days manual cleanup per MVP policy"
     ErrorResponse:
       type: object
       required:

@@ -405,6 +405,87 @@ func (r *MongoUserRepository) UpdateProfile(ctx context.Context, userID ids.User
 	return &updated, nil
 }
 
+// MarkDeletionRequested is the Story 1.6 forward-delete operation. The
+// semantic contract is **first-write-wins idempotency**:
+//
+//   - First call on a user with deletion_requested=false → stamps
+//     deletion_requested=true, deletion_requested_at=now, updated_at=now.
+//   - Repeat call on an already-requested user → returns the SAME
+//     timestamp that was stamped on the first call, never re-stamps.
+//     This is load-bearing for NFR-COMP-5 ("30 days from FIRST request"):
+//     a re-stamp path would let a malicious / confused client reset
+//     the 30-day clock on every DELETE retry, defeating the SLA.
+//
+// Implementation is a two-phase atomic: FindOneAndUpdate gated on
+// `deletion_requested: {$ne: true}` (AC5). When the filter misses
+// (Mongo returns ErrNoDocuments) we fall through to FindByID to
+// distinguish "user genuinely missing" from "already deleted":
+//
+//   - FindByID returns ErrUserNotFound → propagate unchanged.
+//   - FindByID returns a user with DeletionRequested=true → idempotent
+//     success, returned with the ORIGINAL deletion_requested_at.
+//   - FindByID returns a user with DeletionRequested=false → this is
+//     impossible (the first UpdateOne would have matched); surfacing
+//     as ErrInternalError via wrapped error flags data corruption so
+//     ops can investigate rather than silently swallowing the state.
+//
+// The alternative — an aggregation pipeline update with conditional
+// $set — was rejected as less readable and more driver-version-fragile
+// than two clear queries (Story 1.6 AC5 rationale).
+//
+// Crucially the idempotent (read) path does NOT rewrite updated_at.
+// That keeps updated_at aligned with the first-write timestamp and
+// prevents an attacker or retry storm from silently bumping the
+// field, which could confuse downstream consumers (e.g. ops dashboards
+// sorting by updated_at).
+//
+// The returned bool reports whether THIS call performed the write
+// (true = first time; false = idempotent repeat). Service layer uses
+// it as the audit `wasAlreadyRequested` field without a second read.
+func (r *MongoUserRepository) MarkDeletionRequested(ctx context.Context, id ids.UserID) (*domain.User, bool, error) {
+	if id == "" {
+		return nil, false, errors.New("user repo: mark deletion requested: empty user id")
+	}
+	now := r.clock.Now()
+
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+	var updated domain.User
+	err := r.coll.FindOneAndUpdate(ctx,
+		bson.M{
+			"_id":                string(id),
+			"deletion_requested": bson.M{"$ne": true},
+		},
+		bson.M{
+			"$set": bson.M{
+				"deletion_requested":    true,
+				"deletion_requested_at": now,
+				"updated_at":            now,
+			},
+		},
+		opts,
+	).Decode(&updated)
+	if err == nil {
+		return &updated, true, nil
+	}
+	if !errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, false, fmt.Errorf("user repo: mark deletion requested: %w", err)
+	}
+
+	// Filter missed: either the user is gone, or deletion_requested is
+	// already true. Disambiguate with a FindByID read; the service layer
+	// must be able to tell those two cases apart (the first is 404, the
+	// second is idempotent success with the preserved first-call timestamp).
+	existing, findErr := r.FindByID(ctx, id)
+	if findErr != nil {
+		return nil, false, findErr
+	}
+	if existing.DeletionRequested {
+		return existing, false, nil
+	}
+	return nil, false, fmt.Errorf("user repo: mark deletion requested: impossible state — user %q found with deletion_requested=false after $ne:true filter missed: %w",
+		string(id), err)
+}
+
 // ClearDeletion clears the deletion_requested flag and stamps
 // updated_at with the clock. Returns ErrUserNotFound if no row matched
 // (the caller should treat this as a programming error — the service

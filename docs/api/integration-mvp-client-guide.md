@@ -1008,25 +1008,63 @@ NotificationCenter.default.addObserver(
 
 ---
 
-## 16. 账户注销场景的 WS 主动断开（Story 1.6 预告）
+## 16. 账户注销（Story 1.6）
 
-Story 1.6 (DELETE `/v1/users/me`) 上线后会触发以下流程，本节让客户端**提前**做好准备：
+Story 1.6 已上线：`DELETE /v1/users/me` 提供「请求注销账号」能力，符合 FR47 + NFR-COMP-5 30 天内人工处理合规。本节是**正式的客户端契约**。
 
-1. 用户在 App 内确认「注销账号」。
-2. 客户端 POST 到 `/v1/users/me` 的 DELETE（带 access token）。
-3. 服务端：
-   - 标记 `users.deletion_requested = true`（24h 后真正删除，期间内同一 Apple `sub` 再 SIWA 会触发 §11 的 resurrection 流程）。
-   - 调 `RevokeAllUserTokens(userId)` —— 把该 userId 全部 device 的 refresh token 加入黑名单（Story 1.2）。
-   - 调 `Hub.DisconnectUser(userId)` —— 把该 userId **所有**活动 WS 连接（可能跨 Watch + iPhone）发送 `Close 1000 "revoked"` 帧并关闭。
-4. 客户端表现：
-   - HTTP DELETE 收到 `200 OK`（或 200 + `{ok: true}` 类响应，最终 schema 等 Story 1.6 落地）。
-   - 现有 WS 连接**几乎同时**收到 `CloseError{Code: 1000, Text: "revoked"}` —— 客户端**不要**当成网络异常自动重连。
-5. 客户端必做：
-   - 清空 Keychain 里所有 token（access + refresh）+ deviceId（重新登录会生成新的 deviceId）。
-   - 跳回 SIWA 登录入口（如果用户决定再回来）。
-   - **不要**尝试用旧 access token 重连 WS —— 服务端的 access blacklist 还没上线（Story 1.3 接受这个 ~100ms 量级的 race window，详见 server Story 1.3 Dev Notes）。
+### 16.1 端点契约
 
-**已知 race window**：在服务端 `RevokeAllUserTokens` 完成与 `DisconnectUser` 完成之间的极短窗口内（同进程内基本不可见，跨实例可能 < 100ms），如果同一 userId 在另一台设备上**新建**了 WS 连接（access token 还没过期），可能会短暂连上来。客户端不需要为此做任何防御 —— 业务下游（profile / state / push）会查 Mongo 发现用户已 `deletion_requested = true` 自然 fail-closed。
+| 字段 | 值 |
+|---|---|
+| Method | `DELETE` |
+| Path | `/v1/users/me` |
+| Auth | `Authorization: Bearer <accessToken>`（必需） |
+| Request body | **无**（DELETE 不携带 body；即使携带也会被忽略，不会被拒） |
+| Success status | `202 Accepted` |
+| Success body | `AccountDeletionResponse` —— 见下 |
+
+**AccountDeletionResponse**（JSON）：
+
+```json
+{
+  "status": "deletion_requested",
+  "requested_at": "2026-04-19T12:00:00Z",
+  "note": "30 days manual cleanup per MVP policy"
+}
+```
+
+- `status` —— 固定字符串 `"deletion_requested"`。首次请求 OR 幂等重复请求，两种场景下均相同 —— **客户端无法从响应体区分**（幂等是服务端契约，不是客户端关心的维度）。
+- `requested_at` —— UTC RFC3339（结尾 `Z`）。**永远是第一次请求的时间戳**，第二次调用不会重置。
+- `note` —— 固定 MVP 文案，客户端可以原样显示给用户（例如「账号将在 30 天内删除」）。
+
+### 16.2 服务端流程（严格顺序 · §21.3 fail matrix）
+
+调用 DELETE 之后服务端按以下顺序执行，**Step 1 fail-closed、Step 2-4 fail-open with warn log**：
+
+1. **Mark deletion**（fail-closed）：Mongo 写 `users.deletion_requested = true` + `deletion_requested_at = now`。**首次写入才 stamp**，幂等重复请求不会 re-stamp（§21.8 #1 锁 —— re-stamp 会让恶意客户端反复刷新 30 天宽限期）。Mongo 写失败 → 返 500 `INTERNAL_ERROR`，Step 2-4 **不执行**。
+2. **Revoke tokens**（fail-open）：`AuthService.RevokeAllUserTokens(userId)` —— 把该 userId 全部 device 的 refresh token 加入 Redis blacklist（Story 1.2）。失败只 warn log `action=account_deletion_revoke_partial`，主响应仍 202。
+3. **Disconnect WS**（fail-open）：`Hub.DisconnectUser(userId)` —— 该 userId **所有**活动 WS 连接（可能跨 Watch + iPhone）收 `Close 1000 "revoked"` 帧并关闭。
+4. **Invalidate resume cache**（fail-open）：清 `resume_cache:{userId}` key；失败 warn log，TTL 60s 自愈。
+
+### 16.3 客户端实施要点
+
+1. **收到 202 后立即清 Keychain**：access token / refresh token / deviceId 全部删除。**不要**尝试用旧 token 任何操作。
+2. **WS 连接几乎同时**收到 `CloseError{Code: 1000, Text: "revoked"}`。客户端**不要**把这个 close 帧当成网络异常自动重连（§21.8 #8 锁死了 1000 + "revoked"，未来也不会变）。
+3. **幂等安全**：客户端因网络问题重试 DELETE 是安全的 —— 服务端按 first-write-wins 处理，不会延长 30 天 SLA。运维视角一致「用户 A 在 T0 请求注销」。
+4. **resurrection 可用**：30 天宽限期内，同一 Apple `sub` 再走 SIWA 登录（`POST /auth/apple`），服务端会自动把 `deletion_requested` flip 回 `false`（§11 resurrection 流程），业务恢复。
+
+### 16.4 错误码表
+
+| Status | Code | 什么时候发生 | 客户端处理 |
+|---|---|---|---|
+| 401 | `AUTH_TOKEN_EXPIRED` | 缺 `Authorization` 头 / 非 Bearer | 走 `/auth/refresh` 刷新 |
+| 401 | `AUTH_INVALID_IDENTITY_TOKEN` | access token 无效 / 过期 / 错误类型 | 走 `/auth/refresh` 或重登 |
+| 404 | `USER_NOT_FOUND` | JWT 签的 userId 在 Mongo 不存在（罕见 —— 数据损坏场景） | 清 Keychain + 重登 |
+| 500 | `INTERNAL_ERROR` | Step 1 Mongo 写失败（fail-closed） | 指数退避重试 |
+
+### 16.5 已知 race window
+
+在服务端 Step 2（revoke）与 Step 3（disconnect）之间的极短窗口内（同进程内几乎不可见，跨实例 < 100ms），如果同一 userId 在另一台设备**新建** WS 连接（access token 还没过期），可能会短暂连上来。客户端不需要为此做任何防御 —— 业务下游（profile / state / push）会查 Mongo 发现用户已 `deletion_requested = true` 自然 fail-closed。
 
 ---
 

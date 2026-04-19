@@ -133,6 +133,27 @@ type RefreshBlacklist interface {
 	Revoke(ctx context.Context, jti string, exp time.Time) error
 }
 
+// AccessBlacklistRemover is the optional user-level blacklist write
+// surface AuthService consults during the SIWA resurrection path.
+// Injected via SetAccessBlacklistRemover after construction so the
+// existing NewAuthService signature stays stable (tests that don't
+// exercise resurrection leave it nil).
+//
+// Purpose: when a user returns via SIWA inside the 30-day grace
+// window, Story 1.1's ClearDeletion flips deletion_requested=false,
+// but WITHOUT this hook the Redis blacklist entry that Story 1.6
+// wrote on DELETE would still reject the freshly-issued access
+// token. Remove here closes that gap — resurrected users get a
+// clean session immediately, not after TTL expiry.
+//
+// Fail-open with warn: a Remove failure is observable in ops but
+// does not block the SIWA response (the user's new tokens still
+// work, just with a short window of 401s until TTL expires naturally
+// or the user retries).
+type AccessBlacklistRemover interface {
+	Remove(ctx context.Context, userID string) error
+}
+
 // SignInWithAppleRequest is the service-layer input. The handler converts
 // dto.SignInWithAppleRequest → this struct (M8 — service never sees DTO).
 type SignInWithAppleRequest struct {
@@ -154,7 +175,10 @@ type SignInWithAppleResult struct {
 
 // AuthService implements the Story 1.1 SignInWithApple + Story 1.2
 // RefreshToken / RevokeRefreshToken / RevokeAllUserTokens flows.
-// Construction is fail-closed: every dependency is required.
+// Construction is fail-closed: every required dependency panics on
+// nil. accessBlacklist is the only optional field (set via
+// SetAccessBlacklistRemover) because it is a Story 1.6 round-1
+// addition; tests that don't exercise resurrection leave it nil.
 type AuthService struct {
 	users           UserRepository
 	appleVerifier   AppleVerifier
@@ -163,6 +187,9 @@ type AuthService struct {
 	blacklist       RefreshBlacklist
 	clock           clockx.Clock
 	mode            string // cfg.Server.Mode — currently informational only
+	// accessBlacklist is optional — nil = skip blacklist clear on
+	// resurrection (test harnesses, debug paths that predate 1.6).
+	accessBlacklist AccessBlacklistRemover
 }
 
 // NewAuthService wires the dependencies. All non-string fields are
@@ -209,6 +236,17 @@ func NewAuthService(
 		clock:           clk,
 		mode:            mode,
 	}
+}
+
+// SetAccessBlacklistRemover installs the Story 1.6 round-1
+// resurrection hook. Pass nil (or never call) to disable the
+// behaviour — SIWA still succeeds, but a resurrected user will see
+// 401 blacklist responses until the Redis TTL expires naturally.
+// Production wires the same *redisx.RedisBlacklist that
+// AccountDeletionService uses, so DELETE + resurrection converge on
+// one blacklist entry.
+func (s *AuthService) SetAccessBlacklistRemover(r AccessBlacklistRemover) {
+	s.accessBlacklist = r
 }
 
 // SignInWithApple executes the Story 1.1 SIWA flow:
@@ -276,6 +314,23 @@ func (s *AuthService) SignInWithApple(ctx context.Context, req SignInWithAppleRe
 		}
 		user.DeletionRequested = false
 		user.DeletionRequestedAt = nil
+
+		// Story 1.6 round-1: clear the user-level access blacklist
+		// entry DELETE wrote, so the new access + refresh tokens
+		// issued below pass subsequent /v1/* and /ws checks without
+		// waiting for TTL. Fail-open with warn: a Remove failure
+		// leaves the blacklist in place for ≤15 minutes, which
+		// shows up as 401 noise in client logs but does not break
+		// the SIWA response (the tokens are valid once TTL passes).
+		if s.accessBlacklist != nil {
+			if rmErr := s.accessBlacklist.Remove(ctx, string(user.ID)); rmErr != nil {
+				logx.Ctx(ctx).Warn().Err(rmErr).
+					Str("action", "user_resurrection_blacklist_clear_error").
+					Str("userId", string(user.ID)).
+					Msg("user_resurrection_blacklist_clear_error")
+			}
+		}
+
 		logx.Ctx(ctx).Info().
 			Str("action", "user_resurrected_from_deletion").
 			Str("userId", string(user.ID)).

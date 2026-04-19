@@ -240,6 +240,10 @@ func initialize(cfg *config.Config) *App {
 		log.Info().Msg("release mode: JWT validator wired against jwtx.Manager (Story 1.1 — accepts access tokens issued by /auth/apple)")
 	}
 
+	// Story 0.11 user-level blacklist: consumed by the WS upgrade
+	// handler and, starting with Story 1.6 round-1 fix, the HTTP /v1/*
+	// JWTAuth middleware (so the access token a post-deletion client
+	// still holds cannot call /v1/* for its remaining lifetime).
 	blacklist := redisx.NewBlacklist(redisCli.Cmdable())
 	connLimiter := redisx.NewConnectRateLimiter(
 		redisCli.Cmdable(),
@@ -259,7 +263,7 @@ func initialize(cfg *config.Config) *App {
 		log.Fatal().Err(err).Msg("ws message registry drift detected")
 	}
 
-	httpJWTAuth := buildHTTPJWTAuth(cfg.Server.Mode, jwtMgr)
+	httpJWTAuth := buildHTTPJWTAuth(cfg.Server.Mode, jwtMgr, blacklist)
 
 	// --- Story 1.4: device handler wiring ---
 	apnsRegisterLimiter := redisx.NewUserSlidingWindowLimiter(
@@ -272,6 +276,29 @@ func initialize(cfg *config.Config) *App {
 	deviceHandler := handler.NewDeviceHandler(apnsTokenSvc)
 	// --- /Story 1.4 ---
 
+	// --- Story 1.6: account deletion request wiring ---
+	// Dependencies already constructed above: userRepo (1.1), authSvc
+	// (1.1/1.2), blacklist (0.11), wsHub (Epic 0), resumeCache (0.12).
+	// No new config, no new Provider, no new global constant set —
+	// §21.1/§21.2 not triggered. Release & debug both mount the
+	// handler; the UserIDFrom-empty-401 defense-in-depth branch keeps
+	// debug-mode traffic without JWT out.
+	//
+	// Round-1 fix: pass blacklist + AccessExpirySec so Step 3 of the
+	// deletion flow writes `blacklist:device:{userId}` with TTL
+	// matching the access-token lifetime. The JWTAuth middleware
+	// (wired above with the same blacklist) then rejects any further
+	// /v1/* call made with the pre-deletion access token.
+	accessTokenTTL := time.Duration(cfg.JWT.AccessExpirySec) * time.Second
+	accountDeletionSvc := service.NewAccountDeletionService(userRepo, authSvc, blacklist, wsHub, resumeCache, accessTokenTTL)
+	userHandler := handler.NewUserHandler(accountDeletionSvc)
+
+	// SIWA resurrection clears the blacklist so a returning user's
+	// new tokens pass /v1/* and /ws immediately (Story 1.6 round-1
+	// companion to the Add-on-DELETE hook above).
+	authSvc.SetAccessBlacklistRemover(blacklist)
+	// --- /Story 1.6 ---
+
 	h := &handlers{
 		health:    handler.NewHealthHandler(mongoCli, redisCli, wsHub, redisCli.Cmdable(), cfg.WS.MaxConnections*2),
 		wsUpgrade: upgradeHandler,
@@ -279,6 +306,7 @@ func initialize(cfg *config.Config) *App {
 		auth:      authHandler,
 		jwtAuth:   httpJWTAuth,
 		device:    deviceHandler,
+		user:      userHandler,
 	}
 
 	router := buildRouter(cfg, h)
@@ -389,10 +417,10 @@ func validateRegistryConsistency(d *ws.Dispatcher, mode string) error {
 // stack — review-antipatterns §7.1 ("gate written backwards"). The
 // conditional is `!= "debug"` so a release deployment ALWAYS mounts
 // the middleware; the initialize_test.go pair locks both branches.
-func buildHTTPJWTAuth(mode string, verifier middleware.JWTVerifier) gin.HandlerFunc {
+func buildHTTPJWTAuth(mode string, verifier middleware.JWTVerifier, blacklist middleware.UserBlacklist) gin.HandlerFunc {
 	if mode != "debug" {
-		log.Info().Str("mode", mode).Msg("release mode: HTTP JWTAuth middleware mounted on /v1/* group")
-		return middleware.JWTAuth(verifier)
+		log.Info().Str("mode", mode).Msg("release mode: HTTP JWTAuth middleware mounted on /v1/* group (with user blacklist check)")
+		return middleware.JWTAuthWithBlacklist(verifier, blacklist)
 	}
 	log.Info().Msg("debug mode: HTTP JWTAuth NOT mounted (no /v1/* business endpoint yet; debug handlers wire JWTAuth(fakeVerifier) directly)")
 	return nil

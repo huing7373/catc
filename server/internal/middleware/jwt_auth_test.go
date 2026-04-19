@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -246,9 +247,113 @@ func TestJWTAuth_InjectsLoggerUserID(t *testing.T) {
 
 func TestNewJWTAuth_PanicsOnNilVerifier(t *testing.T) {
 	t.Parallel()
-	assert.PanicsWithValue(t, "middleware.JWTAuth: verifier must not be nil", func() {
-		_ = JWTAuth(nil)
+	// Both JWTAuth(nil) and JWTAuthWithBlacklist(nil, ...) share the
+	// same guard because the former is a thin wrapper. Verify both
+	// entry points panic so a future caller pointed at either one
+	// still fails-fast.
+	assert.Panics(t, func() { _ = JWTAuth(nil) })
+	assert.Panics(t, func() { _ = JWTAuthWithBlacklist(nil, nil) })
+	assert.Panics(t, func() { _ = JWTAuthWithBlacklist(nil, &fakeUserBlacklist{}) })
+}
+
+// fakeUserBlacklist is the test double for UserBlacklist used by the
+// Story 1.6 round-1 blacklist-aware middleware subtests below. It
+// records every IsBlacklisted call so assertions can verify the
+// middleware queried with the userId claim (not some other field).
+type fakeUserBlacklist struct {
+	blocked bool
+	err     error
+	calls   []string
+}
+
+func (f *fakeUserBlacklist) IsBlacklisted(_ context.Context, userID string) (bool, error) {
+	f.calls = append(f.calls, userID)
+	return f.blocked, f.err
+}
+
+// newGuardedRouterWithBL wires JWTAuthWithBlacklist + the same
+// downstream /guarded handler as newGuardedRouter so assertions
+// compare shape byte-for-byte.
+func newGuardedRouterWithBL(t *testing.T, v JWTVerifier, bl UserBlacklist) (*gin.Engine, *atomic.Int32) {
+	t.Helper()
+	r := gin.New()
+	hits := &atomic.Int32{}
+	r.Use(JWTAuthWithBlacklist(v, bl))
+	r.GET("/guarded", func(c *gin.Context) {
+		hits.Add(1)
+		c.JSON(http.StatusOK, gin.H{"userId": string(UserIDFrom(c))})
 	})
+	return r, hits
+}
+
+// TestJWTAuthWithBlacklist_HappyPath — non-blocked user passes through
+// and the downstream handler runs. Also verifies the blacklist was
+// actually consulted (sentinel call captured).
+func TestJWTAuthWithBlacklist_HappyPath(t *testing.T) {
+	t.Parallel()
+	v := &fakeVerifier{claims: &jwtx.CustomClaims{
+		UserID: "u1", DeviceID: "d1", Platform: "watch", TokenType: "access",
+	}}
+	bl := &fakeUserBlacklist{blocked: false}
+	r, hits := newGuardedRouterWithBL(t, v, bl)
+
+	w := doGet(r, "Bearer tok")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, int32(1), hits.Load())
+	require.Len(t, bl.calls, 1)
+	assert.Equal(t, "u1", bl.calls[0], "blacklist MUST be queried with the userId claim")
+}
+
+// TestJWTAuthWithBlacklist_UserBlocked_401 — a blocked user (e.g.
+// post-account-deletion) gets 401 AUTH_INVALID_IDENTITY_TOKEN and the
+// downstream handler never runs.
+func TestJWTAuthWithBlacklist_UserBlocked_401(t *testing.T) {
+	t.Parallel()
+	v := &fakeVerifier{claims: &jwtx.CustomClaims{
+		UserID: "u1", DeviceID: "d1", Platform: "watch", TokenType: "access",
+	}}
+	bl := &fakeUserBlacklist{blocked: true}
+	r, hits := newGuardedRouterWithBL(t, v, bl)
+
+	w := doGet(r, "Bearer tok")
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Equal(t, "AUTH_INVALID_IDENTITY_TOKEN", decodeErrCode(t, w))
+	assert.Zero(t, hits.Load(), "downstream handler MUST NOT run when user is blacklisted")
+}
+
+// TestJWTAuthWithBlacklist_RedisError_500_FailClosed — a blacklist
+// read error is fail-closed (500), NOT "assume not blacklisted". This
+// mirrors ws.UpgradeHandler's strategy.
+func TestJWTAuthWithBlacklist_RedisError_500_FailClosed(t *testing.T) {
+	t.Parallel()
+	v := &fakeVerifier{claims: &jwtx.CustomClaims{
+		UserID: "u1", DeviceID: "d1", Platform: "watch", TokenType: "access",
+	}}
+	bl := &fakeUserBlacklist{err: errors.New("redis down")}
+	r, hits := newGuardedRouterWithBL(t, v, bl)
+
+	w := doGet(r, "Bearer tok")
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Equal(t, "INTERNAL_ERROR", decodeErrCode(t, w))
+	assert.Zero(t, hits.Load(),
+		"fail-closed on blacklist read error: downstream handler MUST NOT run on Redis outage (do NOT assume not-blacklisted)")
+}
+
+// TestJWTAuthWithBlacklist_NilBlacklist_SkipsCheck — passing
+// blacklist=nil (test harnesses / pre-round-1 boot paths) must skip
+// the check without panic. JWTAuth(v) wraps JWTAuthWithBlacklist(v,
+// nil), so this also proves the back-compat wrapper works.
+func TestJWTAuthWithBlacklist_NilBlacklist_SkipsCheck(t *testing.T) {
+	t.Parallel()
+	v := &fakeVerifier{claims: &jwtx.CustomClaims{
+		UserID: "u1", DeviceID: "d1", Platform: "watch", TokenType: "access",
+	}}
+	r, hits := newGuardedRouterWithBL(t, v, nil)
+
+	w := doGet(r, "Bearer tok")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, int32(1), hits.Load(),
+		"nil blacklist must behave identically to legacy JWTAuth(v)")
 }
 
 func TestUserIDFrom_WithoutMiddleware(t *testing.T) {

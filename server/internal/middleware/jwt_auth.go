@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"errors"
 
 	"github.com/gin-gonic/gin"
@@ -34,6 +35,21 @@ const (
 // referencing pkg/ types are fine).
 type JWTVerifier interface {
 	Verify(tokenStr string) (*jwtx.CustomClaims, error)
+}
+
+// UserBlacklist is the optional read-side surface JWTAuthWithBlacklist
+// consults after a token verifies successfully. Story 1.6 round-1 fix:
+// after DELETE /v1/users/me the user is added to the Redis blacklist
+// (the same one ws.UpgradeHandler has checked since Story 0.11) so
+// the access token the client already holds cannot authorize any
+// further /v1/* calls for its remaining ≤15-minute lifetime.
+//
+// *redisx.RedisBlacklist satisfies this interface via its
+// IsBlacklisted method. Accepting just the read surface here keeps
+// middleware free of admin-write concerns (Add / Remove stay on the
+// tool surface).
+type UserBlacklist interface {
+	IsBlacklisted(ctx context.Context, userID string) (bool, error)
 }
 
 // JWTAuth returns a gin handler that verifies the
@@ -71,9 +87,39 @@ type JWTVerifier interface {
 // platform may be empty and the middleware lets the request through —
 // downstream endpoints that need platform (e.g. Story 2.3 POST /state)
 // validate it themselves.
+// JWTAuth returns the middleware without an attached blacklist — thin
+// wrapper over JWTAuthWithBlacklist with blacklist=nil, preserved for
+// test call sites that don't need to drive the revocation path.
+// Production wires JWTAuthWithBlacklist directly via
+// buildHTTPJWTAuth (cmd/cat/initialize.go).
 func JWTAuth(verifier JWTVerifier) gin.HandlerFunc {
+	return JWTAuthWithBlacklist(verifier, nil)
+}
+
+// JWTAuthWithBlacklist returns a gin handler that verifies the
+// `Authorization: Bearer <access-token>` header, cross-checks the
+// user against the optional Redis blacklist, and injects
+// (userId, deviceId, platform) into the gin + std context. Mounted on
+// /v1/* by wire.go from Story 1.3 onward; bootstrap endpoints
+// (/auth/apple, /auth/refresh, /v1/platform/ws-registry, /healthz,
+// /readyz, /ws) MUST stay outside the group.
+//
+// Blacklist handling (Story 1.6 round-1 fix):
+//   - blacklist=nil → check skipped (used by legacy test harnesses).
+//   - IsBlacklisted returns true → 401 AUTH_INVALID_IDENTITY_TOKEN;
+//     the client is expected to clear its Keychain and re-run SIWA
+//     (the JWTVerifier still verified the token, so no information
+//     leaks about whether the blacklist was actually the cause —
+//     surfacing DEVICE_BLACKLISTED would distinguish those cases).
+//   - Redis error → 500 INTERNAL_ERROR (fail-closed — same strategy
+//     ws.UpgradeHandler uses on its blacklist path; a Redis outage
+//     MUST NOT degrade to "assume not blacklisted").
+//
+// Other reject paths (token missing / verify failed / type mismatch
+// / claim empty) are unchanged from the pre-round-1 middleware.
+func JWTAuthWithBlacklist(verifier JWTVerifier, blacklist UserBlacklist) gin.HandlerFunc {
 	if verifier == nil {
-		panic("middleware.JWTAuth: verifier must not be nil")
+		panic("middleware.JWTAuthWithBlacklist: verifier must not be nil")
 	}
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
@@ -124,6 +170,29 @@ func JWTAuth(verifier JWTVerifier) gin.HandlerFunc {
 			return
 		}
 
+		// Story 1.6 round-1 fix: check the user-level blacklist AFTER
+		// verify but BEFORE ctx injection. Order matters — a
+		// blacklist hit must not leak userId into downstream log
+		// lines for a request that is going to be rejected anyway.
+		if blacklist != nil {
+			blocked, blErr := blacklist.IsBlacklisted(ctx, claims.UserID)
+			if blErr != nil {
+				logx.Ctx(ctx).Error().Err(blErr).
+					Str("action", "jwt_auth_error").
+					Str("stage", "blacklist").
+					Str("path", path).
+					Msg("jwt_auth_error")
+				dto.RespondAppError(c, dto.ErrInternalError.WithCause(blErr))
+				c.Abort()
+				return
+			}
+			if blocked {
+				rejectAuth(c, "user_blacklisted", path,
+					dto.ErrAuthInvalidIdentityToken.WithCause(errors.New("jwt_auth: user is blacklisted (likely post-deletion)")))
+				return
+			}
+		}
+
 		c.Set(string(ctxUserID), claims.UserID)
 		c.Set(string(ctxDeviceID), claims.DeviceID)
 		c.Set(string(ctxPlatform), claims.Platform)
@@ -135,6 +204,10 @@ func JWTAuth(verifier JWTVerifier) gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+// compile-time check: the blacklist interface's context import is
+// used (defense against lint removing it in a future refactor).
+var _ context.Context = context.Background()
 
 // rejectAuth centralizes the 401 reject path: log an audit event with
 // reason + path (NEVER userId — claims are unverified at this point;

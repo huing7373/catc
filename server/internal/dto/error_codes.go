@@ -29,6 +29,7 @@ var (
 	ErrFriendInviteUsed          = register("FRIEND_INVITE_USED", "friend invite already used", http.StatusConflict, CategoryClientError)
 	ErrFriendBlocked             = register("FRIEND_BLOCKED", "user is blocked", http.StatusForbidden, CategoryClientError)
 	ErrFriendNotFound            = register("FRIEND_NOT_FOUND", "friend not found", http.StatusNotFound, CategoryClientError)
+	ErrUserNotFound              = register("USER_NOT_FOUND", "user not found", http.StatusNotFound, CategoryClientError)
 	ErrBlindboxAlreadyRedeemed   = register("BLINDBOX_ALREADY_REDEEMED", "blindbox already redeemed", http.StatusConflict, CategoryClientError)
 	ErrBlindboxInsufficientSteps = register("BLINDBOX_INSUFFICIENT_STEPS", "insufficient steps", http.StatusUnprocessableEntity, CategoryClientError)
 	ErrBlindboxNotFound          = register("BLINDBOX_NOT_FOUND", "blindbox not found", http.StatusNotFound, CategoryClientError)

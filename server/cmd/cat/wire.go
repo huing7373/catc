@@ -21,6 +21,7 @@ type handlers struct {
 	auth      *handler.AuthHandler
 	jwtAuth   gin.HandlerFunc       // Story 1.3 — mounted on /v1/* group; nil in debug mode
 	device    *handler.DeviceHandler // Story 1.4 — POST /v1/devices/apns-token
+	user      *handler.UserHandler   // Story 1.6 — DELETE /v1/users/me
 	// v1Routes lets test harnesses inject extra /v1/* routes (e.g. an
 	// integration-test echo endpoint that reads UserIDFrom). Production
 	// wiring leaves it nil — Story 1.4 onward adds real routes directly
@@ -74,6 +75,14 @@ func buildRouter(_ *config.Config, h *handlers) *gin.Engine {
 	// "why not conditional route" rationale.
 	if h.device != nil {
 		v1.POST("/devices/apns-token", h.device.RegisterApnsToken)
+	}
+	// Story 1.6 — DELETE /v1/users/me (request account deletion).
+	// Same conditional-mount rationale as h.device: unit tests that
+	// exercise routing pieces in isolation do NOT need to wire the full
+	// service graph. Release production always passes a non-nil handler
+	// from initialize.go.
+	if h.user != nil {
+		v1.DELETE("/users/me", h.user.RequestDeletion)
 	}
 	if h.v1Routes != nil {
 		h.v1Routes(v1)

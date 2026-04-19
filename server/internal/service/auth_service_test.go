@@ -298,6 +298,106 @@ func TestSignInWithApple_ResurrectsDeletedUser(t *testing.T) {
 	assert.Equal(t, int32(1), atomic.LoadInt32(&repo.clearDeletionCount))
 }
 
+// TestSignInWithApple_Resurrection_ClearsAccessBlacklist locks the
+// Story 1.6 round-1 resurrection hook: when the blacklist remover is
+// installed, SIWA resurrection MUST call Remove(userID). Without
+// this, a user who DELETEs and then SIWAs back within 15 minutes
+// would see 401s on /v1/* until the blacklist TTL expires.
+func TestSignInWithApple_Resurrection_ClearsAccessBlacklist(t *testing.T) {
+	t.Parallel()
+	pastTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	uid := ids.NewUserID()
+	existing := &domain.User{
+		ID:                  uid,
+		DeletionRequested:   true,
+		DeletionRequestedAt: &pastTime,
+	}
+	repo := &fakeRepo{
+		findByHash: func(_ context.Context, _ string) (*domain.User, error) { return existing, nil },
+	}
+	verifier := &fakeVerifier{verify: func(_ context.Context, _, _ string) (*jwtx.AppleIdentityClaims, error) {
+		return okClaimsFor("apple:user:returning"), nil
+	}}
+	issuer := &fakeIssuer{issuedAccess: "A", issuedRefresh: "R"}
+
+	bl := &fakeAccessBlacklistRemover{}
+	svc := newSvc(t, repo, verifier, issuer)
+	svc.SetAccessBlacklistRemover(bl)
+
+	_, err := svc.SignInWithApple(context.Background(), defaultRequest())
+	require.NoError(t, err)
+
+	require.Len(t, bl.removed, 1, "resurrection MUST call blacklist.Remove exactly once")
+	assert.Equal(t, string(uid), bl.removed[0],
+		"Remove MUST be called with the same userId whose row was just un-deleted")
+}
+
+// TestSignInWithApple_Resurrection_BlacklistRemoveError_DoesNotFailFlow
+// verifies fail-open on the resurrection hook — a Redis outage during
+// Remove emits a warn log but the SIWA flow still returns tokens.
+func TestSignInWithApple_Resurrection_BlacklistRemoveError_DoesNotFailFlow(t *testing.T) {
+	t.Parallel()
+	pastTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	existing := &domain.User{
+		ID:                  ids.NewUserID(),
+		DeletionRequested:   true,
+		DeletionRequestedAt: &pastTime,
+	}
+	repo := &fakeRepo{
+		findByHash: func(_ context.Context, _ string) (*domain.User, error) { return existing, nil },
+	}
+	verifier := &fakeVerifier{verify: func(_ context.Context, _, _ string) (*jwtx.AppleIdentityClaims, error) {
+		return okClaimsFor("apple:user:returning"), nil
+	}}
+	issuer := &fakeIssuer{issuedAccess: "A", issuedRefresh: "R"}
+
+	bl := &fakeAccessBlacklistRemover{err: errors.New("redis down")}
+	svc := newSvc(t, repo, verifier, issuer)
+	svc.SetAccessBlacklistRemover(bl)
+
+	res, err := svc.SignInWithApple(context.Background(), defaultRequest())
+	require.NoError(t, err, "fail-open: SIWA succeeds even if blacklist Remove errors")
+	require.NotNil(t, res)
+	assert.Equal(t, "A", res.AccessToken)
+}
+
+// TestSignInWithApple_NilAccessBlacklistRemover_ResurrectionStillWorks
+// sanity-checks that a nil remover (legacy test harnesses) does not
+// crash the resurrection path — the Remove call is simply skipped.
+func TestSignInWithApple_NilAccessBlacklistRemover_ResurrectionStillWorks(t *testing.T) {
+	t.Parallel()
+	pastTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	existing := &domain.User{
+		ID:                  ids.NewUserID(),
+		DeletionRequested:   true,
+		DeletionRequestedAt: &pastTime,
+	}
+	repo := &fakeRepo{
+		findByHash: func(_ context.Context, _ string) (*domain.User, error) { return existing, nil },
+	}
+	verifier := &fakeVerifier{verify: func(_ context.Context, _, _ string) (*jwtx.AppleIdentityClaims, error) {
+		return okClaimsFor("apple:user:returning"), nil
+	}}
+	issuer := &fakeIssuer{issuedAccess: "A", issuedRefresh: "R"}
+
+	svc := newSvc(t, repo, verifier, issuer)
+	// Deliberately do NOT call SetAccessBlacklistRemover — accessBlacklist stays nil.
+
+	res, err := svc.SignInWithApple(context.Background(), defaultRequest())
+	require.NoError(t, err)
+	assert.False(t, res.User.DeletionRequested)
+}
+
+type fakeAccessBlacklistRemover struct {
+	removed []string
+	err     error
+}
+
+func (f *fakeAccessBlacklistRemover) Remove(_ context.Context, userID string) error {
+	f.removed = append(f.removed, userID)
+	return f.err
+}
+
 func TestSignInWithApple_ConcurrentRaceResolved(t *testing.T) {
 	t.Parallel()
 	winner := &domain.User{

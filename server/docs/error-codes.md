@@ -13,6 +13,7 @@
 | `FRIEND_INVITE_USED` | client_error | 409 | friend invite already used |
 | `FRIEND_BLOCKED` | client_error | 403 | user is blocked |
 | `FRIEND_NOT_FOUND` | client_error | 404 | friend not found |
+| `USER_NOT_FOUND` | client_error | 404 | user not found |
 | `BLINDBOX_ALREADY_REDEEMED` | client_error | 409 | blindbox already redeemed |
 | `BLINDBOX_INSUFFICIENT_STEPS` | client_error | 422 | insufficient steps |
 | `BLINDBOX_NOT_FOUND` | client_error | 404 | blindbox not found |

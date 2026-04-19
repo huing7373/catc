@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -17,6 +18,7 @@ import (
 	"github.com/huing/cat/server/internal/service"
 	"github.com/huing/cat/server/internal/ws"
 	"github.com/huing/cat/server/pkg/clockx"
+	"github.com/huing/cat/server/pkg/ids"
 	"github.com/huing/cat/server/pkg/jwtx"
 	"github.com/huing/cat/server/pkg/redisx"
 )
@@ -214,13 +216,13 @@ func TestValidateRegistryConsistency_DebugModeMissingRegistrationFails(t *testin
 // nothing!) pass undetected.
 func TestBuildHTTPJWTAuth_ReleaseModeMounted(t *testing.T) {
 	t.Parallel()
-	got := buildHTTPJWTAuth("release", stubJWTVerifier{})
+	got := buildHTTPJWTAuth("release", stubJWTVerifier{}, nil)
 	require.NotNil(t, got, "release mode MUST mount JWTAuth on /v1/*")
 }
 
 func TestBuildHTTPJWTAuth_DebugModeNotMounted(t *testing.T) {
 	t.Parallel()
-	got := buildHTTPJWTAuth("debug", stubJWTVerifier{})
+	got := buildHTTPJWTAuth("debug", stubJWTVerifier{}, nil)
 	assert.Nil(t, got, "debug mode MUST NOT mount JWTAuth (no /v1/* business endpoint yet)")
 }
 
@@ -229,7 +231,7 @@ func TestBuildHTTPJWTAuth_DebugModeNotMounted(t *testing.T) {
 // literally "debug" mounts the middleware.
 func TestBuildHTTPJWTAuth_UnknownModeTreatedAsRelease(t *testing.T) {
 	t.Parallel()
-	got := buildHTTPJWTAuth("staging", stubJWTVerifier{})
+	got := buildHTTPJWTAuth("staging", stubJWTVerifier{}, nil)
 	require.NotNil(t, got, "unknown mode must default to release-style fail-closed wiring")
 }
 
@@ -402,6 +404,75 @@ func TestInitialize_V1DevicesApnsToken_NilDeviceHandler_404(t *testing.T) {
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusNotFound, w.Code,
 		"without h.device wire must NOT register the route (nil-safe)")
+}
+
+// --- Story 1.6 wire tests ---
+
+// fakeUserService satisfies handler.UserHandlerService so the route
+// test exercises buildRouter without pulling Mongo / Redis / WS hub.
+type fakeUserService struct {
+	calls  int
+	result *service.AccountDeletionResult
+	err    error
+}
+
+func (f *fakeUserService) RequestAccountDeletion(_ context.Context, _ ids.UserID) (*service.AccountDeletionResult, error) {
+	f.calls++
+	return f.result, f.err
+}
+
+// newRouterForTestingWithUser wires a handlers struct that includes
+// a real UserHandler backed by a stub svc. Mirrors
+// newRouterForTestingWithDevice.
+func newRouterForTestingWithUser(jwtAuth gin.HandlerFunc, svc handler.UserHandlerService) *gin.Engine {
+	platform := handler.NewPlatformHandler(clockx.NewRealClock(), "release")
+	h := &handlers{
+		platform: platform,
+		jwtAuth:  jwtAuth,
+		user:     handler.NewUserHandler(svc),
+	}
+	return buildRouter(nil, h)
+}
+
+// TestInitialize_V1UsersMeDelete_RegistersRoute proves Story 1.6
+// wire.go change: when h.user is set, DELETE /v1/users/me is routed
+// to the user handler and the service runs.
+func TestInitialize_V1UsersMeDelete_RegistersRoute(t *testing.T) {
+	t.Parallel()
+
+	stamp := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+	svc := &fakeUserService{result: &service.AccountDeletionResult{RequestedAt: stamp}}
+
+	// Happy-path JWT middleware — populates the ctx keys the handler
+	// reads so we reach the svc rather than the defense-in-depth 401.
+	v := func(c *gin.Context) {
+		c.Set("middleware.userId", "u1")
+		c.Set("middleware.deviceId", "d1")
+		c.Set("middleware.platform", "watch")
+		c.Next()
+	}
+	r := newRouterForTestingWithUser(v, svc)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/users/me", nil)
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusAccepted, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, 1, svc.calls, "user svc must have been called exactly once")
+}
+
+// TestInitialize_V1UsersMeDelete_NilUserHandler_404 proves the
+// nil-safe guard in buildRouter: when no user handler is wired the
+// route is absent (404 gin tree miss), NOT a 500 nil-deref.
+func TestInitialize_V1UsersMeDelete_NilUserHandler_404(t *testing.T) {
+	t.Parallel()
+	r := newRouterForTesting(nil, nil)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/users/me", nil)
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotFound, w.Code,
+		"without h.user wire must NOT register the route (nil-safe)")
 }
 
 func TestValidateRegistryConsistency_DebugOnlyInReleaseFails(t *testing.T) {
