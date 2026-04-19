@@ -181,36 +181,75 @@ func TestHub_DisconnectUser_IdempotentCallTwice(t *testing.T) {
 	assert.Equal(t, 0, hub.ConnectionCount())
 }
 
-// TestHub_DisconnectUser_RaceWithSelfDisconnect_DoesNotOvercount
-// simulates the FindByUser-vs-readPump race the round-1 review
-// flagged: a client that disconnects on its own AFTER FindByUser
-// snapshots it but BEFORE the loop reaches unregisterClient must NOT
-// be counted in the returned `connectionsClosed`. We force the race
-// deterministically by registering two clients of the same user, then
-// pre-evicting one via Hub.Unregister (the same path readPump's
-// defer takes) before invoking DisconnectUser.
-func TestHub_DisconnectUser_RaceWithSelfDisconnect_DoesNotOvercount(t *testing.T) {
+// TestHub_disconnectAllForUser_StaleSnapshotEntry_NotCounted is the
+// round-2 fix for the round-1 race regression test that did not
+// actually exercise the snapshot-vs-unregister window.
+//
+// Why the previous attempt was inadequate: pre-evicting before
+// calling DisconnectUser meant FindByUser only returned the live
+// client, so the loop ran exactly once and count==1 either way —
+// guarded or not. A regression of `count++` to unconditional would
+// have stayed invisible.
+//
+// This test bypasses DisconnectUser's internal FindByUser call by
+// driving disconnectAllForUser directly with a snapshot we capture
+// BEFORE the eviction. That snapshot includes the stale *Client
+// pointer; when the loop reaches it, unregisterClient's
+// LoadAndDelete misses (the entry is already gone) and the guarded
+// `if h.unregisterClient(c) { count++ }` correctly skips. Removing
+// the guard would let count climb to 2.
+func TestHub_disconnectAllForUser_StaleSnapshotEntry_NotCounted(t *testing.T) {
 	t.Parallel()
 	srv := newDisconnectTestServer(t)
 	hub := NewHub(HubConfig{SendBufSize: 16}, clockx.NewRealClock())
 
-	_, c1 := dialAndRegister(t, srv, hub, "conn-stale", "eve")
+	_, c1 := dialAndRegister(t, srv, hub, "conn-live", "eve")
 	defer c1.Close()
-	_, c2 := dialAndRegister(t, srv, hub, "conn-live", "eve")
+	_, c2 := dialAndRegister(t, srv, hub, "conn-stale", "eve")
 	defer c2.Close()
 	require.Equal(t, 2, hub.ConnectionCount())
 
-	// Pre-evict the first client to simulate readPump's defer
-	// unregister having already won the race against DisconnectUser.
-	hub.Unregister("conn-stale")
-	require.Equal(t, 1, hub.ConnectionCount())
+	// Capture the snapshot BEFORE the race: at this point both
+	// clients are registered and the slice contains real *Client
+	// pointers from h.clients.
+	snapshot := hub.FindByUser("eve")
+	require.Len(t, snapshot, 2, "snapshot must include both clients")
 
-	count, err := hub.DisconnectUser("eve")
-	require.NoError(t, err)
+	// Now race readPump's defer: evict c-stale via Hub.Unregister
+	// (the same path readPump's defer takes on connection close).
+	// The snapshot still holds the *Client pointer.
+	hub.Unregister("conn-stale")
+	require.Equal(t, 1, hub.ConnectionCount(),
+		"only c-live should remain in the hub's sync.Map")
+
+	count := hub.disconnectAllForUser("eve", snapshot)
 	assert.Equal(t, 1, count,
-		"DisconnectUser MUST count only successfully unregistered clients — "+
-			"snapshot-then-self-disconnect race must not inflate the return")
-	assert.Equal(t, 0, hub.ConnectionCount(), "live client must still be evicted")
+		"snapshot entry whose connID was evicted between snapshot and "+
+			"unregisterClient MUST NOT be counted; if this fails, the "+
+			"`if h.unregisterClient(c) { count++ }` guard regressed to "+
+			"unconditional count++ — round-1 review fix lost")
+	assert.Equal(t, 0, hub.ConnectionCount(),
+		"live client must still be evicted")
+}
+
+// TestHub_DisconnectUser_AllRegistered_CountMatches keeps the prior
+// "all clients still alive at call time" coverage now that the
+// snapshot-race assertion moved to the helper-level test above.
+func TestHub_DisconnectUser_AllRegistered_CountMatches(t *testing.T) {
+	t.Parallel()
+	srv := newDisconnectTestServer(t)
+	hub := NewHub(HubConfig{SendBufSize: 16}, clockx.NewRealClock())
+
+	_, c1 := dialAndRegister(t, srv, hub, "conn-a", "frank")
+	defer c1.Close()
+	_, c2 := dialAndRegister(t, srv, hub, "conn-b", "frank")
+	defer c2.Close()
+	require.Equal(t, 2, hub.ConnectionCount())
+
+	count, err := hub.DisconnectUser("frank")
+	require.NoError(t, err)
+	assert.Equal(t, 2, count, "both registered clients must be counted")
+	assert.Equal(t, 0, hub.ConnectionCount())
 }
 
 // TestHub_DisconnectUser_WriteCloseFrameFailureSwallowed simulates the

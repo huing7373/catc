@@ -225,3 +225,11 @@
 | 1 | patch | `Hub.DisconnectUser` 在 `FindByUser` 取 sync.Map 快照后无条件 `count++`，但 `unregisterClient` 内的 `LoadAndDelete` 可能因 readPump defer 自身已先一步 unregister 而返回 false（snapshot-vs-self-disconnect race），count 仍被加 1 —— 让 `unregisterClient` 返回 bool，仅在真正驱逐时计数 | server/internal/ws/hub.go:174-175 | DisconnectUser 的 `connectionsClosed` 返回值 + 审计日志会大于实际关闭的连接数；Story 1.6 账户注销 / 任何依赖该 count 做下游决策的 revocation flow 都会被误导（既违反 godoc "actually torn down" 契约，也让 ops 看到的关闭数偏多）；新增 `TestHub_DisconnectUser_RaceWithSelfDisconnect_DoesNotOvercount` 锁定 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过
+
+## [1-3-jwt-auth-middleware-userid-context-injection] Round 2 — 2026-04-19
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | Round 1 新增的"race regression"测试在调 `DisconnectUser` 之前 `hub.Unregister("conn-stale")`，导致 `FindByUser` 快照根本不含 stale entry，循环只跑 1 次 —— 无论是否带 `if h.unregisterClient(c) { count++ }` 守护，count 都是 1。测试名声称覆盖 race window 但实际只覆盖"调 DisconnectUser 之前已经少一个连接"的退化场景；如果未来有人把 count++ 改回无条件，这条测试不会失败。 | server/internal/ws/hub_disconnect_user_test.go:184 (round-1 提交) | 守护代码失去"未来回归被测试拦下来"的保护层，Story 1.6 调用方依赖的 connectionsClosed 契约重新变成靠人 review；修法：把 DisconnectUser 的循环抽到 `disconnectAllForUser(userID, clients []*Client)` 测试 seam，新测试在 Unregister 之前**先**捕获 snapshot，再 Unregister，再调 helper 注入 stale snapshot —— 这样 loop 真正跑两次，guard 有作用时 count=1，无 guard 时 count=2，回归立刻被抓 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过

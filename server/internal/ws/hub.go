@@ -164,7 +164,22 @@ func (h *Hub) FindByUser(userID UserID) []*Client {
 // unregisterClient call still runs and the conn is force-closed
 // inside it.
 func (h *Hub) DisconnectUser(userID UserID) (int, error) {
-	clients := h.FindByUser(userID)
+	return h.disconnectAllForUser(userID, h.FindByUser(userID)), nil
+}
+
+// disconnectAllForUser drives the eviction loop over an externally
+// supplied snapshot. Extracted from DisconnectUser so tests can pass
+// a snapshot that includes a *Client which has ALREADY been evicted
+// from h.clients — that is the exact FindByUser-vs-self-disconnect
+// race the round-1 review surfaced. Without this seam, FindByUser
+// only ever returns currently-registered clients, so a regression of
+// `count++` to unconditional would be invisible (the loop body's
+// LoadAndDelete miss never gets triggered in-test).
+//
+// Production code MUST go through DisconnectUser; this helper exists
+// only as a test seam (and stays unexported so external packages
+// cannot bypass FindByUser's filter).
+func (h *Hub) disconnectAllForUser(userID UserID, clients []*Client) int {
 	count := 0
 	for _, c := range clients {
 		deadline := h.clock.Now().Add(5 * time.Second)
@@ -181,12 +196,12 @@ func (h *Hub) DisconnectUser(userID UserID) (int, error) {
 				Msg("ws_disconnect_close_frame_failed")
 		}
 		// Only count when this call actually evicted the client.
-		// FindByUser produced a snapshot a few lines ago; between
-		// then and now the client may have disconnected on its own
-		// (readPump's defer unregister) and LoadAndDelete will miss.
-		// Bumping count regardless would break the documented
-		// contract ("connections actually torn down") and mislead
-		// the audit log + any caller that reasons about return.
+		// The snapshot may be stale by the time we reach the entry
+		// (readPump's defer unregister winning the race); a stale
+		// entry's LoadAndDelete returns false. Bumping count
+		// regardless would break the godoc contract ("connections
+		// actually torn down") and mislead the audit log + any
+		// revocation flow that consumes the return value.
 		if h.unregisterClient(c) {
 			count++
 		}
@@ -198,7 +213,7 @@ func (h *Hub) DisconnectUser(userID UserID) (int, error) {
 			Int("connectionsClosed", count).
 			Msg("ws_disconnect_user")
 	}
-	return count, nil
+	return count
 }
 
 func (h *Hub) ConnectionCount() int {
