@@ -816,8 +816,151 @@ type GiftID string
 
 - 裤衩猫**只做 Apple Watch**，不做 Wear OS。
 - 后端**自建 Go 服务**，不用 Firebase。
-- 客户端：iOS（Swift）+ watchOS（SwiftUI / SpriteKit）。
+- 客户端：iOS（Swift）+ watchOS（SwiftUI / SpriteKit）。**三端独立目录**：`server/` (Go) / `app/` (iOS) / `watch/` (watchOS)。**server 测试必须自包含**（见 §21.7）。
 - Claude 完成 99.99% 编码；瓶颈在美术与真机调试。
+
+---
+
+## 21. Epic 0 → Epic 1+ 继承的工程纪律
+
+**本章节由 Epic 0 retrospective（`_bmad-output/implementation-artifacts/epic-0-retro-2026-04-19.md`）确立，Epic 1 及之后每个业务 story 都必须遵守。**
+
+### 21.1 双 gate 漂移守门（全局常量集合必备）
+
+**触发条件**：每当新增任何一组**全局常量**——error code 枚举 / WS message type / cron job name / feature flag / Redis key prefix / Provider 名字 / 跨包枚举 etc——就必须配套双 gate：
+
+- **Gate 1（CI 单元测试）**：一个 `*_test.go` 扫"常量清单"+"实际使用点的注册"两个集合，不一致则 test fail
+- **Gate 2（启动期 fail-fast）**：`cmd/cat/initialize.go` 最后调一个 `validate*Consistency(...)` 函数，漂移则 `log.Fatal`
+
+**四步走纪律**（每加一条新常量必须同时改四处，漏一步 CI 挡下，这是设计目的）：
+
+1. 往常量清单（源头）加 entry
+2. 在使用点（dispatcher / switch / registry）加 handler 注册或分支
+3. 更新对应文档（`docs/api/ws-message-registry.md` 或同类）
+4. 跑 `bash scripts/build.sh --test`
+
+**现有样板**：
+- `server/internal/dto/error_codes.go` + `server/internal/dto/error_codes_test.go`（Story 0-6 首次建立）
+- `server/internal/dto/ws_messages.go` + `server/internal/dto/ws_messages_test.go` + `server/cmd/cat/initialize.go::validateRegistryConsistency` + `initialize_test.go`（Story 0-14 完整模板，含 downstream-only 豁免扩展）
+
+**不要只写 Gate 1 或只写 Gate 2**。Gate 1 拦不住 feature-flag / 条件注册；Gate 2 等生产崩溃才发现。两者互补。
+
+### 21.2 Empty / Noop Provider 逐步填实模式
+
+**场景**：某个 service / handler 依赖多个下游 Provider（e.g. `session.resume` 依赖 6 个：User / Friends / CatState / Skins / Blindboxes / RoomSnapshot），但骨架 story 先不实现真实 Provider。
+
+**约定**：
+
+- Empty Provider 实现**必须返回合法 JSON**——`null` / `[]` / 空 struct，**禁止**占位字符串 / 魔法值 / panic
+- 消费侧接口定义在 `internal/{service,ws,push}/` 对应包；Empty 实现与真实实现都在**同一包**（P2 consumer-side interface）
+- Epic 1-8 每个 story 替换一个 Empty 时，**消费侧代码零改动**——只改 `cmd/cat/initialize.go` 装配
+- 替换时在 `initialize.go` 里留一行注释 `// UserProvider 真实实现 removed Empty via Story 1.1`（方便 Epic 4.5 统一收口检查哪些 Empty 还在）
+
+**现有样板**：
+- `server/internal/ws/session_resume.go` 6 个 `Empty*Provider{}`（Story 0-12）
+- `server/internal/push/` 4 个 `Empty*` / `NoopPusher{}`（Story 0-13）
+
+### 21.3 Fail-closed vs Fail-open 决策框架
+
+**每个涉及外部系统故障（Redis / Mongo / 上游 API）的路径，都必须显式选一种并在 Dev Notes 说明理由。**
+
+**判据**：问一句"这条路径挂了会让什么事情发生"——
+
+| 业务后果 | 选 | 示例 |
+|---|---|---|
+| 安全 / 合规 / 钱损失 / 数据错乱 | **fail-closed** | WS blacklist / ratelimit（0-11）、APNs Enqueue（0-13） |
+| 只是"某个便利功能降级" | **fail-open** | session.resume 缓存（0-12）、QuietHoursResolver（0-13） |
+
+**必要条件 — 可观测点**（与用户 memory `feedback_no_backup_fallback.md` 一致）：
+
+**每种降级都必须让运维能看到"系统在降级"**：
+
+- fail-closed → healthz 变 red / 调用方拿到 error / 审计日志记 `rejected: <reason>`
+- fail-open → warn/error 日志 / metric `fallback_count` 递增 / DLQ 积压
+
+**判断一个 fallback 合法 vs 掩盖根因的唯一问题**：这条路径上 sleep 睡完重试、catch 住 error return nil、偷偷走备用路径还吞掉日志——都是**遮掩**，即 anti-pattern。
+
+**现有样板**：Story 0-11 / 0-12 / 0-13 的 Dev Notes 各自说明了选择理由。
+
+### 21.4 语义正确性的 review 早启
+
+**Epic 0 教训**：3 条 P1 review finding（0-14 r1 / 0-15 r1 / 0-15 r2）都是**语义正确性**问题而非功能正确性——代码跑通、test 通过，但定义本身错。
+
+**Epic 1+ 流程改进**：**工具 / 指标 / 守门 / 度量类 story，AC draft 写完后、实施之前，必须跑一次 AC review**。目标是用第二个视角扫 AC 描述的语义是否精确，不是扫实施代码。
+
+**实施方式**：
+- 启动第二个 Claude session（或同 session 另起分支），invoke `bmad-review-adversarial-general` 或 `bmad-review-edge-case-hunter`
+- Review 对象：story 文件 AC 段落 + 任何引用的 godoc / 文档
+- 发现 → 记回 story 的 Dev Notes `## AC Review` 小节
+- 然后才开 `/bmad-dev-story`
+
+**判断是否"工具 / 指标 / 守门类"的问句**：
+- 这个 story 输出的结果会被下游**自动化决策**（CI gate / metric 阈值 / 健康检查）消费吗？
+- 是 → 必跑 AC review；否 → 常规流程
+
+### 21.5 工具类 CLI 的上线判据
+
+**规则**：新增 `server/tools/*` CLI 时，AC 必须明确**与 tooling 一起上线的监控 / runbook / alert 是什么**，或显式标注 "**仅开发期使用**"。
+
+- 要配监控就列出：Grafana dashboard 路径 / Prometheus metric 名 / alert rule 位置
+- 要配 runbook 就列出：`docs/runbook/<tool>.md` 路径
+- 仅开发期就在 CLI 首行打印一次 "**NOT for production runtime**" 并在 README 标注
+
+**现有样板**：
+- `server/tools/blacklist_user`（Story 0-11）—— 标注 "仅开发期"
+- `server/tools/ws_loadgen`（Story 0-15）—— 标注 "仅 spike 使用"
+
+未来工具如果要进入生产 runbook，必须升级到 "监控 + alert + runbook" 三件套同发布。
+
+### 21.6 Spike / 真机 / 人工执行类工作归 Epic 9
+
+**规则**：凡涉及"物理 / 真机 / 人工 observability / 需要人类手动在设备上跑"的工作，**默认归属横向 Epic 9**（或新的 spike-class epic），**不塞进业务 epic 关键路径**。
+
+**为什么**：业务 epic 追求"写完就能跑 CI 闭环"。真机 / 人工类工作的瓶颈不在代码（Claude 写代码不瓶颈），在物理 / 硬件 / 手工。混在业务 epic 会阻塞收官。
+
+**现有样板**：
+- Story 0-15 Phase B（真机 watch 压测） → Epic 9.1
+- Story 10-1 真机联调 → 归用户自己跑（MVP 代码进 server，不阻塞）
+
+### 21.7 Server 测试自包含（三端独立）
+
+**规则**：`server/` 目录下所有 `*_test.go` + `//go:build integration` 测试**必须自包含**：只靠 `go test ./...` + `go test -tags integration ./...` 跑通，**不得依赖**运行 iOS app / Apple Watch app / 真 Apple Sign In / 真 APNs。
+
+**手段**：
+- **Apple JWT**：自签 RSA 密钥对 + `httptest.NewServer` 假 JWKS endpoint（Story 1-1 示范）
+- **APNs**：`push.NoopPusher` / fake `apns2.Client` interface
+- **WS 客户端**：`gorilla/websocket` 直接 dial `httptest.NewServer`（Story 10-1 集成测试已示范）
+- **HTTP endpoint**：`httptest.NewRecorder`
+
+**三端各跑各的**：iOS / watch 客户端目录独立，不引用 server repo，也不被 server repo 引用。**契约通过文档同步**（`docs/api/*.md` + `docs/api/openapi.yaml`），不通过共享代码或嵌入式 test runner。
+
+**真机联调类工作**：按 §21.6 归 Epic 9。
+
+### 21.8 §19 PR checklist 的语义正确性思考题
+
+（已写入 §19 第 14 条。）引用方式：任何 PR description 或 story Dev Notes 必须回答"这段代码出错误结果但没 crash 会误导谁"，不答就不算审完。
+
+---
+
+## 22. 给未来 Claude session 的快速指引
+
+每次开新 session 前：
+
+1. **先读 CLAUDE.md**（项目根），再读 **本文件 §21-§22**
+2. 查 `_bmad-output/implementation-artifacts/sprint-status.yaml` 定位当前 epic / story
+3. 若有 `epic-X-retro-*.md` 就读（Epic 0 retro 是第一个，未来每个 epic 都应有）
+4. 检查 `~/.claude/projects/C--fork-cat/memory/MEMORY.md` 索引
+
+**做代码变更时**：
+
+- 涉及全局常量集合 → §21.1
+- 涉及新增 Provider 或替换 Empty Provider → §21.2
+- 涉及外部系统故障降级 → §21.3（Dev Notes 必须说明选择 + 可观测点）
+- 涉及工具 / 指标 / 守门类 story → §21.4（先 AC review）
+- 涉及新增 CLI → §21.5
+- 涉及真机 / 人工执行 → §21.6（归 Epic 9，不塞业务 epic）
+- 涉及测试 → §21.7（server 自包含，不调 APP/watch）
+- 涉及 PR 或 Story 总结 → §21.8（§19 第 14 条问句）
 
 ---
 

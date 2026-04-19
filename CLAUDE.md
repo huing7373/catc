@@ -4,6 +4,22 @@
 
 **Before writing any server code, read `docs/backend-architecture-guide.md`.** It defines the architecture, tech stack (Go + Gin + MongoDB + Redis + zerolog + TOML), layering rules, error/logging/config conventions, and the PR checklist every new change must pass. All server code must conform — rewrite existing code if it conflicts.
 
+**In particular, §21 "Epic 0 → Epic 1+ 继承的工程纪律" is binding for every Epic 1+ story.** Before creating or implementing a story, check which subsections apply:
+- §21.1 双 gate 漂移守门 — when adding global constant sets (error codes / WS msg types / feature flags / Redis key prefixes)
+- §21.2 Empty/Noop Provider 逐步填实 — when adding or replacing Providers
+- §21.3 fail-closed vs fail-open — when handling external system failure (must document choice + observable signal in Dev Notes)
+- §21.4 语义正确性 AC review 早启 — for tool / metric / guard / measurement stories (run AC review BEFORE implementation)
+- §21.5 tools/* CLI 上线判据 — when adding new CLI tools
+- §21.6 Spike / 真机 / 人工执行类工作归 Epic 9 — never block business epic critical path on physical / hardware work
+- §21.7 server 测试自包含 — no test may require running iOS / watchOS app; all tests pass via `go test`
+- §21.8 §19 PR checklist 语义正确性思考题 — every PR must answer "who gets misled if this code runs and produces a wrong result but doesn't crash?"
+
+§22 提供快速指引：每次开 session 先读 CLAUDE.md → 架构指南 §21-§22 → sprint-status.yaml → 最新 epic retro → MEMORY.md。
+
+## Repo Separation (三端独立)
+
+三个独立目录：`server/` (Go) / `app/` (iOS) / `watch/` (watchOS)。server repo **不**引用 APP/watch，也不被它们引用。跨端契约通过 `docs/api/` 下的文档同步（e.g. `ws-message-registry.md` / `integration-mvp-client-guide.md` / `openapi.yaml`），不通过共享代码。真机联调类工作归 Epic 9，不塞业务 epic。
+
 ## Build & Test
 
 Server is a Go project under `server/`. Use the build script:

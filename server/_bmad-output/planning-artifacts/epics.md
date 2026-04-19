@@ -23,6 +23,12 @@ date: 2026-04-16
 
 This document provides the complete epic and story breakdown for server（裤衩猫后端），decomposing the requirements from the PRD and Architecture decisions into implementable stories.
 
+> **Epic 0 retrospective binding rules（2026-04-19 确立，Epic 1+ 每个 story 必须遵守）**：
+> - 工程纪律见 `docs/backend-architecture-guide.md` §21（7 条：双 gate 漂移守门 / Empty Provider 逐步填实 / fail-closed vs fail-open 场景化 + 可观测点 / 语义正确性 AC review 早启 / tools CLI 上线判据 / Spike 归 Epic 9 / server 测试自包含）
+> - 回顾全文：`_bmad-output/implementation-artifacts/epic-0-retro-2026-04-19.md`
+> - PR checklist 追加了"语义正确性思考题"（backend guide §19 第 14 条）
+> - 三端独立：`server/` (Go) / `app/` (iOS) / `watch/` (watchOS)，契约通过 `docs/api/*.md` 同步
+
 ## Requirements Inventory
 
 ### Functional Requirements
