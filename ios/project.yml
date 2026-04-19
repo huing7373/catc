@@ -30,6 +30,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zhuming.cat.phone
+        TARGETED_DEVICE_FAMILY: 1
 
   CatWatch:
     type: application

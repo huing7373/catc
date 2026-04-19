@@ -8,12 +8,15 @@
 
 /* Begin PBXBuildFile section */
 		3033F394924BEACF147B73C8 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4C794CD8DCBDBC791EC7D665 /* WidgetKit.framework */; };
+		31A9C1017B34000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 31A9C1027B34000000000001 /* Assets.xcassets */; };
+		31A9C1067B35000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 31A9C1077B35000000000001 /* Assets.xcassets */; };
+		31A9C1047B34000000000001 /* CatWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 1D43DABD485086BDE39AE816 /* CatWatch.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		37DFA0017B33400000000001 /* default_cat.png in Resources */ = {isa = PBXBuildFile; fileRef = 37DFA0027B33400000000001 /* default_cat.png */; };
 		37DFA0047B33400000000001 /* default_cat_atlas.png in Resources */ = {isa = PBXBuildFile; fileRef = 37DFA0057B33400000000001 /* default_cat_atlas.png */; };
-		37DFA0107B33400000000001 /* default.atlas in Resources */ = {isa = PBXBuildFile; fileRef = 37DFA0117B33400000000001 /* default.atlas */; };
 		37DFA0087B33400000000001 /* spineboy-ess.json in Resources */ = {isa = PBXBuildFile; fileRef = 37DFA0097B33400000000001 /* spineboy-ess.json */; };
 		37DFA00A7B33400000000001 /* WatchSpineboyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37DFA00B7B33400000000001 /* WatchSpineboyView.swift */; };
 		37DFA00C7B33400000000001 /* Spine in Frameworks */ = {isa = PBXBuildFile; productRef = 37DFA00E7B33400000000001 /* Spine */; };
+		37DFA0107B33400000000001 /* default.atlas in Resources */ = {isa = PBXBuildFile; fileRef = 37DFA0117B33400000000001 /* default.atlas */; };
 		4218F24F6F4AA3ABEA67F9B7 /* CatWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0AFE9EA762E3472B93518D /* CatWatchApp.swift */; };
 		4BC40D434211B96A422522EC /* SpriteKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FCACF0A2DB62B65AA46AC320 /* SpriteKit.framework */; };
 		4EFEF6A626B82EBB045E5CFA /* CatCore in Frameworks */ = {isa = PBXBuildFile; productRef = 2FAF7567ACC10E85DE6D7620 /* CatCore */; };
@@ -45,14 +48,30 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		31A9C1057B34000000000001 /* Embed Watch Content */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
+			dstSubfolderSpec = 16;
+			files = (
+				31A9C1047B34000000000001 /* CatWatch.app in Embed Watch Content */,
+			);
+			name = "Embed Watch Content";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		14311BD9AE3540C72A3FDD7A /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
 		1D43DABD485086BDE39AE816 /* CatWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CatWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		31A9C1027B34000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		31A9C1077B35000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		37DFA0027B33400000000001 /* default_cat.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = default_cat.png; sourceTree = "<group>"; };
 		37DFA0057B33400000000001 /* default_cat_atlas.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = default_cat_atlas.png; sourceTree = "<group>"; };
-		37DFA0117B33400000000001 /* default.atlas */ = {isa = PBXFileReference; lastKnownFileType = folder.spriteatlas; path = default.atlas; sourceTree = "<group>"; };
 		37DFA0097B33400000000001 /* spineboy-ess.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "spineboy-ess.json"; sourceTree = "<group>"; };
 		37DFA00B7B33400000000001 /* WatchSpineboyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchSpineboyView.swift; sourceTree = "<group>"; };
+		37DFA0117B33400000000001 /* default.atlas */ = {isa = PBXFileReference; lastKnownFileType = folder.spriteatlas; path = default.atlas; sourceTree = "<group>"; };
 		47A1D57384883FD3B92725CA /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
 		4C794CD8DCBDBC791EC7D665 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		560936E97A6DB94EE941347A /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
@@ -66,7 +85,7 @@
 		8BE80C4D158394F7F2E3B7A3 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		8D0AFE9EA762E3472B93518D /* CatWatchApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatWatchApp.swift; sourceTree = "<group>"; };
 		8F666123D57FA3A216D807BA /* CatPhoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatPhoneApp.swift; sourceTree = "<group>"; };
-		9239497A70B9574DCCD7AECC /* CatPhone.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = CatPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		9239497A70B9574DCCD7AECC /* CatPhone.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CatPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		97CD948555D294784F1B2610 /* WatchConnectivity.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WatchConnectivity.framework; path = System/Library/Frameworks/WatchConnectivity.framework; sourceTree = SDKROOT; };
 		9ECA7FA9604C0017D4F5CD3C /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
 		A2DB179CA72E6162C6564773 /* .gitkeep */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitkeep; sourceTree = "<group>"; };
@@ -193,6 +212,7 @@
 		78EFC1DEFB3452EE36DCFD6D /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				31A9C1077B35000000000001 /* Assets.xcassets */,
 				37DFA0117B33400000000001 /* default.atlas */,
 				37DFA0097B33400000000001 /* spineboy-ess.json */,
 				37DFA0057B33400000000001 /* default_cat_atlas.png */,
@@ -253,6 +273,7 @@
 		ABFF4279163864B218D10A37 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				31A9C1027B34000000000001 /* Assets.xcassets */,
 				F24767AAA00D1C88E70FFAEC /* .gitkeep */,
 			);
 			path = Resources;
@@ -377,10 +398,13 @@
 			buildPhases = (
 				1CD2FCD62995DBE84746C4E9 /* Sources */,
 				1EE8FE634CF83702FA86DC2A /* Frameworks */,
+				31A9C1037B34000000000001 /* Resources */,
+				31A9C1057B34000000000001 /* Embed Watch Content */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				CFFDD91267BC65D98D325EA8 /* PBXTargetDependency */,
 			);
 			name = CatPhone;
 			packageProductDependencies = (
@@ -411,7 +435,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				A5EBC6A1FFA10F1E3D43AC4C /* XCLocalSwiftPackageReference "CatShared" */,
-				37DFA00D7B33400000000001 /* XCLocalSwiftPackageReference "maxgribov-Spine" */,
+				37DFA00D7B33400000000001 /* XCLocalSwiftPackageReference "../.vendor/maxgribov-Spine" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = BB39D0F5923FE0719565E359 /* Products */;
@@ -427,10 +451,19 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		31A9C1037B34000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				31A9C1017B34000000000001 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		37DFA0037B33400000000001 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				31A9C1067B35000000000001 /* Assets.xcassets in Resources */,
 				37DFA0107B33400000000001 /* default.atlas in Resources */,
 				37DFA0087B33400000000001 /* spineboy-ess.json in Resources */,
 				37DFA0047B33400000000001 /* default_cat_atlas.png in Resources */,
@@ -492,15 +525,18 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 83WLPHU995;
 				INFOPLIST_FILE = CatPhone/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.zhuming.cat.phone;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Debug;
 		};
@@ -635,15 +671,18 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 83WLPHU995;
 				INFOPLIST_FILE = CatPhone/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.zhuming.cat.phone;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
 		};
@@ -786,24 +825,24 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
+		37DFA00D7B33400000000001 /* XCLocalSwiftPackageReference "../.vendor/maxgribov-Spine" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "../.vendor/maxgribov-Spine";
+		};
 		A5EBC6A1FFA10F1E3D43AC4C /* XCLocalSwiftPackageReference "CatShared" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = CatShared;
 		};
-		37DFA00D7B33400000000001 /* XCLocalSwiftPackageReference "maxgribov-Spine" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = "../.vendor/maxgribov-Spine";
-		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		37DFA00E7B33400000000001 /* Spine */ = {
-			isa = XCSwiftPackageProductDependency;
-			productName = Spine;
-		};
 		2FAF7567ACC10E85DE6D7620 /* CatCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = CatCore;
+		};
+		37DFA00E7B33400000000001 /* Spine */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = Spine;
 		};
 		9FF1F0C94B40BF9434AEA653 /* CatShared */ = {
 			isa = XCSwiftPackageProductDependency;
