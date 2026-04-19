@@ -1,6 +1,6 @@
 # Story 1.5: Profile 与偏好设置（displayName / timezone / quietHours）
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
