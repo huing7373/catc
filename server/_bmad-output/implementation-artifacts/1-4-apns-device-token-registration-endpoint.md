@@ -1,6 +1,6 @@
 # Story 1.4: APNs device token 注册 endpoint
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- §21.4 AC review 触发点：本 story 含两条"语义错但不 crash"高风险：(1) **AES-GCM 字段级加密**（密钥/nonce/tag 逻辑写错 → 密文可解但另一台部署读不出 / 或"解出"的是伪明文 → 推送发到别人手机）；(2) **per-user 滑动窗口限流**（退化成固定窗口 → NFR-SCALE-8 被打穿，单用户 5s 内写 10 个 token，Mongo upsert 不幂等）。Dev agent 实施前必须先做一轮 self AC review，对照 AC2 / AC4 / AC6 / AC11 + 反模式 §4.1-§4.3 / §9.x / §8.1 / §13.1。结尾 "Semantic-correctness 思考题" 必答。 -->
