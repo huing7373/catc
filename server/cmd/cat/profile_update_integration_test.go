@@ -328,6 +328,48 @@ func TestProfileUpdate_Integration_ReplayEventIDReturnsCachedResponse(t *testing
 		"dedup MUST prevent the second UpdateOne — 'Second' would indicate double-processing")
 }
 
+func TestProfileUpdate_Integration_QuietHoursOnly_RejectedWhenTimezoneUnset(t *testing.T) {
+	h := setupProfileHarness(t)
+	dev := uuid.NewString()
+	// Fresh SIWA → Timezone field is nil on the user doc (SIWA seeds
+	// Preferences.QuietHours at "23:00-07:00" but leaves Timezone
+	// unset). The review-round-1 preflight MUST reject a
+	// quietHours-only update in this state because
+	// RealQuietHoursResolver would silently short-circuit to "not
+	// quiet" at resolve time otherwise.
+	siwa := h.signIn(t, "apple:test:profile-qh-no-tz", dev, "iphone")
+
+	conn := h.dialWS(t, siwa.AccessToken)
+	out := h.sendAndReadProfileUpdate(t, conn, "env-qh-only-no-tz", map[string]any{
+		"quietHours": map[string]string{"start": "22:00", "end": "06:00"},
+	})
+	require.False(t, out.OK, "quietHours-only update must be rejected when user.Timezone is unset; body=%s", string(out.Payload))
+	require.NotNil(t, out.Error)
+	assert.Equal(t, "VALIDATION_ERROR", out.Error.Code)
+	assert.Contains(t, out.Error.Message, "timezone",
+		"error message must name the missing field so the client can act")
+
+	// Mongo must be unchanged — the rejection runs BEFORE UpdateOne.
+	var raw bson.M
+	require.NoError(t, h.users.FindOne(context.Background(), bson.M{"_id": siwa.User.ID}).Decode(&raw))
+	prefs := raw["preferences"].(bson.M)
+	qh := prefs["quiet_hours"].(bson.M)
+	assert.Equal(t, "23:00", qh["start"], "rejected update MUST NOT leak to Mongo")
+	assert.Equal(t, "07:00", qh["end"])
+
+	// Client recovery path: send timezone first, then quietHours works.
+	// This locks the "set tz first, then qh" contract.
+	out2 := h.sendAndReadProfileUpdate(t, conn, "env-set-tz-first", map[string]any{
+		"timezone": "Asia/Shanghai",
+	})
+	require.True(t, out2.OK, "timezone-only setup must succeed; body=%s", string(out2.Payload))
+
+	out3 := h.sendAndReadProfileUpdate(t, conn, "env-qh-after-tz", map[string]any{
+		"quietHours": map[string]string{"start": "22:00", "end": "06:00"},
+	})
+	require.True(t, out3.OK, "quietHours-only update must succeed AFTER tz is set; body=%s", string(out3.Payload))
+}
+
 func TestProfileUpdate_Integration_InvalidPayload_ReturnsValidationError(t *testing.T) {
 	h := setupProfileHarness(t)
 	dev := uuid.NewString()

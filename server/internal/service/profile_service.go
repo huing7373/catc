@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/huing/cat/server/internal/domain"
+	"github.com/huing/cat/server/internal/dto"
 	"github.com/huing/cat/server/internal/repository"
 	"github.com/huing/cat/server/internal/ws"
 	"github.com/huing/cat/server/pkg/clockx"
@@ -27,9 +28,12 @@ type ProfileUpdate struct {
 
 // profileUpdater is the repo surface ProfileService consumes. Declared
 // here (consumer-side P2 §6.2) so service tests can substitute a fake
-// without dragging in mongo-driver.
+// without dragging in mongo-driver. FindByID is used by the preflight
+// that rejects quietHours-only updates when the user still has no
+// persisted timezone — see Update docstring for rationale.
 type profileUpdater interface {
 	UpdateProfile(ctx context.Context, userID ids.UserID, p repository.ProfileUpdate) (*domain.User, error)
+	FindByID(ctx context.Context, id ids.UserID) (*domain.User, error)
 }
 
 // ProfileHandlerService is the contract the WS handler consumes.
@@ -82,7 +86,36 @@ func NewProfileService(repo profileUpdater, invalidator ws.ResumeCacheInvalidato
 //   - Repo returns any other error → wrapped with context.
 //   - Invalidator error → best-effort; the main response still
 //     succeeds. Observable via warn log.
+//
+// # Preflight: quietHours requires a timezone
+//
+// Before writing, if the request sets quietHours but not timezone,
+// the service reads the persisted user and rejects with
+// VALIDATION_ERROR when the stored timezone is still nil/empty.
+// Without this check, RealQuietHoursResolver would silently short-
+// circuit to "not quiet" at resolve time (the user sets quiet hours,
+// the write succeeds, but the window never takes effect) — a P2
+// review finding on the initial Story 1.5 landing.
+//
+// The extra round-trip only fires on the quietHours-only code path;
+// combined updates that also set timezone skip the preflight because
+// the new tz becomes authoritative inside the same UpdateOne.
 func (s *ProfileService) Update(ctx context.Context, userID ids.UserID, p ProfileUpdate) (*domain.User, error) {
+	if p.QuietHours != nil && p.Timezone == nil {
+		existing, err := s.repo.FindByID(ctx, userID)
+		if err != nil {
+			if errors.Is(err, repository.ErrUserNotFound) {
+				return nil, err
+			}
+			return nil, fmt.Errorf("profile service: preflight find: %w", err)
+		}
+		if existing.Timezone == nil || *existing.Timezone == "" {
+			e := *dto.ErrValidationError
+			e.Message = "quietHours requires timezone to be set; include 'timezone' in this request or set it before updating quietHours"
+			return nil, &e
+		}
+	}
+
 	updated, err := s.repo.UpdateProfile(ctx, userID, repository.ProfileUpdate{
 		DisplayName: p.DisplayName,
 		Timezone:    p.Timezone,

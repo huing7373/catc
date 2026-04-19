@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Cat Backend API
-  version: "1.5.0-epic1"
+  version: "1.5.1-epic1"
   description: >
     HTTP API surface for the 裤衩猫 backend. WebSocket envelope/message
     protocol is defined in docs/api/ws-message-registry.md (source of truth

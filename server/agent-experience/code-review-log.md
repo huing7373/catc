@@ -241,3 +241,11 @@
 | 1 | patch | `ApnsTokenService.RegisterApnsToken` 在 `limiter.Acquire` 返回 allowed=false 时拿到了 retry `time.Duration` 却只把它塞进 `WithCause` 的错误消息里，没调 `WithRetryAfter`；`dto.RespondAppError` 遇到 `CategoryRetryAfter` 且 `RetryAfter==0` 会 fallback 到硬编码 60s —— 客户端不论实际限流窗口剩 1s 还是 45s 都被告知等 60s | server/internal/service/apns_token_service.go:109-112 | 任何遵守 Retry-After 的客户端被系统性误导：窗口还剩 1s 时客户端傻等 60s（UX 差），窗口还剩 45s 时客户端以为只要 60s 可 Retry-After 其实已经过期重试会再 429（触发客户端重试风暴）—— 修法：加 `ceilRateLimitSeconds(d)` 私有 helper（镜像 ws/upgrade_handler 的 ceilSeconds 逻辑，独立一份保持 internal 包互不依赖），返错前 `.WithRetryAfter(ceilRateLimitSeconds(retry))`；单测加 `TestRegisterApnsToken_LimiterBlocks` 断言 `appErr.RetryAfter == 2`（2s 输入）+ 新增 `_SubSecondRetryRoundsUpTo1` 锁 §9.3 boundary 1ms→1s ceiling |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过
+
+## [1-5-profile-preferences-displayname-timezone-quiethours] Round 1 — 2026-04-19
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | Story 1.5 允许 quietHours-only 的 partial update，但 `RealQuietHoursResolver.Resolve` 在 `u.Timezone == nil \|\| *u.Timezone == ""` 时早退返回 `(false, nil)`（fail-open）—— fresh-SIWA 用户 timezone 默认 nil，客户端可成功保存 quietHours 但夜间 APNs 仍照旧响铃，直到某次 profile.update 把 timezone 补上。写入成功、运行期短路的语义不一致让用户的 quietHours 配置功能性失效。 | server/internal/push/real_quiet_hours_resolver.go:74-76 | 新 quietHours-only 代码路径对首次设置 quietHours 的 fresh-SIWA 用户功能失效，NFR-COMP 跨时区免打扰合规红线漏洞；修法：在 `service.ProfileService.Update` 加 preflight —— 若 `p.QuietHours != nil && p.Timezone == nil` 则 `repo.FindByID` 检查 persisted tz，stored tz 仍为空则返 `VALIDATION_ERROR`（"quietHours requires timezone to be set …"）；把 `FindByID` 加入 `profileUpdater` 消费接口；5 条新单测（QuietHoursOnly_NoExistingTimezone 拒 / ExistingTimezone 过 / AndTimezone_SkipsPreflight / PreflightRepoError + PreflightUserNotFound 传播）+ 1 条集成测试（`TestProfileUpdate_Integration_QuietHoursOnly_RejectedWhenTimezoneUnset` 端到端 SIWA→reject→set tz→retry ok）；docs bump `1.5.0-epic1 → 1.5.1-epic1`，`ws-message-registry.md` 与 `integration-mvp-client-guide.md §15.5` 文档化 quietHours↔timezone 耦合 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go vet -tags=integration ./...` 通过

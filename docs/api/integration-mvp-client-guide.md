@@ -961,7 +961,8 @@ func registerApnsToken(hex: String) async throws {
 
 ### 15.5 Errors
 
-- `VALIDATION_ERROR` —— `at least one of displayName/timezone/quietHours must be provided` / `displayName must be at least 1 character after trim` / `timezone %q is not a valid IANA zone` / `quietHours.start %q must be HH:MM ...` / `invalid profile.update payload`（JSON decode 失败）。客户端**不要**重试同一 payload，需要用户修正输入。
+- `VALIDATION_ERROR` —— `at least one of displayName/timezone/quietHours must be provided` / `displayName must be at least 1 character after trim` / `timezone %q is not a valid IANA zone` / `quietHours.start %q must be HH:MM ...` / `quietHours requires timezone to be set; include 'timezone' in this request or set it before updating quietHours` / `invalid profile.update payload`（JSON decode 失败）。客户端**不要**重试同一 payload，需要用户修正输入。
+  > **quietHours ↔ timezone 耦合（1.5.1 起）**：fresh-SIWA 用户 `timezone=null`，服务端会拒绝"只发 quietHours"的请求（因为 APNs quiet-hours 解析器在 tz 缺失时短路返 "not quiet"，静默失效）。客户端要么**先**单独发 `timezone` 然后再发 `quietHours`，要么**同一请求**带上两者。FR50 自动时区上报本来就应该在首次 SIWA 后立即触发，通常这个耦合对用户不可见。
 - `EVENT_PROCESSING` —— 同一 `envelope.id` 正在处理或已处理过；替换为新 `envelope.id` 重发（非幂等错误）。
 - `INTERNAL_ERROR` —— 服务端 Mongo 写失败或其他不可恢复故障。客户端以指数退避（1s → 3s → 10s）最多重试 3 次，仍失败则提示用户稍后再试。
 

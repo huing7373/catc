@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/huing/cat/server/internal/domain"
+	"github.com/huing/cat/server/internal/dto"
 	"github.com/huing/cat/server/internal/repository"
 	"github.com/huing/cat/server/pkg/clockx"
 	"github.com/huing/cat/server/pkg/ids"
@@ -25,6 +26,12 @@ type fakeProfileRepo struct {
 	lastUpdate repository.ProfileUpdate
 	returnUser *domain.User
 	returnErr  error
+
+	// preflight (Story 1.5 review round 1): FindByID feeds the
+	// quietHours-requires-timezone gate.
+	findByIDCalls  int
+	findByIDResult *domain.User
+	findByIDErr    error
 }
 
 func (f *fakeProfileRepo) UpdateProfile(_ context.Context, userID ids.UserID, p repository.ProfileUpdate) (*domain.User, error) {
@@ -32,6 +39,11 @@ func (f *fakeProfileRepo) UpdateProfile(_ context.Context, userID ids.UserID, p 
 	f.lastUser = userID
 	f.lastUpdate = p
 	return f.returnUser, f.returnErr
+}
+
+func (f *fakeProfileRepo) FindByID(_ context.Context, _ ids.UserID) (*domain.User, error) {
+	f.findByIDCalls++
+	return f.findByIDResult, f.findByIDErr
 }
 
 type fakeInvalidator struct {
@@ -54,7 +66,21 @@ func fixedClock() *clockx.FakeClock {
 	return clockx.NewFakeClock(time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC))
 }
 
-func newOkRepo(u *domain.User) *fakeProfileRepo { return &fakeProfileRepo{returnUser: u} }
+// newOkRepo builds a fakeProfileRepo that returns u for both UpdateProfile
+// and FindByID. A copy of u with a non-empty Timezone satisfies the
+// Story 1.5 review-round-1 preflight gate for quietHours-only updates,
+// so tests that don't exercise the preflight keep working unchanged.
+func newOkRepo(u *domain.User) *fakeProfileRepo {
+	// Ensure the default FindByID shape has a timezone so the new
+	// preflight does not reject tests that predate it. Copy so tests
+	// that want to inspect u post-call see an unchanged instance.
+	existing := *u
+	if existing.Timezone == nil {
+		tz := "UTC"
+		existing.Timezone = &tz
+	}
+	return &fakeProfileRepo{returnUser: u, findByIDResult: &existing}
+}
 
 func seedUser(uid, dn, tz string) *domain.User {
 	var dnPtr, tzPtr *string
@@ -154,6 +180,112 @@ func TestProfileService_Update_InvalidatorError_FailOpen(t *testing.T) {
 	assert.Contains(t, output, "resume_cache_invalidate_error",
 		"warn log required so ops can diagnose cache staleness")
 	assert.Equal(t, 1, inv.calls)
+}
+
+// --- Preflight: quietHours requires a timezone (review round 1) ---
+
+func TestProfileService_Update_QuietHoursOnly_NoExistingTimezone_RejectedWithValidationError(t *testing.T) {
+	t.Parallel()
+	// User has no timezone persisted yet. Client tries quietHours-
+	// only update. The pre-review behavior silently persisted this
+	// and then RealQuietHoursResolver short-circuited on nil tz,
+	// leaving the user unprotected at night. The fix rejects at
+	// write time with VALIDATION_ERROR.
+	userNoTZ := seedUser("u1", "", "")
+	require.Nil(t, userNoTZ.Timezone, "test precondition: user has no timezone")
+
+	repo := &fakeProfileRepo{findByIDResult: userNoTZ}
+	inv := &fakeInvalidator{}
+	svc := NewProfileService(repo, inv, fixedClock())
+
+	_, err := svc.Update(context.Background(), ids.UserID("u1"), ProfileUpdate{
+		QuietHours: &domain.QuietHours{Start: "22:00", End: "06:00"},
+	})
+	require.Error(t, err)
+	var ae *dto.AppError
+	require.True(t, errors.As(err, &ae), "expected AppError, got %T: %v", err, err)
+	assert.Equal(t, "VALIDATION_ERROR", ae.Code)
+	assert.Contains(t, ae.Message, "timezone",
+		"error message must tell the client to set timezone first")
+
+	assert.Equal(t, 1, repo.findByIDCalls, "preflight FindByID must fire once")
+	assert.Equal(t, 0, repo.calls, "UpdateProfile MUST NOT run after preflight rejection")
+	assert.Equal(t, 0, inv.calls, "Invalidate MUST NOT run after preflight rejection")
+}
+
+func TestProfileService_Update_QuietHoursOnly_ExistingTimezone_Accepted(t *testing.T) {
+	t.Parallel()
+	// User already has timezone persisted. Client sends quietHours-
+	// only update — preflight sees tz is set, proceeds to UpdateOne.
+	userWithTZ := seedUser("u1", "", "UTC")
+	require.NotNil(t, userWithTZ.Timezone, "test precondition: user has timezone")
+
+	repo := &fakeProfileRepo{returnUser: userWithTZ, findByIDResult: userWithTZ}
+	inv := &fakeInvalidator{}
+	svc := NewProfileService(repo, inv, fixedClock())
+
+	_, err := svc.Update(context.Background(), ids.UserID("u1"), ProfileUpdate{
+		QuietHours: &domain.QuietHours{Start: "22:00", End: "06:00"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, repo.findByIDCalls)
+	assert.Equal(t, 1, repo.calls, "UpdateProfile runs after preflight pass")
+	assert.Equal(t, 1, inv.calls)
+}
+
+func TestProfileService_Update_QuietHoursAndTimezone_SkipsPreflight(t *testing.T) {
+	t.Parallel()
+	// Combined update (tz + quietHours in same request): the new tz
+	// becomes authoritative inside the same UpdateOne, so the
+	// preflight is superfluous. Skipping saves a Mongo round trip.
+	repo := &fakeProfileRepo{returnUser: seedUser("u1", "", "Asia/Shanghai")}
+	inv := &fakeInvalidator{}
+	svc := NewProfileService(repo, inv, fixedClock())
+
+	_, err := svc.Update(context.Background(), ids.UserID("u1"), ProfileUpdate{
+		Timezone:   ptr("Asia/Shanghai"),
+		QuietHours: &domain.QuietHours{Start: "22:00", End: "06:00"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, repo.findByIDCalls, "preflight MUST NOT run when timezone is in the same request")
+	assert.Equal(t, 1, repo.calls)
+}
+
+func TestProfileService_Update_QuietHoursOnly_PreflightRepoError_Propagated(t *testing.T) {
+	t.Parallel()
+	// Mongo I/O failure during preflight: the service wraps and
+	// propagates the error (fail-closed on preflight). This lets
+	// the handler surface INTERNAL_ERROR rather than silently
+	// persist.
+	boom := errors.New("mongo io")
+	repo := &fakeProfileRepo{findByIDErr: boom}
+	inv := &fakeInvalidator{}
+	svc := NewProfileService(repo, inv, fixedClock())
+
+	_, err := svc.Update(context.Background(), ids.UserID("u1"), ProfileUpdate{
+		QuietHours: &domain.QuietHours{Start: "22:00", End: "06:00"},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, boom)
+	assert.Contains(t, err.Error(), "preflight")
+	assert.Equal(t, 0, repo.calls, "UpdateProfile MUST NOT run after preflight err")
+}
+
+func TestProfileService_Update_QuietHoursOnly_PreflightUserNotFound_Propagates(t *testing.T) {
+	t.Parallel()
+	// Preflight user-missing → propagate ErrUserNotFound so handler
+	// maps to INTERNAL_ERROR (existence-probe hardening, same as the
+	// happy path).
+	repo := &fakeProfileRepo{findByIDErr: repository.ErrUserNotFound}
+	inv := &fakeInvalidator{}
+	svc := NewProfileService(repo, inv, fixedClock())
+
+	_, err := svc.Update(context.Background(), ids.UserID("u1"), ProfileUpdate{
+		QuietHours: &domain.QuietHours{Start: "22:00", End: "06:00"},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, repository.ErrUserNotFound)
+	assert.Equal(t, 0, repo.calls)
 }
 
 func TestProfileService_Update_InvalidatesCacheOnAnyFieldChange(t *testing.T) {

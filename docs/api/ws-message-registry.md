@@ -229,6 +229,10 @@ Dedup: **required** (NFR-SEC-9; registered via `RegisterDedup`). Replay of the s
 
 **Errors:**
 
-- `VALIDATION_ERROR` — `at least one of displayName/timezone/quietHours must be provided` | `displayName must be at least 1 character after trim` | `displayName must be at most 32 characters` | `displayName must not contain control characters` | `displayName must be valid UTF-8` | `timezone %q is not a valid IANA zone` | `quietHours.start %q must be HH:MM (00-23):(00-59)` | `quietHours.end %q must be HH:MM (00-23):(00-59)` | `invalid profile.update payload`
+- `VALIDATION_ERROR` — `at least one of displayName/timezone/quietHours must be provided` | `displayName must be at least 1 character after trim` | `displayName must be at most 32 characters` | `displayName must not contain control characters` | `displayName must be valid UTF-8` | `timezone %q is not a valid IANA zone` | `quietHours.start %q must be HH:MM (00-23):(00-59)` | `quietHours.end %q must be HH:MM (00-23):(00-59)` | `quietHours requires timezone to be set; include 'timezone' in this request or set it before updating quietHours` | `invalid profile.update payload`
 - `EVENT_PROCESSING` — concurrent replay / in-flight dedup slot (Story 0.10 contract)
 - `INTERNAL_ERROR` — Mongo write failed, or user row missing (deliberately NOT leaked as a distinct error to prevent user-existence probes)
+
+**quietHours ↔ timezone coupling (release 1.5.1-epic1)**
+
+A quietHours-only update is rejected with `VALIDATION_ERROR` when the persisted user has no timezone yet (fresh SIWA users start with `timezone=null`). The APNs quiet-hours resolver short-circuits to "not quiet" when timezone is null, so a successful quietHours write without a timezone would produce a silently ineffective quiet window. Clients must either (a) send `timezone` first then `quietHours`, or (b) send both in the same request.
