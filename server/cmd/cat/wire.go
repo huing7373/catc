@@ -19,6 +19,12 @@ type handlers struct {
 	wsUpgrade *ws.UpgradeHandler
 	platform  *handler.PlatformHandler
 	auth      *handler.AuthHandler
+	jwtAuth   gin.HandlerFunc // Story 1.3 — mounted on /v1/* group; nil in debug mode
+	// v1Routes lets test harness inject extra /v1/* routes (e.g. an
+	// integration-test echo endpoint that reads UserIDFrom). Production
+	// wiring leaves it nil and Story 1.4 will append directly inside
+	// buildRouter as the first real /v1/* endpoint lands.
+	v1Routes func(*gin.RouterGroup)
 }
 
 func buildRouter(_ *config.Config, h *handlers) *gin.Engine {
@@ -29,9 +35,12 @@ func buildRouter(_ *config.Config, h *handlers) *gin.Engine {
 	r.Use(middleware.RequestID())
 	r.GET("/healthz", h.health.Healthz)
 	r.GET("/readyz", h.health.Readyz)
-	// Bootstrap endpoint — intentionally OUTSIDE the future /v1/* JWT group
+	// Bootstrap endpoint — intentionally OUTSIDE the /v1/* JWT group
 	// (architecture line 814). Clients hit this pre-auth to verify protocol
-	// compatibility (FR59 / Story 0.14 AC6).
+	// compatibility (FR59 / Story 0.14 AC6). gin matches the explicit
+	// top-level route before the /v1 group middleware, so the JWTAuth
+	// middleware below does NOT intercept /v1/platform/ws-registry —
+	// TestRouter_V1Group_DoesNotIntercept_PlatformRegistry locks this.
 	r.GET("/v1/platform/ws-registry", h.platform.WSRegistry)
 	// Bootstrap auth endpoints — also OUTSIDE /v1/* JWT group. Story 1.1
 	// shipped /auth/apple; Story 1.2 adds /auth/refresh (rolling-rotation +
@@ -42,6 +51,23 @@ func buildRouter(_ *config.Config, h *handlers) *gin.Engine {
 		r.POST("/auth/refresh", h.auth.Refresh)
 	}
 	r.GET("/ws", h.wsUpgrade.Handle)
+
+	// --- Story 1.3: /v1/* authenticated group ---
+	// Every business endpoint added from Story 1.4 onward (devices /
+	// users / state / profile / blindbox / friend / skin) lands inside
+	// this group. The platform/ws-registry endpoint above is the one
+	// and only /v1/* exception (pre-auth protocol probe). Debug mode
+	// leaves jwtAuth nil — the group is still created so v1Routes can
+	// hook in if a test wires it, but no JWT middleware runs.
+	v1 := r.Group("/v1")
+	if h.jwtAuth != nil {
+		v1.Use(h.jwtAuth)
+	}
+	if h.v1Routes != nil {
+		h.v1Routes(v1)
+	}
+	// --- /Story 1.3 ---
+
 	return r
 }
 

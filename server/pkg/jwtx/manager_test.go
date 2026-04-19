@@ -388,6 +388,93 @@ func TestManager_Issue_EmptyJTIStaysEmpty(t *testing.T) {
 		"Issue must leave RegisteredClaims.ID empty when the caller did not supply one")
 }
 
+// TestManager_Verify_MissingKid locks the AC1 defense-in-depth branch:
+// a forged token whose Header carries no "kid" entry must be rejected
+// with the explicit "missing kid header" error, not collapsed into the
+// "unknown kid \"\"" path. Production Issue always sets the kid (line
+// 157), so this only fires on hand-crafted tokens; the test prevents a
+// future refactor from silently re-merging the branches.
+func TestManager_Verify_MissingKid(t *testing.T) {
+	t.Parallel()
+	m, activeKey, _ := setupManager(t)
+
+	claims := CustomClaims{
+		UserID:    "u1",
+		TokenType: "access",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    "test-issuer",
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	// Deliberately remove the "kid" header that NewWithClaims auto-populates
+	// (it does not, but Issue would). We never set it here.
+	delete(token.Header, "kid")
+	tokenStr, err := token.SignedString(activeKey)
+	require.NoError(t, err)
+
+	_, err = m.Verify(tokenStr)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing kid header")
+}
+
+// TestManager_Verify_KidNotAString locks the second AC1 branch: a
+// header carrying "kid" with a non-string value (e.g. an attacker
+// constructs `{"kid": 42}`) is rejected explicitly rather than silently
+// becoming an empty kid that would then route through "unknown kid \"\"".
+func TestManager_Verify_KidNotAString(t *testing.T) {
+	t.Parallel()
+	m, activeKey, _ := setupManager(t)
+
+	claims := CustomClaims{
+		UserID:    "u1",
+		TokenType: "access",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    "test-issuer",
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = 42 // intentionally non-string
+	tokenStr, err := token.SignedString(activeKey)
+	require.NoError(t, err)
+
+	_, err = m.Verify(tokenStr)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kid header must be a non-empty string")
+}
+
+// TestManager_Verify_EmptyKid locks the third AC1 branch: an explicit
+// empty-string kid is also rejected before the activeKID compare, so
+// "" cannot accidentally match a misconfigured Manager.activeKID == "".
+func TestManager_Verify_EmptyKid(t *testing.T) {
+	t.Parallel()
+	m, activeKey, _ := setupManager(t)
+
+	claims := CustomClaims{
+		UserID:    "u1",
+		TokenType: "access",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    "test-issuer",
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = ""
+	tokenStr, err := token.SignedString(activeKey)
+	require.NoError(t, err)
+
+	_, err = m.Verify(tokenStr)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kid header must be a non-empty string")
+}
+
 func TestManager_Verify_MissingExpiration(t *testing.T) {
 	t.Parallel()
 	m, activeKey, _ := setupManager(t)

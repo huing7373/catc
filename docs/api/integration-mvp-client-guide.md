@@ -751,6 +751,84 @@ Story 1.2 上线 `POST /auth/refresh`，实现 **rolling-rotation + stolen-token
 
 ---
 
+## 13. HTTP 鉴权流程（Story 1.3）
+
+Story 1.3 上线 `internal/middleware/jwt_auth.go`，挂在 `/v1/*` 路由组上。本节是客户端开发者实现「每次调 `/v1/*` 时怎么带 access token」的**唯一权威来源**。
+
+### 13.1 哪些 endpoint 需要带 Bearer
+
+- **需要**：`/v1/*` 下所有 endpoint（Story 1.4 起逐步上线 `POST /v1/devices/apns-token`、`DELETE /v1/users/me`、`POST /v1/state` 等）。
+- **不需要**（bootstrap，**显式排除**）：
+  - `POST /auth/apple`（凭证就是 body 里的 Apple identityToken）
+  - `POST /auth/refresh`（凭证就是 body 里的 refresh token）
+  - `GET /v1/platform/ws-registry`（pre-auth 协议探针；客户端启动后还没登录就要查 server 支持哪些 WS 消息类型）
+  - `GET /healthz` / `GET /readyz`（infra 探针）
+  - `GET /ws`（鉴权在 upgrade handler 内部完成，与本节路径相同 token，不重复挂 middleware）
+
+### 13.2 Header 格式
+
+```
+Authorization: Bearer <accessToken>
+```
+
+- 必须**严格** `Bearer`（大小写不敏感，但建议保持 `Bearer` 首字母大写）+ **单个空格** + 完整 access token 字符串。
+- token 末尾不要带换行 / 多空格（服务端会 `TrimSpace` 但仍建议客户端先 trim）。
+- **不要**把 access token 拼到 query string / cookie / 自定义 header。
+
+### 13.3 失败响应矩阵
+
+| 服务端响应 | 触发条件 | 客户端必须做 |
+|---|---|---|
+| `401 AUTH_TOKEN_EXPIRED` | header 缺失 / 非 Bearer / Bearer 后空 token | 走 §12 refresh 流程；服务端把「无凭证」与「access 过期」**统一**映射到此码 |
+| `401 AUTH_INVALID_IDENTITY_TOKEN` | token 验签失败 / iss / alg / kid / exp 不通过 / `ttype != "access"` / claim 残缺（uid 或 deviceId 为空） | 走 §12 refresh；若 refresh 也 401 → 清 Keychain 跳回 SIWA |
+| `403 DEVICE_BLACKLISTED` | 设备在 abuse 拦截名单 | 中止业务流程，提示用户联系支持；**不要**重试 |
+| `429 RATE_LIMIT_EXCEEDED` | 触发 per-user / per-route 限流 | 按 `Retry-After` header 退避后重试 |
+| `5xx INTERNAL_ERROR` | 服务端 fail-closed（Redis / Mongo / 签名服务挂） | 按 §7.2 重连/退避策略重试；**不需要**刷新 token |
+
+### 13.4 **绝对禁止** —— rolling-rotation 安全铁则的延伸
+
+1. **绝对不要**把 refresh token 当 Bearer 发给 `/v1/*`。服务端 middleware 校验 `claims.TokenType == "access"`，refresh token 会被拒为 `AUTH_INVALID_IDENTITY_TOKEN` 并丢失下次 refresh 的机会（与 §12.5 一致）。
+2. **不要**手工构造 / 篡改 access token。任何 claims（uid / did / plat）由服务端签发，客户端**只读**。
+3. **不要**把 access token 写进除 Keychain / 内存以外的位置（日志 / 埋点 / crash report 一律禁止）。
+4. **不要**用 access token 做客户端逻辑判断的「身份信源」—— access token 是 opaque bearer，业务侧需要 userId 时从 `/auth/apple` 响应里 `user.id` 字段拿，不是从 token 里解析。
+
+### 13.5 与 WS 鉴权的关系
+
+- **同一把 access token** 既用于 HTTP `/v1/*`，也用于 WS `/ws` 升级（见 §11.5 / §2.1）。
+- WS 升级一旦成功，连接**存续期间**服务端**不会**因 access token 过期而主动断开（性能与体验取舍：mid-connection re-verify 会抵消 session.resume cache 的意义）。
+- 所以正常使用 flow 是：客户端建立 WS → 长连接里持续收发消息；HTTP `/v1/*` 调用按需 → 收到 401 时按 §13.3 处理（走 refresh + 重试 HTTP；**不需要**重连 WS）。
+- 主动断开的唯一场景是账号注销，详见 §14。
+
+### 13.6 观察性
+
+- 服务端每次拒绝 `/v1/*` 请求落一条 `action=jwt_auth_reject` 审计日志，字段 `reason` 取值：`missing_header` / `not_bearer` / `empty_token` / `verify_failed` / `token_type_mismatch` / `claims_missing_uid` / `claims_missing_device_id`。
+- 拒绝日志**不**带 userId（claims 未通过校验，不可信）；happy path 通过后续 access log 自然带上 userId。
+- 客户端**不**需要向后端上报鉴权相关事件。
+
+---
+
+## 14. 账户注销场景的 WS 主动断开（Story 1.6 预告）
+
+Story 1.6 (DELETE `/v1/users/me`) 上线后会触发以下流程，本节让客户端**提前**做好准备：
+
+1. 用户在 App 内确认「注销账号」。
+2. 客户端 POST 到 `/v1/users/me` 的 DELETE（带 access token）。
+3. 服务端：
+   - 标记 `users.deletion_requested = true`（24h 后真正删除，期间内同一 Apple `sub` 再 SIWA 会触发 §11 的 resurrection 流程）。
+   - 调 `RevokeAllUserTokens(userId)` —— 把该 userId 全部 device 的 refresh token 加入黑名单（Story 1.2）。
+   - 调 `Hub.DisconnectUser(userId)` —— 把该 userId **所有**活动 WS 连接（可能跨 Watch + iPhone）发送 `Close 1000 "revoked"` 帧并关闭。
+4. 客户端表现：
+   - HTTP DELETE 收到 `200 OK`（或 200 + `{ok: true}` 类响应，最终 schema 等 Story 1.6 落地）。
+   - 现有 WS 连接**几乎同时**收到 `CloseError{Code: 1000, Text: "revoked"}` —— 客户端**不要**当成网络异常自动重连。
+5. 客户端必做：
+   - 清空 Keychain 里所有 token（access + refresh）+ deviceId（重新登录会生成新的 deviceId）。
+   - 跳回 SIWA 登录入口（如果用户决定再回来）。
+   - **不要**尝试用旧 access token 重连 WS —— 服务端的 access blacklist 还没上线（Story 1.3 接受这个 ~100ms 量级的 race window，详见 server Story 1.3 Dev Notes）。
+
+**已知 race window**：在服务端 `RevokeAllUserTokens` 完成与 `DisconnectUser` 完成之间的极短窗口内（同进程内基本不可见，跨实例可能 < 100ms），如果同一 userId 在另一台设备上**新建**了 WS 连接（access token 还没过期），可能会短暂连上来。客户端不需要为此做任何防御 —— 业务下游（profile / state / push）会查 Mongo 发现用户已 `deletion_requested = true` 自然 fail-closed。
+
+---
+
 ## 附录 A：快速参考卡
 
 | # | Type | Direction | 场景 |

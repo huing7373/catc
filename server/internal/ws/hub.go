@@ -108,13 +108,22 @@ func (h *Hub) Unregister(connID ConnID) {
 	}
 }
 
-func (h *Hub) unregisterClient(c *Client) {
+// unregisterClient removes c from the hub if it is still registered
+// and returns whether anything was actually torn down. The bool lets
+// concurrent eviction paths (e.g. DisconnectUser racing readPump's
+// own unregister-on-defer) attribute their counters honestly — both
+// callers may race to LoadAndDelete the same connID, but only the
+// winning call performs the close-and-notify side effects, so only
+// the winner should count it.
+func (h *Hub) unregisterClient(c *Client) bool {
 	if _, loaded := h.clients.LoadAndDelete(c.connID); loaded {
 		c.stop()
 		c.conn.Close()
 		h.count.Add(-1)
 		h.notifyDisconnect(c)
+		return true
 	}
+	return false
 }
 
 func (h *Hub) FindByUser(userID UserID) []*Client {
@@ -129,6 +138,69 @@ func (h *Hub) FindByUser(userID UserID) []*Client {
 	return result
 }
 
+// DisconnectUser closes every connection currently held for userID and
+// returns the number of connections actually torn down. Safe to call
+// when userID has no live connection (returns 0, nil).
+//
+// Called by Story 1.6 account deletion and any future admin-tool
+// revocation: after Story 1.2 RevokeAllUserTokens blacks out the
+// refresh jti in Redis, this method is the only way to evict the WS
+// session that was opened BEFORE the revocation — WS connections do
+// not re-validate the access token on each inbound message (epic line
+// 823: access TTL is not enforced mid-connection, fail-open by design).
+//
+// Known race window (Story 1.3 Dev Notes): FindByUser ranges
+// sync.Map, so a connection registered AFTER the Range starts is not
+// included in the snapshot. Story 1.6 accepts this — the new
+// connection still went through JWT validation at upgrade time, and
+// the same revocation flow can re-call DisconnectUser. A future story
+// may add an "access jti blacklist" that is checked on every WS
+// upgrade to close the gap completely.
+//
+// Returned error is reserved for unexpected internal state (currently
+// always nil); callers may treat it as INTERNAL_ERROR. Per-conn
+// close-frame write failures are logged at Warn and swallowed so one
+// misbehaving connection does not starve the eviction loop — the
+// unregisterClient call still runs and the conn is force-closed
+// inside it.
+func (h *Hub) DisconnectUser(userID UserID) (int, error) {
+	clients := h.FindByUser(userID)
+	count := 0
+	for _, c := range clients {
+		deadline := h.clock.Now().Add(5 * time.Second)
+		if err := c.conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "revoked"),
+			deadline,
+		); err != nil {
+			log.Warn().
+				Err(err).
+				Str("action", "ws_disconnect_close_frame_failed").
+				Str("userId", userID).
+				Str("connId", c.connID).
+				Msg("ws_disconnect_close_frame_failed")
+		}
+		// Only count when this call actually evicted the client.
+		// FindByUser produced a snapshot a few lines ago; between
+		// then and now the client may have disconnected on its own
+		// (readPump's defer unregister) and LoadAndDelete will miss.
+		// Bumping count regardless would break the documented
+		// contract ("connections actually torn down") and mislead
+		// the audit log + any caller that reasons about return.
+		if h.unregisterClient(c) {
+			count++
+		}
+	}
+	if count > 0 {
+		log.Info().
+			Str("action", "ws_disconnect_user").
+			Str("userId", userID).
+			Int("connectionsClosed", count).
+			Msg("ws_disconnect_user")
+	}
+	return count, nil
+}
+
 func (h *Hub) ConnectionCount() int {
 	return int(h.count.Load())
 }
@@ -136,6 +208,8 @@ func (h *Hub) ConnectionCount() int {
 type Client struct {
 	connID     ConnID
 	userID     UserID
+	deviceID   string // Story 1.3 — from jwtx.CustomClaims.DeviceID via JWTValidator
+	platform   string // Story 1.3 — from jwtx.CustomClaims.Platform via JWTValidator
 	conn       *websocket.Conn
 	send       chan []byte
 	done       chan struct{}
@@ -144,8 +218,10 @@ type Client struct {
 	closeOnce  sync.Once
 }
 
-func (c *Client) ConnID() ConnID { return c.connID }
-func (c *Client) UserID() UserID { return c.userID }
+func (c *Client) ConnID() ConnID   { return c.connID }
+func (c *Client) UserID() UserID   { return c.userID }
+func (c *Client) DeviceID() string { return c.deviceID }
+func (c *Client) Platform() string { return c.platform }
 
 // stop signals the client to shut down. Safe to call from any goroutine, any
 // number of times. It closes the done channel (once) which causes writePump to

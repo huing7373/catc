@@ -217,3 +217,11 @@
 | 1 | patch | Manager 新加 `issueClock` 字段与"Issue / Verify 共用注入时钟"的 godoc，但 `Verify` 的 `jwt.ParseWithClaims` 只传了 `WithIssuer + WithExpirationRequired`，没传 `WithTimeFunc(m.issueClock.Now)` —— Issue 走 FakeClock，Verify 退回 `time.Now()` | pkg/jwtx/manager.go:159,173 | refresh/expiry 集成测试的 FakeClock 夹具无效：token 发行时间走 2026-04-19 12:00 UTC 假时钟，15 分钟后真实墙钟把 access token 看成"已过期"；短 TTL 相关路径会在 CI 非此时此刻运行时回归；补 `jwt.WithTimeFunc(m.issueClock.Now)` + 两个单测 (`TestManager_VerifyAndIssue_ShareInjectedClock` / `TestManager_Verify_ExpiredAgainstInjectedClock`) 锁定双向契约 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go vet -tags=integration ./cmd/cat/... ./internal/repository/... ./pkg/...` 通过
+
+## [1-3-jwt-auth-middleware-userid-context-injection] Round 1 — 2026-04-19
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | `Hub.DisconnectUser` 在 `FindByUser` 取 sync.Map 快照后无条件 `count++`，但 `unregisterClient` 内的 `LoadAndDelete` 可能因 readPump defer 自身已先一步 unregister 而返回 false（snapshot-vs-self-disconnect race），count 仍被加 1 —— 让 `unregisterClient` 返回 bool，仅在真正驱逐时计数 | server/internal/ws/hub.go:174-175 | DisconnectUser 的 `connectionsClosed` 返回值 + 审计日志会大于实际关闭的连接数；Story 1.6 账户注销 / 任何依赖该 count 做下游决策的 revocation flow 都会被误导（既违反 godoc "actually torn down" 契约，也让 ops 看到的关闭数偏多）；新增 `TestHub_DisconnectUser_RaceWithSelfDisconnect_DoesNotOvercount` 锁定 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过

@@ -22,10 +22,35 @@ func (f fakeVerifier) Verify(_ string) (*jwtx.CustomClaims, error) {
 
 func TestJWTValidator_HappyPath(t *testing.T) {
 	t.Parallel()
-	v := NewJWTValidator(fakeVerifier{out: &jwtx.CustomClaims{UserID: "u-1", TokenType: "access"}})
-	uid, err := v.ValidateToken("real-token")
+	v := NewJWTValidator(fakeVerifier{out: &jwtx.CustomClaims{
+		UserID:    "u-1",
+		DeviceID:  "d-1",
+		Platform:  "iphone",
+		TokenType: "access",
+	}})
+	identity, err := v.ValidateToken("real-token")
 	require.NoError(t, err)
-	assert.Equal(t, "u-1", uid)
+	assert.Equal(t, "u-1", identity.UserID)
+	assert.Equal(t, "d-1", identity.DeviceID)
+	assert.Equal(t, "iphone", identity.Platform)
+}
+
+// TestJWTValidator_RejectsEmptyDeviceID locks the AC5 fail-closed
+// branch: a JWT that survives signature + iss + alg + exp + ttype +
+// uid checks but carries an empty deviceId is still rejected. Mirrors
+// the HTTP middleware behavior so the (userId, deviceId) pair is a
+// load-bearing invariant on both auth paths.
+func TestJWTValidator_RejectsEmptyDeviceID(t *testing.T) {
+	t.Parallel()
+	v := NewJWTValidator(fakeVerifier{out: &jwtx.CustomClaims{
+		UserID:    "u-1",
+		DeviceID:  "",
+		TokenType: "access",
+	}})
+	_, err := v.ValidateToken("missing-device-token")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, dto.ErrAuthInvalidIdentityToken,
+		"empty-deviceId reject must surface as AUTH_INVALID_IDENTITY_TOKEN")
 }
 
 // All four reject paths must wrap the cause inside

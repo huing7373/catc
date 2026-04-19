@@ -3,7 +3,6 @@ package ws
 import (
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -12,26 +11,54 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/huing/cat/server/internal/dto"
+	"github.com/huing/cat/server/internal/middleware"
 	"github.com/huing/cat/server/pkg/logx"
 )
 
+// AuthenticatedIdentity is what UpgradeHandler propagates into ws.Client
+// for all downstream WS handlers. Fields map 1:1 to jwtx.CustomClaims so
+// the production JWTValidator wiring is a thin unwrap; the debug wiring
+// (DebugValidator) synthesizes them for local devtools.
+//
+// All three fields are populated for happy-path requests; reject paths
+// return the zero value alongside a non-nil error. Callers MUST treat
+// the zero value as a programmer error (the validator already returned
+// err) — not as "anonymous user".
+type AuthenticatedIdentity struct {
+	UserID   UserID
+	DeviceID string
+	Platform string
+}
+
 type TokenValidator interface {
-	ValidateToken(token string) (userID string, err error)
+	ValidateToken(token string) (AuthenticatedIdentity, error)
 }
 
 type debugValidator struct{}
 
-func (debugValidator) ValidateToken(token string) (string, error) {
+// ValidateToken (debug) treats the entire bearer string as the userId
+// and synthesizes a deviceId / platform so downstream handlers (Story
+// 10.1 room.join, Story 2.x state.tick when added) can rely on a non-
+// empty (deviceId, platform) pair without each having to special-case
+// the debug branch. The synthetic deviceId is derived from the token
+// so two debug clients with distinct bearers get distinct deviceIds —
+// useful for room-join tests with two browser tabs. Platform defaults
+// to "iphone" because the integration MVP (Story 10.1) is iPhone-side.
+func (debugValidator) ValidateToken(token string) (AuthenticatedIdentity, error) {
 	if token == "" {
-		return "", errors.New("empty token")
+		return AuthenticatedIdentity{}, errors.New("empty token")
 	}
-	return token, nil
+	return AuthenticatedIdentity{
+		UserID:   token,
+		DeviceID: "debug-device-" + token,
+		Platform: "iphone",
+	}, nil
 }
 
 type stubValidator struct{}
 
-func (stubValidator) ValidateToken(_ string) (string, error) {
-	return "", dto.ErrAuthInvalidIdentityToken
+func (stubValidator) ValidateToken(_ string) (AuthenticatedIdentity, error) {
+	return AuthenticatedIdentity{}, dto.ErrAuthInvalidIdentityToken
 }
 
 func NewDebugValidator() TokenValidator { return debugValidator{} }
@@ -73,17 +100,18 @@ func NewUpgradeHandler(
 func (h *UpgradeHandler) Handle(c *gin.Context) {
 	ctx := c.Request.Context()
 
-	token := extractBearerToken(c.GetHeader("Authorization"))
+	token := middleware.ExtractBearerToken(c.GetHeader("Authorization"))
 	if token == "" {
 		dto.RespondAppError(c, dto.ErrAuthInvalidIdentityToken)
 		return
 	}
 
-	userID, err := h.validator.ValidateToken(token)
+	identity, err := h.validator.ValidateToken(token)
 	if err != nil {
 		dto.RespondAppError(c, err)
 		return
 	}
+	userID := identity.UserID
 
 	// Guard order: blacklist first (fatal — client must clear token), then
 	// rate limit (retry_after — client backs off). Both checks fail closed
@@ -144,7 +172,9 @@ func (h *UpgradeHandler) Handle(c *gin.Context) {
 
 	client := &Client{
 		connID:     uuid.New().String(),
-		userID:     userID,
+		userID:     identity.UserID,
+		deviceID:   identity.DeviceID,
+		platform:   identity.Platform,
 		conn:       conn,
 		send:       make(chan []byte, h.hub.cfg.SendBufSize),
 		done:       make(chan struct{}),
@@ -168,10 +198,3 @@ func ceilSeconds(d time.Duration) int {
 	return secs
 }
 
-func extractBearerToken(header string) string {
-	parts := strings.SplitN(header, " ", 2)
-	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
-		return parts[1]
-	}
-	return ""
-}

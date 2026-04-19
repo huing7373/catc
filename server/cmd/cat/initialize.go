@@ -9,10 +9,13 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/huing/cat/server/internal/config"
 	"github.com/huing/cat/server/internal/cron"
 	"github.com/huing/cat/server/internal/dto"
 	"github.com/huing/cat/server/internal/handler"
+	"github.com/huing/cat/server/internal/middleware"
 	"github.com/huing/cat/server/internal/push"
 	"github.com/huing/cat/server/internal/repository"
 	"github.com/huing/cat/server/internal/service"
@@ -210,11 +213,14 @@ func initialize(cfg *config.Config) *App {
 		log.Fatal().Err(err).Msg("ws message registry drift detected")
 	}
 
+	httpJWTAuth := buildHTTPJWTAuth(cfg.Server.Mode, jwtMgr)
+
 	h := &handlers{
 		health:    handler.NewHealthHandler(mongoCli, redisCli, wsHub, redisCli.Cmdable(), cfg.WS.MaxConnections*2),
 		wsUpgrade: upgradeHandler,
 		platform:  handler.NewPlatformHandler(clk, cfg.Server.Mode),
 		auth:      authHandler,
+		jwtAuth:   httpJWTAuth,
 	}
 
 	router := buildRouter(cfg, h)
@@ -308,4 +314,28 @@ func validateRegistryConsistency(d *ws.Dispatcher, mode string) error {
 		"ws registry drift: unknownRegistered=%v missingInDebug=%v missingInRelease=%v debugOnlyInRelease=%v",
 		unknownRegistered, missingInDebug, missingInRelease, forbiddenInRelease,
 	)
+}
+
+// buildHTTPJWTAuth picks the gin middleware mounted on /v1/*.
+//
+// Release mode (anything except "debug") returns
+// middleware.JWTAuth(verifier). Debug mode deliberately returns nil —
+// MVP debug has no /v1/* business endpoint to protect (the only /v1/*
+// route is the pre-auth /v1/platform/ws-registry probe, which is
+// hoisted out of the group at the top-level r.GET in wire.go) and
+// unit tests that do need auth wire middleware.JWTAuth(fakeVerifier)
+// directly. Mirrors the debug/release split of the WS validator
+// (DebugValidator vs JWTValidator) so the two auth surfaces stay in
+// lockstep. Extracted from initialize() so the inverse-gate
+// regression is unit-testable without booting a full Mongo+Redis
+// stack — review-antipatterns §7.1 ("gate written backwards"). The
+// conditional is `!= "debug"` so a release deployment ALWAYS mounts
+// the middleware; the initialize_test.go pair locks both branches.
+func buildHTTPJWTAuth(mode string, verifier middleware.JWTVerifier) gin.HandlerFunc {
+	if mode != "debug" {
+		log.Info().Str("mode", mode).Msg("release mode: HTTP JWTAuth middleware mounted on /v1/* group")
+		return middleware.JWTAuth(verifier)
+	}
+	log.Info().Msg("debug mode: HTTP JWTAuth NOT mounted (no /v1/* business endpoint yet; debug handlers wire JWTAuth(fakeVerifier) directly)")
+	return nil
 }

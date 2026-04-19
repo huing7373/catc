@@ -166,20 +166,36 @@ func (m *Manager) Issue(claims CustomClaims) (string, error) {
 // "now" during Verify, otherwise a token issued at fake-now with a
 // 15-minute access expiry would fail Verify the moment the real wall
 // clock passes fake-now+15min (round-2 review finding).
+//
+// kid extraction defense-in-depth (review-antipatterns §3.3): missing
+// header / non-string header / empty string are each rejected with a
+// distinct error before the keyfunc compares against activeKID. The
+// production Issue path always sets a valid kid (line 157), so this
+// only triggers on forged or otherwise malformed tokens; aligning the
+// branch shape with VerifyApple (line 287-295) keeps the two code
+// paths from drifting and stops a future refactor of the kid==X check
+// from re-collapsing the missing/non-string cases into "unknown kid: ".
 func (m *Manager) Verify(tokenStr string) (*CustomClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &CustomClaims{}, func(t *jwt.Token) (any, error) {
 		if t.Method != jwt.SigningMethodRS256 {
 			return nil, errors.New("unexpected signing method: " + t.Method.Alg())
 		}
 
-		kid, _ := t.Header["kid"].(string)
+		kidRaw, present := t.Header["kid"]
+		if !present {
+			return nil, errors.New("jwtx.Verify: missing kid header")
+		}
+		kid, ok := kidRaw.(string)
+		if !ok || kid == "" {
+			return nil, errors.New("jwtx.Verify: kid header must be a non-empty string")
+		}
 		if kid == m.activeKID {
 			return m.activePub, nil
 		}
 		if m.oldPub != nil && kid == m.oldKID {
 			return m.oldPub, nil
 		}
-		return nil, errors.New("unknown kid: " + kid)
+		return nil, fmt.Errorf("jwtx.Verify: unknown kid %q", kid)
 	}, jwt.WithIssuer(m.issuer), jwt.WithExpirationRequired(), jwt.WithTimeFunc(m.issueClock.Now))
 	if err != nil {
 		return nil, err

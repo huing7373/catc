@@ -45,19 +45,34 @@ func NewJWTValidator(verifier jwtVerifier) TokenValidator {
 	return jwtValidator{verifier: verifier}
 }
 
-func (v jwtValidator) ValidateToken(token string) (string, error) {
+func (v jwtValidator) ValidateToken(token string) (AuthenticatedIdentity, error) {
 	if token == "" {
-		return "", dto.ErrAuthInvalidIdentityToken.WithCause(errors.New("empty token"))
+		return AuthenticatedIdentity{}, dto.ErrAuthInvalidIdentityToken.WithCause(errors.New("empty token"))
 	}
 	claims, err := v.verifier.Verify(token)
 	if err != nil {
-		return "", dto.ErrAuthInvalidIdentityToken.WithCause(err)
+		return AuthenticatedIdentity{}, dto.ErrAuthInvalidIdentityToken.WithCause(err)
 	}
 	if claims.TokenType != "access" {
-		return "", dto.ErrAuthInvalidIdentityToken.WithCause(errors.New("ws: token_type must be access"))
+		return AuthenticatedIdentity{}, dto.ErrAuthInvalidIdentityToken.WithCause(errors.New("ws: token_type must be access"))
 	}
 	if claims.UserID == "" {
-		return "", dto.ErrAuthInvalidIdentityToken.WithCause(errors.New("ws: claims missing uid"))
+		return AuthenticatedIdentity{}, dto.ErrAuthInvalidIdentityToken.WithCause(errors.New("ws: claims missing uid"))
 	}
-	return claims.UserID, nil
+	// Story 1.3 AC5 — fail-closed on missing deviceId. Mirrors HTTP
+	// JWTAuth (internal/middleware/jwt_auth.go): downstream handlers
+	// rely on (userId, deviceId) being a fully-formed pair (Epic 4
+	// presence map, Story 2.2 source-priority Watch-vs-iPhone
+	// arbitration, Story 5.x touch.send sender-platform audit).
+	// Allowing an empty deviceId silently would let a stale-claim
+	// token (issued before this story extended the WS path) open a
+	// session whose downstream handlers see a key collision.
+	if claims.DeviceID == "" {
+		return AuthenticatedIdentity{}, dto.ErrAuthInvalidIdentityToken.WithCause(errors.New("ws: claims missing deviceId"))
+	}
+	return AuthenticatedIdentity{
+		UserID:   claims.UserID,
+		DeviceID: claims.DeviceID,
+		Platform: claims.Platform,
+	}, nil
 }

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Cat Backend API
-  version: "1.2.0-epic1"
+  version: "1.3.0-epic1"
   description: >
     HTTP API surface for the 裤衩猫 backend. WebSocket envelope/message
     protocol is defined in docs/api/ws-message-registry.md (source of truth
@@ -12,13 +12,22 @@ info:
     endpoints land starting with Story 1.3 (JWT middleware) and are added
     here per-story. /healthz and /readyz are infra endpoints, intentionally
     omitted.
+
+    Story 1.3 wires `Authorization: Bearer <accessToken>` enforcement on
+    every /v1/* endpoint by default (`security: [{BearerAuth: []}]`).
+    The three bootstrap endpoints below opt out via `security: []` —
+    `/auth/apple` and `/auth/refresh` because the credential is in the
+    body, `/v1/platform/ws-registry` because clients call it pre-auth.
 servers:
   - url: https://api.example.invalid
     description: Placeholder — replaced per-environment in deploy manifests.
+security:
+  - BearerAuth: []
 paths:
   /auth/apple:
     post:
       summary: Sign in with Apple — issue access + refresh JWTs
+      security: []  # Bootstrap: no JWT — credential is the Apple identity token in the body.
       description: >
         Bootstrap endpoint (no JWT required — outside the future /v1/*
         group). The client passes Apple's identity token plus the *raw*
@@ -76,6 +85,7 @@ paths:
   /auth/refresh:
     post:
       summary: Rotate access + refresh tokens (rolling rotation + reuse detection)
+      security: []  # Bootstrap: no JWT — credential is the refresh token in the body.
       description: >
         Bootstrap endpoint (no JWT required — outside the future /v1/*
         group). The refresh token in the body IS the caller's credential.
@@ -151,6 +161,7 @@ paths:
   /v1/platform/ws-registry:
     get:
       summary: List supported WS message types with versions
+      security: []  # Pre-auth protocol probe — the only /v1/* endpoint that bypasses JWTAuth.
       description: >
         Returns the set of WebSocket envelope.type values the server
         currently understands, plus per-message metadata (version,
@@ -168,6 +179,20 @@ paths:
               schema:
                 $ref: "#/components/schemas/WSRegistryResponse"
 components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        RS256 JWT access token issued by /auth/apple or /auth/refresh.
+        Story 1.3 mounts middleware.JWTAuth on the /v1/* group. A
+        request whose token fails verification gets 401
+        AUTH_INVALID_IDENTITY_TOKEN; a missing or non-Bearer header
+        gets 401 AUTH_TOKEN_EXPIRED (clients treat both as the
+        trigger to call /auth/refresh). Refresh tokens MUST NEVER be
+        sent here — the middleware rejects ttype="refresh" with
+        AUTH_INVALID_IDENTITY_TOKEN.
   schemas:
     WSRegistryResponse:
       type: object

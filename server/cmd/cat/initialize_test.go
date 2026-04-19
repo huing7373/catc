@@ -3,15 +3,46 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/huing/cat/server/internal/handler"
 	"github.com/huing/cat/server/internal/ws"
 	"github.com/huing/cat/server/pkg/clockx"
+	"github.com/huing/cat/server/pkg/jwtx"
 	"github.com/huing/cat/server/pkg/redisx"
 )
+
+// stubJWTVerifier is a tiny fake — buildHTTPJWTAuth does not invoke
+// it at construction time, so we just need a non-nil concrete value
+// that satisfies middleware.JWTVerifier.
+type stubJWTVerifier struct{}
+
+func (stubJWTVerifier) Verify(_ string) (*jwtx.CustomClaims, error) {
+	return nil, errors.New("unused")
+}
+
+// newRouterForTesting builds the real buildRouter with the minimum
+// viable handlers struct so AC7 routing assertions exercise the
+// production wire.go code path. Health / wsUpgrade are intentionally
+// omitted (no test below hits /healthz, /readyz, /ws); platform is
+// real because TestRouter_V1Group_DoesNotIntercept_PlatformRegistry
+// asserts the actual handler runs.
+func newRouterForTesting(jwtAuth gin.HandlerFunc, v1Routes func(*gin.RouterGroup)) *gin.Engine {
+	platform := handler.NewPlatformHandler(clockx.NewRealClock(), "release")
+	h := &handlers{
+		platform: platform,
+		jwtAuth:  jwtAuth,
+		v1Routes: v1Routes,
+	}
+	return buildRouter(nil, h)
+}
 
 type fakeDedupStore struct{}
 
@@ -129,6 +160,133 @@ func TestValidateRegistryConsistency_DebugModeMissingRegistrationFails(t *testin
 		"error must name the drifting type for triage")
 	assert.Contains(t, err.Error(), "missingInDebug",
 		"error must classify the drift bucket")
+}
+
+// TestBuildHTTPJWTAuth_ReleaseModeMounted locks the AC8 release-side
+// branch: any non-debug mode wires middleware.JWTAuth(jwtMgr) so the
+// /v1/* group is actually guarded in production. Pairs with
+// TestBuildHTTPJWTAuth_DebugModeNotMounted to defeat the
+// review-antipatterns §7.1 "gate written backwards" failure mode —
+// either test alone would let `if mode == "debug"` (release mounts
+// nothing!) pass undetected.
+func TestBuildHTTPJWTAuth_ReleaseModeMounted(t *testing.T) {
+	t.Parallel()
+	got := buildHTTPJWTAuth("release", stubJWTVerifier{})
+	require.NotNil(t, got, "release mode MUST mount JWTAuth on /v1/*")
+}
+
+func TestBuildHTTPJWTAuth_DebugModeNotMounted(t *testing.T) {
+	t.Parallel()
+	got := buildHTTPJWTAuth("debug", stubJWTVerifier{})
+	assert.Nil(t, got, "debug mode MUST NOT mount JWTAuth (no /v1/* business endpoint yet)")
+}
+
+// TestBuildHTTPJWTAuth_UnknownModeTreatedAsRelease keeps the gate
+// fail-closed for typos / future modes — anything that isn't
+// literally "debug" mounts the middleware.
+func TestBuildHTTPJWTAuth_UnknownModeTreatedAsRelease(t *testing.T) {
+	t.Parallel()
+	got := buildHTTPJWTAuth("staging", stubJWTVerifier{})
+	require.NotNil(t, got, "unknown mode must default to release-style fail-closed wiring")
+}
+
+// TestRouter_V1Group_DoesNotIntercept_PlatformRegistry locks the AC7
+// drift case: even with httpJWTAuth wired on /v1, the explicit
+// top-level GET /v1/platform/ws-registry MUST take precedence. A
+// regression here would silently 401 a pre-auth client probe.
+func TestRouter_V1Group_DoesNotIntercept_PlatformRegistry(t *testing.T) {
+	t.Parallel()
+
+	// Use a stub middleware that always 401s — if it ever runs on
+	// /v1/platform/ws-registry, the test fails because the body
+	// won't be the platform handler's response.
+	always401 := func(c *gin.Context) {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": gin.H{"code": "MIDDLEWARE_RAN"}})
+	}
+
+	r := newRouterForTesting(always401, nil)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/platform/ws-registry", nil)
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code,
+		"platform/ws-registry must skip JWTAuth — got %d, body=%s", w.Code, w.Body.String())
+	assert.NotContains(t, w.Body.String(), "MIDDLEWARE_RAN",
+		"platform/ws-registry must NOT pass through JWTAuth")
+}
+
+// TestRouter_V1Group_RejectsUnauthenticated locks the positive path:
+// any /v1/* endpoint registered via v1Routes IS guarded by
+// httpJWTAuth and returns the middleware's reject (401 stub).
+func TestRouter_V1Group_RejectsUnauthenticated(t *testing.T) {
+	t.Parallel()
+
+	always401 := func(c *gin.Context) {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": gin.H{"code": "AUTH_TOKEN_EXPIRED"}})
+	}
+
+	echoCalled := false
+	r := newRouterForTesting(always401, func(g *gin.RouterGroup) {
+		g.GET("/echo", func(c *gin.Context) {
+			echoCalled = true
+			c.JSON(http.StatusOK, gin.H{"ok": true})
+		})
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/echo", nil)
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.False(t, echoCalled, "downstream /v1/echo MUST NOT execute when JWTAuth rejects")
+	assert.Contains(t, w.Body.String(), "AUTH_TOKEN_EXPIRED")
+}
+
+// TestRouter_Bootstrap_NoAuth proves /auth/apple lives outside the
+// JWT group. With JWTAuth installed as always-401, hitting
+// /auth/apple must NOT return 401 — instead it reaches the auth
+// handler (which then validates the body and returns its own error).
+func TestRouter_Bootstrap_NoAuth(t *testing.T) {
+	t.Parallel()
+
+	always401 := func(c *gin.Context) {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": gin.H{"code": "MIDDLEWARE_RAN"}})
+	}
+
+	r := newRouterForTesting(always401, nil)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/apple", nil)
+	r.ServeHTTP(w, req)
+
+	// /auth/apple is bootstrap; its handler will return its own
+	// validation error for an empty body. We just need to assert the
+	// JWTAuth stub did NOT intercept.
+	assert.NotContains(t, w.Body.String(), "MIDDLEWARE_RAN",
+		"/auth/apple must skip JWTAuth — bootstrap endpoint")
+}
+
+// TestRouter_V1Group_404OnUnknownRoute proves the v1 group itself
+// does not eat unknown paths — without a registered route, /v1/x
+// returns 404 (gin tree miss), not 401 (middleware match). This is
+// the cheap-to-maintain version of the "test-tag echo route" the AC
+// alternative suggested.
+func TestRouter_V1Group_404OnUnknownRoute(t *testing.T) {
+	t.Parallel()
+
+	always401 := func(c *gin.Context) {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": gin.H{"code": "MIDDLEWARE_RAN"}})
+	}
+
+	r := newRouterForTesting(always401, nil)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/no-such-route", nil)
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code,
+		"unknown /v1/* route must 404 (gin tree miss), not 401 (middleware match)")
 }
 
 func TestValidateRegistryConsistency_DebugOnlyInReleaseFails(t *testing.T) {
