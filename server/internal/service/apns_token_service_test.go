@@ -109,9 +109,33 @@ func TestRegisterApnsToken_LimiterBlocks(t *testing.T) {
 	var appErr *dto.AppError
 	require.True(t, errors.As(err, &appErr), "expected AppError, got %T", err)
 	assert.Equal(t, "RATE_LIMIT_EXCEEDED", appErr.Code)
+	assert.Equal(t, 2, appErr.RetryAfter,
+		"service must propagate limiter's retry hint; hard-coded 60s default would mislead clients")
 
 	assert.Equal(t, 0, r.callCount, "repo must not be called when rate-limited")
 	assert.Equal(t, 0, sr.callCount, "session flag must not flip when rate-limited")
+}
+
+// TestRegisterApnsToken_LimiterBlocks_SubSecondRetryRoundsUpTo1 covers
+// the ceiling helper's clamp: a 1 ms boundary retry (matches §9.3
+// sliding-window behaviour) must surface as Retry-After: 1, never 0 —
+// a zero header would tell the client "retry immediately" while the
+// limiter already decided the slot is blocked.
+func TestRegisterApnsToken_LimiterBlocks_SubSecondRetryRoundsUpTo1(t *testing.T) {
+	t.Parallel()
+	r, sr, _ := newOkFakes()
+	lim := &fakeLimiter{allowed: false, retry: time.Millisecond}
+	svc := NewApnsTokenService(r, sr, lim, fixedSvcClock())
+
+	err := svc.RegisterApnsToken(context.Background(), RegisterApnsTokenRequest{
+		UserID: ids.UserID("u1"), DeviceID: "d1",
+		Platform: ids.PlatformWatch, DeviceToken: "tok",
+	})
+	require.Error(t, err)
+	var appErr *dto.AppError
+	require.True(t, errors.As(err, &appErr))
+	assert.Equal(t, 1, appErr.RetryAfter,
+		"sub-second retry must ceil to 1s — zero would read as 'retry immediately'")
 }
 
 func TestRegisterApnsToken_LimiterError_FailsClosed(t *testing.T) {

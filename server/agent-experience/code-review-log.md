@@ -233,3 +233,11 @@
 | 1 | patch | Round 1 新增的"race regression"测试在调 `DisconnectUser` 之前 `hub.Unregister("conn-stale")`，导致 `FindByUser` 快照根本不含 stale entry，循环只跑 1 次 —— 无论是否带 `if h.unregisterClient(c) { count++ }` 守护，count 都是 1。测试名声称覆盖 race window 但实际只覆盖"调 DisconnectUser 之前已经少一个连接"的退化场景；如果未来有人把 count++ 改回无条件，这条测试不会失败。 | server/internal/ws/hub_disconnect_user_test.go:184 (round-1 提交) | 守护代码失去"未来回归被测试拦下来"的保护层，Story 1.6 调用方依赖的 connectionsClosed 契约重新变成靠人 review；修法：把 DisconnectUser 的循环抽到 `disconnectAllForUser(userID, clients []*Client)` 测试 seam，新测试在 Unregister 之前**先**捕获 snapshot，再 Unregister，再调 helper 注入 stale snapshot —— 这样 loop 真正跑两次，guard 有作用时 count=1，无 guard 时 count=2，回归立刻被抓 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过
+
+## [1-4-apns-device-token-registration-endpoint] Round 1 — 2026-04-19
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | `ApnsTokenService.RegisterApnsToken` 在 `limiter.Acquire` 返回 allowed=false 时拿到了 retry `time.Duration` 却只把它塞进 `WithCause` 的错误消息里，没调 `WithRetryAfter`；`dto.RespondAppError` 遇到 `CategoryRetryAfter` 且 `RetryAfter==0` 会 fallback 到硬编码 60s —— 客户端不论实际限流窗口剩 1s 还是 45s 都被告知等 60s | server/internal/service/apns_token_service.go:109-112 | 任何遵守 Retry-After 的客户端被系统性误导：窗口还剩 1s 时客户端傻等 60s（UX 差），窗口还剩 45s 时客户端以为只要 60s 可 Retry-After 其实已经过期重试会再 429（触发客户端重试风暴）—— 修法：加 `ceilRateLimitSeconds(d)` 私有 helper（镜像 ws/upgrade_handler 的 ceilSeconds 逻辑，独立一份保持 internal 包互不依赖），返错前 `.WithRetryAfter(ceilRateLimitSeconds(retry))`；单测加 `TestRegisterApnsToken_LimiterBlocks` 断言 `appErr.RetryAfter == 2`（2s 输入）+ 新增 `_SubSecondRetryRoundsUpTo1` 锁 §9.3 boundary 1ms→1s ceiling |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过

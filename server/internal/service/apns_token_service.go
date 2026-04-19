@@ -107,9 +107,9 @@ func (s *ApnsTokenService) RegisterApnsToken(ctx context.Context, req RegisterAp
 		return fmt.Errorf("apns token service: rate limit acquire: %w", err)
 	}
 	if !allowed {
-		return dto.ErrRateLimitExceeded.WithCause(fmt.Errorf(
-			"apns_token register rate: retry_after=%s", retry,
-		))
+		return dto.ErrRateLimitExceeded.
+			WithRetryAfter(ceilRateLimitSeconds(retry)).
+			WithCause(fmt.Errorf("apns_token register rate: retry_after=%s", retry))
 	}
 
 	t := &domain.ApnsToken{
@@ -146,3 +146,20 @@ func (s *ApnsTokenService) RegisterApnsToken(ctx context.Context, req RegisterAp
 // consumer-side handler interface. If a future field change breaks
 // that, the build fails here rather than at wire time.
 var _ ApnsTokenHandlerService = (*ApnsTokenService)(nil)
+
+// ceilRateLimitSeconds converts the limiter's sub-second retry hint
+// into whole seconds for the HTTP Retry-After header. A zero / negative
+// input is clamped to 1s — "0" in Retry-After reads as "try immediately"
+// which would defeat the purpose when the limiter already decided the
+// attempt is blocked. Mirrors ws/upgrade_handler.ceilSeconds; kept
+// local here because the WS helper is unexported and this is the
+// second of what will become several per-endpoint limiters (Story 1.5
+// profile, Story 5.3 touch). Future refactor: hoist into pkg/redisx or
+// an internal helper once the third caller lands.
+func ceilRateLimitSeconds(d time.Duration) int {
+	secs := int((d + time.Second - 1) / time.Second)
+	if secs < 1 {
+		return 1
+	}
+	return secs
+}
