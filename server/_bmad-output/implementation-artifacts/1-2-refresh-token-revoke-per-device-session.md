@@ -1,6 +1,6 @@
 # Story 1.2: Refresh token 刷新 + 吊销 + per-device session 隔离
 
-Status: review
+Status: done
 
 <!-- Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- §21.4 AC review 触发点：本 story 为"auth guard + 度量" 类（rolling-rotation refresh 是密码学安全边界，stolen-token-reuse detection 是 "首次成功 after"-类语义），dev agent 在 implementation 前建议先做一轮 AC self-review，逐条对照 AC ↔ 反模式 §3.x / §14 / 架构指南 §21.3。结尾 "Semantic-correctness 思考题"必须在 Completion Notes 回答。 -->
