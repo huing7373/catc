@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/huing/cat/server/pkg/clockx"
+	"github.com/huing/cat/server/pkg/jwtx"
 )
 
 // fakeBlacklist is a deterministic in-memory Blacklist for unit tests.
@@ -71,6 +72,56 @@ func TestUpgradeHandler_EmptyToken_Returns401(t *testing.T) {
 	rr := doUpgradeRequest(t, h, "")
 
 	assert.Equal(t, http.StatusUnauthorized, rr.Code)
+	assert.Contains(t, rr.Body.String(), "AUTH_INVALID_IDENTITY_TOKEN")
+}
+
+// TestUpgradeHandler_JWTValidator_VerifyError_Returns401 is the
+// release-validator regression for Story 1.1 round 2 review: a
+// JWTValidator that rejects must produce 401 AUTH_INVALID_IDENTITY_TOKEN,
+// not 500 INTERNAL_ERROR. The bug surfaces only at the
+// validator → RespondAppError seam — pure validator unit tests would
+// pass even when the handler regressed to 500. Drives an end-to-end
+// upgrade through the same code path the production wiring uses.
+func TestUpgradeHandler_JWTValidator_VerifyError_Returns401(t *testing.T) {
+	t.Parallel()
+
+	bl := &fakeBlacklist{}
+	rl := &fakeLimiter{decision: ConnectDecision{Allowed: true}}
+	hub := NewHub(HubConfig{SendBufSize: 64}, clockx.NewRealClock())
+	dispatcher := NewDispatcher(nil, clockx.NewRealClock())
+	v := NewJWTValidator(fakeVerifier{err: errors.New("apple sig mismatch")})
+	h := NewUpgradeHandler(hub, dispatcher, v, bl, rl)
+
+	rr := doUpgradeRequest(t, h, "garbage.jwt.token")
+
+	assert.Equal(t, http.StatusUnauthorized, rr.Code,
+		"verifier-rejected token MUST yield 401, not 500")
+	assert.Contains(t, rr.Body.String(), "AUTH_INVALID_IDENTITY_TOKEN")
+	assert.NotContains(t, rr.Body.String(), "INTERNAL_ERROR",
+		"the underlying cause must NOT escape into the wire response")
+	assert.Equal(t, int32(0), bl.calls.Load(),
+		"blacklist must NOT be consulted after the auth gate failed")
+	assert.Equal(t, int32(0), rl.calls.Load(),
+		"rate limiter must NOT be consulted after the auth gate failed")
+}
+
+// TestUpgradeHandler_JWTValidator_RefreshTokenAsAccess_Returns401
+// belt-and-braces for the most likely abuse vector: replaying the
+// refresh token issued by /auth/apple as the WS bearer.
+func TestUpgradeHandler_JWTValidator_RefreshTokenAsAccess_Returns401(t *testing.T) {
+	t.Parallel()
+
+	bl := &fakeBlacklist{}
+	rl := &fakeLimiter{decision: ConnectDecision{Allowed: true}}
+	hub := NewHub(HubConfig{SendBufSize: 64}, clockx.NewRealClock())
+	dispatcher := NewDispatcher(nil, clockx.NewRealClock())
+	v := NewJWTValidator(fakeVerifier{out: &jwtx.CustomClaims{UserID: "u-1", TokenType: "refresh"}})
+	h := NewUpgradeHandler(hub, dispatcher, v, bl, rl)
+
+	rr := doUpgradeRequest(t, h, "refresh.jwt.token")
+
+	assert.Equal(t, http.StatusUnauthorized, rr.Code,
+		"refresh-as-access MUST yield 401, not 500")
 	assert.Contains(t, rr.Body.String(), "AUTH_INVALID_IDENTITY_TOKEN")
 }
 

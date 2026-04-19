@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/huing/cat/server/internal/dto"
 	"github.com/huing/cat/server/pkg/jwtx"
 )
 
@@ -27,11 +28,17 @@ func TestJWTValidator_HappyPath(t *testing.T) {
 	assert.Equal(t, "u-1", uid)
 }
 
+// All four reject paths must wrap the cause inside
+// dto.ErrAuthInvalidIdentityToken so RespondAppError returns 401, not
+// 500. This is the Round 2 regression — a plain `errors.New` here
+// silently became INTERNAL_ERROR in the production WS upgrade.
 func TestJWTValidator_EmptyToken(t *testing.T) {
 	t.Parallel()
 	v := NewJWTValidator(fakeVerifier{})
 	_, err := v.ValidateToken("")
 	require.Error(t, err)
+	assert.ErrorIs(t, err, dto.ErrAuthInvalidIdentityToken,
+		"empty-token reject must surface as AUTH_INVALID_IDENTITY_TOKEN, not INTERNAL_ERROR")
 }
 
 func TestJWTValidator_VerifyError(t *testing.T) {
@@ -39,7 +46,9 @@ func TestJWTValidator_VerifyError(t *testing.T) {
 	cause := errors.New("bad sig")
 	v := NewJWTValidator(fakeVerifier{err: cause})
 	_, err := v.ValidateToken("forged")
-	assert.ErrorIs(t, err, cause)
+	assert.ErrorIs(t, err, dto.ErrAuthInvalidIdentityToken,
+		"verifier error must surface as AUTH_INVALID_IDENTITY_TOKEN, not INTERNAL_ERROR")
+	assert.ErrorIs(t, err, cause, "underlying cause must remain reachable for server logs")
 }
 
 func TestJWTValidator_RejectsRefreshToken(t *testing.T) {
@@ -47,6 +56,8 @@ func TestJWTValidator_RejectsRefreshToken(t *testing.T) {
 	v := NewJWTValidator(fakeVerifier{out: &jwtx.CustomClaims{UserID: "u-1", TokenType: "refresh"}})
 	_, err := v.ValidateToken("refresh-token")
 	require.Error(t, err, "refresh tokens must NOT open a WS session")
+	assert.ErrorIs(t, err, dto.ErrAuthInvalidIdentityToken,
+		"refresh-as-access reject must surface as AUTH_INVALID_IDENTITY_TOKEN")
 }
 
 func TestJWTValidator_RejectsEmptyUID(t *testing.T) {
@@ -54,6 +65,8 @@ func TestJWTValidator_RejectsEmptyUID(t *testing.T) {
 	v := NewJWTValidator(fakeVerifier{out: &jwtx.CustomClaims{TokenType: "access"}})
 	_, err := v.ValidateToken("malformed")
 	require.Error(t, err)
+	assert.ErrorIs(t, err, dto.ErrAuthInvalidIdentityToken,
+		"empty-uid reject must surface as AUTH_INVALID_IDENTITY_TOKEN")
 }
 
 func TestNewJWTValidator_PanicsOnNilVerifier(t *testing.T) {

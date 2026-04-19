@@ -3,6 +3,7 @@ package ws
 import (
 	"errors"
 
+	"github.com/huing/cat/server/internal/dto"
 	"github.com/huing/cat/server/pkg/jwtx"
 )
 
@@ -24,6 +25,15 @@ type jwtValidator struct {
 // a WS session — refresh tokens are only consumable on /auth/refresh
 // (Story 1.2).
 //
+// All rejection paths return dto.ErrAuthInvalidIdentityToken (with the
+// real cause attached for the server log) so UpgradeHandler.Handle can
+// hand the result to dto.RespondAppError and the client sees 401
+// AUTH_INVALID_IDENTITY_TOKEN — never 500. The same sentinel was used
+// by the Story 0 StubValidator; round 2 of Story 1.1 review caught the
+// regression where ValidateToken returned plain errors and the WS
+// upgrade response collapsed expired / forged / refresh-as-access /
+// missing-uid tokens all into INTERNAL_ERROR.
+//
 // verifier MUST be non-nil; passing nil panics at construction so a
 // misconfigured DI graph cannot reach request time and silently
 // accept every token (the bug Round 1 of Story 1.1 review caught
@@ -37,17 +47,17 @@ func NewJWTValidator(verifier jwtVerifier) TokenValidator {
 
 func (v jwtValidator) ValidateToken(token string) (string, error) {
 	if token == "" {
-		return "", errors.New("empty token")
+		return "", dto.ErrAuthInvalidIdentityToken.WithCause(errors.New("empty token"))
 	}
 	claims, err := v.verifier.Verify(token)
 	if err != nil {
-		return "", err
+		return "", dto.ErrAuthInvalidIdentityToken.WithCause(err)
 	}
 	if claims.TokenType != "access" {
-		return "", errors.New("ws: token_type must be access")
+		return "", dto.ErrAuthInvalidIdentityToken.WithCause(errors.New("ws: token_type must be access"))
 	}
 	if claims.UserID == "" {
-		return "", errors.New("ws: claims missing uid")
+		return "", dto.ErrAuthInvalidIdentityToken.WithCause(errors.New("ws: claims missing uid"))
 	}
 	return claims.UserID, nil
 }

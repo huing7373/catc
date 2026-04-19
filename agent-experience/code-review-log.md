@@ -48,6 +48,17 @@
 
 ---
 
+## [1-1-user-domain-sign-in-with-apple-jwt] Round 2 — 2026-04-19
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | 替换的新 validator 用 `errors.New(...)` 直接返普通 error，忘记保持原有 `dto.ErrAuthInvalidIdentityToken` sentinel；`dto.RespondAppError` 仅对 `*dto.AppError` 维持自定状态码，普通 error 一律落到 500 INTERNAL_ERROR | server/internal/ws/jwt_validator.go:38-52（round 1 引入）+ server/internal/ws/upgrade_handler.go:82（消费侧未验证 sentinel）+ server/internal/dto/error.go:78（`errors.As` 仅对 AppError 路径）| 过期 / 伪造 / 损坏 token、refresh token 冒充 access token、空 uid 全部从 401 退化为 500 —— 客户端的"刷新 token / 重新 SIWA"逻辑通常按 401 触发，500 触发的是"指数回退重试"路径，导致：(a) 用户无法自愈登录 (b) WS 握手 storm 直接打到容量上限 (c) 监控误报 INTERNAL_ERROR 高峰，掩盖真实 500 信号。Round 1 替换 StubValidator → JWTValidator 时只想着"换实现"，没意识到 sentinel 也是 contract 的一部分；典型的"换零件忘了对接同一接线" |
+| 2 | patch | 单元测试只覆盖 validator 自身（"返回 error"是否正确）—— 没有任何测试穿过 `UpgradeHandler.Handle → RespondAppError` 的端到端路径来锁定 HTTP 状态码 | server/internal/ws/jwt_validator_test.go（round 1 版本）| validator 单测 100% 绿，但 HTTP 401 vs 500 的回归在 unit-only 视角下完全不可见；Round 2 证明 sentinel-wrapping 这种"接缝处契约"必须在 handler 层做端到端断言才能锁住，否则随便一次实现替换都会再断 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过（含 `jwt_validator_test.go` 4 个 reject path 全部加 `errors.Is(err, dto.ErrAuthInvalidIdentityToken)` 断言 + `upgrade_handler_test.go` 新增 `TestUpgradeHandler_JWTValidator_VerifyError_Returns401` / `TestUpgradeHandler_JWTValidator_RefreshTokenAsAccess_Returns401` 端到端 401 回归测试）
+
+---
+
 ## [10-1-integration-mvp-room-and-action] Round 1 — 2026-04-18
 
 | # | 类别 | 错误模式 | 文件 | 影响 |
