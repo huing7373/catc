@@ -35,7 +35,8 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-17
-last_updated: 2026-04-18
+last_updated: 2026-04-19
+# Epic 0 retrospective done: 2026-04-19 (epic-0-retro-2026-04-19.md — 3 纪律继续 / 2 条改进 / 7 action items)
 # Epic 10 done: 2026-04-18 (all stories 10-1 done)
 # Story 10-1 done: 2026-04-18
 # Story 10-1 review: 2026-04-18
@@ -94,7 +95,7 @@ development_status:
   0-13-apns-push-platform-pusher-queue-routing-410-cleanup: done
   0-14-ws-message-type-registry-and-version-query: done
   0-15-spike-op1-watchos-ws-primary-stability-test-matrix: done
-  epic-0-retrospective: optional
+  epic-0-retrospective: done
 
   # Epic 1: 身份与账户
   epic-1: backlog
