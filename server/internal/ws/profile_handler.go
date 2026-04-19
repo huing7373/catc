@@ -60,8 +60,17 @@ func NewProfileHandler(svc profileUpdater) *ProfileHandler {
 //     the repo receives the trimmed value (Story 1.5 Semantic #8).
 //  4. Call ProfileService.Update. Err mapping:
 //     - ErrUserNotFound → INTERNAL_ERROR (do not leak existence).
-//     - Any other error → INTERNAL_ERROR.
+//     - *dto.AppError (e.g. preflight VALIDATION_ERROR) → passed
+//       through verbatim so the dispatcher emits the service's
+//       chosen Code + Message on the wire.
+//     - Anything else → wrapped as INTERNAL_ERROR with Cause.
 //  5. Marshal ProfileUpdateResponse from the returned *domain.User.
+//
+// The ErrUserNotFound branch MUST come first: a future refactor that
+// wraps ErrUserNotFound inside an AppError (not the current shape,
+// but possible) would otherwise leak existence via the passthrough.
+// The explicit guard keeps the security contract independent of
+// service-layer error-wrapping choices.
 func (h *ProfileHandler) HandleUpdate(ctx context.Context, client *Client, env Envelope) (json.RawMessage, error) {
 	var req dto.ProfileUpdateRequest
 	if len(env.Payload) > 0 {
@@ -82,6 +91,15 @@ func (h *ProfileHandler) HandleUpdate(ctx context.Context, client *Client, env E
 		// service's own error-level line.
 		if errors.Is(err, repository.ErrUserNotFound) {
 			return nil, dto.ErrInternalError.WithCause(err)
+		}
+		// Preserve *dto.AppError verbatim so VALIDATION_ERROR (e.g.
+		// the preflight "quietHours requires timezone" rejection)
+		// reaches the client with its service-level Code + Message
+		// intact. Without this branch the unconditional wrap below
+		// masks the distinction as INTERNAL_ERROR.
+		var ae *dto.AppError
+		if errors.As(err, &ae) {
+			return nil, ae
 		}
 		return nil, dto.ErrInternalError.WithCause(err)
 	}

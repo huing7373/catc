@@ -217,6 +217,35 @@ func TestProfileHandler_ServiceReturnsUserNotFound_MapsToInternalError(t *testin
 		"ErrUserNotFound must map to INTERNAL_ERROR — never NOT_FOUND — to avoid user-existence probe")
 }
 
+// TestProfileHandler_ServiceReturnsAppError_PassedThrough locks the
+// round-2 review fix: when the service returns a *dto.AppError (for
+// example the preflight "quietHours requires timezone" VALIDATION_ERROR
+// from ProfileService.Update), the handler MUST forward it verbatim
+// so the dispatcher emits the service's Code + Message. The prior
+// unconditional ErrInternalError.WithCause wrap masked every
+// service-level AppError as INTERNAL_ERROR on the wire.
+func TestProfileHandler_ServiceReturnsAppError_PassedThrough(t *testing.T) {
+	t.Parallel()
+	// Build a VALIDATION_ERROR AppError exactly the way
+	// ProfileService builds its preflight rejection.
+	svcErr := *dto.ErrValidationError
+	svcErr.Message = "quietHours requires timezone to be set; include 'timezone' in this request or set it before updating quietHours"
+	svc := &fakeProfileSvc{returnError: &svcErr}
+	h := NewProfileHandler(svc)
+	client := newProfileTestClient("u1")
+
+	env := profileEnv(t, "env-svc-apperr", map[string]any{
+		"quietHours": map[string]string{"start": "22:00", "end": "06:00"},
+	})
+	_, err := h.HandleUpdate(context.Background(), client, env)
+	require.Error(t, err)
+	ae := mustAppErr(t, err)
+	assert.Equal(t, "VALIDATION_ERROR", ae.Code,
+		"service *AppError MUST reach the wire verbatim — prior bug: rewrapped as INTERNAL_ERROR")
+	assert.Contains(t, ae.Message, "timezone",
+		"service message MUST be preserved so clients can react with a specific recovery path")
+}
+
 func TestProfileHandler_ServiceReturnsGenericError_MapsToInternalError(t *testing.T) {
 	t.Parallel()
 	svc := &fakeProfileSvc{returnError: errors.New("mongo io")}
