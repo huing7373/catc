@@ -18,6 +18,7 @@ type handlers struct {
 	health    *handler.HealthHandler
 	wsUpgrade *ws.UpgradeHandler
 	platform  *handler.PlatformHandler
+	auth      *handler.AuthHandler
 }
 
 func buildRouter(_ *config.Config, h *handlers) *gin.Engine {
@@ -32,6 +33,11 @@ func buildRouter(_ *config.Config, h *handlers) *gin.Engine {
 	// (architecture line 814). Clients hit this pre-auth to verify protocol
 	// compatibility (FR59 / Story 0.14 AC6).
 	r.GET("/v1/platform/ws-registry", h.platform.WSRegistry)
+	// Bootstrap auth endpoints — also OUTSIDE /v1/* JWT group. Story 1.1
+	// ships /auth/apple; Story 1.2 will add /auth/refresh on the same handler.
+	if h.auth != nil {
+		r.POST("/auth/apple", h.auth.SignInWithApple)
+	}
 	r.GET("/ws", h.wsUpgrade.Handle)
 	return r
 }

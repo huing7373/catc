@@ -58,5 +58,12 @@ max_attempts = 4
 token_expiry_days = 30
 enabled = false
 
+[apple]
+bundle_id = ""
+jwks_url = "https://appleid.apple.com/auth/keys"
+jwks_cache_key = "apple_jwk:cache"
+jwks_cache_ttl_sec = 86400
+jwks_fetch_timeout_sec = 5
+
 [cdn]
 base_url = ""

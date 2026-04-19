@@ -128,9 +128,11 @@ func TestWSMessages_ConsistencyWithDispatcher_DebugMode(t *testing.T) {
 func TestWSMessages_ConsistencyWithDispatcher_ReleaseMode(t *testing.T) {
 	t.Parallel()
 
-	// Mirrors cmd/cat/initialize.go release branch: registers nothing
-	// beyond the WS hub. This will grow from Story 1.1 onward.
+	// Mirrors cmd/cat/initialize.go release branch. Story 1.1 promoted
+	// session.resume out of DebugOnly so the release dispatcher must
+	// register it as well; later epic-1+ stories will append more.
 	d := newDispatcher()
+	d.Register("session.resume", noopHandler)
 
 	got := d.RegisteredTypes()
 

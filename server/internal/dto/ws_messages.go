@@ -53,7 +53,7 @@ var WSMessages = []WSMessageMeta{
 		Direction:     WSDirectionBi,
 		RequiresAuth:  true,
 		RequiresDedup: false,
-		DebugOnly:     true,
+		DebugOnly:     false, // Story 1.1: flipped after RealUserProvider replaced EmptyUserProvider; safe in release because new accounts legitimately have empty friends/skins/blindboxes/catState/room snapshots until later epics fill them in.
 		Description:   "Client requests a full session snapshot (user/friends/cat_state/skins/blindboxes/room) cached 60s.",
 	},
 	{

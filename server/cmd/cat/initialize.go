@@ -14,8 +14,11 @@ import (
 	"github.com/huing/cat/server/internal/dto"
 	"github.com/huing/cat/server/internal/handler"
 	"github.com/huing/cat/server/internal/push"
+	"github.com/huing/cat/server/internal/repository"
+	"github.com/huing/cat/server/internal/service"
 	"github.com/huing/cat/server/internal/ws"
 	"github.com/huing/cat/server/pkg/clockx"
+	"github.com/huing/cat/server/pkg/jwtx"
 	"github.com/huing/cat/server/pkg/logx"
 	"github.com/huing/cat/server/pkg/mongox"
 	"github.com/huing/cat/server/pkg/redisx"
@@ -98,13 +101,43 @@ func initialize(cfg *config.Config) *App {
 	dedupStore := redisx.NewDedupStore(redisCli.Cmdable(), time.Duration(cfg.WS.DedupTTLSec)*time.Second)
 	dispatcher := ws.NewDispatcher(dedupStore, clk)
 
+	// --- Story 1.1 Apple SIWA wiring ---
+	appleJWKFetcher := jwtx.NewAppleJWKFetcher(redisCli.Cmdable(), clk, jwtx.AppleJWKConfig{
+		JWKSURL:      cfg.Apple.JWKSURL,
+		CacheKey:     cfg.Apple.JWKSCacheKey,
+		CacheTTL:     time.Duration(cfg.Apple.JWKSCacheTTLSec) * time.Second,
+		FetchTimeout: time.Duration(cfg.Apple.JWKSFetchTimeoutSec) * time.Second,
+	})
+	jwtMgr := jwtx.NewManagerWithApple(jwtx.Options{
+		PrivateKeyPath:    cfg.JWT.PrivateKeyPath,
+		PrivateKeyPathOld: cfg.JWT.PrivateKeyPathOld,
+		ActiveKID:         cfg.JWT.ActiveKID,
+		OldKID:            cfg.JWT.OldKID,
+		Issuer:            cfg.JWT.Issuer,
+		AccessExpirySec:   cfg.JWT.AccessExpirySec,
+		RefreshExpirySec:  cfg.JWT.RefreshExpirySec,
+	}, jwtx.AppleVerifyDeps{
+		Fetcher:  appleJWKFetcher,
+		BundleID: cfg.Apple.BundleID,
+		Clock:    clk,
+	})
+	userRepo := repository.NewMongoUserRepository(mongoCli.DB(), clk)
+	if err := userRepo.EnsureIndexes(context.Background()); err != nil {
+		log.Fatal().Err(err).Msg("user repo EnsureIndexes failed")
+	}
+	authSvc := service.NewAuthService(userRepo, jwtMgr, jwtMgr, clk, cfg.Server.Mode)
+	authHandler := handler.NewAuthHandler(authSvc)
+	// --- /Story 1.1 ---
+
 	resumeCache := redisx.NewResumeCache(
 		redisCli.Cmdable(),
 		clk,
 		time.Duration(cfg.WS.ResumeCacheTTLSec)*time.Second,
 	)
+	// UserProvider 真实实现 — removed Empty via Story 1.1.
+	realUserProvider := ws.NewRealUserProvider(userRepo, clk)
 	sessionResumeHandler := ws.NewSessionResumeHandler(resumeCache, clk, ws.ResumeProviders{
-		User:         ws.EmptyUserProvider{},
+		User:         realUserProvider,
 		Friends:      ws.EmptyFriendsProvider{},
 		CatState:     ws.EmptyCatStateProvider{},
 		Skins:        ws.EmptySkinsProvider{},
@@ -114,6 +147,14 @@ func initialize(cfg *config.Config) *App {
 
 	broadcaster := ws.NewInMemoryBroadcaster(wsHub)
 
+	// Story 1.1 — session.resume now registers in BOTH modes. The
+	// UserProvider is real; the remaining five Empty providers return
+	// genuine empty state for a brand-new account (no friends, no
+	// skins, no blindboxes, no cat state, no room snapshot). The
+	// release guard around session.resume can be deleted entirely
+	// once Story 4.5 lands the last real provider.
+	dispatcher.Register("session.resume", sessionResumeHandler.Handle)
+
 	var validator ws.TokenValidator
 	if cfg.Server.Mode == "debug" {
 		validator = ws.NewDebugValidator()
@@ -122,15 +163,6 @@ func initialize(cfg *config.Config) *App {
 		}
 		dispatcher.Register("debug.echo", echoFn)
 		dispatcher.RegisterDedup("debug.echo.dedup", echoFn)
-		// session.resume is registered only in debug mode while every
-		// provider is an Empty*Provider. In release mode handing a client
-		// `user: null, friends: [], skins: [], ...` is indistinguishable
-		// from legitimate "new account" state and would materially corrupt
-		// the UI. Re-enable here when the first real Provider lands
-		// (Story 1.1 UserProvider is the first; by Story 4.5 all six are
-		// real and this guard can be removed along with the EmptyProviders
-		// that feed it).
-		dispatcher.Register("session.resume", sessionResumeHandler.Handle)
 
 		// Story 10.1 联调 MVP: room.join / action.update handlers + an
 		// in-memory RoomManager. action.broadcast is Direction=down (no
@@ -145,12 +177,7 @@ func initialize(cfg *config.Config) *App {
 		log.Info().Msg("debug mode: debug.echo, debug.echo.dedup, session.resume, room.join, action.update handlers registered")
 	} else {
 		validator = ws.NewStubValidator()
-		// Cast the unused handler and cache to a blank assignment so linters
-		// don't flag them — they still need to be *constructed* so Redis
-		// config validation runs on every boot (fail-fast on ResumeCacheTTLSec
-		// misconfiguration), even though no route is bound in release mode.
-		_ = sessionResumeHandler
-		log.Info().Msg("release mode: session.resume handler NOT registered (Empty providers would corrupt client state); see initialize.go comment")
+		log.Info().Msg("release mode: session.resume handler registered (Story 1.1 — RealUserProvider replaced EmptyUserProvider)")
 	}
 
 	blacklist := redisx.NewBlacklist(redisCli.Cmdable())
@@ -176,6 +203,7 @@ func initialize(cfg *config.Config) *App {
 		health:    handler.NewHealthHandler(mongoCli, redisCli, wsHub, redisCli.Cmdable(), cfg.WS.MaxConnections*2),
 		wsUpgrade: upgradeHandler,
 		platform:  handler.NewPlatformHandler(clk, cfg.Server.Mode),
+		auth:      authHandler,
 	}
 
 	router := buildRouter(cfg, h)

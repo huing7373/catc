@@ -17,6 +17,7 @@ type Config struct {
 	JWT    JWTCfg    `toml:"jwt"`
 	WS     WSCfg     `toml:"ws"`
 	APNs   APNsCfg   `toml:"apns"`
+	Apple  AppleCfg  `toml:"apple"`
 	CDN    CDNCfg    `toml:"cdn"`
 	Hash   string    `toml:"-"`
 }
@@ -86,6 +87,20 @@ type APNsCfg struct {
 	MaxAttempts     int    `toml:"max_attempts"`
 	TokenExpiryDays int    `toml:"token_expiry_days"`
 	Enabled         bool   `toml:"enabled"`
+}
+
+// AppleCfg holds the Sign in with Apple verification knobs (Story 1.1).
+// BundleID is the expected `aud` of every accepted Apple identity token
+// — production must set it explicitly (no compile-time default), per
+// the same fail-fast pattern as APNs.KeyID. JWKSURL / cache key / TTLs
+// have safe defaults so a thin local override file boots without a full
+// [apple] block (review-antipatterns §4.2).
+type AppleCfg struct {
+	BundleID            string `toml:"bundle_id"`
+	JWKSURL             string `toml:"jwks_url"`
+	JWKSCacheKey        string `toml:"jwks_cache_key"`
+	JWKSCacheTTLSec     int    `toml:"jwks_cache_ttl_sec"`
+	JWKSFetchTimeoutSec int    `toml:"jwks_fetch_timeout_sec"`
 }
 
 type CDNCfg struct {
@@ -167,6 +182,21 @@ func (c *Config) applyDefaults() {
 	if c.APNs.TokenExpiryDays == 0 {
 		c.APNs.TokenExpiryDays = 30
 	}
+	// Apple SIWA defaults — JWKS endpoint and cache knobs are operational
+	// constants; only BundleID has no sane compile-time default (it is the
+	// per-deployment app identity, must be set explicitly like APNs.KeyID).
+	if c.Apple.JWKSURL == "" {
+		c.Apple.JWKSURL = "https://appleid.apple.com/auth/keys"
+	}
+	if c.Apple.JWKSCacheKey == "" {
+		c.Apple.JWKSCacheKey = "apple_jwk:cache"
+	}
+	if c.Apple.JWKSCacheTTLSec == 0 {
+		c.Apple.JWKSCacheTTLSec = 86400
+	}
+	if c.Apple.JWKSFetchTimeoutSec == 0 {
+		c.Apple.JWKSFetchTimeoutSec = 5
+	}
 }
 
 func (c *Config) mustValidate() {
@@ -196,6 +226,26 @@ func (c *Config) mustValidate() {
 			Msg("config: ws.resume_cache_ttl_sec must be > 0")
 	}
 	c.validateAPNs()
+	c.validateApple()
+}
+
+// validateApple enforces Story 1.1 Apple SIWA invariants. BundleID is
+// required because there is no safe default — accepting an empty audience
+// would let identity tokens issued for any other Apple-developer team's
+// app pass through. JWKS positive-int knobs use the same fail-fast
+// pattern as APNs / WS (review-antipatterns §4.1).
+func (c *Config) validateApple() {
+	if c.Apple.BundleID == "" {
+		log.Fatal().Msg("config: apple.bundle_id must not be empty (set in production / local override)")
+	}
+	if c.Apple.JWKSCacheTTLSec <= 0 {
+		log.Fatal().Int("jwks_cache_ttl_sec", c.Apple.JWKSCacheTTLSec).
+			Msg("config: apple.jwks_cache_ttl_sec must be > 0")
+	}
+	if c.Apple.JWKSFetchTimeoutSec <= 0 {
+		log.Fatal().Int("jwks_fetch_timeout_sec", c.Apple.JWKSFetchTimeoutSec).
+			Msg("config: apple.jwks_fetch_timeout_sec must be > 0")
+	}
 }
 
 // validateAPNs enforces positive-integer invariants on APNs worker /

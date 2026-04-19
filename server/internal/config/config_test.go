@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -52,6 +53,9 @@ key_id = "KEY123"
 team_id = "TEAM123"
 bundle_id = "com.test.cat"
 key_path = "/path/to/key.p8"
+
+[apple]
+bundle_id = "com.test.cat"
 
 [cdn]
 base_url = "https://cdn.example.com"
@@ -109,6 +113,9 @@ port = 8080
 
 [redis]
 addr = "localhost:6379"
+
+[apple]
+bundle_id = "com.test.cat"
 `
 	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
 
@@ -143,6 +150,9 @@ port = 8080
 
 [redis]
 addr = "localhost:6379"
+
+[apple]
+bundle_id = "com.test.cat"
 `
 	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
 
@@ -152,6 +162,84 @@ addr = "localhost:6379"
 	assert.Equal(t, 60, cfg.WS.ConnectRateWindowSec)
 	assert.Equal(t, 86400, cfg.WS.BlacklistDefaultTTLSec)
 	assert.Equal(t, 60, cfg.WS.ResumeCacheTTLSec)
+}
+
+// TestMustLoad_AppleDefaultsAppliedWhenSectionOmitted is a noop because
+// the [apple] section is REQUIRED (bundle_id has no default) — we cannot
+// test "section omitted boots" the way [apns] / [ws] can. Instead we
+// verify the JWKS knobs default correctly when only bundle_id is set.
+func TestMustLoad_AppleDefaultsForJWKSKnobs(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "override.toml")
+	content := `
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[redis]
+addr = "localhost:6379"
+
+[apple]
+bundle_id = "com.test.cat"
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	cfg := MustLoad(path)
+
+	assert.Equal(t, "com.test.cat", cfg.Apple.BundleID)
+	assert.Equal(t, "https://appleid.apple.com/auth/keys", cfg.Apple.JWKSURL)
+	assert.Equal(t, "apple_jwk:cache", cfg.Apple.JWKSCacheKey)
+	assert.Equal(t, 86400, cfg.Apple.JWKSCacheTTLSec)
+	assert.Equal(t, 5, cfg.Apple.JWKSFetchTimeoutSec)
+}
+
+// TestMustLoad_MissingBundleIDFatals proves the §4.1 fail-fast guard:
+// loading a config that omits `apple.bundle_id` MUST log.Fatal (which
+// calls os.Exit(1)) rather than boot into a state where every Apple
+// identity token would silently pass the audience check.
+//
+// Pattern: re-exec the test binary as a child process with
+// CONFIG_TEST_FATAL_BUNDLE_ID=1 so the child runs the would-fatal
+// branch in isolation; the parent asserts the child exited non-zero.
+// This is the same standard-library trick used to test functions that
+// call os.Exit (see https://go.dev/src/log/log_test.go). Skipped on
+// Windows because re-spawning the test binary across drives there is
+// brittle in CI; the source-level branch is the load-bearing guard.
+func TestMustLoad_MissingBundleIDFatals(t *testing.T) {
+	if os.Getenv("CONFIG_TEST_FATAL_BUNDLE_ID") == "1" {
+		// Child branch: write a config that has every other required
+		// field but no apple.bundle_id, then call MustLoad — expected
+		// to log.Fatal → os.Exit(1).
+		dir, err := os.MkdirTemp("", "cfg-fatal")
+		if err != nil {
+			os.Exit(2)
+		}
+		path := filepath.Join(dir, "test.toml")
+		body := []byte(`
+[server]
+port = 8080
+[apple]
+bundle_id = ""
+`)
+		if err := os.WriteFile(path, body, 0644); err != nil {
+			os.Exit(3)
+		}
+		MustLoad(path) // must not return
+		os.Exit(99)    // unreachable; if it returns we exit unique non-1 to detect the regression
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMustLoad_MissingBundleIDFatals$", "-test.v")
+	cmd.Env = append(os.Environ(), "CONFIG_TEST_FATAL_BUNDLE_ID=1")
+	out, err := cmd.CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("child must have exited non-zero (log.Fatal expected); err=%v\noutput=\n%s", err, out)
+	}
+	// log.Fatal exits 1 — exit code 99 would mean MustLoad returned (regression).
+	assert.NotEqual(t, 99, exitErr.ExitCode(),
+		"MustLoad returned without log.Fatal — bundle_id guard regressed!\noutput=\n%s", out)
 }
 
 func TestMustLoad_HashDeterministic(t *testing.T) {
@@ -167,6 +255,9 @@ port = 9090
 connect_rate_per_window = 5
 connect_rate_window_sec = 60
 blacklist_default_ttl_sec = 86400
+
+[apple]
+bundle_id = "com.test.cat"
 `
 	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
 

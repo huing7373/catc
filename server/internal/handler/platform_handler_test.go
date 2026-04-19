@@ -94,9 +94,10 @@ func TestPlatformHandler_WSRegistry_ReleaseMode(t *testing.T) {
 	assert.Equal(t, "v1", resp.APIVersion)
 	assert.Equal(t, "2026-04-18T12:34:56Z", resp.ServerTime)
 
-	// Release mode filters out every DebugOnly entry. At Story 0.14 all three
-	// entries are DebugOnly; this MUST produce an empty-but-not-null messages
-	// slice (iOS ISO8601 decoders cope with [] but bomb on null for arrays).
+	// Release mode filters out every DebugOnly entry. After Story 1.1 the
+	// list is no longer empty (session.resume is the first non-DebugOnly
+	// entry) — but the slice MUST still serialize as a JSON array, never
+	// null (iOS ISO8601 decoders cope with [] but bomb on null for arrays).
 	for _, meta := range dto.WSMessages {
 		if !meta.DebugOnly {
 			assert.Contains(t,
@@ -108,11 +109,13 @@ func TestPlatformHandler_WSRegistry_ReleaseMode(t *testing.T) {
 				"release mode must hide DebugOnly entry %q", meta.Type)
 		}
 	}
+	assert.NotEmpty(t, resp.Messages,
+		"release mode after Story 1.1 must surface at least session.resume")
 
-	// Empty JSON array, never null.
-	assert.True(t,
-		strings.Contains(w.Body.String(), `"messages":[]`),
-		"release mode with zero visible entries must serialize messages as [] not null; body=%s",
+	// Never null — must always be a JSON array literal.
+	assert.False(t,
+		strings.Contains(w.Body.String(), `"messages":null`),
+		"messages slice must serialize as JSON array, never null; body=%s",
 		w.Body.String(),
 	)
 }

@@ -58,23 +58,27 @@ func TestWSRegistryEndpoint_ReleaseMode(t *testing.T) {
 	assert.Equal(t, "v1", resp.APIVersion)
 	assert.Equal(t, "2026-04-18T12:34:56Z", resp.ServerTime)
 
-	// Release mode at Story 0.14: every WSMessages entry is DebugOnly, so
-	// messages slice must be empty-but-not-null.
-	for _, meta := range dto.WSMessages {
-		if !meta.DebugOnly {
-			found := false
-			for _, m := range resp.Messages {
-				if m.Type == meta.Type {
-					found = true
-					break
-				}
-			}
-			assert.True(t, found, "release mode must surface non-DebugOnly entry %q", meta.Type)
-		}
+	// Release mode after Story 1.1: session.resume is the first
+	// WSMessages entry to leave DebugOnly, so the registry must list it
+	// (and continue listing every later non-DebugOnly entry as Epic 1+
+	// upgrades them). DebugOnly entries (debug.echo* / room.* /
+	// action.update) must still be filtered out.
+	gotTypes := make(map[string]bool, len(resp.Messages))
+	for _, m := range resp.Messages {
+		gotTypes[m.Type] = true
 	}
-	assert.True(t,
-		strings.Contains(w.Body.String(), `"messages":[]`),
-		"release mode messages slice must marshal as [] not null; body=%s", w.Body.String(),
+	for _, meta := range dto.WSMessages {
+		if meta.DebugOnly {
+			assert.False(t, gotTypes[meta.Type], "release mode must NOT surface DebugOnly entry %q", meta.Type)
+			continue
+		}
+		assert.True(t, gotTypes[meta.Type], "release mode must surface non-DebugOnly entry %q", meta.Type)
+	}
+	// Sanity: at least one entry surfaced (Story 1.1 flipped session.resume).
+	assert.NotEmpty(t, resp.Messages, "release mode messages slice must be non-empty after Story 1.1")
+	assert.False(t,
+		strings.Contains(w.Body.String(), `"messages":null`),
+		"messages slice must marshal as a real array, not null; body=%s", w.Body.String(),
 	)
 }
 

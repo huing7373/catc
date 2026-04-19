@@ -548,6 +548,149 @@ Epic 4.1 开发启动时，后端会：
 
 ---
 
+## 11. Sign in with Apple 客户端流程（Story 1.1）
+
+> **新增于 Story 1.1**：服务端正式支持 Sign in with Apple，签发 per-device 的 access + refresh JWT。本节描述客户端从「拿到 Apple identityToken」到「持有可用 JWT」的完整流程。
+
+### 11.1 端点
+
+```
+POST /auth/apple    ← 无鉴权 bootstrap，挂在 /v1/* JWT group 之外
+```
+
+请求体（`Content-Type: application/json`）：
+
+```json
+{
+  "identityToken":     "eyJhbGciOiJSUzI1NiIs...",
+  "authorizationCode": "c_xxx (可选, MVP 不消费)",
+  "deviceId":          "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "platform":          "watch",
+  "nonce":             "32-byte-base64-encoded-random-string"
+}
+```
+
+成功响应（HTTP 200）：
+
+```json
+{
+  "accessToken":  "eyJhbGciOiJSUzI1NiIs... (~15min 有效)",
+  "refreshToken": "eyJhbGciOiJSUzI1NiIs... (~30day 有效)",
+  "user": {
+    "id":          "uuid-v4-string",
+    "displayName": null,
+    "timezone":    null
+  }
+}
+```
+
+错误响应（HTTP 400 / 401 / 500）：
+
+```json
+{ "error": { "code": "AUTH_INVALID_IDENTITY_TOKEN", "message": "invalid identity token" } }
+```
+
+完整错误码语义见 [`docs/error-codes.md`](../error-codes.md)。
+
+### 11.2 客户端流程（iOS / watchOS 通用）
+
+1. **生成 raw nonce + 计算 SHA-256 hex**
+   ```swift
+   import CryptoKit
+   func randomNonce(length: Int = 32) -> String {
+       var data = Data(count: length)
+       _ = data.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, length, $0.baseAddress!) }
+       return data.base64EncodedString()
+   }
+   func sha256Hex(_ s: String) -> String {
+       SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
+   }
+   let rawNonce = randomNonce()
+   let hashedNonce = sha256Hex(rawNonce)
+   ```
+
+2. **发起 Apple SIWA 授权请求**，把 `hashedNonce` 作为 `nonce` 参数传 Apple：
+   ```swift
+   let provider = ASAuthorizationAppleIDProvider()
+   let request = provider.createRequest()
+   request.requestedScopes = [.fullName, .email]   // 仅 first sign-in 返回这两项
+   request.nonce = hashedNonce                     // ← 注意：传 hash 给 Apple
+   let controller = ASAuthorizationController(authorizationRequests: [request])
+   controller.delegate = self
+   controller.performRequests()
+   ```
+
+3. **拿到 Apple 回调中的 `identityToken`**：
+   ```swift
+   func authorizationController(controller: ASAuthorizationController,
+                                didCompleteWithAuthorization authorization: ASAuthorization) {
+       guard let credential = authorization.credential as? ASAuthorizationAppleIDCredential,
+             let tokenData = credential.identityToken,
+             let identityToken = String(data: tokenData, encoding: .utf8) else { return }
+       // identityToken 的 nonce claim 是服务端期望的 sha256(rawNonce) 的 hex；服务端会自己重做这一步比对
+       sendToServer(identityToken: identityToken, rawNonce: rawNonce)
+   }
+   ```
+
+4. **生成 / 复用 deviceId**（**首次启动生成 UUID v4 写入 Keychain**，后续登录复用）：
+   ```swift
+   func loadOrCreateDeviceID() -> String {
+       if let existing = Keychain.string(for: "cat.deviceId") { return existing }
+       let id = UUID().uuidString
+       Keychain.set(id, for: "cat.deviceId")
+       return id
+   }
+   ```
+
+5. **POST `/auth/apple`**，把**原始 nonce**（不是 hash）作为 `nonce` 字段：
+   ```swift
+   let body: [String: Any] = [
+       "identityToken": identityToken,
+       "deviceId":      loadOrCreateDeviceID(),
+       "platform":      "watch",     // iOS app 传 "iphone"
+       "nonce":         rawNonce      // ← 原始 nonce, 不是 hash
+   ]
+   var request = URLRequest(url: URL(string: "https://api.example.com/auth/apple")!)
+   request.httpMethod = "POST"
+   request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+   request.httpBody = try JSONSerialization.data(withJSONObject: body)
+   let (data, response) = try await URLSession.shared.data(for: request)
+   ```
+
+6. **持久化 accessToken / refreshToken 到 Keychain**（per-device 隔离）：
+   - `cat.accessToken`、`cat.refreshToken` 加 access group 跨 watch / phone 时**不要共享**——它们是 per-device 的，watch 与 phone 分别独立登录。
+   - 后续业务请求加 header：`Authorization: Bearer <accessToken>`
+   - access token 过期（约 15 分钟）→ 用 refresh token 调 `POST /auth/refresh`（Story 1.2 上线）
+
+### 11.3 关键约束（很容易踩坑）
+
+| 字段 | 客户端发什么 | 服务端期望什么 |
+|---|---|---|
+| `nonce` | **原始** raw nonce | 自己 SHA-256 后比 `claims.nonce` |
+| Apple SIWA `request.nonce` | `sha256(rawNonce)` 的 hex | Apple 把它原样写进 token 的 `nonce` claim |
+| `deviceId` | UUID v4，存 Keychain，**不变** | 用于 Story 1.2 refresh / 1.4 APNs 绑定 |
+| `platform` | `"watch"` 或 `"iphone"`，小写 | enum 校验，其他值 → `VALIDATION_ERROR` |
+| `aud` | （客户端无需关心；由 Apple 自动塞 Bundle ID） | 服务端配置 `apple.bundle_id` 必须与之精确一致 |
+
+### 11.4 错误处理建议
+
+| HTTP / Code | 客户端建议 |
+|---|---|
+| 200 | 持久化 token，进入主界面 |
+| 400 `VALIDATION_ERROR` | 检查请求体字段；这是客户端 bug 而非用户问题 |
+| 401 `AUTH_INVALID_IDENTITY_TOKEN` | 让用户重新发起 SIWA（Apple 可能让 user revoke 了授权 / token 过期） |
+| 500 `INTERNAL_ERROR` | 客户端展示「服务暂不可用」，按指数回退重试 |
+
+服务端**不**在错误响应里泄漏具体 `Cause` —— 「sub mismatch」「audience invalid」等只在服务端日志里，客户端只看到大类 code。这是 NFR-SEC 信息泄漏防御。
+
+### 11.5 与 WS 通道的关系
+
+- 本端点是**HTTP**，与 WS 通道完全独立。
+- 拿到 access token 后，建立 WS 连接的 header 仍是 `Authorization: Bearer <accessToken>`（替换调试期的 `<userId>` bearer）。
+- Story 1.3 上线 JWT middleware 后，所有 WS upgrade 都通过真实 JWT 校验；本指南的 §1.3 debug bearer 约定仅在 Story 1.3 之前有效。
+
+---
+
 ## 附录 A：快速参考卡
 
 | # | Type | Direction | 场景 |

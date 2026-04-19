@@ -1,18 +1,77 @@
 openapi: 3.0.3
 info:
   title: Cat Backend API
-  version: "0.14.0-epic0"
+  version: "1.1.0-epic1"
   description: >
     HTTP API surface for the 裤衩猫 backend. WebSocket envelope/message
     protocol is defined in docs/api/ws-message-registry.md (source of truth
-    internal/dto/ws_messages.go). This file currently formalizes only the
-    unauthenticated platform-bootstrap endpoint used by Watch / iPhone
-    clients on upgrade to verify protocol compatibility (FR59 / Story 0.14).
-    /healthz and /readyz are infra endpoints, intentionally omitted.
+    internal/dto/ws_messages.go). This file formalizes the unauthenticated
+    bootstrap endpoints — /v1/platform/ws-registry (FR59 / Story 0.14)
+    and /auth/apple (Story 1.1 Sign in with Apple). Authenticated /v1/*
+    endpoints land starting with Story 1.3 (JWT middleware) and are added
+    here per-story. /healthz and /readyz are infra endpoints, intentionally
+    omitted.
 servers:
   - url: https://api.example.invalid
     description: Placeholder — replaced per-environment in deploy manifests.
 paths:
+  /auth/apple:
+    post:
+      summary: Sign in with Apple — issue access + refresh JWTs
+      description: >
+        Bootstrap endpoint (no JWT required — outside the future /v1/*
+        group). The client passes Apple's identity token plus the *raw*
+        nonce it supplied to ASAuthorizationAppleIDProvider; the server
+        verifies the token (signature / iss / aud / exp / kid /
+        sha256(nonce) === claims.nonce), then either creates a new
+        users-collection row keyed by sha256(claims.sub) or returns the
+        existing one (resurrecting it if a deletion request was pending).
+        Response carries per-device access + refresh tokens plus the
+        public projection of the user. Story 1.1.
+      operationId: signInWithApple
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignInWithAppleRequest"
+      responses:
+        "200":
+          description: Sign-in succeeded; tokens + user payload returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignInWithAppleResponse"
+        "400":
+          description: Validation error (missing field / bad UUID / bad enum).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: VALIDATION_ERROR
+                  message: validation error
+        "401":
+          description: Apple identity token failed verification (signature / iss / aud / exp / kid / nonce).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: AUTH_INVALID_IDENTITY_TOKEN
+                  message: invalid identity token
+        "500":
+          description: Internal server error (Mongo / JWT signing failure).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: INTERNAL_ERROR
+                  message: internal server error
   /v1/platform/ws-registry:
     get:
       summary: List supported WS message types with versions
@@ -95,3 +154,96 @@ components:
           description: >
             Whether the dispatcher wraps the handler in dedup middleware
             (NFR-SEC-9). Corresponds to RegisterDedup vs Register.
+    SignInWithAppleRequest:
+      type: object
+      required:
+        - identityToken
+        - deviceId
+        - platform
+        - nonce
+      properties:
+        identityToken:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          description: >
+            The JWT identity token Apple SIWA hands the client.
+            Server verifies signature, issuer, audience (== app
+            BundleID), exp, and that sha256(nonce) === claims.nonce.
+        authorizationCode:
+          type: string
+          maxLength: 1024
+          description: >
+            Optional. Reserved for server-to-Apple token exchange in
+            growth; MVP ignores. Bound to 1 KB defensively.
+        deviceId:
+          type: string
+          format: uuid
+          description: >
+            Client-generated UUID v4 stored in Keychain. Identifies the
+            installation for per-device session tracking (Story 1.2 / 1.4).
+        platform:
+          type: string
+          enum: [watch, iphone]
+          description: Device class. Controls APNs topic routing (Story 1.4).
+        nonce:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: >
+            The *raw* nonce the client supplied to
+            ASAuthorizationAppleIDProvider. The server SHA-256-hashes it
+            and compares against claims.nonce (Apple SIWA spec).
+      example:
+        identityToken: "eyJhbGciOiJSUzI1NiIs..."
+        deviceId: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+        platform: "watch"
+        nonce: "32-byte-base64-encoded-random-string"
+    SignInWithAppleResponse:
+      type: object
+      required:
+        - accessToken
+        - refreshToken
+        - user
+      properties:
+        accessToken:
+          type: string
+          description: RS256 JWT, ~15 minute expiry. Carries uid / did / plat / ttype=access.
+        refreshToken:
+          type: string
+          description: RS256 JWT, ~30 day expiry. Carries uid / did / plat / ttype=refresh.
+        user:
+          $ref: "#/components/schemas/UserPublic"
+    UserPublic:
+      type: object
+      required:
+        - id
+      properties:
+        id:
+          type: string
+          description: UUID v4 user identifier (== JWT sub claim).
+        displayName:
+          type: string
+          nullable: true
+          description: Set via Story 1.5 /me/profile; nil until then.
+        timezone:
+          type: string
+          nullable: true
+          description: IANA tz; set via Story 1.5; nil until then.
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+              description: Machine-readable error code (see docs/error-codes.md for the full registry).
+            message:
+              type: string
+              description: Human-readable, non-PII default text. Server NEVER leaks Cause / stack.

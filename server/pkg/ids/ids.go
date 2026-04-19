@@ -14,11 +14,14 @@
 // YAGNI rule.
 package ids
 
-// UserID uniquely identifies a registered user. In release mode this is
-// the Mongo `_id` of the `users` document (ObjectID hex); in debug mode it
-// can be an arbitrary string carried in the JWT subject or bearer token.
-// Callers should treat UserID as opaque — the push platform, WS hub, and
-// dedup layer all log it as-is without masking (§M13 — userId is not PII).
+import "github.com/google/uuid"
+
+// UserID uniquely identifies a registered user. Story 1.1 issues these as
+// UUID v4 strings (see NewUserID below) on first Sign in with Apple; the
+// value is also the Mongo `_id` of the `users` document and the JWT
+// subject. Callers treat UserID as opaque — the push platform, WS hub,
+// and dedup layer all log it as-is without masking (§M13 — userId is not
+// PII).
 type UserID string
 
 // Platform enumerates the device classes that may register APNs tokens.
@@ -36,3 +39,19 @@ const (
 	// registered (e.g. low-battery watch offline, FR44b cold-start recall).
 	PlatformIphone Platform = "iphone"
 )
+
+// NewUserID returns a fresh UUID v4 encoded UserID. Story 1.1 calls this
+// for new Mongo `users` documents on first Sign in with Apple; tests use
+// it for fixture identity. A failure from the crypto RNG is fatal — the
+// process cannot produce a safe user id and must not continue. Panic
+// (rather than log.Fatal) is the right shape because this helper runs on
+// the request path: panic surfaces as INTERNAL_ERROR via the recover
+// middleware, instead of taking the whole process down for one bad
+// request.
+func NewUserID() UserID {
+	id, err := uuid.NewRandom()
+	if err != nil {
+		panic("ids.NewUserID: " + err.Error())
+	}
+	return UserID(id.String())
+}

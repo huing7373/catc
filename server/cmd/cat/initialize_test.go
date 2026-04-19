@@ -71,13 +71,29 @@ func TestValidateRegistryConsistency_DownstreamOnlyExempt(t *testing.T) {
 	require.NoError(t, validateRegistryConsistency(d, "debug"))
 }
 
-func TestValidateRegistryConsistency_ReleaseModeNothingRegistered(t *testing.T) {
+func TestValidateRegistryConsistency_ReleaseMode(t *testing.T) {
 	t.Parallel()
 
-	// At Story 0.14 every WSMessages entry is DebugOnly, so release mode has
-	// nothing to register and MUST pass.
+	// Story 1.1 flipped session.resume to non-DebugOnly. Release mode
+	// must register it (the same way debug mode does) — without the
+	// registration the dispatcher would return UNKNOWN_MESSAGE_TYPE
+	// while the registry endpoint advertises the type.
 	d := newStubDispatcher()
+	d.Register("session.resume", noopHandler)
 	require.NoError(t, validateRegistryConsistency(d, "release"))
+}
+
+func TestValidateRegistryConsistency_ReleaseModeMissingSessionResumeFails(t *testing.T) {
+	t.Parallel()
+
+	// Inverse of the above: forgetting to register session.resume in
+	// release mode must trip the drift guard. Direct regression test
+	// for the Story 1.1 flip.
+	d := newStubDispatcher()
+	err := validateRegistryConsistency(d, "release")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "session.resume")
+	assert.Contains(t, err.Error(), "missingInRelease")
 }
 
 func TestValidateRegistryConsistency_UnknownRegisteredFails(t *testing.T) {
@@ -118,13 +134,17 @@ func TestValidateRegistryConsistency_DebugModeMissingRegistrationFails(t *testin
 func TestValidateRegistryConsistency_DebugOnlyInReleaseFails(t *testing.T) {
 	t.Parallel()
 
-	// Registering a DebugOnly entry (session.resume) in release mode is the
-	// Story 0.12 regression the guard is supposed to catch.
+	// Registering a DebugOnly entry (debug.echo — session.resume left
+	// DebugOnly via Story 1.1 so it no longer demonstrates this case)
+	// in release mode is the Story 0.12 regression the guard catches.
+	// session.resume MUST also be registered in release mode after the
+	// 1.1 flip, otherwise we hit `missingInRelease` first.
 	d := newStubDispatcher()
 	d.Register("session.resume", noopHandler)
+	d.Register("debug.echo", noopHandler)
 
 	err := validateRegistryConsistency(d, "release")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "session.resume")
+	assert.Contains(t, err.Error(), "debug.echo")
 	assert.Contains(t, err.Error(), "debugOnlyInRelease")
 }
