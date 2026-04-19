@@ -140,6 +140,182 @@ func TestMongoUserRepo_Integration(t *testing.T) {
 		require.NotNil(t, got.Consents.StepData)
 		assert.True(t, *got.Consents.StepData)
 	})
+
+	t.Run("UpsertSession_CreateThenFind", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:upsert-create")
+		require.NoError(t, repo.Insert(ctx, u))
+		deviceA := "00000000-0000-4000-8000-0000000000a1"
+
+		s := domain.Session{
+			CurrentJTI: "jti-a-1",
+			IssuedAt:   clk.Now().Add(-1 * time.Minute),
+		}
+		require.NoError(t, repo.UpsertSession(ctx, u.ID, deviceA, s))
+
+		got, ok, err := repo.GetSession(ctx, u.ID, deviceA)
+		require.NoError(t, err)
+		require.True(t, ok, "session must exist after UpsertSession")
+		assert.Equal(t, "jti-a-1", got.CurrentJTI)
+		assert.Equal(t, s.IssuedAt.UTC(), got.IssuedAt.UTC())
+	})
+
+	t.Run("UpsertSession_Overwrite", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:upsert-overwrite")
+		require.NoError(t, repo.Insert(ctx, u))
+		device := "00000000-0000-4000-8000-0000000000b1"
+
+		require.NoError(t, repo.UpsertSession(ctx, u.ID, device, domain.Session{
+			CurrentJTI: "jti-1", IssuedAt: clk.Now(),
+		}))
+		require.NoError(t, repo.UpsertSession(ctx, u.ID, device, domain.Session{
+			CurrentJTI: "jti-2", IssuedAt: clk.Now().Add(time.Second),
+		}))
+
+		got, ok, err := repo.GetSession(ctx, u.ID, device)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, "jti-2", got.CurrentJTI, "rolling rotation: second Upsert replaces first")
+	})
+
+	t.Run("UpsertSession_IndependentDevices", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:upsert-independent")
+		require.NoError(t, repo.Insert(ctx, u))
+		watch := "00000000-0000-4000-8000-0000000000c1"
+		phone := "00000000-0000-4000-8000-0000000000c2"
+
+		require.NoError(t, repo.UpsertSession(ctx, u.ID, watch, domain.Session{
+			CurrentJTI: "jti-watch", IssuedAt: clk.Now(),
+		}))
+		require.NoError(t, repo.UpsertSession(ctx, u.ID, phone, domain.Session{
+			CurrentJTI: "jti-phone", IssuedAt: clk.Now(),
+		}))
+
+		ws, ok, err := repo.GetSession(ctx, u.ID, watch)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, "jti-watch", ws.CurrentJTI)
+
+		ps, ok, err := repo.GetSession(ctx, u.ID, phone)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, "jti-phone", ps.CurrentJTI)
+
+		ids, err := repo.ListDeviceIDs(ctx, u.ID)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{watch, phone}, ids)
+	})
+
+	t.Run("GetSession_AbsentDevice", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:get-session-absent")
+		require.NoError(t, repo.Insert(ctx, u))
+
+		got, ok, err := repo.GetSession(ctx, u.ID, "00000000-0000-4000-8000-0000000000d9")
+		require.NoError(t, err, "absent device must NOT be ErrUserNotFound")
+		assert.False(t, ok)
+		assert.Equal(t, domain.Session{}, got)
+	})
+
+	t.Run("GetSession_UserNotFound", func(t *testing.T) {
+		_, _, err := repo.GetSession(ctx, ids.NewUserID(), "00000000-0000-4000-8000-0000000000e1")
+		assert.ErrorIs(t, err, repository.ErrUserNotFound)
+	})
+
+	t.Run("UpsertSession_UserNotFound", func(t *testing.T) {
+		err := repo.UpsertSession(ctx, ids.NewUserID(), "00000000-0000-4000-8000-0000000000f1", domain.Session{
+			CurrentJTI: "orphan-jti", IssuedAt: clk.Now(),
+		})
+		assert.ErrorIs(t, err, repository.ErrUserNotFound)
+	})
+
+	t.Run("UpsertSession_PreservesOtherFields", func(t *testing.T) {
+		displayName := "preserved-user"
+		tz := "Asia/Tokyo"
+		stepConsent := false
+		u := newSeedUser(clk, "hash:upsert-preserve")
+		u.DisplayName = &displayName
+		u.Timezone = &tz
+		u.FriendCount = 5
+		u.Consents.StepData = &stepConsent
+		require.NoError(t, repo.Insert(ctx, u))
+
+		device := "00000000-0000-4000-8000-0000000000a9"
+		require.NoError(t, repo.UpsertSession(ctx, u.ID, device, domain.Session{
+			CurrentJTI: "jti-preserve", IssuedAt: clk.Now(),
+		}))
+
+		got, err := repo.FindByID(ctx, u.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.DisplayName)
+		assert.Equal(t, "preserved-user", *got.DisplayName)
+		require.NotNil(t, got.Timezone)
+		assert.Equal(t, "Asia/Tokyo", *got.Timezone)
+		assert.Equal(t, 5, got.FriendCount)
+		require.NotNil(t, got.Consents.StepData)
+		assert.False(t, *got.Consents.StepData)
+		assert.False(t, got.DeletionRequested)
+	})
+
+	t.Run("ListDeviceIDs_Empty", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:list-empty")
+		require.NoError(t, repo.Insert(ctx, u))
+
+		ids, err := repo.ListDeviceIDs(ctx, u.ID)
+		require.NoError(t, err)
+		assert.Equal(t, []string{}, ids, "no sessions ⇒ non-nil empty slice")
+	})
+
+	// Round-1 review P1 (rotation CAS): UpsertSessionIfJTIMatches must
+	// win the race only when the expected jti matches, and fail with
+	// ErrSessionStale otherwise.
+	t.Run("UpsertSessionIfJTIMatches_Succeeds", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:cas-ok")
+		require.NoError(t, repo.Insert(ctx, u))
+		dev := "00000000-0000-4000-8000-0000000000ca"
+		require.NoError(t, repo.UpsertSession(ctx, u.ID, dev, domain.Session{
+			CurrentJTI: "jti-old", IssuedAt: clk.Now(),
+		}))
+
+		// CAS with matching expected jti should win.
+		require.NoError(t, repo.UpsertSessionIfJTIMatches(ctx, u.ID, dev, "jti-old", domain.Session{
+			CurrentJTI: "jti-new", IssuedAt: clk.Now().Add(time.Second),
+		}))
+		got, ok, err := repo.GetSession(ctx, u.ID, dev)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, "jti-new", got.CurrentJTI)
+	})
+
+	t.Run("UpsertSessionIfJTIMatches_StaleReturnsErr", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:cas-stale")
+		require.NoError(t, repo.Insert(ctx, u))
+		dev := "00000000-0000-4000-8000-0000000000cb"
+		require.NoError(t, repo.UpsertSession(ctx, u.ID, dev, domain.Session{
+			CurrentJTI: "jti-first", IssuedAt: clk.Now(),
+		}))
+
+		// Simulate a race winner rotating the session.
+		require.NoError(t, repo.UpsertSessionIfJTIMatches(ctx, u.ID, dev, "jti-first", domain.Session{
+			CurrentJTI: "jti-second", IssuedAt: clk.Now(),
+		}))
+
+		// The loser (still presenting the old expected jti) must fail.
+		err := repo.UpsertSessionIfJTIMatches(ctx, u.ID, dev, "jti-first", domain.Session{
+			CurrentJTI: "jti-loser", IssuedAt: clk.Now(),
+		})
+		require.ErrorIs(t, err, repository.ErrSessionStale)
+
+		got, _, err := repo.GetSession(ctx, u.ID, dev)
+		require.NoError(t, err)
+		assert.Equal(t, "jti-second", got.CurrentJTI, "winner's jti must remain")
+	})
+
+	t.Run("UpsertSessionIfJTIMatches_UserMissing_AsStale", func(t *testing.T) {
+		err := repo.UpsertSessionIfJTIMatches(ctx, ids.NewUserID(),
+			"00000000-0000-4000-8000-0000000000cc", "jti-whatever",
+			domain.Session{CurrentJTI: "new", IssuedAt: clk.Now()})
+		assert.ErrorIs(t, err, repository.ErrSessionStale,
+			"absent user is conflated with CAS mismatch — service semantic is identical")
+	})
 }
 
 func newSeedUser(clk clockx.Clock, hash string) *domain.User {

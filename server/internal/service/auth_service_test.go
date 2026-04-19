@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,14 +22,40 @@ import (
 
 // ---- Fakes ----
 
+type upsertCall struct {
+	UserID   ids.UserID
+	DeviceID string
+	Session  domain.Session
+}
+
 type fakeRepo struct {
 	findByHash    func(ctx context.Context, hash string) (*domain.User, error)
 	findByID      func(ctx context.Context, id ids.UserID) (*domain.User, error)
 	insert        func(ctx context.Context, u *domain.User) error
 	clearDeletion func(ctx context.Context, id ids.UserID) error
 
+	// Story 1.2 sessions surface. Each is optional; the default
+	// happy-path Upsert success / GetSession absent / ListDeviceIDs
+	// empty is enough for Story 1.1 tests that do not care about
+	// sessions semantics.
+	upsertSession         func(ctx context.Context, userID ids.UserID, deviceID string, s domain.Session) error
+	upsertSessionIfMatch  func(ctx context.Context, userID ids.UserID, deviceID, expectedJTI string, s domain.Session) error
+	getSession            func(ctx context.Context, userID ids.UserID, deviceID string) (domain.Session, bool, error)
+	listDeviceIDs         func(ctx context.Context, userID ids.UserID) ([]string, error)
+
 	insertCount        int32
 	clearDeletionCount int32
+
+	mu                       sync.Mutex
+	upsertSessionCalls       []upsertCall
+	upsertSessionCASCalls    []upsertCASCall
+}
+
+type upsertCASCall struct {
+	UserID      ids.UserID
+	DeviceID    string
+	ExpectedJTI string
+	Session     domain.Session
 }
 
 func (f *fakeRepo) EnsureIndexes(_ context.Context) error { return nil }
@@ -63,6 +90,42 @@ func (f *fakeRepo) ClearDeletion(ctx context.Context, id ids.UserID) error {
 	return f.clearDeletion(ctx, id)
 }
 
+func (f *fakeRepo) UpsertSession(ctx context.Context, userID ids.UserID, deviceID string, s domain.Session) error {
+	f.mu.Lock()
+	f.upsertSessionCalls = append(f.upsertSessionCalls, upsertCall{UserID: userID, DeviceID: deviceID, Session: s})
+	f.mu.Unlock()
+	if f.upsertSession == nil {
+		return nil
+	}
+	return f.upsertSession(ctx, userID, deviceID, s)
+}
+
+func (f *fakeRepo) UpsertSessionIfJTIMatches(ctx context.Context, userID ids.UserID, deviceID, expectedJTI string, s domain.Session) error {
+	f.mu.Lock()
+	f.upsertSessionCASCalls = append(f.upsertSessionCASCalls, upsertCASCall{
+		UserID: userID, DeviceID: deviceID, ExpectedJTI: expectedJTI, Session: s,
+	})
+	f.mu.Unlock()
+	if f.upsertSessionIfMatch == nil {
+		return nil
+	}
+	return f.upsertSessionIfMatch(ctx, userID, deviceID, expectedJTI, s)
+}
+
+func (f *fakeRepo) GetSession(ctx context.Context, userID ids.UserID, deviceID string) (domain.Session, bool, error) {
+	if f.getSession == nil {
+		return domain.Session{}, false, nil
+	}
+	return f.getSession(ctx, userID, deviceID)
+}
+
+func (f *fakeRepo) ListDeviceIDs(ctx context.Context, userID ids.UserID) ([]string, error) {
+	if f.listDeviceIDs == nil {
+		return []string{}, nil
+	}
+	return f.listDeviceIDs(ctx, userID)
+}
+
 type fakeVerifier struct {
 	verify func(ctx context.Context, idToken, expectedNonce string) (*jwtx.AppleIdentityClaims, error)
 }
@@ -76,6 +139,7 @@ type fakeIssuer struct {
 	issuedRefresh string
 	failOn        string // "" | "access" | "refresh"
 	calls         []string
+	refreshExpiry time.Duration // zero → default 30 days
 }
 
 func (f *fakeIssuer) Issue(claims jwtx.CustomClaims) (string, error) {
@@ -87,6 +151,29 @@ func (f *fakeIssuer) Issue(claims jwtx.CustomClaims) (string, error) {
 		return f.issuedAccess, nil
 	}
 	return f.issuedRefresh, nil
+}
+
+func (f *fakeIssuer) RefreshExpiry() time.Duration {
+	if f.refreshExpiry == 0 {
+		return 30 * 24 * time.Hour
+	}
+	return f.refreshExpiry
+}
+
+// noopRefreshVerifier / noopRefreshBlacklist are happy-path stubs for
+// Story 1.1 tests that do not exercise /auth/refresh. Verify always
+// errors so any accidental call from SIWA-focused tests surfaces loudly.
+type noopRefreshVerifier struct{}
+
+func (noopRefreshVerifier) Verify(_ string) (*jwtx.CustomClaims, error) {
+	return nil, errors.New("noopRefreshVerifier: not wired for this test")
+}
+
+type noopRefreshBlacklist struct{}
+
+func (noopRefreshBlacklist) IsRevoked(_ context.Context, _ string) (bool, error) { return false, nil }
+func (noopRefreshBlacklist) Revoke(_ context.Context, _ string, _ time.Time) error {
+	return nil
 }
 
 // ---- Helpers ----
@@ -112,7 +199,7 @@ func defaultRequest() SignInWithAppleRequest {
 func newSvc(t *testing.T, repo UserRepository, verifier AppleVerifier, issuer JWTIssuer) *AuthService {
 	t.Helper()
 	clk := clockx.NewFakeClock(time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC))
-	return NewAuthService(repo, verifier, issuer, clk, "release")
+	return NewAuthService(repo, verifier, noopRefreshVerifier{}, issuer, noopRefreshBlacklist{}, clk, "release")
 }
 
 // ---- Cases ----
@@ -133,6 +220,12 @@ func TestSignInWithApple_NewUser(t *testing.T) {
 	assert.Equal(t, "ACCESS", res.AccessToken)
 	assert.Equal(t, "REFRESH", res.RefreshToken)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&repo.insertCount))
+
+	// Story 1.2 AC7: SIWA must write sessions[deviceId].current_jti.
+	require.Len(t, repo.upsertSessionCalls, 1)
+	assert.Equal(t, res.User.ID, repo.upsertSessionCalls[0].UserID)
+	assert.Equal(t, "device-uuid", repo.upsertSessionCalls[0].DeviceID)
+	assert.NotEmpty(t, repo.upsertSessionCalls[0].Session.CurrentJTI)
 }
 
 func TestSignInWithApple_ExistingUser(t *testing.T) {
@@ -155,6 +248,30 @@ func TestSignInWithApple_ExistingUser(t *testing.T) {
 	assert.False(t, res.IsNewUser)
 	assert.Equal(t, existing.ID, res.User.ID)
 	assert.Equal(t, int32(0), atomic.LoadInt32(&repo.insertCount))
+
+	require.Len(t, repo.upsertSessionCalls, 1,
+		"Story 1.2 AC7: existing-user SIWA must also write sessions[deviceId]")
+	assert.Equal(t, existing.ID, repo.upsertSessionCalls[0].UserID)
+	assert.NotEmpty(t, repo.upsertSessionCalls[0].Session.CurrentJTI)
+}
+
+func TestSignInWithApple_UpsertSessionError(t *testing.T) {
+	t.Parallel()
+	repo := &fakeRepo{
+		upsertSession: func(_ context.Context, _ ids.UserID, _ string, _ domain.Session) error {
+			return errors.New("mongo write timeout")
+		},
+	}
+	verifier := &fakeVerifier{verify: func(_ context.Context, _, _ string) (*jwtx.AppleIdentityClaims, error) {
+		return okClaimsFor("apple:user:session-fail"), nil
+	}}
+	issuer := &fakeIssuer{issuedAccess: "A", issuedRefresh: "R"}
+
+	svc := newSvc(t, repo, verifier, issuer)
+	_, err := svc.SignInWithApple(context.Background(), defaultRequest())
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, dto.ErrInternalError),
+		"Story 1.2 AC7: UpsertSession failure must be fail-closed (INTERNAL_ERROR), not a silent token issue")
 }
 
 func TestSignInWithApple_ResurrectsDeletedUser(t *testing.T) {
@@ -389,4 +506,8 @@ func (c *capturingIssuer) Issue(claims jwtx.CustomClaims) (string, error) {
 		return c.access, nil
 	}
 	return c.refresh, nil
+}
+
+func (c *capturingIssuer) RefreshExpiry() time.Duration {
+	return 30 * 24 * time.Hour
 }

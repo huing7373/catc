@@ -123,6 +123,38 @@ func TestSignInWithAppleRequest_Validator(t *testing.T) {
 	}
 }
 
+// TestRefreshTokenRequest_Validator exercises the same binding path the
+// handler uses.
+func TestRefreshTokenRequest_Validator(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		body    RefreshTokenRequest
+		wantErr bool
+	}{
+		{name: "empty", body: RefreshTokenRequest{}, wantErr: true},
+		{name: "too short (<16)", body: RefreshTokenRequest{RefreshToken: "header.p.s"}, wantErr: true},
+		{name: "oversized (>8192)", body: RefreshTokenRequest{RefreshToken: strings.Repeat("a", 8193)}, wantErr: true},
+		{
+			name: "legal jwt-shaped value",
+			body: RefreshTokenRequest{RefreshToken: strings.Repeat("a", 128) + "." + strings.Repeat("b", 256) + "." + strings.Repeat("c", 256)},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := binding.Validator.ValidateStruct(&tc.body)
+			if tc.wantErr {
+				require.Error(t, err, "expected validator to reject %#v", tc.body)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestUserPublicFromDomain_OmitsNilFields(t *testing.T) {
 	t.Parallel()
 	pub := UserPublicFromDomain(&domain.User{ID: "u1"})

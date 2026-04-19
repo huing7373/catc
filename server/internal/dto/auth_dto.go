@@ -64,3 +64,24 @@ func UserPublicFromDomain(u *domain.User) UserPublic {
 		Timezone:    u.Timezone,
 	}
 }
+
+// RefreshTokenRequest is the wire format for POST /auth/refresh.
+// refreshToken is the ONLY input — userId / deviceId / platform are
+// extracted from the token's claims server-side, never trusted from
+// the request body (defense in depth: a compromised client cannot
+// trick the server by lying about its deviceId).
+//
+// min=16 rejects obviously malformed strings (real JWTs are hundreds
+// of bytes). max=8192 mirrors SignInWithApple.identityToken — bounds
+// what a malicious client can ship.
+type RefreshTokenRequest struct {
+	RefreshToken string `json:"refreshToken" binding:"required,min=16,max=8192"`
+}
+
+// RefreshTokenResponse is the success body for POST /auth/refresh.
+// Deliberately omits the user block (unlike SignInWithApple) — this is
+// a token rotation, not a login; the client already has the profile.
+type RefreshTokenResponse struct {
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+}

@@ -38,6 +38,7 @@ import (
 	"github.com/huing/cat/server/internal/testutil"
 	"github.com/huing/cat/server/pkg/jwtx"
 	"github.com/huing/cat/server/pkg/mongox"
+	"github.com/huing/cat/server/pkg/redisx"
 )
 
 // TestSignInWithApple_EndToEnd wires every Story 1.1 layer end-to-end —
@@ -91,7 +92,16 @@ func TestSignInWithApple_EndToEnd(t *testing.T) {
 	userRepo := repository.NewMongoUserRepository(mongoCli.DB(), clk)
 	require.NoError(t, userRepo.EnsureIndexes(context.Background()))
 
-	authSvc := service.NewAuthService(userRepo, jwtMgr, jwtMgr, clk, "release")
+	refreshBlacklist := redisx.NewRefreshBlacklist(fa.Redis, clk)
+	authSvc := service.NewAuthService(
+		userRepo,
+		jwtMgr, // AppleVerifier
+		jwtMgr, // RefreshVerifier
+		jwtMgr, // JWTIssuer
+		refreshBlacklist,
+		clk,
+		"release",
+	)
 	authHandler := handler.NewAuthHandler(authSvc)
 
 	// Capture audit log lines via a thread-safe buffer-backed zerolog
@@ -152,6 +162,13 @@ func TestSignInWithApple_EndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, body1.User.ID, string(one.ID))
 
+	// Story 1.2 AC7: new user must have sessions[deviceId].current_jti
+	// populated so the subsequent refresh flow does not misfire on a
+	// "session not initialized" reuse detection.
+	require.Contains(t, one.Sessions, deviceID,
+		"sessions[deviceId] must be populated after SIWA (Story 1.2 AC7)")
+	assert.NotEmpty(t, one.Sessions[deviceID].CurrentJTI)
+
 	requireAuditLine(t, auditBuf, "sign_in_with_apple", map[string]any{
 		"userId":    body1.User.ID,
 		"deviceId":  deviceID,
@@ -179,6 +196,13 @@ func TestSignInWithApple_EndToEnd(t *testing.T) {
 	count2, err := mongoCli.DB().Collection("users").CountDocuments(context.Background(), bson.M{})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), count2, "repeat sign-in must NOT create a second row")
+
+	// Story 1.2 AC7: repeat sign-in also rewrites sessions[deviceId].current_jti;
+	// previous jti got replaced (rolling rotation at login).
+	twoRow, err := userRepo.FindByAppleHash(context.Background(), expectedHash)
+	require.NoError(t, err)
+	require.Contains(t, twoRow.Sessions, deviceID)
+	assert.NotEmpty(t, twoRow.Sessions[deviceID].CurrentJTI)
 
 	requireAuditLine(t, auditBuf, "sign_in_with_apple", map[string]any{
 		"userId":    body1.User.ID,
@@ -216,6 +240,11 @@ func TestSignInWithApple_EndToEnd(t *testing.T) {
 	requireAuditLine(t, auditBuf, "user_resurrected_from_deletion", map[string]any{
 		"userId": body1.User.ID,
 	})
+
+	// Story 1.2 AC7: resurrection path also must write sessions[deviceId].
+	require.Contains(t, again.Sessions, deviceID,
+		"resurrection sign-in must still populate sessions[deviceId]")
+	assert.NotEmpty(t, again.Sessions[deviceID].CurrentJTI)
 
 	// Compile-time guard against accidental redis import dropping.
 	var _ redis.Cmdable = fa.Redis

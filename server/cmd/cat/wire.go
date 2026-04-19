@@ -34,9 +34,12 @@ func buildRouter(_ *config.Config, h *handlers) *gin.Engine {
 	// compatibility (FR59 / Story 0.14 AC6).
 	r.GET("/v1/platform/ws-registry", h.platform.WSRegistry)
 	// Bootstrap auth endpoints — also OUTSIDE /v1/* JWT group. Story 1.1
-	// ships /auth/apple; Story 1.2 will add /auth/refresh on the same handler.
+	// shipped /auth/apple; Story 1.2 adds /auth/refresh (rolling-rotation +
+	// stolen-token reuse detection). The refresh token in the body IS the
+	// credential — no JWT middleware.
 	if h.auth != nil {
 		r.POST("/auth/apple", h.auth.SignInWithApple)
+		r.POST("/auth/refresh", h.auth.Refresh)
 	}
 	r.GET("/ws", h.wsUpgrade.Handle)
 	return r

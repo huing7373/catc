@@ -48,6 +48,14 @@ type Options struct {
 // optional: they are nil for the Story 0.3 sign-only construction path
 // (New) and are populated by NewManagerWithApple for Story 1.1+.
 // VerifyApple panics if called on a sign-only Manager — see its doc.
+//
+// issueClock drives the IssuedAt / ExpiresAt stamps on Issue. New(opts)
+// defaults it to RealClock (time.Now-backed); NewManagerWithApple
+// overrides it with the injected AppleVerifyDeps.Clock so FakeClock
+// tests can drive Issue, Verify, and VerifyApple off the same wall
+// clock. Story 1.2 guards against the "Issue silently uses time.Now in
+// production" footgun (review-antipatterns §4.1): callers on the
+// request path MUST go through NewManagerWithApple.
 type Manager struct {
 	activeKey     *rsa.PrivateKey
 	activePub     *rsa.PublicKey
@@ -57,6 +65,7 @@ type Manager struct {
 	issuer        string
 	accessExpiry  time.Duration
 	refreshExpiry time.Duration
+	issueClock    clockx.Clock
 
 	appleFetcher  *AppleJWKFetcher
 	appleBundleID string
@@ -98,6 +107,7 @@ func New(opts Options) *Manager {
 		issuer:        opts.Issuer,
 		accessExpiry:  time.Duration(opts.AccessExpirySec) * time.Second,
 		refreshExpiry: time.Duration(opts.RefreshExpirySec) * time.Second,
+		issueClock:    clockx.NewRealClock(),
 	}
 
 	if opts.PrivateKeyPathOld != "" {
@@ -112,9 +122,23 @@ func New(opts Options) *Manager {
 	return m
 }
 
-// Issue signs a JWT with the active key. The kid header is set for key selection during verification.
+// Issue signs a JWT with the active key. The kid header is set for key
+// selection during verification.
+//
+// Issue overwrites Issuer / IssuedAt / ExpiresAt but deliberately does
+// NOT touch the caller-supplied RegisteredClaims.ID (jti) or Subject —
+// that contract is load-bearing for Story 1.2 rolling-rotation (a
+// refresh token whose jti got stomped silently would make reuse
+// detection fail open). Tests
+// TestManager_Issue_PreservesRegisteredClaimsID and
+// TestManager_Issue_EmptyJTIStaysEmpty lock the contract.
+//
+// Timebase: m.issueClock — RealClock when built via New(opts), the
+// injected AppleVerifyDeps.Clock when built via NewManagerWithApple.
+// Production paths MUST go through NewManagerWithApple so that
+// FakeClock tests can drive Issue deterministically (antipattern §4.1).
 func (m *Manager) Issue(claims CustomClaims) (string, error) {
-	now := time.Now()
+	now := m.issueClock.Now()
 
 	expiry := m.accessExpiry
 	if claims.TokenType == "refresh" {
@@ -181,6 +205,7 @@ func NewManagerWithApple(opts Options, apple AppleVerifyDeps) *Manager {
 	m.appleFetcher = apple.Fetcher
 	m.appleBundleID = apple.BundleID
 	m.appleClock = apple.Clock
+	m.issueClock = apple.Clock
 	return m
 }
 

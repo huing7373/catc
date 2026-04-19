@@ -691,6 +691,66 @@ POST /auth/apple    ← 无鉴权 bootstrap，挂在 /v1/* JWT group 之外
 
 ---
 
+## 12. Refresh token 使用流程（Story 1.2）
+
+Story 1.2 上线 `POST /auth/refresh`，实现 **rolling-rotation + stolen-token reuse detection**。本节是客户端开发者实现 refresh 流程的**唯一权威来源**。
+
+### 12.1 何时调用
+
+- 客户端调 `/v1/*` 受保护 API 拿到 `401 AUTH_TOKEN_EXPIRED` 时：access token 已过期（~15 min 后必然发生），**客户端立即 POST `/auth/refresh`**，body = `{"refreshToken": "<Keychain 里存的 refresh>"}`。
+- **不要**主动预刷新（no silent refresh on timer）—— 只在收到 `AUTH_TOKEN_EXPIRED` 时触发；避免撞上服务端 rolling-rotation 的正常重放。
+- WS 升级失败（access 过期同样会被新版 JWT middleware 拒绝）时也走同一路径。
+
+### 12.2 端点契约
+
+- **Method**：`POST`
+- **URL**：`/auth/refresh`（与 `/auth/apple` 同级，`bootstrap` 路由，**不**经 JWT middleware）
+- **Content-Type**：`application/json`
+- **Body**：`{"refreshToken": "<RS256 JWT 字符串>"}`
+- **200**：`{"accessToken": "...", "refreshToken": "..."}`（**两把都换新**）
+- **401 `AUTH_INVALID_IDENTITY_TOKEN`**：token 签名 / iss / alg / kid / exp / ttype 任一失败
+- **401 `AUTH_REFRESH_TOKEN_REVOKED`**：token 已被吊销 / reuse detection / session 未初始化
+- **500 `INTERNAL_ERROR`**：Redis / Mongo / 签名服务 fail-closed
+
+### 12.3 成功流程（必须严格按步骤）
+
+1. 读 Keychain 取出当前 `refreshToken`。
+2. POST `/auth/refresh`，body 见 §12.2。
+3. 收到 `200 {accessToken, refreshToken}`：
+   - **立即**把**两把 token 一起**写回 Keychain（**旧 refresh 已失效**，不能留任何副本）。
+   - 用新的 access token 重试刚才失败的 `/v1/*` 请求。
+4. 重建 WS 连接时使用新的 access token（见 §11.5）。
+
+### 12.4 失败处理 —— **核心契约**
+
+| 服务端响应 | 含义 | 客户端必须做 |
+|---|---|---|
+| `401 AUTH_REFRESH_TOKEN_REVOKED` | 这把 refresh token 已死（可能服务端 rotate / 可能被盗重放） | **清 Keychain + 跳回 SIWA 登录流程**，不允许 silent 重试 |
+| `401 AUTH_INVALID_IDENTITY_TOKEN` | 这把 token 本身无效（签名 / 过期 / ttype 错） | 同上：清 Keychain + 跳回 SIWA |
+| `500 INTERNAL_ERROR` | 服务端自身挂了 | 展示「服务暂不可用」，可按指数回退重试**同一 token**（这是少数允许重试的情况 —— 服务端并未成功 rotate） |
+| 网络层失败 | 请求未到达服务端 | 按 §7.2 重连策略重试**同一 token**，但**限制**重试次数（3 次以内） |
+
+### 12.5 **绝对禁止** —— rolling-rotation 安全铁则
+
+1. **客户端不得并发刷新**：多个请求同时拿到 `AUTH_TOKEN_EXPIRED` 时，**只允许一次** `/auth/refresh` 请求在途（mutex / actor / semaphore 任意实现），后续请求**等待第一次的结果**再用新 access 重试。两个并发刷新 = 其中一个命中 reuse detection = **用户被踢**。
+2. **刷新失败不得重试同一 token（除 500）**：服务端 reuse detection 已把当前 jti 吊销，同一 token 再试必然 401 并把活着的新 token 也烧掉。
+3. **Keychain 写必须原子**：新的 access + refresh **一起**替换旧值，不能先写 access 再写 refresh（部分写入 + 崩溃 = 下次用混配）。
+4. **不得把 refresh token 记录到除 Keychain 以外的位置**（日志 / 埋点 / crash report 全部禁止）。
+
+### 12.6 端侧独立：Watch 和 iPhone 各自管理
+
+- Watch 与 iPhone **各自独立** SIWA，各自独立 `deviceId`，各自独立 refresh token。
+- 一台设备的 refresh 失败 **不影响**另一台；用户在 Watch 被踢下线时 iPhone 仍然登录着，反之亦然（FR5）。
+- **禁止**跨端共享 refresh token（任何形式的 iCloud Keychain 同步都必须关闭 —— refresh token **不是** shared credential）。
+
+### 12.7 观察性
+
+- 服务端每次 refresh 会落一条 `action=refresh_token` 审计日志（不含任何 token 原文）。
+- reuse detection 命中时落 `action=refresh_token_reuse_detected` **Warn**级别日志，含 `oldJti` + `currentJti`，便于后端排查客户端并发 bug / 可能的 token 泄漏。
+- 客户端**不**需要向后端上报 refresh 相关事件（服务端审计足够）。
+
+---
+
 ## 附录 A：快速参考卡
 
 | # | Type | Direction | 场景 |

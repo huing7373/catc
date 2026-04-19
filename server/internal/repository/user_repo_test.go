@@ -119,3 +119,90 @@ func TestUser_BSONFieldNames(t *testing.T) {
 	}
 	assert.True(t, hasQuiet, "preferences must contain quiet_hours subdocument (got %T %v)", prefs, prefs)
 }
+
+// TestUser_SessionBSONFieldNames locks down the snake_case field names
+// inside sessions.<deviceId>.*. Story 1.2 writes current_jti /
+// issued_at via dotted Mongo $set paths, so a rename on either field
+// would break reads silently.
+func TestUser_SessionBSONFieldNames(t *testing.T) {
+	t.Parallel()
+
+	u := domain.User{
+		ID:              "u1",
+		AppleUserIDHash: "h",
+		Preferences:     domain.DefaultPreferences(),
+		Sessions: map[string]domain.Session{
+			"00000000-0000-4000-8000-000000000001": {
+				CurrentJTI:   "jti-a",
+				IssuedAt:     time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC),
+				HasApnsToken: true,
+			},
+		},
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	raw, err := bson.Marshal(u)
+	require.NoError(t, err)
+
+	var asMap bson.M
+	require.NoError(t, bson.Unmarshal(raw, &asMap))
+
+	sessionKeys := bsonDocKeys(t, asMap["sessions"])
+	require.Contains(t, sessionKeys, "00000000-0000-4000-8000-000000000001",
+		"sessions map key must be preserved as the deviceId")
+
+	deviceSub := bsonDocLookup(t, asMap["sessions"], "00000000-0000-4000-8000-000000000001")
+	deviceKeys := bsonDocKeys(t, deviceSub)
+
+	for _, name := range []string{"current_jti", "issued_at", "has_apns_token"} {
+		assert.Containsf(t, deviceKeys, name,
+			"expected snake_case field %q in sessions[<deviceId>] (got %v)", name, deviceKeys)
+	}
+	for _, name := range []string{"CurrentJTI", "IssuedAt", "HasApnsToken"} {
+		assert.NotContainsf(t, deviceKeys, name,
+			"sessions[<deviceId>] must NOT contain Go field name %q", name)
+	}
+}
+
+// bsonDocKeys extracts field names from either a bson.M or bson.D. Go's
+// BSON driver chooses representation based on decode target; both
+// shapes are semantically equivalent for schema assertions.
+func bsonDocKeys(t *testing.T, v any) []string {
+	t.Helper()
+	switch d := v.(type) {
+	case bson.M:
+		out := make([]string, 0, len(d))
+		for k := range d {
+			out = append(out, k)
+		}
+		return out
+	case bson.D:
+		out := make([]string, 0, len(d))
+		for _, e := range d {
+			out = append(out, e.Key)
+		}
+		return out
+	default:
+		t.Fatalf("bsonDocKeys: expected bson.M or bson.D, got %T", v)
+		return nil
+	}
+}
+
+// bsonDocLookup fetches a named field from either bson.M or bson.D.
+func bsonDocLookup(t *testing.T, v any, key string) any {
+	t.Helper()
+	switch d := v.(type) {
+	case bson.M:
+		return d[key]
+	case bson.D:
+		for _, e := range d {
+			if e.Key == key {
+				return e.Value
+			}
+		}
+		t.Fatalf("bsonDocLookup: key %q not found in bson.D", key)
+	default:
+		t.Fatalf("bsonDocLookup: expected bson.M or bson.D, got %T", v)
+	}
+	return nil
+}

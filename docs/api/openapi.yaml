@@ -1,13 +1,14 @@
 openapi: 3.0.3
 info:
   title: Cat Backend API
-  version: "1.1.0-epic1"
+  version: "1.2.0-epic1"
   description: >
     HTTP API surface for the 裤衩猫 backend. WebSocket envelope/message
     protocol is defined in docs/api/ws-message-registry.md (source of truth
     internal/dto/ws_messages.go). This file formalizes the unauthenticated
-    bootstrap endpoints — /v1/platform/ws-registry (FR59 / Story 0.14)
-    and /auth/apple (Story 1.1 Sign in with Apple). Authenticated /v1/*
+    bootstrap endpoints — /v1/platform/ws-registry (FR59 / Story 0.14),
+    /auth/apple (Story 1.1 Sign in with Apple), and /auth/refresh
+    (Story 1.2 rolling rotation + reuse detection). Authenticated /v1/*
     endpoints land starting with Story 1.3 (JWT middleware) and are added
     here per-story. /healthz and /readyz are infra endpoints, intentionally
     omitted.
@@ -64,6 +65,81 @@ paths:
                   message: invalid identity token
         "500":
           description: Internal server error (Mongo / JWT signing failure).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: INTERNAL_ERROR
+                  message: internal server error
+  /auth/refresh:
+    post:
+      summary: Rotate access + refresh tokens (rolling rotation + reuse detection)
+      description: >
+        Bootstrap endpoint (no JWT required — outside the future /v1/*
+        group). The refresh token in the body IS the caller's credential.
+        The server verifies it, rejects it if it was already blacklisted,
+        and implements stolen-token reuse detection: if the presented
+        jti does not match users.sessions[deviceId].current_jti, the
+        *current* live jti is burned and this call returns 401 —
+        OAuth2 RFC 6819 §5.2.2.3. On success the old jti goes into the
+        refresh_blacklist with ttl = exp - now, and the client receives
+        a brand-new (access, refresh) pair. Story 1.2.
+
+        Clients MUST NOT retry a failed refresh with the same token —
+        the server already rotated or burned it. On 401 treat the
+        device's session as terminated and re-run /auth/apple.
+      operationId: refreshToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshTokenRequest"
+      responses:
+        "200":
+          description: Rotation succeeded; new access + refresh returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RefreshTokenResponse"
+        "400":
+          description: Validation error (missing field / too short / oversized).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error:
+                  code: VALIDATION_ERROR
+                  message: validation error
+        "401":
+          description: >
+            Refresh token rejected. Two distinct codes: the token failed
+            verification (signature / iss / alg / kid / exp /
+            tokenType!="refresh") → AUTH_INVALID_IDENTITY_TOKEN; the
+            token was blacklisted / reused / bound to an uninitialized
+            session → AUTH_REFRESH_TOKEN_REVOKED.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalid:
+                  summary: Token failed verification
+                  value:
+                    error:
+                      code: AUTH_INVALID_IDENTITY_TOKEN
+                      message: invalid identity token
+                revoked:
+                  summary: Token blacklisted / reused / session not initialized
+                  value:
+                    error:
+                      code: AUTH_REFRESH_TOKEN_REVOKED
+                      message: refresh token revoked
+        "500":
+          description: Internal server error (Redis / Mongo / JWT signing failure; fail-closed).
           content:
             application/json:
               schema:
@@ -214,6 +290,43 @@ components:
           description: RS256 JWT, ~30 day expiry. Carries uid / did / plat / ttype=refresh.
         user:
           $ref: "#/components/schemas/UserPublic"
+    RefreshTokenRequest:
+      type: object
+      required:
+        - refreshToken
+      properties:
+        refreshToken:
+          type: string
+          minLength: 16
+          maxLength: 8192
+          description: >
+            The refresh token the client last received — either from
+            /auth/apple or from a prior successful /auth/refresh. This
+            is the ONLY input; userId / deviceId / platform come from
+            the token's claims server-side and are never trusted from
+            the request body.
+      example:
+        refreshToken: "eyJhbGciOiJSUzI1NiIs..."
+    RefreshTokenResponse:
+      type: object
+      required:
+        - accessToken
+        - refreshToken
+      properties:
+        accessToken:
+          type: string
+          description: >
+            Freshly signed access token. The old access token is still
+            valid until its natural exp — the client should replace
+            it immediately in Keychain regardless.
+        refreshToken:
+          type: string
+          description: >
+            Freshly signed refresh token with a new jti. The old
+            refresh token is now blacklisted server-side and will fail
+            any subsequent /auth/refresh call — clients MUST replace
+            the value stored in Keychain before the next refresh
+            attempt.
     UserPublic:
       type: object
       required:

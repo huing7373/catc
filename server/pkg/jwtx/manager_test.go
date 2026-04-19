@@ -289,6 +289,50 @@ func TestManager_Verify_WrongSigningMethod(t *testing.T) {
 	assert.Contains(t, err.Error(), "signing method")
 }
 
+func TestManager_Issue_PreservesRegisteredClaimsID(t *testing.T) {
+	t.Parallel()
+	m, _, _ := setupManager(t)
+
+	// Deliberately picks a non-UUID sentinel so a silent m.issueClock.Now-
+	// tied mutation would be visible.
+	claims := CustomClaims{
+		UserID:    "u1",
+		TokenType: "refresh",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ID: "jti-rolling-rotation-sentinel",
+		},
+	}
+
+	tokenStr, err := m.Issue(claims)
+	require.NoError(t, err)
+
+	got, err := m.Verify(tokenStr)
+	require.NoError(t, err)
+	assert.Equal(t, "jti-rolling-rotation-sentinel", got.ID,
+		"Issue must not overwrite caller-supplied RegisteredClaims.ID (jti)")
+}
+
+func TestManager_Issue_EmptyJTIStaysEmpty(t *testing.T) {
+	t.Parallel()
+	m, _, _ := setupManager(t)
+
+	// Caller passes no jti — Issue MUST NOT magically fill one in; Story
+	// 1.2 services build their own jti via ids.NewRefreshJTI so Issue
+	// stays side-effect free.
+	claims := CustomClaims{
+		UserID:    "u1",
+		TokenType: "refresh",
+	}
+
+	tokenStr, err := m.Issue(claims)
+	require.NoError(t, err)
+
+	got, err := m.Verify(tokenStr)
+	require.NoError(t, err)
+	assert.Empty(t, got.ID,
+		"Issue must leave RegisteredClaims.ID empty when the caller did not supply one")
+}
+
 func TestManager_Verify_MissingExpiration(t *testing.T) {
 	t.Parallel()
 	m, activeKey, _ := setupManager(t)

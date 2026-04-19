@@ -200,3 +200,12 @@
 | 1 | patch | Round 1 的 detached writeCtx 只套在 Send 之后的收尾分支（原 handle 尾部），decode error / RouteTokens error / 无 token 三条早期分支仍然用原始（可能已取消的）ctx 做 xaddDLQ / retryOrDLQ / Ack；若 shutdown 恰在 quiet.Resolve / RouteTokens 期间到达，这几处 Redis 写全部失败，消息仍滞留 PEL；而 worker 只 `XREADGROUP ... ">"` 从不回收 PEL，等价于数据丢失 | internal/push/apns_worker.go:233,250,257 | 提取 `writeCtxFor(parent)` helper（parent 未 Done 时直接返回 + no-op cancel，否则 `context.Background()+2s`），覆盖 handle 的每一条收尾路径；新增 3 个单元测试（decode / route-err / no-token）在 `ctx` 已 cancel 的前提下断言 `XPENDING.Count == 0`，锁死 PEL 无残留契约 |
 
 **构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go test -tags=integration ./internal/push/ ./internal/cron/` 通过
+
+## [1-2-refresh-token-revoke-per-device-session] Round 1 — 2026-04-19
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | UpsertSession 在 `/auth/refresh` 旋转路径里只按 `_id` 过滤更新，未对 `sessions.<device>.current_jti` 做 compare-and-swap；两个并发请求都能通过 Step 4 reuse-detection 后 OVERWRITE 会话，违反 rolling-rotation 单用语义 | internal/repository/user_repo.go:164-167 | 竞态下两个 refresh 都返 200、但只有最后写入的 current_jti 存活；另一方客户端手里的新 token 在下次 refresh 会触发 reuse detection，直接烧掉活着的会话；新增 `UpsertSessionIfJTIMatches` + `ErrSessionStale` 哨兵；service 侧改用 CAS，落败者返 AUTH_REFRESH_TOKEN_REVOKED |
+| 2 | patch | RefreshToken Step 6/7 顺序是 UpsertSession → Revoke(oldJTI)，一旦 blacklist 写失败，session.current_jti 已指向客户端未接收的 newJTI，下次同一 oldJTI 的 retry 必命中 reuse detection 烧掉 newJTI | internal/service/auth_service.go:617-627 | 单次瞬时的 Redis 写失败会把合法用户直接踢回 SIWA；改为 Revoke FIRST → UpsertSession LAST：Revoke 失败 ⇒ 500 + session 不动，客户端可用同一 oldJTI 重试自愈；反向的 Revoke OK + UpsertSession Mongo 失败是接受的复合故障长尾 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过 + `go vet -tags=integration ./cmd/cat/... ./internal/repository/...` 通过

@@ -38,3 +38,30 @@ func TestNewUserID_Uniqueness(t *testing.T) {
 	}
 	assert.Len(t, seen, n)
 }
+
+func TestNewRefreshJTI_UUID4Format(t *testing.T) {
+	t.Parallel()
+
+	jti := NewRefreshJTI()
+	assert.Len(t, jti, 36, "UUID v4 textual form is exactly 36 chars")
+	assert.True(t, uuidV4Pattern.MatchString(jti),
+		"NewRefreshJTI must emit canonical UUID v4 (got %q)", jti)
+}
+
+// TestNewRefreshJTI_Uniqueness mirrors the UserID uniqueness check. Same
+// defensive goal: catch a broken RNG before it can produce a
+// refresh_blacklist key collision (review-antipatterns §8.1 — namespace
+// + injectivity).
+func TestNewRefreshJTI_Uniqueness(t *testing.T) {
+	t.Parallel()
+
+	const n = 1000
+	seen := make(map[string]struct{}, n)
+	for i := range n {
+		jti := NewRefreshJTI()
+		_, dup := seen[jti]
+		assert.False(t, dup, "NewRefreshJTI returned duplicate %q after %d iterations", jti, i)
+		seen[jti] = struct{}{}
+	}
+	assert.Len(t, seen, n)
+}

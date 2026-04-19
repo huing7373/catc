@@ -46,6 +46,12 @@ type RedisCfg struct {
 	DB   int    `toml:"db"`
 }
 
+// JWTCfg configures the jwtx.Manager. RefreshExpirySec controls two
+// behaviours: (1) the lifetime stamped on newly issued refresh tokens
+// via jwtx.Manager.Issue, and (2) the conservative blacklist TTL
+// AuthService.RevokeRefreshToken / reuse-detection burn path uses when
+// the caller does not know the live token's exp (Story 1.2 AC8 / §4.3
+// review-antipatterns "config fields must actually affect behavior").
 type JWTCfg struct {
 	PrivateKeyPath    string `toml:"private_key_path"`
 	PrivateKeyPathOld string `toml:"private_key_path_old"`

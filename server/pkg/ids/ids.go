@@ -55,3 +55,22 @@ func NewUserID() UserID {
 	}
 	return UserID(id.String())
 }
+
+// NewRefreshJTI returns a fresh UUID v4 encoded JTI string for a
+// refresh token. The JTI is the server-side canonical identifier for
+// the token — it is written to users.sessions[deviceId].current_jti and
+// used as the refresh_blacklist key suffix. UUID v4 guarantees both
+// uniqueness and colon-freedom, so `refresh_blacklist:<jti>` is
+// injective without length-prefix encoding (review-antipatterns §8.2).
+//
+// Intentionally distinct from NewUserID to keep identity IDs and token
+// IDs separable under grep / code review. Failure handling mirrors
+// NewUserID: panic — surfaces as INTERNAL_ERROR via the recover
+// middleware on the request path (Story 0.5 mechanism).
+func NewRefreshJTI() string {
+	id, err := uuid.NewRandom()
+	if err != nil {
+		panic("ids.NewRefreshJTI: " + err.Error())
+	}
+	return id.String()
+}

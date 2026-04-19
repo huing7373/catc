@@ -11,22 +11,23 @@ import (
 	"github.com/huing/cat/server/pkg/ids"
 )
 
-// AuthSignInService is the consumer-side surface AuthHandler depends on.
-// Defined here (not in internal/service) so unit tests can inject a fake
-// without crossing the service.UserRepository / VerifyApple / Issue web
-// the production wiring stitches together.
-type AuthSignInService interface {
+// AuthHandlerService aggregates the service-layer methods AuthHandler
+// depends on. Renamed from AuthSignInService (Story 1.1) to reflect
+// the expanding surface — Story 1.2 adds RefreshToken; Story 1.6 will
+// add RequestDeletion.
+type AuthHandlerService interface {
 	SignInWithApple(ctx context.Context, req service.SignInWithAppleRequest) (*service.SignInWithAppleResult, error)
+	RefreshToken(ctx context.Context, req service.RefreshTokenRequest) (*service.RefreshTokenResult, error)
 }
 
 // AuthHandler is the Gin handler for /auth/* unauthenticated bootstrap
-// endpoints. Story 1.1 ships POST /auth/apple; Story 1.2 will add
-// POST /auth/refresh on the same handler.
+// endpoints. Story 1.1 shipped POST /auth/apple; Story 1.2 adds
+// POST /auth/refresh.
 type AuthHandler struct {
-	svc AuthSignInService
+	svc AuthHandlerService
 }
 
-func NewAuthHandler(svc AuthSignInService) *AuthHandler {
+func NewAuthHandler(svc AuthHandlerService) *AuthHandler {
 	if svc == nil {
 		panic("handler.NewAuthHandler: svc must not be nil")
 	}
@@ -58,5 +59,29 @@ func (h *AuthHandler) SignInWithApple(c *gin.Context) {
 		AccessToken:  result.AccessToken,
 		RefreshToken: result.RefreshToken,
 		User:         dto.UserPublicFromDomain(result.User),
+	})
+}
+
+// Refresh handles POST /auth/refresh — bootstrap unauthenticated
+// endpoint (outside the future /v1/* JWT group). The refresh token in
+// the body IS the caller's credential; the handler does not check any
+// other auth. The service layer owns verification + rotation +
+// blacklist (Story 1.2 AuthService.RefreshToken).
+func (h *AuthHandler) Refresh(c *gin.Context) {
+	var req dto.RefreshTokenRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		dto.RespondAppError(c, dto.ErrValidationError.WithCause(err))
+		return
+	}
+	result, err := h.svc.RefreshToken(c.Request.Context(), service.RefreshTokenRequest{
+		RefreshToken: req.RefreshToken,
+	})
+	if err != nil {
+		dto.RespondAppError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, dto.RefreshTokenResponse{
+		AccessToken:  result.AccessToken,
+		RefreshToken: result.RefreshToken,
 	})
 }

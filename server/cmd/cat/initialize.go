@@ -125,7 +125,18 @@ func initialize(cfg *config.Config) *App {
 	if err := userRepo.EnsureIndexes(context.Background()); err != nil {
 		log.Fatal().Err(err).Msg("user repo EnsureIndexes failed")
 	}
-	authSvc := service.NewAuthService(userRepo, jwtMgr, jwtMgr, clk, cfg.Server.Mode)
+	// --- Story 1.2 refresh blacklist wiring ---
+	refreshBlacklist := redisx.NewRefreshBlacklist(redisCli.Cmdable(), clk)
+	// --- /Story 1.2 ---
+	authSvc := service.NewAuthService(
+		userRepo,
+		jwtMgr,           // AppleVerifier
+		jwtMgr,           // RefreshVerifier
+		jwtMgr,           // JWTIssuer (Issue + RefreshExpiry)
+		refreshBlacklist, // RefreshBlacklist
+		clk,
+		cfg.Server.Mode,
+	)
 	authHandler := handler.NewAuthHandler(authSvc)
 	// --- /Story 1.1 ---
 

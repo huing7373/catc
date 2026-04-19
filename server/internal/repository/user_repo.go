@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -21,6 +22,14 @@ import (
 var (
 	ErrUserNotFound      = errors.New("user repo: user not found")
 	ErrUserDuplicateHash = errors.New("user repo: duplicate apple_user_id_hash")
+	// ErrSessionStale signals that UpsertSessionIfJTIMatches observed a
+	// session.current_jti different from the expected one — i.e. the
+	// caller lost a rotation race against a concurrent /auth/refresh
+	// (or the user document was absent). The service interprets this
+	// as "your refresh token is no longer the live one; treat as
+	// revoked" and returns AUTH_REFRESH_TOKEN_REVOKED without burning
+	// any jti (no point — whoever won already wrote a new one).
+	ErrSessionStale = errors.New("user repo: session current_jti no longer matches expected")
 )
 
 const usersCollection = "users"
@@ -125,6 +134,162 @@ func (r *MongoUserRepository) Insert(ctx context.Context, u *domain.User) error 
 		return fmt.Errorf("user repo: insert: %w", err)
 	}
 	return nil
+}
+
+// validateDeviceID is the repo-side defense-in-depth guard for
+// sessions.<deviceId> Mongo paths. Real callers are DTO-validated
+// (binding:"uuid") so this guard is never load-bearing; it exists so a
+// future programmer error cannot smuggle "." or "$" into the dotted
+// path and alter an unrelated field (review-antipatterns §8.2).
+func validateDeviceID(deviceID string) error {
+	if deviceID == "" {
+		return errors.New("user repo: empty device id")
+	}
+	if strings.ContainsAny(deviceID, ".$") {
+		return fmt.Errorf("user repo: device id contains reserved path characters: %q", deviceID)
+	}
+	return nil
+}
+
+// UpsertSession writes sessions.<deviceId>.current_jti +
+// sessions.<deviceId>.issued_at via a dotted $set so other
+// sessions.<deviceId>.* fields (has_apns_token, owned by Story 1.4)
+// are untouched. updated_at is always refreshed via the injected
+// clock. Returns ErrUserNotFound when no user document matched.
+func (r *MongoUserRepository) UpsertSession(ctx context.Context, userID ids.UserID, deviceID string, s domain.Session) error {
+	if userID == "" {
+		return errors.New("user repo: upsert session: empty user id")
+	}
+	if err := validateDeviceID(deviceID); err != nil {
+		return err
+	}
+	now := r.clock.Now()
+	setDoc := bson.M{
+		"sessions." + deviceID + ".current_jti": s.CurrentJTI,
+		"sessions." + deviceID + ".issued_at":   s.IssuedAt,
+		"updated_at":                            now,
+	}
+	res, err := r.coll.UpdateOne(ctx,
+		bson.M{"_id": string(userID)},
+		bson.M{"$set": setDoc},
+	)
+	if err != nil {
+		return fmt.Errorf("user repo: upsert session: %w", err)
+	}
+	if res.MatchedCount == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// UpsertSessionIfJTIMatches is the rotation-safe variant of
+// UpsertSession. The Mongo filter includes
+// `sessions.<deviceId>.current_jti: expectedJTI`, so two concurrent
+// /auth/refresh requests that both passed the reuse-detection gate
+// cannot both overwrite the session — only the one that observes the
+// expected jti at UpdateOne time wins. The loser gets ErrSessionStale.
+//
+// Returns:
+//   - nil when the CAS succeeded.
+//   - ErrSessionStale when the user document exists but current_jti
+//     no longer matches — the caller MUST treat this as "refresh
+//     token already consumed", i.e. return AUTH_REFRESH_TOKEN_REVOKED.
+//     The repo cannot cheaply distinguish "user missing" from "CAS
+//     failed" in a single query; we conflate them here because the
+//     service semantic is identical (the token is no longer valid).
+//     Production data can never be in "user missing but has an
+//     authenticated refresh jti" state — SignInWithApple inserts the
+//     row before issuing the token.
+func (r *MongoUserRepository) UpsertSessionIfJTIMatches(ctx context.Context, userID ids.UserID, deviceID string, expectedJTI string, s domain.Session) error {
+	if userID == "" {
+		return errors.New("user repo: upsert session cas: empty user id")
+	}
+	if err := validateDeviceID(deviceID); err != nil {
+		return err
+	}
+	if expectedJTI == "" {
+		// An empty expected jti would match an uninitialized sub-document
+		// and silently overwrite it — reject loudly. Legitimate callers
+		// always pass claims.ID which comes from a non-empty JWT.
+		return errors.New("user repo: upsert session cas: empty expected jti")
+	}
+	now := r.clock.Now()
+	setDoc := bson.M{
+		"sessions." + deviceID + ".current_jti": s.CurrentJTI,
+		"sessions." + deviceID + ".issued_at":   s.IssuedAt,
+		"updated_at":                            now,
+	}
+	res, err := r.coll.UpdateOne(ctx,
+		bson.M{
+			"_id": string(userID),
+			"sessions." + deviceID + ".current_jti": expectedJTI,
+		},
+		bson.M{"$set": setDoc},
+	)
+	if err != nil {
+		return fmt.Errorf("user repo: upsert session cas: %w", err)
+	}
+	if res.MatchedCount == 0 {
+		return ErrSessionStale
+	}
+	return nil
+}
+
+// GetSession projects only sessions.<deviceId> to keep the payload
+// small. Returns ErrUserNotFound if the user document is absent;
+// returns (zero, false, nil) when the user exists but has no entry for
+// deviceID (distinguishable case — the caller treats absence as
+// "session not initialized, reject").
+func (r *MongoUserRepository) GetSession(ctx context.Context, userID ids.UserID, deviceID string) (domain.Session, bool, error) {
+	if userID == "" {
+		return domain.Session{}, false, errors.New("user repo: get session: empty user id")
+	}
+	if err := validateDeviceID(deviceID); err != nil {
+		return domain.Session{}, false, err
+	}
+	// Projection: only the requested sub-document + _id.
+	opts := options.FindOne().SetProjection(bson.M{"sessions." + deviceID: 1})
+	var doc struct {
+		Sessions map[string]domain.Session `bson:"sessions"`
+	}
+	err := r.coll.FindOne(ctx, bson.M{"_id": string(userID)}, opts).Decode(&doc)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return domain.Session{}, false, ErrUserNotFound
+		}
+		return domain.Session{}, false, fmt.Errorf("user repo: get session: %w", err)
+	}
+	s, ok := doc.Sessions[deviceID]
+	if !ok {
+		return domain.Session{}, false, nil
+	}
+	return s, true, nil
+}
+
+// ListDeviceIDs projects the full sessions map and returns its keys.
+// Returns []string{} (non-nil) when the user exists but has no
+// sessions. Consumed by AuthService.RevokeAllUserTokens (Story 1.6
+// account deletion).
+func (r *MongoUserRepository) ListDeviceIDs(ctx context.Context, userID ids.UserID) ([]string, error) {
+	if userID == "" {
+		return nil, errors.New("user repo: list device ids: empty user id")
+	}
+	opts := options.FindOne().SetProjection(bson.M{"sessions": 1})
+	var doc struct {
+		Sessions map[string]domain.Session `bson:"sessions"`
+	}
+	err := r.coll.FindOne(ctx, bson.M{"_id": string(userID)}, opts).Decode(&doc)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("user repo: list device ids: %w", err)
+	}
+	out := make([]string, 0, len(doc.Sessions))
+	for k := range doc.Sessions {
+		out = append(out, k)
+	}
+	return out, nil
 }
 
 // ClearDeletion clears the deletion_requested flag and stamps
