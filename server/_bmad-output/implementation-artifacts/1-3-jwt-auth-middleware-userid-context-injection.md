@@ -1,6 +1,6 @@
 # Story 1.3: JWT 鉴权中间件 + userId context 注入
 
-Status: review
+Status: done
 
 <!-- Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- §21.4 AC review 触发点：本 story 是典型的 "guard/auth middleware 类" —— 中间件一旦写错，所有 /v1/* 业务 endpoint 都在错误假设（错的 userId / 空 claims / 接受 refresh 当 access / 不拒过期 token）上运行；属"语义错但不 crash"的高风险类别。Dev agent 在 implementation 前必须先跑一轮 AC self-review，逐条对照 AC ↔ 反模式 §3.1-§3.5 / §7.1 / §10.x / §13.1 / §14.1。结尾 "Semantic-correctness 思考题" 必须在 Completion Notes 回答。 -->
