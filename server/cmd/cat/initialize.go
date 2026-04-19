@@ -176,8 +176,8 @@ func initialize(cfg *config.Config) *App {
 
 		log.Info().Msg("debug mode: debug.echo, debug.echo.dedup, session.resume, room.join, action.update handlers registered")
 	} else {
-		validator = ws.NewStubValidator()
-		log.Info().Msg("release mode: session.resume handler registered (Story 1.1 — RealUserProvider replaced EmptyUserProvider)")
+		validator = ws.NewJWTValidator(jwtMgr)
+		log.Info().Msg("release mode: JWT validator wired against jwtx.Manager (Story 1.1 — accepts access tokens issued by /auth/apple)")
 	}
 
 	blacklist := redisx.NewBlacklist(redisCli.Cmdable())

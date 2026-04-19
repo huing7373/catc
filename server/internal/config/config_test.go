@@ -2,7 +2,6 @@ package config
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -195,51 +194,31 @@ bundle_id = "com.test.cat"
 	assert.Equal(t, 5, cfg.Apple.JWKSFetchTimeoutSec)
 }
 
-// TestMustLoad_MissingBundleIDFatals proves the §4.1 fail-fast guard:
-// loading a config that omits `apple.bundle_id` MUST log.Fatal (which
-// calls os.Exit(1)) rather than boot into a state where every Apple
-// identity token would silently pass the audience check.
-//
-// Pattern: re-exec the test binary as a child process with
-// CONFIG_TEST_FATAL_BUNDLE_ID=1 so the child runs the would-fatal
-// branch in isolation; the parent asserts the child exited non-zero.
-// This is the same standard-library trick used to test functions that
-// call os.Exit (see https://go.dev/src/log/log_test.go). Skipped on
-// Windows because re-spawning the test binary across drives there is
-// brittle in CI; the source-level branch is the load-bearing guard.
-func TestMustLoad_MissingBundleIDFatals(t *testing.T) {
-	if os.Getenv("CONFIG_TEST_FATAL_BUNDLE_ID") == "1" {
-		// Child branch: write a config that has every other required
-		// field but no apple.bundle_id, then call MustLoad — expected
-		// to log.Fatal → os.Exit(1).
-		dir, err := os.MkdirTemp("", "cfg-fatal")
-		if err != nil {
-			os.Exit(2)
-		}
-		path := filepath.Join(dir, "test.toml")
-		body := []byte(`
+// TestMustLoad_BundleIDOptionalAtConfigLoad guards the deliberate
+// decision NOT to validate apple.bundle_id at config-load time —
+// operations CLIs (tools/blacklist_user, etc.) default to
+// config/default.toml and don't construct the SIWA verifier; making
+// them fatal here would break every unrelated tool. The bundle_id
+// fail-fast lives on jwtx.NewManagerWithApple, exercised by the main
+// server boot path only.
+func TestMustLoad_BundleIDOptionalAtConfigLoad(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tool.toml")
+	require.NoError(t, os.WriteFile(path, []byte(`
 [server]
 port = 8080
+
+[redis]
+addr = "localhost:6379"
+
 [apple]
 bundle_id = ""
-`)
-		if err := os.WriteFile(path, body, 0644); err != nil {
-			os.Exit(3)
-		}
-		MustLoad(path) // must not return
-		os.Exit(99)    // unreachable; if it returns we exit unique non-1 to detect the regression
-	}
+`), 0644))
 
-	cmd := exec.Command(os.Args[0], "-test.run=^TestMustLoad_MissingBundleIDFatals$", "-test.v")
-	cmd.Env = append(os.Environ(), "CONFIG_TEST_FATAL_BUNDLE_ID=1")
-	out, err := cmd.CombinedOutput()
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok {
-		t.Fatalf("child must have exited non-zero (log.Fatal expected); err=%v\noutput=\n%s", err, out)
-	}
-	// log.Fatal exits 1 — exit code 99 would mean MustLoad returned (regression).
-	assert.NotEqual(t, 99, exitErr.ExitCode(),
-		"MustLoad returned without log.Fatal — bundle_id guard regressed!\noutput=\n%s", out)
+	cfg := MustLoad(path)
+	assert.Empty(t, cfg.Apple.BundleID, "bundle_id may be empty at config-load; verifier construction enforces it")
 }
 
 func TestMustLoad_HashDeterministic(t *testing.T) {

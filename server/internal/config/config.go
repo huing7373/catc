@@ -229,15 +229,16 @@ func (c *Config) mustValidate() {
 	c.validateApple()
 }
 
-// validateApple enforces Story 1.1 Apple SIWA invariants. BundleID is
-// required because there is no safe default — accepting an empty audience
-// would let identity tokens issued for any other Apple-developer team's
-// app pass through. JWKS positive-int knobs use the same fail-fast
-// pattern as APNs / WS (review-antipatterns §4.1).
+// validateApple enforces Story 1.1 Apple SIWA positive-int invariants
+// (review-antipatterns §4.1). bundle_id is intentionally NOT validated
+// here: the value is required only for the SIWA verifier construction
+// path, and validating at config load makes every operations CLI
+// (e.g. tools/blacklist_user) fatal on the default config even though
+// it never instantiates the verifier. The actual fail-fast guard lives
+// on jwtx.NewManagerWithApple (which the main server unconditionally
+// constructs) — same pattern as APNs.KeyID / KeyPath, which only fail
+// when apns.enabled=true forces them down a consumer path.
 func (c *Config) validateApple() {
-	if c.Apple.BundleID == "" {
-		log.Fatal().Msg("config: apple.bundle_id must not be empty (set in production / local override)")
-	}
 	if c.Apple.JWKSCacheTTLSec <= 0 {
 		log.Fatal().Int("jwks_cache_ttl_sec", c.Apple.JWKSCacheTTLSec).
 			Msg("config: apple.jwks_cache_ttl_sec must be > 0")

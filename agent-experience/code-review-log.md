@@ -37,6 +37,17 @@
 
 ---
 
+## [1-1-user-domain-sign-in-with-apple-jwt] Round 1 — 2026-04-19
+
+| # | 类别 | 错误模式 | 文件 | 影响 |
+|---|------|---------|------|------|
+| 1 | patch | 把"运行时只在某条 consumer 路径才需要"的字段拉到 `MustLoad → mustValidate` 顶层强制非空，等价于让 default.toml 默认 boot fatal | server/internal/config/config.go:201（旧 validateApple bundle_id 检查）+ server/config/default.toml:42 | `cmd/cat/main.go` 与 `tools/blacklist_user/main.go` 都 fallback `config/default.toml` —— bundle_id 默认空导致两个 binary 在与 SIWA 完全无关的场景（如 `tools/blacklist_user` 操作 Redis blacklist）也启动 fatal；正确位置是 `jwtx.NewManagerWithApple`（已 fail-fast），让没有 verifier 装配的工具能正常 boot —— APNs.KeyID 用的就是这个 "consumer 路径才校验" 模式（apns.enabled=true 才 fatal） |
+| 2 | patch | release 分支保留 Story 0 的 `ws.NewStubValidator()` 占位（永远返 `AUTH_INVALID_IDENTITY_TOKEN`），但同 commit `/auth/apple` 已经签发真实 access token、`session.resume` 也开闸到 release | server/cmd/cat/initialize.go:179（旧）| 生产客户端拿到新签的 token，连接 `/ws` 仍然 100% 被拒，所有 WS 业务（含本 story 刚解锁的 release-mode `session.resume`）都不可用 —— 形成"HTTP 端能登，WS 端进不来"的撕裂状态。系统性地把 token-issuer 上线和 token-consumer 上线分到两个 story 时，最容易在 wiring 层漏接其中一端 |
+
+**构建验证：** ✅ `bash scripts/build.sh --test` 通过（含 `internal/ws/jwt_validator_test.go` 6 子用例 + `internal/config` 用 `TestMustLoad_BundleIDOptionalAtConfigLoad` 替换原 fatal 测试 + `go vet -tags=integration ./...` 全绿）
+
+---
+
 ## [10-1-integration-mvp-room-and-action] Round 1 — 2026-04-18
 
 | # | 类别 | 错误模式 | 文件 | 影响 |
