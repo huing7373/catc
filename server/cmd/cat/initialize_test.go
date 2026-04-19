@@ -73,6 +73,7 @@ func TestValidateRegistryConsistency_DebugModeFullyRegistered(t *testing.T) {
 	d.Register("session.resume", noopHandler)
 	d.Register("room.join", noopHandler)
 	d.Register("action.update", noopHandler)
+	d.RegisterDedup("profile.update", noopHandler)
 	// action.broadcast is Direction=down; MUST NOT be registered. The
 	// drift check exempts downstream-only types (Story 10.1).
 
@@ -98,6 +99,7 @@ func TestValidateRegistryConsistency_DownstreamOnlyExempt(t *testing.T) {
 	d.Register("session.resume", noopHandler)
 	d.Register("room.join", noopHandler)
 	d.Register("action.update", noopHandler)
+	d.RegisterDedup("profile.update", noopHandler)
 
 	// Debug mode must accept this configuration despite action.broadcast
 	// being in WSMessages but not registered.
@@ -110,23 +112,62 @@ func TestValidateRegistryConsistency_ReleaseMode(t *testing.T) {
 	// Story 1.1 flipped session.resume to non-DebugOnly. Release mode
 	// must register it (the same way debug mode does) — without the
 	// registration the dispatcher would return UNKNOWN_MESSAGE_TYPE
-	// while the registry endpoint advertises the type.
+	// while the registry endpoint advertises the type. Story 1.5
+	// adds profile.update — the first release-mode write-class RPC.
 	d := newStubDispatcher()
 	d.Register("session.resume", noopHandler)
+	d.RegisterDedup("profile.update", noopHandler)
 	require.NoError(t, validateRegistryConsistency(d, "release"))
 }
 
 func TestValidateRegistryConsistency_ReleaseModeMissingSessionResumeFails(t *testing.T) {
 	t.Parallel()
 
-	// Inverse of the above: forgetting to register session.resume in
-	// release mode must trip the drift guard. Direct regression test
-	// for the Story 1.1 flip.
+	// Inverse of the above: forgetting to register session.resume /
+	// profile.update in release mode must trip the drift guard.
+	// Direct regression test for the Story 1.1 + 1.5 flips.
 	d := newStubDispatcher()
 	err := validateRegistryConsistency(d, "release")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "session.resume")
+	assert.Contains(t, err.Error(), "profile.update")
 	assert.Contains(t, err.Error(), "missingInRelease")
+}
+
+// TestInitialize_ProfileUpdateDispatcherRegistered_ReleaseMode locks
+// the Story 1.5 §21.1 four-step gate: profile.update MUST appear in
+// the dispatcher's registered types in release mode. If a future
+// refactor gates the RegisterDedup call on DebugOnly (or similar
+// feature-flag drift), this test surfaces the regression at CI time
+// instead of leaving release clients looking at UNKNOWN_MESSAGE_TYPE.
+func TestInitialize_ProfileUpdateDispatcherRegistered_ReleaseMode(t *testing.T) {
+	t.Parallel()
+	d := newStubDispatcher()
+	// Mirror the production initialize.go release branch: register
+	// exactly what the release code path registers.
+	d.Register("session.resume", noopHandler)
+	d.RegisterDedup("profile.update", noopHandler)
+
+	registered := d.RegisteredTypes()
+	assert.Contains(t, registered, "profile.update",
+		"release mode MUST register profile.update (Story 1.5 §21.1 gate)")
+}
+
+func TestInitialize_ProfileUpdateDispatcherRegistered_DebugMode(t *testing.T) {
+	t.Parallel()
+	d := newStubDispatcher()
+	// Debug mode registers all non-downstream WSMessages entries;
+	// profile.update (DebugOnly=false) MUST be among them.
+	d.Register("debug.echo", noopHandler)
+	d.RegisterDedup("debug.echo.dedup", noopHandler)
+	d.Register("session.resume", noopHandler)
+	d.Register("room.join", noopHandler)
+	d.Register("action.update", noopHandler)
+	d.RegisterDedup("profile.update", noopHandler)
+
+	registered := d.RegisteredTypes()
+	assert.Contains(t, registered, "profile.update",
+		"debug mode MUST register profile.update (Story 1.5 §21.1 gate)")
 }
 
 func TestValidateRegistryConsistency_UnknownRegisteredFails(t *testing.T) {

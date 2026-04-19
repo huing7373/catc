@@ -337,6 +337,74 @@ func (r *MongoUserRepository) SetSessionHasApnsToken(ctx context.Context, userID
 	return nil
 }
 
+// ProfileUpdate is the repo-layer shape for UpdateProfile. Every field
+// is a pointer: non-nil ⇒ "client asked to change this"; nil ⇒ "leave
+// alone". The handler/service layer is responsible for already having
+// run DTO validation (HH:MM / IANA / displayName trim) before calling
+// this method; the repo treats inputs as authoritative and copies them
+// into the $set document.
+type ProfileUpdate struct {
+	DisplayName *string
+	Timezone    *string
+	QuietHours  *domain.QuietHours
+}
+
+// UpdateProfile applies the partial update in a single Mongo round-trip
+// (FindOneAndUpdate with ReturnDocument: After). The partial shape
+// prevents accidentally clobbering unrelated nested fields —
+// preferences.quiet_hours.{start,end} uses *dotted* $set so future
+// preferences.* additions (Epic 5 touch mute, Epic 7 skin slot) survive
+// a displayName-only update.
+//
+// A single-call UpdateOne is deliberate (see Story 1.4 AC Review
+// hardening #5): a two-step exists-check + update would TOCTOU-race
+// with Story 1.6 concurrent account deletion. FindOneAndUpdate uses
+// Mongo's server-side atomic update and returns the post-update
+// document in one network round-trip.
+//
+// Returns ErrUserNotFound when no document matched. The caller (service
+// layer) typically maps this to ErrInternalError at the handler boundary
+// so clients cannot probe for user-existence.
+func (r *MongoUserRepository) UpdateProfile(ctx context.Context, userID ids.UserID, p ProfileUpdate) (*domain.User, error) {
+	if userID == "" {
+		return nil, errors.New("user repo: update profile: empty user id")
+	}
+	if p.DisplayName == nil && p.Timezone == nil && p.QuietHours == nil {
+		return nil, errors.New("user repo: update profile: no fields to update")
+	}
+
+	setDoc := bson.M{"updated_at": r.clock.Now()}
+	if p.DisplayName != nil {
+		setDoc["display_name"] = *p.DisplayName
+	}
+	if p.Timezone != nil {
+		setDoc["timezone"] = *p.Timezone
+	}
+	if p.QuietHours != nil {
+		// Dotted $set — NEVER replace `preferences` wholesale. Future
+		// preferences.* additions would otherwise get clobbered by a
+		// profile.update that only carries quietHours. (Story 1.5
+		// Semantic-correctness #7.)
+		setDoc["preferences.quiet_hours.start"] = p.QuietHours.Start
+		setDoc["preferences.quiet_hours.end"] = p.QuietHours.End
+	}
+
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+	var updated domain.User
+	err := r.coll.FindOneAndUpdate(ctx,
+		bson.M{"_id": string(userID)},
+		bson.M{"$set": setDoc},
+		opts,
+	).Decode(&updated)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("user repo: update profile: %w", err)
+	}
+	return &updated, nil
+}
+
 // ClearDeletion clears the deletion_requested flag and stamps
 // updated_at with the clock. Returns ErrUserNotFound if no row matched
 // (the caller should treat this as a programming error — the service

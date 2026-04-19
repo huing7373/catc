@@ -900,7 +900,114 @@ func registerApnsToken(hex: String) async throws {
 
 ---
 
-## 15. 账户注销场景的 WS 主动断开（Story 1.6 预告）
+## 15. Profile 更新与时区自动上报（Story 1.5）
+
+### 15.1 端点（WS RPC）
+
+- 类型：`profile.update`（WS；`Direction=bi`，RequireAuth=true，RequireDedup=true）
+- 首次可用版本：openapi `1.5.0-epic1`
+- 用户必须已完成 Story 1.1 SIWA 并持有有效 access token；WS 连接必须已通过鉴权（HTTP `Authorization: Bearer …`）或 debug 模式的 query-token fallback。
+
+### 15.2 何时调用
+
+1. 用户在 App 设置页修改 displayName、timezone 或 quietHours（勿扰时段）其中任意一个或多个字段。
+2. **FR50 自动上报**：客户端（iOS + watchOS）**监听** `TimeZone.current` 的变化（`NSSystemTimeZoneDidChange` 通知或 `NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)`），一旦检测到变化，**主动**发送 `profile.update`，payload 仅含 `timezone` 字段（不动 displayName / quietHours）。
+
+> 服务端**不**区分"用户手动设置"与"自动上报" —— 同一个 endpoint 两种场景都走。差异仅在客户端 UI 是否展示了确认对话框。
+
+### 15.3 Request payload（最小示例：三字段全部）
+
+```json
+{
+  "id": "d5f0c6d0-0000-4000-8000-abc123456789",
+  "type": "profile.update",
+  "payload": {
+    "displayName": "Alice",
+    "timezone": "Asia/Shanghai",
+    "quietHours": { "start": "23:00", "end": "07:00" }
+  }
+}
+```
+
+- 三个字段**都 optional** —— 可以只发其中任一。**至少一个**非空，否则服务端返 `VALIDATION_ERROR`。
+- `displayName`：trim 后 UTF-8 字符数 ∈ [1,32]，不含 ASCII 控制字符；服务端会 trim 前后空白再落库。
+- `timezone`：IANA 时区（`time.LoadLocation` 能解析：`Asia/Shanghai` / `America/New_York` / `UTC` / `Europe/London` / …）。
+- `quietHours.start` 与 `quietHours.end`：24h 制 `HH:MM`，锁死 `00:00-23:59`。
+  - 区间**左闭右开**：`[start, end)` —— start 那一分钟算 quiet，end 那一分钟不算 quiet（设 07:00 结束 ⇒ 07:00 响）。
+  - `start == end` 合法，表示"24 小时静默"。
+  - `start > end` 表示跨日窗口（如 `23:00-07:00`）。
+
+### 15.4 Response payload（ok）
+
+```json
+{
+  "id": "d5f0c6d0-0000-4000-8000-abc123456789",
+  "ok": true,
+  "type": "profile.update.result",
+  "payload": {
+    "user": {
+      "id": "u-uuid",
+      "displayName": "Alice",
+      "timezone": "Asia/Shanghai",
+      "preferences": {
+        "quietHours": { "start": "23:00", "end": "07:00" }
+      }
+    }
+  }
+}
+```
+
+客户端**应该**用 response.payload.user 整条替换本地缓存 —— 这是 authoritative post-write 的最新快照（在某些实现细节上可能比你请求时发的字段更规范化，比如 displayName 已 trim）。
+
+### 15.5 Errors
+
+- `VALIDATION_ERROR` —— `at least one of displayName/timezone/quietHours must be provided` / `displayName must be at least 1 character after trim` / `timezone %q is not a valid IANA zone` / `quietHours.start %q must be HH:MM ...` / `invalid profile.update payload`（JSON decode 失败）。客户端**不要**重试同一 payload，需要用户修正输入。
+- `EVENT_PROCESSING` —— 同一 `envelope.id` 正在处理或已处理过；替换为新 `envelope.id` 重发（非幂等错误）。
+- `INTERNAL_ERROR` —— 服务端 Mongo 写失败或其他不可恢复故障。客户端以指数退避（1s → 3s → 10s）最多重试 3 次，仍失败则提示用户稍后再试。
+
+### 15.6 默认 quietHours
+
+新账户首次 SIWA 登录时，服务端默认写入 `quietHours = 23:00-07:00`（`domain.DefaultPreferences` 的 seed 值）。客户端 UI 在用户首次覆盖前应**显示默认值**（可通过 `session.resume` 的 `user.preferences.quietHours` 拿到）。
+
+### 15.7 Session.resume 与 profile.update 的关系
+
+- `session.resume` 的 `user.*` 字段（含 `preferences.quietHours`）被一层 **60s TTL Redis 缓存**（Story 0.12）。
+- `profile.update` 成功后，服务端**同步 invalidate** 该用户的 resume cache —— 同一 userId 下次 session.resume 必然重建快照，反映最新 profile。
+- 因此客户端**不需要**在 profile.update 成功后主动 resend session.resume（response 已带最新 user 字段）。
+
+### 15.8 观察性
+
+- 服务端成功落 `action=profile_update` INFO 日志，字段含 `userId` + `fields=[...]`（字段名枚举）。
+- 服务端**绝不**记 displayName **原值**（PII §M13）。客户端日志可以记，但**不**建议上传未脱敏到后台分析系统。
+- timezone / quietHours 原值服务端可能在排错时临时记录，非 PII。
+
+### 15.9 Swift 伪代码（FR50 自动时区上报）
+
+```swift
+// 一次性注册监听
+NotificationCenter.default.addObserver(
+    forName: .NSSystemTimeZoneDidChange,
+    object: nil, queue: .main
+) { _ in
+    let newTZ = TimeZone.current.identifier // e.g. "Asia/Shanghai"
+    Task {
+        do {
+            try await wsClient.sendDedup(
+                type: "profile.update",
+                payload: ["timezone": newTZ]
+            )
+        } catch {
+            // fail silently; 下次变化再尝试
+        }
+    }
+}
+```
+
+> `wsClient.sendDedup` 必须生成**新的** `envelope.id`（UUID v4）并等待 `*.result` —— 与其他 `RegisterDedup` 消息一致。
+
+---
+
+## 16. 账户注销场景的 WS 主动断开（Story 1.6 预告）
 
 Story 1.6 (DELETE `/v1/users/me`) 上线后会触发以下流程，本节让客户端**提前**做好准备：
 

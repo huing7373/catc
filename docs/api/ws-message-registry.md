@@ -184,3 +184,51 @@ Server → client push carrying another member's latest action. Fanned out from 
 ```
 
 No response shape — downstream pushes carry no `id` and no `ok` field (see **Envelope Shapes → Downstream push** above).
+
+### profile.update (bi, v1, auth required)
+
+**Release mode; Story 1.5 (Epic 1).**
+
+Client-initiated partial update of the authenticated user's profile — `displayName`, `timezone`, and/or `quietHours`. At least one field must be non-null. Updates are atomic (single `$set` Mongo call). On success the server invalidates the 60s `session.resume` cache for this user so the next `session.resume` reflects the fresh values.
+
+`timezone` must be a valid IANA zone (`time.LoadLocation` parseable: `Asia/Shanghai`, `America/New_York`, `UTC`, …). `quietHours.start` / `quietHours.end` must be `HH:MM` on a 24h calendar (`00:00`-`23:59`). `start == end` is permitted — it means "24h silent". The window is **left-closed, right-open** (`[start, end)`): the `start` minute is quiet, the `end` minute is not. Overnight windows are natural: `start > end` reads as "from start tonight through end the next morning".
+
+`displayName` is trimmed before persistence; all-whitespace and ASCII-control characters are rejected. Non-ASCII (CJK, emoji, …) is accepted. `displayName` is treated as PII in logs — server never emits the value, only the field-enum `fields=["displayName"]`.
+
+This is the primary wire for **FR50 client-side auto-timezone report**: iOS / watchOS clients observe `TimeZone.current` changes and send `profile.update` carrying only `timezone`.
+
+Dedup: **required** (NFR-SEC-9; registered via `RegisterDedup`). Replay of the same `envelope.id` returns the cached result without re-hitting Mongo.
+
+**Request payload:**
+
+```json
+{
+  "displayName": "<optional string, 1-32 runes after trim, no ASCII control chars>",
+  "timezone":    "<optional IANA zone, e.g. 'Asia/Shanghai'>",
+  "quietHours":  {
+    "start": "<HH:MM on 24h, 00-23 hours, 00-59 minutes>",
+    "end":   "<HH:MM on 24h>"
+  }
+}
+```
+
+**Response payload:**
+
+```json
+{
+  "user": {
+    "id":          "<uuid>",
+    "displayName": "<optional string>",
+    "timezone":    "<optional IANA zone>",
+    "preferences": {
+      "quietHours": { "start": "HH:MM", "end": "HH:MM" }
+    }
+  }
+}
+```
+
+**Errors:**
+
+- `VALIDATION_ERROR` — `at least one of displayName/timezone/quietHours must be provided` | `displayName must be at least 1 character after trim` | `displayName must be at most 32 characters` | `displayName must not contain control characters` | `displayName must be valid UTF-8` | `timezone %q is not a valid IANA zone` | `quietHours.start %q must be HH:MM (00-23):(00-59)` | `quietHours.end %q must be HH:MM (00-23):(00-59)` | `invalid profile.update payload`
+- `EVENT_PROCESSING` — concurrent replay / in-flight dedup slot (Story 0.10 contract)
+- `INTERNAL_ERROR` — Mongo write failed, or user row missing (deliberately NOT leaked as a distinct error to prevent user-existence probes)

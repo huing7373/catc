@@ -106,6 +106,7 @@ func TestWSMessages_ConsistencyWithDispatcher_DebugMode(t *testing.T) {
 	d.Register("session.resume", noopHandler)
 	d.Register("room.join", noopHandler)
 	d.Register("action.update", noopHandler)
+	d.RegisterDedup("profile.update", noopHandler)
 
 	got := d.RegisteredTypes()
 
@@ -130,9 +131,11 @@ func TestWSMessages_ConsistencyWithDispatcher_ReleaseMode(t *testing.T) {
 
 	// Mirrors cmd/cat/initialize.go release branch. Story 1.1 promoted
 	// session.resume out of DebugOnly so the release dispatcher must
-	// register it as well; later epic-1+ stories will append more.
+	// register it as well; Story 1.5 adds profile.update (first release-
+	// mode write-class RPC).
 	d := newDispatcher()
 	d.Register("session.resume", noopHandler)
+	d.RegisterDedup("profile.update", noopHandler)
 
 	got := d.RegisteredTypes()
 
@@ -152,6 +155,27 @@ func TestWSMessages_ConsistencyWithDispatcher_ReleaseMode(t *testing.T) {
 	assert.ElementsMatch(t, want, got,
 		"dto.WSMessages vs dispatcher registrations drifted (release mode): want=%v got=%v",
 		want, got)
+}
+
+// TestWSMessages_ProfileUpdate_Entry locks the exact meta shape of the
+// Story 1.5 profile.update entry. A future refactor that flips any of
+// RequiresDedup / RequiresAuth / DebugOnly / Direction would break the
+// fail-closed / PII / idempotency assumptions baked into the handler
+// and service — this test fails the build at that point.
+func TestWSMessages_ProfileUpdate_Entry(t *testing.T) {
+	t.Parallel()
+	meta, ok := dto.WSMessagesByType["profile.update"]
+	require.True(t, ok, "profile.update must be registered in dto.WSMessages")
+	assert.Equal(t, "v1", meta.Version)
+	assert.Equal(t, dto.WSDirectionBi, meta.Direction,
+		"profile.update is client-initiated RPC expecting a server response (Direction=bi)")
+	assert.True(t, meta.RequiresAuth,
+		"profile.update writes user-owned fields; must require auth")
+	assert.True(t, meta.RequiresDedup,
+		"profile.update is NFR-SEC-9 write-class; must require dedup "+
+			"(replay of same envelope.id → cached result, no double UpdateOne)")
+	assert.False(t, meta.DebugOnly,
+		"profile.update is a release-mode feature (Epic 1 Story 1.5), not debug-only")
 }
 
 // Sanity check that the init helper panics on duplicate Type. We cannot

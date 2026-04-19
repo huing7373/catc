@@ -65,6 +65,16 @@ func initialize(cfg *config.Config) *App {
 	}
 	// --- /Story 1.4 ---
 
+	// --- Story 1.1 user repo (built early; Story 1.5
+	// RealQuietHoursResolver needs it before the APNs worker wiring
+	// below). EnsureIndexes is idempotent, so calling here vs inside
+	// the Story 1.1 auth block is equivalent for production. ---
+	userRepo := repository.NewMongoUserRepository(mongoCli.DB(), clk)
+	if err := userRepo.EnsureIndexes(context.Background()); err != nil {
+		log.Fatal().Err(err).Msg("user repo EnsureIndexes failed")
+	}
+	// --- /Story 1.1 ---
+
 	// TokenCleaner real impl — swapped Empty via Story 1.4 (§21.2).
 	cronSch := cron.NewScheduler(
 		locker, redisCli.Cmdable(), clk, apnsTokenRepo,
@@ -93,7 +103,14 @@ func initialize(cfg *config.Config) *App {
 		// TokenProvider real impl — swapped Empty via Story 1.4 (§21.2).
 		router := push.NewAPNsRouter(apnsTokenRepo, cfg.APNs.WatchTopic, cfg.APNs.IphoneTopic)
 		// TokenDeleter real impl — swapped Empty via Story 1.4 (§21.2).
-		// QuietHoursResolver real impl — Story 1.5 fills this.
+		// QuietHoursResolver real impl — removed Empty via Story 1.5
+		// (§21.2 Empty→Real Provider 填实). Adapter below maps
+		// repository.ErrUserNotFound → (nil, found=false) because
+		// internal/push cannot import internal/repository (cycle:
+		// repository already imports push for TokenInfo).
+		realQuietHoursResolver := push.NewRealQuietHoursResolver(
+			&quietHoursUserLookupAdapter{repo: userRepo}, clk,
+		)
 		apnsWorker = push.NewAPNsWorker(push.APNsWorkerConfig{
 			InstanceID:      locker.InstanceID(),
 			StreamKey:       cfg.APNs.StreamKey,
@@ -105,7 +122,7 @@ func initialize(cfg *config.Config) *App {
 			ReadCount:       int64(cfg.APNs.ReadCount),
 			RetryBackoffsMs: cfg.APNs.RetryBackoffsMs,
 			MaxAttempts:     cfg.APNs.MaxAttempts,
-		}, redisCli.Cmdable(), sender, router, push.EmptyQuietHoursResolver{}, apnsTokenRepo, clk)
+		}, redisCli.Cmdable(), sender, router, realQuietHoursResolver, apnsTokenRepo, clk)
 		log.Info().Msg("apns push platform enabled")
 	} else {
 		log.Info().Msg("apns disabled (cfg.apns.enabled=false); NoopPusher in use")
@@ -142,10 +159,9 @@ func initialize(cfg *config.Config) *App {
 		BundleID: cfg.Apple.BundleID,
 		Clock:    clk,
 	})
-	userRepo := repository.NewMongoUserRepository(mongoCli.DB(), clk)
-	if err := userRepo.EnsureIndexes(context.Background()); err != nil {
-		log.Fatal().Err(err).Msg("user repo EnsureIndexes failed")
-	}
+	// userRepo is created earlier (see Story 1.1 early-build above)
+	// so the Story 1.5 RealQuietHoursResolver can consume it in the
+	// APNs worker construction.
 	// --- Story 1.2 refresh blacklist wiring ---
 	refreshBlacklist := redisx.NewRefreshBlacklist(redisCli.Cmdable(), clk)
 	// --- /Story 1.2 ---
@@ -186,6 +202,18 @@ func initialize(cfg *config.Config) *App {
 	// release guard around session.resume can be deleted entirely
 	// once Story 4.5 lands the last real provider.
 	dispatcher.Register("session.resume", sessionResumeHandler.Handle)
+
+	// Story 1.5 — profile.update: first release-mode WS write-class
+	// RPC. ResumeCache is the first business consumer of
+	// ResumeCacheInvalidator (the service calls Invalidate on every
+	// successful UpdateProfile so the 60s session.resume cache
+	// reflects the new displayName / timezone / quietHours
+	// immediately). RegisterDedup (NOT Register) because NFR-SEC-9
+	// requires idempotency for authoritative writes (replay of the
+	// same envelope.id → cached response, no double UpdateOne).
+	profileSvc := service.NewProfileService(userRepo, resumeCache, clk)
+	profileHandler := ws.NewProfileHandler(&profileServiceHandlerAdapter{svc: profileSvc})
+	dispatcher.RegisterDedup("profile.update", profileHandler.HandleUpdate)
 
 	var validator ws.TokenValidator
 	if cfg.Server.Mode == "debug" {

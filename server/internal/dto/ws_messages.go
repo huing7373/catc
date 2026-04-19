@@ -101,6 +101,15 @@ var WSMessages = []WSMessageMeta{
 		DebugOnly:     true,
 		Description:   "Server push: another room member's current action. MVP only, removed when Epic 4.1 ships.",
 	},
+	{
+		Type:          "profile.update",
+		Version:       "v1",
+		Direction:     WSDirectionBi,
+		RequiresAuth:  true,
+		RequiresDedup: true,
+		DebugOnly:     false,
+		Description:   "Client updates profile (displayName / timezone / quietHours); authoritative write, idempotent via envelope.id dedup.",
+	},
 }
 
 // WSMessagesByType is an O(1) lookup map keyed by Type, built once at package

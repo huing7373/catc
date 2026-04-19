@@ -385,6 +385,105 @@ func TestMongoUserRepo_Integration(t *testing.T) {
 		require.True(t, ok)
 		assert.False(t, got.HasApnsToken)
 	})
+
+	// --- Story 1.5 UpdateProfile subtests ---
+
+	t.Run("UpdateProfile_PartialDisplayNameOnly", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:update-dn-only")
+		require.NoError(t, repo.Insert(ctx, u))
+
+		dn := "Alice"
+		got, err := repo.UpdateProfile(ctx, u.ID, repository.ProfileUpdate{DisplayName: &dn})
+		require.NoError(t, err)
+		require.NotNil(t, got.DisplayName)
+		assert.Equal(t, "Alice", *got.DisplayName)
+		assert.Nil(t, got.Timezone, "timezone untouched")
+		assert.Equal(t, "23:00", got.Preferences.QuietHours.Start, "quiet hours preserved")
+		assert.Equal(t, "07:00", got.Preferences.QuietHours.End)
+	})
+
+	t.Run("UpdateProfile_PartialTimezoneOnly", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:update-tz-only")
+		require.NoError(t, repo.Insert(ctx, u))
+
+		tz := "Asia/Shanghai"
+		got, err := repo.UpdateProfile(ctx, u.ID, repository.ProfileUpdate{Timezone: &tz})
+		require.NoError(t, err)
+		assert.Nil(t, got.DisplayName, "displayName untouched (nil)")
+		require.NotNil(t, got.Timezone)
+		assert.Equal(t, "Asia/Shanghai", *got.Timezone)
+		assert.Equal(t, "23:00", got.Preferences.QuietHours.Start, "quiet hours preserved")
+	})
+
+	t.Run("UpdateProfile_PartialQuietHoursOnly", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:update-qh-only")
+		require.NoError(t, repo.Insert(ctx, u))
+
+		qh := domain.QuietHours{Start: "22:30", End: "06:30"}
+		got, err := repo.UpdateProfile(ctx, u.ID, repository.ProfileUpdate{QuietHours: &qh})
+		require.NoError(t, err)
+		assert.Nil(t, got.DisplayName)
+		assert.Nil(t, got.Timezone)
+		assert.Equal(t, "22:30", got.Preferences.QuietHours.Start)
+		assert.Equal(t, "06:30", got.Preferences.QuietHours.End)
+	})
+
+	t.Run("UpdateProfile_AllThreeFields", func(t *testing.T) {
+		u := newSeedUser(clk, "hash:update-all")
+		require.NoError(t, repo.Insert(ctx, u))
+
+		dn := "Bob"
+		tz := "America/New_York"
+		qh := domain.QuietHours{Start: "00:00", End: "06:00"}
+		got, err := repo.UpdateProfile(ctx, u.ID, repository.ProfileUpdate{
+			DisplayName: &dn, Timezone: &tz, QuietHours: &qh,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, got.DisplayName)
+		assert.Equal(t, "Bob", *got.DisplayName)
+		require.NotNil(t, got.Timezone)
+		assert.Equal(t, "America/New_York", *got.Timezone)
+		assert.Equal(t, "00:00", got.Preferences.QuietHours.Start)
+		assert.Equal(t, "06:00", got.Preferences.QuietHours.End)
+	})
+
+	t.Run("UpdateProfile_UserNotFound", func(t *testing.T) {
+		dn := "Alice"
+		_, err := repo.UpdateProfile(ctx, ids.UserID("nonexistent-id"),
+			repository.ProfileUpdate{DisplayName: &dn})
+		assert.ErrorIs(t, err, repository.ErrUserNotFound)
+	})
+
+	t.Run("UpdateProfile_PreservesSessionsAndFriendCount", func(t *testing.T) {
+		// Seed a user with an active session and friendCount, then run a
+		// quietHours-only update. The dotted $set path must NOT clobber
+		// sessions.* / friend_count / consents.* (Story 1.5 Semantic
+		// #7 — dotted $set not wholesale replace).
+		u := newSeedUser(clk, "hash:update-preserves")
+		u.FriendCount = 5
+		yesConsent := true
+		u.Consents = domain.UserConsents{StepData: &yesConsent}
+		require.NoError(t, repo.Insert(ctx, u))
+
+		dev := "00000000-0000-4000-8000-0000000001b5"
+		require.NoError(t, repo.UpsertSession(ctx, u.ID, dev, domain.Session{
+			CurrentJTI: "jti-original", IssuedAt: clk.Now(),
+		}))
+
+		qh := domain.QuietHours{Start: "01:00", End: "05:00"}
+		got, err := repo.UpdateProfile(ctx, u.ID, repository.ProfileUpdate{QuietHours: &qh})
+		require.NoError(t, err)
+		assert.Equal(t, "01:00", got.Preferences.QuietHours.Start)
+		assert.Equal(t, 5, got.FriendCount, "friend_count preserved")
+		require.NotNil(t, got.Consents.StepData)
+		assert.True(t, *got.Consents.StepData, "consents.step_data preserved")
+
+		// Session survived — current_jti is still the seed value.
+		sess, ok, err := repo.GetSession(ctx, u.ID, dev)
+		require.NoError(t, err)
+		require.True(t, ok, "session must survive quiet hours update")
+		assert.Equal(t, "jti-original", sess.CurrentJTI)
+	})
 }
 
 func newSeedUser(clk clockx.Clock, hash string) *domain.User {
