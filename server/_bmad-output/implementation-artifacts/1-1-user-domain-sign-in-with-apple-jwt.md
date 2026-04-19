@@ -1,6 +1,6 @@
 # Story 1.1: User 领域 + Sign in with Apple 登录 + JWT 签发
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 <!-- Story 1.1 is the FIRST Epic 1 story. Per epic-0-retro §8.1 Action #2 + 架构指南 §21.4, this story is NOT a tool/metric/guard/measurement story, so the mandatory AC review is NOT triggered — 但本 story 涉及密码学原语（JWT / Apple JWK 验签 / PII 哈希）和账号身份边界，dev agent 在 implementation 前仍建议手工 diff AC 与实现契约再开工，并回答 §21.8 "语义正确性" 思考题（见本文件末尾 "Semantic-correctness 思考题" 段落）。 -->
