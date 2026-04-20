@@ -1,25 +1,59 @@
 import SwiftUI
-import SpriteKit
+import UIKit
 import CatShared
-import Spine
 
 struct SpineWatchCatView: View {
     let state: CatState
-    @State private var scene = WatchSpineboyScene(size: CGSize(width: 320, height: 320))
 
     var body: some View {
-        SpriteView(scene: scene)
-            .background(Color.clear)
-            .onAppear {
-                scene.play(state: state)
+        TimelineView(.periodic(from: .now, by: frameDuration(for: normalizedState))) { context in
+            if let frameImage = DefaultCatAtlasStore.shared.frame(
+                for: normalizedState,
+                at: frameIndex(for: context.date, state: normalizedState)
+            ) {
+                Image(uiImage: frameImage)
+                    .resizable()
+                    .interpolation(.none)
+                    .scaledToFit()
+            } else {
+                Color.clear
             }
-            .onChange(of: state) { _, newValue in
-                scene.play(state: newValue)
-            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private var normalizedState: CatState {
+        switch state {
+        case .microYawn, .microStretch:
+            return .idle
+        default:
+            return state
+        }
+    }
+
+    private func frameDuration(for state: CatState) -> TimeInterval {
+        switch state {
+        case .idle:
+            return 0.26
+        case .walking:
+            return 0.16
+        case .running:
+            return 0.10
+        case .sleeping:
+            return 0.38
+        case .microYawn, .microStretch:
+            return 0.26
+        }
+    }
+
+    private func frameIndex(for date: Date, state: CatState) -> Int {
+        let duration = frameDuration(for: state)
+        let tick = Int(date.timeIntervalSinceReferenceDate / duration)
+        return tick % 4
     }
 }
 
-#Preview("Spine Idle") {
+#Preview("Frame Idle") {
     ZStack {
         Color.black.opacity(0.9).ignoresSafeArea()
         SpineWatchCatView(state: .idle)
@@ -27,7 +61,7 @@ struct SpineWatchCatView: View {
     }
 }
 
-#Preview("Spine Walking") {
+#Preview("Frame Walking") {
     ZStack {
         Color.black.opacity(0.9).ignoresSafeArea()
         SpineWatchCatView(state: .walking)
@@ -35,7 +69,7 @@ struct SpineWatchCatView: View {
     }
 }
 
-#Preview("Spine Running") {
+#Preview("Frame Running") {
     ZStack {
         Color.black.opacity(0.9).ignoresSafeArea()
         SpineWatchCatView(state: .running)
@@ -43,103 +77,66 @@ struct SpineWatchCatView: View {
     }
 }
 
-private final class WatchSpineboyScene: SKScene {
-    private var skeleton: Skeleton?
-    private let animationKey = "watch-spine-animation"
-    private let debugFrameNodeName = "debug-frame-node"
+private final class DefaultCatAtlasStore {
+    static let shared = DefaultCatAtlasStore()
 
-    override init(size: CGSize) {
-        super.init(size: size)
-        scaleMode = .resizeFill
-        backgroundColor = .clear
-        anchorPoint = CGPoint(x: 0.5, y: 0.5)
-        setupSkeletonIfNeeded()
-        layoutSkeleton()
+    private var cachedFrames: [CatState: [UIImage]] = [:]
+
+    func frame(for state: CatState, at index: Int) -> UIImage? {
+        let frames = framesForState(state)
+        guard frames.indices.contains(index) else { return nil }
+        return frames[index]
     }
 
-    required init?(coder aDecoder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func didChangeSize(_ oldSize: CGSize) {
-        super.didChangeSize(oldSize)
-        layoutSkeleton()
-    }
-
-    func play(state: CatState) {
-        setupSkeletonIfNeeded()
-        guard let skeleton else { return }
-
-        skeleton.removeAction(forKey: animationKey)
-
-        let animation = animationName(for: state)
-
-        do {
-            let action = try skeleton.action(animation: animation)
-            skeleton.run(.repeatForever(action), withKey: animationKey)
-            print("Watch spineboy animation started: \(animation)")
-        } catch {
-            print("Watch spineboy animation failed: \(animation), error: \(error)")
-            return
+    private func framesForState(_ state: CatState) -> [UIImage] {
+        if let cached = cachedFrames[state] {
+            return cached
         }
-    }
 
-    private func setupSkeletonIfNeeded() {
-        guard skeleton == nil else { return }
-
-        let atlas = SKTextureAtlas(named: "default")
-        let textureNames = atlas.textureNames.sorted()
-        print("Watch atlas default texture count: \(textureNames.count)")
-        print("Watch atlas default sample textures: \(Array(textureNames.prefix(8)))")
-
-        do {
-            let skeleton = try Skeleton(json: "spineboy-ess", skin: "default")
-            skeleton.setScale(0.14)
-            self.skeleton = skeleton
-            addChild(skeleton)
-            print("Watch spineboy skeleton loaded")
-            print("Watch spineboy child count: \(skeleton.children.count)")
-            print("Watch spineboy frame after load: \(skeleton.calculateAccumulatedFrame())")
-            installDebugFrame(for: skeleton)
-        } catch {
-            print("Watch spineboy load failed: \(error)")
+        guard let atlas = loadAtlasImage(), let cgImage = atlas.cgImage else {
+            return []
         }
+
+        let row = rowIndex(for: state)
+        let tileWidth = cgImage.width / 4
+        let tileHeight = cgImage.height / 4
+        let scale = atlas.scale
+
+        let frames: [UIImage] = (0..<4).compactMap { column in
+            let rect = CGRect(
+                x: column * tileWidth,
+                y: row * tileHeight,
+                width: tileWidth,
+                height: tileHeight
+            )
+
+            guard let frameCG = cgImage.cropping(to: rect) else { return nil }
+            return UIImage(cgImage: frameCG, scale: scale, orientation: .up)
+        }
+
+        cachedFrames[state] = frames
+        return frames
     }
 
-    private func layoutSkeleton() {
-        guard let skeleton else { return }
-        skeleton.position = CGPoint(x: 0, y: -24)
-
-        installDebugFrame(for: skeleton)
-        print("Watch spineboy frame after layout: \(skeleton.calculateAccumulatedFrame())")
-    }
-
-    private func animationName(for state: CatState) -> String {
+    private func rowIndex(for state: CatState) -> Int {
         switch state {
-        case .running:
-            return "run"
+        case .idle, .microYawn, .microStretch:
+            return 0
         case .walking:
-            return "walk"
-        case .sleeping, .idle, .microYawn, .microStretch:
-            return "idle"
+            return 1
+        case .running:
+            return 2
+        case .sleeping:
+            return 3
         }
     }
 
-    private func installDebugFrame(for skeleton: Skeleton) {
-        childNode(withName: debugFrameNodeName)?.removeFromParent()
-
-        let frame = skeleton.calculateAccumulatedFrame()
-        guard !frame.isNull, !frame.isInfinite, frame.width > 0, frame.height > 0 else {
-            print("Watch spineboy debug frame skipped: \(frame)")
-            return
+    private func loadAtlasImage() -> UIImage? {
+        guard let url = Bundle.main.url(forResource: "default_cat_atlas", withExtension: "png"),
+              let data = try? Data(contentsOf: url) else {
+            return nil
         }
 
-        let path = CGPath(rect: frame, transform: nil)
-        let shape = SKShapeNode(path: path)
-        shape.name = debugFrameNodeName
-        shape.strokeColor = .green
-        shape.lineWidth = 2
-        shape.zPosition = 999
-        addChild(shape)
+        return UIImage(data: data)
     }
 }

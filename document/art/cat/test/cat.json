@@ -1,0 +1,117 @@
+{ "skeleton": { "images": "./cat.atlas/" },
+"PhotoshopToSpine": { "scale": 1, "padding": 1, "trim": true },
+"bones": [
+	{ "name": "root" }
+],
+"slots": [
+	{ "name": "leg_front_right", "bone": "root" },
+	{ "name": "tail", "bone": "root" },
+	{ "name": "body", "bone": "root", "attachment": "body" },
+	{ "name": "head", "bone": "root", "attachment": "head" },
+	{ "name": "mouth", "bone": "root" },
+	{ "name": "blush_right", "bone": "root" },
+	{ "name": "blush_left", "bone": "root" },
+	{ "name": "eye_right", "bone": "root" },
+	{ "name": "eye_left", "bone": "root" },
+	{ "name": "ear_right", "bone": "root" },
+	{ "name": "ear_left", "bone": "root" },
+	{ "name": "leg_back_left", "bone": "root" },
+	{ "name": "leg_back_right", "bone": "root" },
+	{ "name": "leg_front_left", "bone": "root" },
+	{ "name": "tail_running", "bone": "root" },
+	{ "name": "leg_front_right_waliking", "bone": "root" },
+	{ "name": "leg_back_left_walking", "bone": "root" },
+	{ "name": "leg_front_right_running", "bone": "root" },
+	{ "name": "leg_front_left_running", "bone": "root" },
+	{ "name": "leg_back_left_running", "bone": "root" },
+	{ "name": "Z", "bone": "root" },
+	{ "name": "leg_front_right_sleep", "bone": "root" },
+	{ "name": "leg_front_left_sleep", "bone": "root" },
+	{ "name": "tail_sleeping", "bone": "root" },
+	{ "name": "eyebrow_right", "bone": "root" },
+	{ "name": "eyebrow_left", "bone": "root" }
+],
+"skins": {
+	"default": {
+		"leg_front_right": {
+			"leg_front_right": { "x": 714, "y": -723, "width": 56, "height": 60 }
+		},
+		"tail": {
+			"tail": { "x": 574, "y": -600.5, "width": 60, "height": 69 }
+		},
+		"body": {
+			"body": { "x": 646, "y": -665, "width": 196, "height": 188 }
+		},
+		"head": {
+			"head": { "x": 690.5, "y": -668, "width": 123, "height": 118 }
+		},
+		"mouth": {
+			"mouth": { "x": 703.5, "y": -682, "width": 29, "height": 20 }
+		},
+		"blush_right": {
+			"blush_right": { "x": 739.5, "y": -676, "width": 17, "height": 14 }
+		},
+		"blush_left": {
+			"blush_left": { "x": 660, "y": -687.5, "width": 26, "height": 21 }
+		},
+		"eye_right": {
+			"eye_right": { "x": 722, "y": -664.5, "width": 22, "height": 23 }
+		},
+		"eye_left": {
+			"eye_left": { "x": 677.5, "y": -668.5, "width": 21, "height": 21 }
+		},
+		"ear_right": {
+			"ear_right": { "x": 729, "y": -632, "width": 44, "height": 44 }
+		},
+		"ear_left": {
+			"ear_left": { "x": 650.5, "y": -637.5, "width": 37, "height": 39 }
+		},
+		"leg_back_left": {
+			"leg_back_left": { "x": 591, "y": -720, "width": 46, "height": 40 }
+		},
+		"leg_back_right": {
+			"leg_back_right": { "x": 622, "y": -725, "width": 38, "height": 30 }
+		},
+		"leg_front_left": {
+			"leg_front_left": { "x": 655.5, "y": -729.5, "width": 59, "height": 61 }
+		},
+		"tail_running": {
+			"tail_running": { "x": 181, "y": -702.5, "width": 72, "height": 71 }
+		},
+		"leg_front_right_waliking": {
+			"leg_front_right_waliking": { "x": 776, "y": -567.5, "width": 56, "height": 51 }
+		},
+		"leg_back_left_walking": {
+			"leg_back_left_walking": { "x": 698.5, "y": -553, "width": 49, "height": 54 }
+		},
+		"leg_front_right_running": {
+			"leg_front_right_running": { "x": 335, "y": -802, "width": 30, "height": 38 }
+		},
+		"leg_front_left_running": {
+			"leg_front_left_running": { "x": 300.5, "y": -803.5, "width": 45, "height": 41 }
+		},
+		"leg_back_left_running": {
+			"leg_back_left_running": { "x": 213, "y": -786.5, "width": 54, "height": 49 }
+		},
+		"Z": {
+			"Z": { "x": 855.5, "y": -1072.5, "width": 29, "height": 35 }
+		},
+		"leg_front_right_sleep": {
+			"leg_front_right_sleep": { "x": 756, "y": -1161, "width": 62, "height": 44 }
+		},
+		"leg_front_left_sleep": {
+			"leg_front_left_sleep": { "x": 676.5, "y": -1169, "width": 89, "height": 46 }
+		},
+		"tail_sleeping": {
+			"tail_sleeping": { "x": 539.5, "y": -1130.5, "width": 161, "height": 131 }
+		},
+		"eyebrow_right": {
+			"eyebrow_right": { "x": 1065.5, "y": -142.5, "width": 23, "height": 13 }
+		},
+		"eyebrow_left": {
+			"eyebrow_left": { "x": 1022, "y": -146, "width": 26, "height": 14 }
+		}
+	}
+},
+"animations": { "animation": {} }
+}

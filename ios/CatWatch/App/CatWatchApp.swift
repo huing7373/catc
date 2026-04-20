@@ -21,7 +21,16 @@ struct WatchHomeView: View {
     @StateObject private var controller = WatchMotionController()
     @StateObject private var reminderManager = StandReminderManager()
     @StateObject private var blindBoxManager = BlindBoxManager()
+    @StateObject private var friendStore: FriendCatStore
+    @StateObject private var syncCoordinator: WatchSyncCoordinator
     private let isPreview = ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1"
+
+    init() {
+        let config = BackendConfig.current
+        let friendStore = FriendCatStore(localUserID: config.debugToken)
+        _friendStore = StateObject(wrappedValue: friendStore)
+        _syncCoordinator = StateObject(wrappedValue: WatchSyncCoordinator(config: config, friendStore: friendStore))
+    }
 
     var body: some View {
         ZStack {
@@ -36,26 +45,16 @@ struct WatchHomeView: View {
             .ignoresSafeArea()
 
             VStack(spacing: 10) {
-                ZStack {
-                    SpineWatchCatView(state: controller.currentState)
-                        .frame(width: 116, height: 116)
-
-                    if let blindBox = blindBoxManager.currentBlindBox {
-                        FloatingBlindBoxBubble(
-                            blindBox: blindBox,
-                            spendableSteps: blindBoxManager.spendableSteps,
-                            openBlindBox: {
-                            blindBoxManager.openBlindBox()
-                        })
-                        .offset(x: 44, y: -30)
-                        .transition(.scale.combined(with: .opacity))
-                    } else {
-                        BlindBoxCountdownBubble(startDate: blindBoxManager.dropCycleStartDate)
-                            .offset(x: 44, y: -30)
-                            .transition(.opacity)
+                RoomCatGridView(
+                    localState: controller.currentState,
+                    friendCats: friendStore.topThreeFriends,
+                    blindBox: blindBoxManager.currentBlindBox,
+                    spendableSteps: blindBoxManager.spendableSteps,
+                    dropCycleStartDate: blindBoxManager.dropCycleStartDate,
+                    openBlindBox: {
+                        blindBoxManager.openBlindBox()
                     }
-                }
-                .animation(.spring(response: 0.35, dampingFraction: 0.8), value: blindBoxManager.currentBlindBox != nil)
+                )
 
                 VStack(spacing: 4) {
                     Text(stateSubtitle(controller.currentState))
@@ -71,6 +70,11 @@ struct WatchHomeView: View {
                     Text(controller.sensorStatus)
                         .font(.system(size: 10, weight: .medium, design: .rounded))
                         .foregroundStyle(.white.opacity(0.55))
+                        .multilineTextAlignment(.center)
+
+                    Text(syncCoordinator.statusText)
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(syncCoordinator.isHealthy ? .green.opacity(0.8) : .white.opacity(0.5))
                         .multilineTextAlignment(.center)
                 }
                 .padding(.horizontal, 10)
@@ -140,6 +144,7 @@ struct WatchHomeView: View {
             controller.onStateChanged = { state in
                 reminderManager.registerCatState(state)
                 blindBoxManager.registerCatState(state)
+                syncCoordinator.handleLocalStateChange(state)
             }
             controller.onTodayStepsChanged = { steps in
                 reminderManager.registerTodaySteps(steps)
@@ -148,6 +153,7 @@ struct WatchHomeView: View {
             controller.start()
             reminderManager.start()
             blindBoxManager.start()
+            syncCoordinator.start()
         }
         .onChange(of: scenePhase) { _, newPhase in
             guard !isPreview else { return }
@@ -155,6 +161,7 @@ struct WatchHomeView: View {
                 controller.handleWristRaise()
                 reminderManager.handleScenePhaseChange(.active)
                 blindBoxManager.handleScenePhaseChange(.active)
+                syncCoordinator.start()
             } else {
                 reminderManager.handleScenePhaseChange(newPhase)
                 blindBoxManager.handleScenePhaseChange(newPhase)
@@ -182,6 +189,259 @@ struct WatchHomeView: View {
 
 #Preview("Watch Home") {
     WatchHomeView()
+}
+
+private struct RoomCatGridView: View {
+    let localState: CatState
+    let friendCats: [FriendCatPresence]
+    let blindBox: BlindBoxStatus?
+    let spendableSteps: Int
+    let dropCycleStartDate: Date
+    let openBlindBox: () -> Void
+
+    private let columns = [
+        GridItem(.flexible(), spacing: 8),
+        GridItem(.flexible(), spacing: 8)
+    ]
+
+    var body: some View {
+        Group {
+            if friendCats.isEmpty {
+                SingleCatHeroCard(
+                    state: localState,
+                    accessory: {
+                        Group {
+                            if let blindBox {
+                                FloatingBlindBoxBubble(
+                                    blindBox: blindBox,
+                                    spendableSteps: spendableSteps,
+                                    openBlindBox: openBlindBox
+                                )
+                                .scaleEffect(0.86)
+                            } else {
+                                BlindBoxCountdownBubble(startDate: dropCycleStartDate)
+                                    .scaleEffect(0.86)
+                            }
+                        }
+                    }
+                )
+            } else {
+                LazyVGrid(columns: columns, spacing: 8) {
+                    RoomCatCard(
+                        title: "You",
+                        state: localState,
+                        accessory: {
+                            Group {
+                                if let blindBox {
+                                    FloatingBlindBoxBubble(
+                                        blindBox: blindBox,
+                                        spendableSteps: spendableSteps,
+                                        openBlindBox: openBlindBox
+                                    )
+                                    .scaleEffect(0.72)
+                                } else {
+                                    BlindBoxCountdownBubble(startDate: dropCycleStartDate)
+                                        .scaleEffect(0.72)
+                                }
+                            }
+                        }
+                    )
+
+                    ForEach(friendCats) { friend in
+                        RoomCatCard(
+                            title: shortName(for: friend.userID),
+                            state: friend.state
+                        )
+                    }
+
+                    ForEach(friendCats.count..<3, id: \.self) { _ in
+                        EmptyRoomCatCard()
+                    }
+                }
+            }
+        }
+    }
+
+    private func shortName(for userID: String) -> String {
+        if let token = userID.split(separator: "-").last, !token.isEmpty {
+            return String(token.prefix(8))
+        }
+        return String(userID.prefix(8))
+    }
+}
+
+private struct RoomCatCard<Accessory: View>: View {
+    let title: String
+    let state: CatState
+    @ViewBuilder var accessory: Accessory
+
+    init(
+        title: String,
+        state: CatState,
+        @ViewBuilder accessory: () -> Accessory = { EmptyView() }
+    ) {
+        self.title = title
+        self.state = state
+        self.accessory = accessory()
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text(title)
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.88))
+                .lineLimit(1)
+
+            ZStack(alignment: .topTrailing) {
+                Circle()
+                    .fill(Color.white.opacity(0.06))
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    )
+                    .frame(width: 68, height: 68)
+
+                SpineWatchCatView(state: state)
+                    .frame(width: 58, height: 58)
+                    .offset(y: 4)
+
+                accessory
+                    .offset(x: 10, y: -8)
+            }
+            .frame(height: 72)
+
+            Text(displayName(for: state))
+                .font(.system(size: 9, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.66))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 6)
+        .padding(.horizontal, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.white.opacity(0.06), lineWidth: 1)
+        )
+    }
+
+    private func displayName(for state: CatState) -> String {
+        switch state {
+        case .walking:
+            return "walking"
+        case .running:
+            return "running"
+        case .sleeping:
+            return "sleeping"
+        case .idle, .microYawn, .microStretch:
+            return "idle"
+        }
+    }
+}
+
+private struct SingleCatHeroCard<Accessory: View>: View {
+    let title: String?
+    let state: CatState
+    @ViewBuilder var accessory: Accessory
+
+    init(
+        title: String? = nil,
+        state: CatState,
+        @ViewBuilder accessory: () -> Accessory = { EmptyView() }
+    ) {
+        self.title = title
+        self.state = state
+        self.accessory = accessory()
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if let title {
+                Text(title)
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.88))
+            }
+
+            ZStack(alignment: .topTrailing) {
+                Circle()
+                    .fill(Color.white.opacity(0.06))
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    )
+                    .frame(width: 112, height: 112)
+
+                SpineWatchCatView(state: state)
+                    .frame(width: 98, height: 98)
+                    .offset(y: 8)
+
+                accessory
+                    .offset(x: 14, y: -10)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 118)
+
+            Text(displayName(for: state))
+                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.66))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+    }
+
+    private func displayName(for state: CatState) -> String {
+        switch state {
+        case .walking:
+            return "walking"
+        case .running:
+            return "running"
+        case .sleeping:
+            return "sleeping"
+        case .idle, .microYawn, .microStretch:
+            return "idle"
+        }
+    }
+}
+
+private struct EmptyRoomCatCard: View {
+    var body: some View {
+        VStack(spacing: 4) {
+            Text("Waiting")
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.56))
+
+            Circle()
+                .fill(Color.white.opacity(0.03))
+                .overlay(
+                    Circle()
+                        .stroke(style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                        .foregroundStyle(Color.white.opacity(0.12))
+                )
+                .frame(width: 68, height: 68)
+                .overlay(
+                    Text("+")
+                        .font(.system(size: 22, weight: .light, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.25))
+                )
+
+            Text("idle")
+                .font(.system(size: 9, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.36))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 6)
+        .padding(.horizontal, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white.opacity(0.03))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.white.opacity(0.05), lineWidth: 1)
+        )
+    }
 }
 
 private struct LiveCatView: View {

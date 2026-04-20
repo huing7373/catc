@@ -14,10 +14,7 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "CatShared",
-            resources: [
-                .process("Resources")
-            ]
+            name: "CatShared"
         ),
         .target(
             name: "CatCore",
