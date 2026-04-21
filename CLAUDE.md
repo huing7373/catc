@@ -18,6 +18,32 @@
 
 **写 server 代码前额外读 `server/agent-experience/review-antipatterns.md`。** 这是 Epic 0 十九轮 code review 蒸馏出的战术级反模式清单（并发安全 / context 生命周期 / JWT 安全边界 / 配置 fail-fast / 注册表自证 / release-vs-debug gate / redis key injectivity / 滑动窗口 / 中间件顺序 / 度量语义等），开头有 TL;DR 自检清单。发现新反模式时同步更新：原始记录进 `code-review-log.md`，蒸馏条目进 `review-antipatterns.md`。
 
+## Pending Cross-Repo Action Items (待处理跨仓需求)
+
+**⚠️ Server 团队请在下次 epic 规划前处理**：
+
+### 2026-04-20 · iPhone UX Step 10 Party Mode → Server 4 个新需求
+
+iPhone UX 设计规范在 Step 10 User Journey Flows 评审中产生 4 个 server 契约新需求（S-SRV-15~18），以及架构哲学升级（**哲学 B · Server 为主，WC 为辅**）。
+
+**详细技术契约文档**：`ios/CatPhone/_bmad-output/planning-artifacts/server-handoff-ux-step10-2026-04-20.md`
+
+**核心新需求概览**：
+- **S-SRV-15**：新建 `user_milestones` collection + API（承载账号级里程碑，替代客户端 UserDefaults）
+- **S-SRV-16**：`box.state` 新增 `unlocked_pending_reveal` 态（Watch 不可达时延迟揭晓）
+- **S-SRV-17**：取消 `emote.delivered` 发送者 ack 推送（fire-and-forget 硬约束）
+- **S-SRV-18**：所有 fail 节点 Prometheus metric 打点（详见清单）
+
+**建议行动**：
+1. 阅读 handoff 文档
+2. 跨仓 sync 会议对齐契约（建议 60 min）
+3. server PRD 追加 S-SRV-15~18（或链接 iPhone PRD）
+4. 排期到合适的 server epic（建议 `UserMilestones` 先行，是 iOS Epic 1/2 硬依赖）
+
+**iPhone 端状态**：UX 规范 v0.3 完稿（`ios/CatPhone/_bmad-output/planning-artifacts/ux-design-specification.md`），iPhone PRD 已追加 v2 修订注记。
+
+---
+
 ## Repo Separation (三端独立)
 
 三个独立目录：`server/` (Go) / `app/` (iOS) / `watch/` (watchOS)。server repo **不**引用 APP/watch，也不被它们引用。跨端契约通过 `docs/api/` 下的文档同步（e.g. `ws-message-registry.md` / `integration-mvp-client-guide.md` / `openapi.yaml`），不通过共享代码。真机联调类工作归 Epic 9，不塞业务 epic。
