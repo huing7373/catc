@@ -1,0 +1,158 @@
+# generated: 2026-04-22
+# last_updated: 2026-04-22
+# project: CatPhone
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: {project-root}/_bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+
+generated: 2026-04-22
+last_updated: 2026-04-22
+project: CatPhone
+project_key: NOKEY
+tracking_system: file-system
+story_location: "{project-root}/_bmad-output/implementation-artifacts"
+
+development_status:
+  # ==========================================================================
+  # Epic 1: Foundation（基石：Bootstrap + Provider + WS 稳定性基线 + Log）
+  # ==========================================================================
+  epic-1: backlog
+  # --- 1A: Bootstrap & Dev Loop ---
+  1a-1-build-sh-install-hooks-swift-format: backlog
+  1a-2-xcodegen-four-target-skeleton: backlog
+  1a-3-dir-skeleton-log-facade: backlog
+  1a-4-onboarding-docs-ac-triplet-lint: backlog
+  1a-5-spine-swift6-concurrency-spike: backlog
+  1a-6-failure-semantics-adr: backlog
+  1a-7-fail-closed-grep-gate-ci: backlog
+  # --- 1B: Provider 契约骨架 + WS baseline ---
+  1b-1-apiclient-protocol-empty-impl: backlog
+  1b-2-wsclient-protocol-registry: backlog
+  1b-3-wsclient-baseline-reconnect-ttl: backlog
+  1b-4-authtokenprovider-keychain: backlog
+  1b-5-localstore-swiftdata-placeholder: backlog
+  1b-6-authservice-protocol-empty: backlog
+  1b-7-boxstatestore-protocol-empty: backlog
+  1b-8-watchtransport-noop-philosophy-b: backlog
+  # --- 1C: 测试基础设施 + UI 基础组件 ---
+  1c-1-test-protocol-skeletons: backlog
+  1c-2-fixture-trio-userdefaults-wsfake-hapticspy: backlog
+  1c-3-dual-ssot-scenario-fixture: backlog
+  1c-4-contract-drift-register-ws-fixture-check: backlog
+  1c-5-catshared-ui-base-components: backlog
+  epic-1-retrospective: optional
+
+  # ==========================================================================
+  # Epic 2: Onboarding（首开仪式：叙事 + SIWA + Watch 模式 + 撕包装 + 命名）
+  # ==========================================================================
+  epic-2: backlog
+  2-1-narrative-card-carousel: backlog
+  2-2-siwa-login-nonce-replay: backlog
+  2-3-watch-mode-picker-observer: backlog
+  2-4-tear-ceremony-cat-gaze: backlog
+  2-5-cat-naming-milestones-soft-gate: backlog
+  epic-2-retrospective: optional
+
+  # ==========================================================================
+  # Epic 3: 我的猫 & 表情交互（MyCat & Emote）
+  # ==========================================================================
+  epic-3: backlog
+  3-1-account-tab-mycat-card: backlog
+  3-2-emoji-picker-inline-sheet: backlog
+  3-3-emote-float-cat-response-tooltip: backlog
+  3-4-fire-and-forget-symmetry-server-dedup: backlog
+  epic-3-retrospective: optional
+
+  # ==========================================================================
+  # Epic 4: HealthKit × 盲盒 × 仓库（经济闭环 Part 1）
+  # ==========================================================================
+  epic-4: backlog
+  4-1-healthkit-auth-reject-degradation: backlog
+  4-2-stepdatasource-local-display: backlog
+  4-3-step-history-chart: backlog
+  4-4-boxstatestore-pending-ui-30min: backlog
+  4-5-1000-steps-unlock-server-authoritative: backlog
+  4-6-unlocked-pending-reveal-ui: backlog
+  4-7-skin-rarity-badge-loot-box-compliance: backlog
+  4-8-inventory-ui-duplicate-to-material: backlog
+  4-9-unlock-service-fail-closed-aggregation: backlog
+  epic-4-retrospective: optional
+
+  # ==========================================================================
+  # Epic 5: 合成 & 装扮（经济闭环 Part 2）
+  # ==========================================================================
+  epic-5: backlog
+  5-1-craft-confirm-sheet: backlog
+  5-2-craftservice-idempotent-concurrent: backlog
+  5-3-dressup-iphone-large-screen-preview: backlog
+  5-4-dressup-payoff-watch-render-timezone: backlog
+  epic-5-retrospective: optional
+
+  # ==========================================================================
+  # Epic 6: 好友 & 房间（社交核心）
+  # ==========================================================================
+  epic-6: backlog
+  6-1-friend-request-accept-reject: backlog
+  6-2-friend-list-block-remove: backlog
+  6-3-mute-friend-emote-report: backlog
+  6-4-room-create-join-leave: backlog
+  6-5-room-owner-transfer-dissolve: backlog
+  6-6-invite-link-qr-join-flow: backlog
+  6-7-room-members-observer-privacy-gate: backlog
+  6-8-narrative-rules-room-story-feed: backlog
+  6-9-room-emote-broadcast-observer-push: backlog
+  epic-6-retrospective: optional
+
+  # ==========================================================================
+  # Epic 7: 账户 & 隐私合规 & 可观测性 MVP
+  # ==========================================================================
+  epic-7: backlog
+  7-1-settings-tab-static-info: backlog
+  7-2-identity-edit-nickname-avatar-bio: backlog
+  7-3-push-channel-toggles: backlog
+  7-4-sign-out-keychain-cleanup: backlog
+  7-5-account-delete-export-gdpr: backlog
+  7-6-crash-version-remote-config: backlog
+  7-7-milestones-sync-privacy-empty-prompt: backlog
+  epic-7-retrospective: optional
+
+  # ==========================================================================
+  # Epic 9: 真机 × Watch 配对 × Spike 验证（Hardware & Manual · per CLAUDE §21.6）
+  # ==========================================================================
+  epic-9: backlog
+  9-1-github-actions-ci: backlog
+  9-2-release-binary-linker-symbol-check: backlog
+  9-3-watch-pairing-healthkit-siwa-smoke: backlog
+  9-4-watch-only-fr-smoke: backlog
+  9-5-pre-mvp-alpha-legal-store-compliance: backlog
+  9-6-final-release-ship-gate: backlog
+  epic-9-retrospective: optional
