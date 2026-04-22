@@ -74,7 +74,7 @@
          <EnvironmentVariable
             key = "CAT_BACKEND_HTTP_URL"
             value = "http://127.0.0.1:18080"
-            isEnabled = "NO">
+            isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable
             key = "CAT_BACKEND_WS_URL"
