@@ -58,6 +58,7 @@ final class WatchRoomSession {
     func joinCurrentRoom() async {
         let requestID = UUID().uuidString
         pendingJoinRequestID = requestID
+        log("joinCurrentRoom request id = \(requestID)")
 
         let envelope = WSRequestEnvelope(
             id: requestID,
@@ -68,8 +69,10 @@ final class WatchRoomSession {
         do {
             try await webSocketClient.sendJSON(envelope)
             onStatusTextChanged?("room.join 已发送")
+            log("room.join sent")
         } catch {
             onStatusTextChanged?("room.join 发送失败：\(error.localizedDescription)")
+            log("room.join send failed: \(error.localizedDescription)")
         }
     }
 
@@ -90,8 +93,10 @@ final class WatchRoomSession {
 
         do {
             try await webSocketClient.sendJSON(envelope)
+            log("action.update sent: \(action)")
         } catch {
             onStatusTextChanged?("action.update 发送失败：\(error.localizedDescription)")
+            log("action.update send failed: \(error.localizedDescription)")
         }
     }
 
@@ -113,6 +118,7 @@ final class WatchRoomSession {
 
         if let broadcast = try? decoder.decode(WSDownstreamEnvelope<ActionBroadcastPayload>.self, from: data),
            broadcast.type == "action.broadcast" {
+            log("action.broadcast received: \(broadcast.payload.userId) -> \(broadcast.payload.action)")
             friendStore.applyBroadcast(broadcast.payload)
             return true
         }
@@ -127,11 +133,13 @@ final class WatchRoomSession {
             isJoined = true
             friendStore.replace(with: payload.members)
             onStatusTextChanged?("room.join 成功：\(payload.members.count) 位好友")
+            log("room.join ok, members=\(payload.members.count)")
             onJoined?()
         } else {
             isJoined = false
             let message = response.error?.message ?? "未知错误"
             onStatusTextChanged?("room.join 失败：\(message)")
+            log("room.join failed: \(message)")
         }
     }
 
@@ -141,6 +149,11 @@ final class WatchRoomSession {
         if !response.ok {
             let message = response.error?.message ?? "未知错误"
             onStatusTextChanged?("action.update 失败：\(message)")
+            log("action.update failed: \(message)")
         }
+    }
+
+    private func log(_ message: String) {
+        print("[WatchRoomSession] \(message)")
     }
 }

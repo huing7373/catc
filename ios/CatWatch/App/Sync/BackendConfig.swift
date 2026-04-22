@@ -48,8 +48,8 @@ extension BackendConfig {
 
     static let localDebug = BackendConfig(
         name: "local-debug",
-        baseHTTPURL: URL(string: "http://127.0.0.1:8080")!,
-        webSocketURL: URL(string: "ws://127.0.0.1:8080/ws")!,
+        baseHTTPURL: URL(string: "http://127.0.0.1:18080")!,
+        webSocketURL: URL(string: "ws://127.0.0.1:18080/ws")!,
         debugToken: "watch-alice",
         roomID: "test-room"
     )

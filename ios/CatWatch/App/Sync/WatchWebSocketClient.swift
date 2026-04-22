@@ -62,6 +62,7 @@ final class WatchWebSocketClient: ObservableObject {
         reconnectTask?.cancel()
         reconnectTask = nil
         reconnectAttempt = 0
+        log("connect() -> \(config.webSocketURL.absoluteString)")
         openConnection(asReconnect: false)
     }
 
@@ -74,6 +75,7 @@ final class WatchWebSocketClient: ObservableObject {
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
         updateState(.disconnected)
+        log("disconnect()")
     }
 
     func sendText(_ text: String) async throws {
@@ -105,9 +107,11 @@ final class WatchWebSocketClient: ObservableObject {
         task = webSocketTask
 
         updateState(asReconnect ? .reconnecting(attempt: reconnectAttempt) : .connecting)
+        log(asReconnect ? "reconnecting attempt \(reconnectAttempt)" : "connecting")
 
         webSocketTask.resume()
         updateState(.connected)
+        log("connected (socket resumed)")
         startReceiveLoop(for: webSocketTask)
     }
 
@@ -152,6 +156,7 @@ final class WatchWebSocketClient: ObservableObject {
         guard !isManualDisconnect else { return }
 
         lastErrorMessage = error.localizedDescription
+        log("receive failed: \(error.localizedDescription)")
         stopReceiveLoop()
         task = nil
         scheduleReconnect()
@@ -183,5 +188,9 @@ final class WatchWebSocketClient: ObservableObject {
     private func updateState(_ newState: WatchWebSocketConnectionState) {
         connectionState = newState
         onStateChanged?(newState)
+    }
+
+    private func log(_ message: String) {
+        print("[WatchWebSocketClient] \(message)")
     }
 }

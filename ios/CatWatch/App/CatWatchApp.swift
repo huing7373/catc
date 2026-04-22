@@ -33,138 +33,150 @@ struct WatchHomeView: View {
     }
 
     var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.06, green: 0.07, blue: 0.09),
-                    Color(red: 0.12, green: 0.13, blue: 0.16)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .ignoresSafeArea()
+        GeometryReader { proxy in
+            let compact = proxy.size.width < 170
+            let hasFriends = !friendStore.topThreeFriends.isEmpty
 
-            VStack(spacing: 10) {
-                RoomCatGridView(
-                    localState: controller.currentState,
-                    friendCats: friendStore.topThreeFriends,
-                    blindBox: blindBoxManager.currentBlindBox,
-                    spendableSteps: blindBoxManager.spendableSteps,
-                    dropCycleStartDate: blindBoxManager.dropCycleStartDate,
-                    openBlindBox: {
-                        blindBoxManager.openBlindBox()
-                    }
+            ZStack {
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.06, green: 0.07, blue: 0.09),
+                        Color(red: 0.12, green: 0.13, blue: 0.16)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
                 )
+                .ignoresSafeArea()
 
-                VStack(spacing: 4) {
-                    Text(stateSubtitle(controller.currentState))
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.82))
-                        .multilineTextAlignment(.center)
+                VStack(spacing: compact ? 6 : 10) {
+                    RoomCatGridView(
+                        localState: controller.currentState,
+                        friendCats: friendStore.topThreeFriends,
+                        blindBox: blindBoxManager.currentBlindBox,
+                        spendableSteps: blindBoxManager.spendableSteps,
+                        dropCycleStartDate: blindBoxManager.dropCycleStartDate,
+                        compact: compact,
+                        openBlindBox: {
+                            blindBoxManager.openBlindBox()
+                        }
+                    )
 
-                    Text("当前点数 \(blindBoxManager.spendableSteps) 点")
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.72))
-                        .multilineTextAlignment(.center)
+                    if !hasFriends {
+                        VStack(spacing: compact ? 3 : 4) {
+                            Text(stateSubtitle(controller.currentState))
+                                .font(.system(size: compact ? 11 : 12, weight: .medium, design: .rounded))
+                                .foregroundStyle(.white.opacity(0.82))
+                                .multilineTextAlignment(.center)
 
-                    Text(controller.sensorStatus)
-                        .font(.system(size: 10, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.55))
-                        .multilineTextAlignment(.center)
+                            Text("当前点数 \(blindBoxManager.spendableSteps) 点")
+                                .font(.system(size: compact ? 10 : 11, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.white.opacity(0.72))
+                                .multilineTextAlignment(.center)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
 
-                    Text(syncCoordinator.statusText)
-                        .font(.system(size: 10, weight: .medium, design: .rounded))
-                        .foregroundStyle(syncCoordinator.isHealthy ? .green.opacity(0.8) : .white.opacity(0.5))
-                        .multilineTextAlignment(.center)
+                            Text(controller.sensorStatus)
+                                .font(.system(size: compact ? 9 : 10, weight: .medium, design: .rounded))
+                                .foregroundStyle(.white.opacity(0.55))
+                                .multilineTextAlignment(.center)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+
+                            Text(syncCoordinator.statusText)
+                                .font(.system(size: compact ? 9 : 10, weight: .medium, design: .rounded))
+                                .foregroundStyle(syncCoordinator.isHealthy ? .green.opacity(0.8) : .white.opacity(0.5))
+                                .multilineTextAlignment(.center)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                        }
+                        .padding(.horizontal, 10)
+                    }
                 }
-                .padding(.horizontal, 10)
-            }
-            .padding(16)
+                .padding(compact ? 10 : 16)
+                .offset(y: hasFriends ? (compact ? -8 : -4) : 0)
 
-            if let reminderMessage = reminderManager.foregroundBannerText {
-                VStack {
-                    Text(reminderMessage)
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(
-                            Capsule()
-                                .fill(Color.black.opacity(0.72))
-                        )
-                        .overlay(
-                            Capsule()
-                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                        )
-                        .shadow(color: .black.opacity(0.22), radius: 12, y: 6)
-                        .padding(.top, 8)
-
-                    Spacer()
-                }
-                .padding(.horizontal, 12)
-                .transition(.move(edge: .top).combined(with: .opacity))
-            }
-
-            #if DEBUG
-            VStack {
-                Spacer()
-                HStack {
-                    Button {
-                        controller.injectDebugWalkAndSteps()
-                    } label: {
-                        Text("+50")
-                            .font(.system(size: 10, weight: .black, design: .rounded))
+                if let reminderMessage = reminderManager.foregroundBannerText {
+                    VStack {
+                        Text(reminderMessage)
+                            .font(.system(size: compact ? 10 : 11, weight: .semibold, design: .rounded))
                             .foregroundStyle(.white)
-                            .frame(width: 36, height: 28)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
                             .background(
                                 Capsule()
                                     .fill(Color.black.opacity(0.72))
                             )
                             .overlay(
                                 Capsule()
-                                    .stroke(Color.white.opacity(0.22), lineWidth: 1)
+                                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
                             )
-                    }
-                    .buttonStyle(.plain)
+                            .shadow(color: .black.opacity(0.22), radius: 12, y: 6)
+                            .padding(.top, 8)
 
-                    Spacer()
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
-            .padding(.leading, 10)
-            .padding(.bottom, 10)
-            #endif
-        }
-        .animation(.spring(response: 0.32, dampingFraction: 0.82), value: reminderManager.foregroundBannerText)
-        .task {
-            guard !isPreview else { return }
-            controller.onMotionInputChanged = { input in
-                reminderManager.registerMotion(input)
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .center)
+            .overlay(alignment: .bottomLeading) {
+                #if DEBUG
+                Button {
+                    controller.injectDebugWalkAndSteps()
+                } label: {
+                    Text("+50")
+                        .font(.system(size: 11, weight: .black, design: .rounded))
+                        .foregroundStyle(.white)
+                        .frame(width: 42, height: 30)
+                        .background(
+                            Capsule()
+                                .fill(Color.black.opacity(0.80))
+                        )
+                        .overlay(
+                            Capsule()
+                                .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .shadow(color: .black.opacity(0.18), radius: 4, y: 2)
+                .padding(.leading, 10)
+                .padding(.bottom, 12)
+                .zIndex(999)
+                #endif
             }
-            controller.onStateChanged = { state in
-                reminderManager.registerCatState(state)
-                blindBoxManager.registerCatState(state)
-                syncCoordinator.handleLocalStateChange(state)
-            }
-            controller.onTodayStepsChanged = { steps in
-                reminderManager.registerTodaySteps(steps)
-                blindBoxManager.registerTodaySteps(steps)
-            }
-            controller.start()
-            reminderManager.start()
-            blindBoxManager.start()
-            syncCoordinator.start()
-        }
-        .onChange(of: scenePhase) { _, newPhase in
-            guard !isPreview else { return }
-            if newPhase == .active {
-                controller.handleWristRaise()
-                reminderManager.handleScenePhaseChange(.active)
-                blindBoxManager.handleScenePhaseChange(.active)
+            .animation(.spring(response: 0.32, dampingFraction: 0.82), value: reminderManager.foregroundBannerText)
+            .task {
+                guard !isPreview else { return }
+                controller.onMotionInputChanged = { input in
+                    reminderManager.registerMotion(input)
+                }
+                controller.onStateChanged = { state in
+                    reminderManager.registerCatState(state)
+                    blindBoxManager.registerCatState(state)
+                    syncCoordinator.handleLocalStateChange(state)
+                }
+                controller.onTodayStepsChanged = { steps in
+                    reminderManager.registerTodaySteps(steps)
+                    blindBoxManager.registerTodaySteps(steps)
+                }
+                controller.start()
+                reminderManager.start()
+                blindBoxManager.start()
                 syncCoordinator.start()
-            } else {
-                reminderManager.handleScenePhaseChange(newPhase)
-                blindBoxManager.handleScenePhaseChange(newPhase)
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                guard !isPreview else { return }
+                if newPhase == .active {
+                    controller.handleWristRaise()
+                    reminderManager.handleScenePhaseChange(.active)
+                    blindBoxManager.handleScenePhaseChange(.active)
+                    syncCoordinator.start()
+                } else {
+                    reminderManager.handleScenePhaseChange(newPhase)
+                    blindBoxManager.handleScenePhaseChange(newPhase)
+                }
             }
         }
     }
@@ -197,6 +209,7 @@ private struct RoomCatGridView: View {
     let blindBox: BlindBoxStatus?
     let spendableSteps: Int
     let dropCycleStartDate: Date
+    let compact: Bool
     let openBlindBox: () -> Void
 
     private let columns = [
@@ -209,6 +222,7 @@ private struct RoomCatGridView: View {
             if friendCats.isEmpty {
                 SingleCatHeroCard(
                     state: localState,
+                    compact: compact,
                     accessory: {
                         Group {
                             if let blindBox {
@@ -217,46 +231,53 @@ private struct RoomCatGridView: View {
                                     spendableSteps: spendableSteps,
                                     openBlindBox: openBlindBox
                                 )
-                                .scaleEffect(0.86)
+                                .scaleEffect(compact ? 0.82 : 0.86)
                             } else {
                                 BlindBoxCountdownBubble(startDate: dropCycleStartDate)
-                                    .scaleEffect(0.86)
+                                    .scaleEffect(compact ? 0.82 : 0.86)
                             }
                         }
                     }
                 )
             } else {
-                LazyVGrid(columns: columns, spacing: 8) {
-                    RoomCatCard(
-                        title: "You",
-                        state: localState,
-                        accessory: {
-                            Group {
-                                if let blindBox {
-                                    FloatingBlindBoxBubble(
-                                        blindBox: blindBox,
-                                        spendableSteps: spendableSteps,
-                                        openBlindBox: openBlindBox
-                                    )
-                                    .scaleEffect(0.72)
-                                } else {
-                                    BlindBoxCountdownBubble(startDate: dropCycleStartDate)
-                                        .scaleEffect(0.72)
+                ZStack {
+                    LazyVGrid(columns: columns, spacing: compact ? 6 : 8) {
+                        RoomCatCard(
+                            title: "You",
+                            state: localState,
+                            compact: compact,
+                            accessory: {
+                                Group {
+                                    if let blindBox {
+                                        FloatingBlindBoxBubble(
+                                            blindBox: blindBox,
+                                            spendableSteps: spendableSteps,
+                                            openBlindBox: openBlindBox
+                                        )
+                                        .scaleEffect(compact ? 0.64 : 0.72)
+                                    } else {
+                                        BlindBoxCountdownBubble(startDate: dropCycleStartDate)
+                                            .scaleEffect(compact ? 0.64 : 0.72)
+                                    }
                                 }
                             }
-                        }
-                    )
-
-                    ForEach(friendCats) { friend in
-                        RoomCatCard(
-                            title: shortName(for: friend.userID),
-                            state: friend.state
                         )
+
+                        ForEach(friendCats) { friend in
+                            RoomCatCard(
+                                title: shortName(for: friend.userID),
+                                state: friend.state,
+                                compact: compact
+                            )
+                        }
+
+                        ForEach(friendCats.count..<3, id: \.self) { _ in
+                            EmptyRoomCatCard(compact: compact)
+                        }
                     }
 
-                    ForEach(friendCats.count..<3, id: \.self) { _ in
-                        EmptyRoomCatCard()
-                    }
+                    CenterClockView(compact: compact)
+                        .allowsHitTesting(false)
                 }
             }
         }
@@ -273,25 +294,29 @@ private struct RoomCatGridView: View {
 private struct RoomCatCard<Accessory: View>: View {
     let title: String
     let state: CatState
+    let compact: Bool
     @ViewBuilder var accessory: Accessory
 
     init(
         title: String,
         state: CatState,
+        compact: Bool = false,
         @ViewBuilder accessory: () -> Accessory = { EmptyView() }
     ) {
         self.title = title
         self.state = state
+        self.compact = compact
         self.accessory = accessory()
     }
 
     var body: some View {
-        VStack(spacing: 4) {
-            Text(title)
-                .font(.system(size: 10, weight: .bold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.88))
-                .lineLimit(1)
-
+        VStack(spacing: compact ? 0 : 4) {
+            if !compact {
+                Text(title)
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.88))
+                    .lineLimit(1)
+            }
             ZStack(alignment: .topTrailing) {
                 Circle()
                     .fill(Color.white.opacity(0.06))
@@ -299,30 +324,32 @@ private struct RoomCatCard<Accessory: View>: View {
                         Circle()
                             .stroke(Color.white.opacity(0.08), lineWidth: 1)
                     )
-                    .frame(width: 68, height: 68)
+                    .frame(width: compact ? 62 : 68, height: compact ? 62 : 68)
 
                 SpineWatchCatView(state: state)
-                    .frame(width: 58, height: 58)
-                    .offset(y: 4)
+                    .frame(width: compact ? 52 : 58, height: compact ? 52 : 58)
+                    .offset(y: compact ? 2 : 4)
 
                 accessory
-                    .offset(x: 10, y: -8)
+                    .offset(x: compact ? 8 : 10, y: compact ? -6 : -8)
             }
-            .frame(height: 72)
+            .frame(height: compact ? 64 : 72)
 
-            Text(displayName(for: state))
-                .font(.system(size: 9, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.66))
+            if !compact {
+                Text(displayName(for: state))
+                    .font(.system(size: 9, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.66))
+            }
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 6)
-        .padding(.horizontal, 4)
+        .padding(.vertical, compact ? 4 : 6)
+        .padding(.horizontal, compact ? 3 : 4)
         .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: compact ? 16 : 18, style: .continuous)
                 .fill(Color.white.opacity(0.05))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: compact ? 16 : 18, style: .continuous)
                 .stroke(Color.white.opacity(0.06), lineWidth: 1)
         )
     }
@@ -344,23 +371,26 @@ private struct RoomCatCard<Accessory: View>: View {
 private struct SingleCatHeroCard<Accessory: View>: View {
     let title: String?
     let state: CatState
+    let compact: Bool
     @ViewBuilder var accessory: Accessory
 
     init(
         title: String? = nil,
         state: CatState,
+        compact: Bool = false,
         @ViewBuilder accessory: () -> Accessory = { EmptyView() }
     ) {
         self.title = title
         self.state = state
+        self.compact = compact
         self.accessory = accessory()
     }
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: compact ? 6 : 8) {
             if let title {
                 Text(title)
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .font(.system(size: compact ? 10 : 11, weight: .bold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.88))
             }
 
@@ -371,47 +401,28 @@ private struct SingleCatHeroCard<Accessory: View>: View {
                         Circle()
                             .stroke(Color.white.opacity(0.08), lineWidth: 1)
                     )
-                    .frame(width: 112, height: 112)
+                    .frame(width: compact ? 104 : 112, height: compact ? 104 : 112)
 
                 SpineWatchCatView(state: state)
-                    .frame(width: 98, height: 98)
-                    .offset(y: 8)
+                    .frame(width: compact ? 90 : 98, height: compact ? 90 : 98)
+                    .offset(y: compact ? 6 : 8)
 
                 accessory
-                    .offset(x: 14, y: -10)
+                    .offset(x: compact ? 12 : 14, y: compact ? -8 : -10)
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 118)
-
-            Text(displayName(for: state))
-                .font(.system(size: 10, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.66))
+            .frame(height: compact ? 108 : 118)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-    }
-
-    private func displayName(for state: CatState) -> String {
-        switch state {
-        case .walking:
-            return "walking"
-        case .running:
-            return "running"
-        case .sleeping:
-            return "sleeping"
-        case .idle, .microYawn, .microStretch:
-            return "idle"
-        }
+        .padding(.vertical, compact ? 6 : 8)
     }
 }
 
 private struct EmptyRoomCatCard: View {
-    var body: some View {
-        VStack(spacing: 4) {
-            Text("Waiting")
-                .font(.system(size: 10, weight: .bold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.56))
+    let compact: Bool
 
+    var body: some View {
+        VStack(spacing: compact ? 0 : 4) {
             Circle()
                 .fill(Color.white.opacity(0.03))
                 .overlay(
@@ -419,28 +430,57 @@ private struct EmptyRoomCatCard: View {
                         .stroke(style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
                         .foregroundStyle(Color.white.opacity(0.12))
                 )
-                .frame(width: 68, height: 68)
+                .frame(width: compact ? 62 : 68, height: compact ? 62 : 68)
                 .overlay(
                     Text("+")
-                        .font(.system(size: 22, weight: .light, design: .rounded))
+                        .font(.system(size: compact ? 20 : 22, weight: .light, design: .rounded))
                         .foregroundStyle(.white.opacity(0.25))
                 )
 
-            Text("idle")
-                .font(.system(size: 9, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.36))
+            if !compact {
+                Text("idle")
+                    .font(.system(size: 9, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.36))
+            }
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 6)
-        .padding(.horizontal, 4)
+        .padding(.vertical, compact ? 4 : 6)
+        .padding(.horizontal, compact ? 3 : 4)
         .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: compact ? 16 : 18, style: .continuous)
                 .fill(Color.white.opacity(0.03))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: compact ? 16 : 18, style: .continuous)
                 .stroke(Color.white.opacity(0.05), lineWidth: 1)
         )
+    }
+}
+
+private struct CenterClockView: View {
+    let compact: Bool
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            Text(formattedTime(for: context.date))
+                .font(.system(size: compact ? 18 : 22, weight: .bold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.92))
+                .shadow(color: .black.opacity(0.18), radius: 4, y: 1)
+                .padding(.horizontal, compact ? 8 : 10)
+                .padding(.vertical, compact ? 4 : 6)
+                .background(
+                    Capsule()
+                        .fill(Color.black.opacity(0.16))
+                )
+        }
+    }
+
+    private func formattedTime(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = .autoupdatingCurrent
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return formatter.string(from: date)
     }
 }
 

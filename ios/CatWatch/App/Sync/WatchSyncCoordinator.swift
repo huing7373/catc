@@ -53,6 +53,7 @@ final class WatchSyncCoordinator: ObservableObject {
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
+        log("start()")
 
         Task {
             await bootstrap()
@@ -72,23 +73,28 @@ final class WatchSyncCoordinator: ObservableObject {
     private func bootstrap() async {
         statusText = "正在检查联机环境"
         isHealthy = false
+        log("bootstrap: checking registry")
 
         do {
             let registryStatus = try await registryClient.fetchRequiredMVPRegistryStatus()
             guard registryStatus.isReadyForRoomMVP else {
                 statusText = "后端缺少消息：\(registryStatus.missingRequiredTypes.joined(separator: ", "))"
+                log("bootstrap: registry missing \(registryStatus.missingRequiredTypes)")
                 return
             }
 
             statusText = "已发现联机环境，正在连接 WS"
+            log("bootstrap: registry ready, connecting websocket")
             webSocketClient.connect()
         } catch {
             statusText = "registry 检查失败：\(error.localizedDescription)"
+            log("bootstrap failed: \(error.localizedDescription)")
         }
     }
 
     private func handleConnectionStateChange(_ state: WatchWebSocketConnectionState) {
         connectionState = state
+        log("websocket state -> \(state)")
 
         switch state {
         case .disconnected:
@@ -100,6 +106,7 @@ final class WatchSyncCoordinator: ObservableObject {
         case .connected:
             roomSession.resetForReconnect()
             statusText = "WS 已连接，发送 debug.echo"
+            log("sending debug.echo")
             Task {
                 await sendDebugEcho()
             }
@@ -113,6 +120,7 @@ final class WatchSyncCoordinator: ObservableObject {
     private func sendDebugEcho() async {
         let requestID = UUID().uuidString
         pendingDebugEchoRequestID = requestID
+        log("debug.echo request id = \(requestID)")
 
         let payload = DebugEchoPayload(
             source: config.debugToken,
@@ -128,9 +136,11 @@ final class WatchSyncCoordinator: ObservableObject {
         do {
             try await webSocketClient.sendJSON(envelope)
             statusText = "debug.echo 已发送"
+            log("debug.echo sent")
         } catch {
             isHealthy = false
             statusText = "debug.echo 发送失败：\(error.localizedDescription)"
+            log("debug.echo send failed: \(error.localizedDescription)")
         }
     }
 
@@ -153,6 +163,7 @@ final class WatchSyncCoordinator: ObservableObject {
         if response.ok, let payload = response.payload {
             isHealthy = true
             statusText = "debug.echo 已跑通：\(payload.message)"
+            log("debug.echo ok -> joining room")
             Task {
                 await roomSession.joinCurrentRoom()
             }
@@ -160,6 +171,7 @@ final class WatchSyncCoordinator: ObservableObject {
             isHealthy = false
             let message = response.error?.message ?? "未知错误"
             statusText = "debug.echo 失败：\(message)"
+            log("debug.echo failed: \(message)")
         }
 
         return true
@@ -167,9 +179,14 @@ final class WatchSyncCoordinator: ObservableObject {
 
     private func flushLatestPendingActionIfNeeded() {
         guard let latestPendingAction else { return }
+        log("flushing pending action \(latestPendingAction)")
 
         Task {
             await roomSession.sendActionUpdate(latestPendingAction)
         }
+    }
+
+    private func log(_ message: String) {
+        print("[WatchSyncCoordinator] \(message)")
     }
 }
