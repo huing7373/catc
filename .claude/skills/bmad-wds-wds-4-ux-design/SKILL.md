@@ -1,0 +1,6 @@
+---
+name: bmad-wds-wds-4-ux-design
+description: Transform ideas into detailed visual specifications through scenario-driven design
+---
+
+IT IS CRITICAL THAT YOU FOLLOW THIS COMMAND: LOAD the FULL {project-root}/_bmad/wds/workflows/wds-4-ux-design/workflow.md, READ its entire contents and follow its directions exactly!
