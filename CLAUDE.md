@@ -1,80 +1,82 @@
 # CLAUDE.md
 
-## Architecture Guide (MANDATORY)
+## 状态：重启中（2026-04-23）
 
-**Before writing any server code, read `docs/backend-architecture-guide.md`.** It defines the architecture, tech stack (Go + Gin + MongoDB + Redis + zerolog + TOML), layering rules, error/logging/config conventions, and the PR checklist every new change must pass. All server code must conform — rewrite existing code if it conflicts.
+旧架构（MongoDB + TOML + P2 分层）和旧 server 实装已**全部放弃**。新设计文档包是**唯一权威来源**，全部位于 `docs/宠物互动App_*.md`：
 
-**In particular, §21 "Epic 0 → Epic 1+ 继承的工程纪律" is binding for every Epic 1+ story.** Before creating or implementing a story, check which subsections apply:
-- §21.1 双 gate 漂移守门 — when adding global constant sets (error codes / WS msg types / feature flags / Redis key prefixes)
-- §21.2 Empty/Noop Provider 逐步填实 — when adding or replacing Providers
-- §21.3 fail-closed vs fail-open — when handling external system failure (must document choice + observable signal in Dev Notes)
-- §21.4 语义正确性 AC review 早启 — for tool / metric / guard / measurement stories (run AC review BEFORE implementation)
-- §21.5 tools/* CLI 上线判据 — when adding new CLI tools
-- §21.6 Spike / 真机 / 人工执行类工作归 Epic 9 — never block business epic critical path on physical / hardware work
-- §21.7 server 测试自包含 — no test may require running iOS / watchOS app; all tests pass via `go test`
-- §21.8 §19 PR checklist 语义正确性思考题 — every PR must answer "who gets misled if this code runs and produces a wrong result but doesn't crash?"
+1. `docs/宠物互动App_总体架构设计.md` — 总体架构、模块边界、产品规则
+2. `docs/宠物互动App_MVP节点规划与里程碑.md` — 10 节点开发顺序与验收
+3. `docs/宠物互动App_V1接口设计.md` — REST + WebSocket 协议
+4. `docs/宠物互动App_数据库设计.md` — MySQL 表结构、索引、事务边界
+5. `docs/宠物互动App_时序图与核心业务流程设计.md` — 关键链路时序
+6. `docs/宠物互动App_Go项目结构与模块职责设计.md` — server 工程结构与分层
+7. `docs/宠物互动App_iOS客户端工程结构与模块职责设计.md` — iOS 工程结构
 
-§22 提供快速指引：每次开 session 先读 CLAUDE.md → 架构指南 §21-§22 → sprint-status.yaml → 最新 epic retro → MEMORY.md。
+**写任何 server 代码前，必须先读 1 / 6 / 4 / 3 / 5 这五份。** iOS 任务读 1 / 7 / 3。
 
-**写 server 代码前额外读 `server/agent-experience/review-antipatterns.md`。** 这是 Epic 0 十九轮 code review 蒸馏出的战术级反模式清单（并发安全 / context 生命周期 / JWT 安全边界 / 配置 fail-fast / 注册表自证 / release-vs-debug gate / redis key injectivity / 滑动窗口 / 中间件顺序 / 度量语义等），开头有 TL;DR 自检清单。发现新反模式时同步更新：原始记录进 `code-review-log.md`，蒸馏条目进 `review-antipatterns.md`。
+## Tech Stack（新方向）
 
-## Pending Cross-Repo Action Items (待处理跨仓需求)
+- **语言**：Go（server）/ Swift + SwiftUI（iOS）
+- **HTTP 框架**：Gin / Echo / Chi 任选其一（建议 Gin）
+- **ORM / DB 驱动**：GORM 或 sqlx
+- **主存储**：**MySQL 8.0**（取代旧方案的 MongoDB）
+- **缓存与实时态**：Redis
+- **配置格式**：**YAML**（取代旧方案的 TOML），支持环境变量覆盖
+- **协议**：REST + WebSocket
+- **形态**：模块化单体（**不**拆微服务）
+- **iOS**：MVVM + UseCase + Repository，HealthKit / CoreMotion 接入
 
-**⚠️ Server 团队请在下次 epic 规划前处理**：
+## Repo Separation（三端独立）
 
-### 2026-04-20 · iPhone UX Step 10 Party Mode → Server 4 个新需求
-
-iPhone UX 设计规范在 Step 10 User Journey Flows 评审中产生 4 个 server 契约新需求（S-SRV-15~18），以及架构哲学升级（**哲学 B · Server 为主，WC 为辅**）。
-
-**详细技术契约文档**：`ios/CatPhone/_bmad-output/planning-artifacts/server-handoff-ux-step10-2026-04-20.md`
-
-**核心新需求概览**：
-- **S-SRV-15**：新建 `user_milestones` collection + API（承载账号级里程碑，替代客户端 UserDefaults）
-- **S-SRV-16**：`box.state` 新增 `unlocked_pending_reveal` 态（Watch 不可达时延迟揭晓）
-- **S-SRV-17**：取消 `emote.delivered` 发送者 ack 推送（fire-and-forget 硬约束）
-- **S-SRV-18**：所有 fail 节点 Prometheus metric 打点（详见清单）
-
-**建议行动**：
-1. 阅读 handoff 文档
-2. 跨仓 sync 会议对齐契约（建议 60 min）
-3. server PRD 追加 S-SRV-15~18（或链接 iPhone PRD）
-4. 排期到合适的 server epic（建议 `UserMilestones` 先行，是 iOS Epic 1/2 硬依赖）
-
-**iPhone 端状态**：UX 规范 v0.3 完稿（`ios/CatPhone/_bmad-output/planning-artifacts/ux-design-specification.md`），iPhone PRD 已追加 v2 修订注记。
-
----
-
-## Repo Separation (三端独立)
-
-三个独立目录：`server/` (Go) / `app/` (iOS) / `watch/` (watchOS)。server repo **不**引用 APP/watch，也不被它们引用。跨端契约通过 `docs/api/` 下的文档同步（e.g. `ws-message-registry.md` / `integration-mvp-client-guide.md` / `openapi.yaml`），不通过共享代码。真机联调类工作归 Epic 9，不塞业务 epic。
+三个独立目录：`server/` (Go) / `ios/` (iOS) / `watch/`（watchOS，当前重启阶段暂不考虑）。server 测试自包含，不依赖 APP / watch 真机；真机联调类工作单独排期，不塞业务节点。跨端契约通过 `docs/宠物互动App_V1接口设计.md` 统一同步，不通过共享代码。
 
 ## Build & Test
 
-Server is a Go project under `server/`. Use the build script:
+Server 是 `server/` 下的 Go 工程。当前 build 脚本：
 
 ```bash
-# Compile only (vet + build)
-bash scripts/build.sh
-
-# Compile + run all tests
-bash scripts/build.sh --test
-
-# With race detector
+bash scripts/build.sh           # vet + build
+bash scripts/build.sh --test    # 加跑单测
 bash scripts/build.sh --race --test
 ```
 
-Binary output: `build/catserver`
+二进制输出：`build/catserver`。
 
-After writing or modifying Go code, run `bash scripts/build.sh --test` to verify compilation and tests pass. Read the output to check for errors.
+写完或改完 Go 代码后跑 `bash scripts/build.sh --test` 验证。
 
-## Project Structure (target, per architecture guide)
+> **TODO**：当前 `scripts/build.sh` 仍引用旧的 `cmd/cat`、`docs/api/openapi.yaml`、`scripts/check_time_now.sh`（M9 时间检查）—— 这些属于旧架构残留。节点 1 实装时一并重做，让 build 脚本对齐新的 `cmd/server/main.go` 入口和新的目录结构。
 
-- `server/cmd/cat/` — entry point, initialize, app lifecycle
-- `server/internal/` — application code (config, domain, service, repository, handler, dto, middleware, ws, cron, push)
-- `server/pkg/` — reusable libraries (logx, mongox, redisx, jwtx, ids, fsm)
-- `server/config/` — TOML configs (default/production/local)
-- `server/tools/` — one-off data scripts
-- `server/deploy/` — Dockerfile, docker-compose
-- `scripts/` — build scripts
+## 节点 1 之后的目录形态（target）
 
-Note: Story 2-1 landed a Postgres+GORM+env prototype. Per user decision, it will be rewritten to match the architecture guide (MongoDB + TOML + full P2-style layering).
+按 `docs/宠物互动App_Go项目结构与模块职责设计.md` §4：
+
+```
+server/
+├─ cmd/server/main.go
+├─ configs/{local,dev,staging,prod}.yaml
+├─ migrations/                  # MySQL DDL 文件
+├─ internal/
+│  ├─ app/{bootstrap,http,ws}/
+│  ├─ domain/{auth,user,pet,step,chest,cosmetic,compose,room,emoji}/
+│  ├─ service/
+│  ├─ repo/{mysql,redis,tx}/
+│  ├─ infra/{config,db,redis,logger,clock,idgen}/
+│  └─ pkg/{errors,response,auth,utils}/
+└─ docs/architecture/
+```
+
+## 工作纪律
+
+- **节点顺序不可乱跳**：`docs/宠物互动App_MVP节点规划与里程碑.md` §3 / §5 定义了 10 节点的依赖关系，按顺序推进。节点 1（App 与 Server 可运行）必须先完成。
+- **资产类操作必须事务**：开箱、合成、穿戴、加入房间、游客登录初始化 —— 见 `数据库设计.md` §8，全部必须包在 MySQL 事务里。
+- **幂等键**：`/chest/open` 和 `/compose/upgrade` 必须支持 `idempotencyKey`，存 Redis（`idem:{userId}:{apiName}:{key}`）并设 TTL。
+- **状态以 server 为准**：步数余额、宝箱状态、背包归属、合成结果、房间成员关系都以 server 响应为最终态，客户端只能做本地预展示。
+- **错误码统一**：见 `V1接口设计.md` §3，repo 返回底层错误 → service 转业务错误 → handler 映射统一响应结构。
+
+## 开 session 起手式
+
+每次新 session：
+1. 读本文件
+2. 读 `docs/宠物互动App_总体架构设计.md` + 当前节点对应的设计文档
+3. 读 `MEMORY.md`
+4. 看当前节点状态再开工
