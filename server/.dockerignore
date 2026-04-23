@@ -1,8 +1,0 @@
-.git
-build/
-*.md
-*_test.go
-.idea/
-.vscode/
-_bmad/
-_bmad-output/
