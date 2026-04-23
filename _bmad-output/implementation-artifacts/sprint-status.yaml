@@ -1,0 +1,298 @@
+# generated: 2026-04-23T22:58:47+08:00
+# last_updated: 2026-04-23T22:58:47+08:00
+# project: cat
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: {project-root}/_bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - SM typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+
+generated: 2026-04-23T22:58:47+08:00
+last_updated: 2026-04-23T22:58:47+08:00
+project: cat
+project_key: NOKEY
+tracking_system: file-system
+story_location: "{project-root}/_bmad-output/implementation-artifacts"
+
+development_status:
+  epic-1: backlog
+  1-1-mock-库选型-spike-logger-metrics-框架选型: backlog
+  1-2-cmd-server-入口-配置加载-gin-ping: backlog
+  1-3-中间件-request_id-recover-logging: backlog
+  1-4-version-接口: backlog
+  1-5-测试基础设施搭建: backlog
+  1-6-dev-tools-框架: backlog
+  1-7-重做-scripts-build-sh: backlog
+  1-8-apperror-类型-错误三层映射框架: backlog
+  1-9-go-context-传播框架-cancellation-验证: backlog
+  1-10-server-readme-本地开发指南: backlog
+  epic-1-retrospective: optional
+  epic-2: backlog
+  2-1-ios-mock-框架选型-ios-目录决策-spike: backlog
+  2-2-swiftui-app-入口-主界面骨架-信息架构定稿: backlog
+  2-3-导航架构搭建: backlog
+  2-4-apiclient-封装: backlog
+  2-5-ping-调用-主界面显示-server-version-信息: backlog
+  2-6-基础错误-ui-框架: backlog
+  2-7-ios-测试基础设施搭建: backlog
+  2-8-dev-重置-keychain-按钮: backlog
+  2-9-launchingview-设计: backlog
+  2-10-ios-readme-模拟器开发指南: backlog
+  epic-2-retrospective: optional
+  epic-3: backlog
+  3-1-跨端集成测试场景-ping-e2e: backlog
+  3-2-节点-1-demo-验收: backlog
+  3-3-文档同步与-tech-debt-登记: backlog
+  epic-3-retrospective: optional
+  epic-4: backlog
+  4-1-接口契约最终化: backlog
+  4-2-mysql-接入: backlog
+  4-3-五张表-migrations: backlog
+  4-4-token-util: backlog
+  4-5-auth-rate_limit-中间件: backlog
+  4-6-游客登录接口-首次初始化事务: backlog
+  4-7-layer-2-集成测试-游客登录初始化事务全流程: backlog
+  4-8-get-home-聚合接口: backlog
+  4-9-layer-2-集成测试-游客登录初始化事务全流程: backlog
+  epic-4-retrospective: optional
+  epic-5: backlog
+  5-1-keychain-封装: backlog
+  5-2-启动自动登录-usecase: backlog
+  5-3-apiclient-interceptor-自动注入-bearer-token: backlog
+  5-4-无效-token-静默重新登录: backlog
+  5-5-loadhomeusecase-主界面用-get-home-一次拉取全部数据: backlog
+  epic-5-retrospective: optional
+  epic-6: backlog
+  6-1-跨端集成测试场景-自动登录-e2e: backlog
+  6-2-节点-2-demo-验收: backlog
+  6-3-文档同步与-tech-debt-登记: backlog
+  epic-6-retrospective: optional
+  epic-7: backlog
+  7-1-接口契约最终化: backlog
+  7-2-user_step_sync_logs-migration: backlog
+  7-3-post-steps-sync-接口-累计差值入账-service: backlog
+  7-4-get-steps-account-接口: backlog
+  7-5-dev-端点-post-dev-grant-steps: backlog
+  epic-7-retrospective: optional
+  epic-8: backlog
+  8-1-healthkit-接入: backlog
+  8-2-coremotion-接入: backlog
+  8-3-运动状态机映射: backlog
+  8-4-主界面猫-sprite-三态动画切换: backlog
+  8-5-步数同步触发器: backlog
+  epic-8-retrospective: optional
+  epic-9: backlog
+  9-1-跨端集成测试场景-步数-猫动作-e2e: backlog
+  9-2-节点-3-demo-验收: backlog
+  9-3-文档同步与-tech-debt-登记: backlog
+  epic-9-retrospective: optional
+  epic-10: backlog
+  10-1-接口契约最终化: backlog
+  10-2-redis-接入: backlog
+  10-3-ws-网关骨架: backlog
+  10-4-心跳框架: backlog
+  10-5-broadcasttoroom-primitive: backlog
+  10-6-redis-presence-repo: backlog
+  10-7-房间快照下发框架: backlog
+  epic-10-retrospective: optional
+  epic-11: backlog
+  11-1-接口契约最终化: backlog
+  11-2-rooms-room_members-migration: backlog
+  11-3-创建房间事务: backlog
+  11-4-加入房间事务: backlog
+  11-5-退出房间事务: backlog
+  11-6-房间详情查询: backlog
+  11-7-房间快照真实实现: backlog
+  11-8-成员加入-离开-ws-广播: backlog
+  11-9-layer-2-集成测试-房间生命周期全流程: backlog
+  11-10-get-home-扩展-room-currentroomid-真实数据: backlog
+  epic-11-retrospective: optional
+  epic-12: backlog
+  12-1-房间页面-swiftui-骨架: backlog
+  12-2-websocketclient-封装: backlog
+  12-3-房间快照解析-成员列表渲染: backlog
+  12-4-成员加入-离开-ws-消息处理: backlog
+  12-5-自动重连: backlog
+  12-6-心跳维护: backlog
+  12-7-创建-加入-退出-use-case-主界面入口完善: backlog
+  epic-12-retrospective: optional
+  epic-13: backlog
+  13-1-跨端集成测试场景-房间-lifecycle-成员事件-e2e: backlog
+  13-2-节点-4-demo-验收: backlog
+  13-3-文档同步与-tech-debt-登记: backlog
+  epic-13-retrospective: optional
+  epic-14: backlog
+  14-1-接口契约最终化: backlog
+  14-2-post-pets-current-state-sync-接口-pets-current_state-更新: backlog
+  14-3-修改-roomsnapshotbuilder-snapshot-含真实-pet-currentstate: backlog
+  14-4-pet-state-changed-ws-广播: backlog
+  epic-14-retrospective: optional
+  epic-15: backlog
+  15-1-房间页内多成员猫位渲染-snapshot-pet-currentstate-解析: backlog
+  15-2-pet-state-changed-ws-消息处理: backlog
+  15-3-状态切换动画过渡: backlog
+  15-4-自己状态变化时上报-state-sync: backlog
+  15-5-跨房间状态恢复: backlog
+  epic-15-retrospective: optional
+  epic-16: backlog
+  16-1-跨端集成测试场景-房间内猫动作同步-e2e: backlog
+  16-2-节点-5-demo-验收: backlog
+  16-3-文档同步与-tech-debt-登记: backlog
+  epic-16-retrospective: optional
+  epic-17: backlog
+  17-1-接口契约最终化: backlog
+  17-2-emoji_configs-migration: backlog
+  17-3-emoji_configs-seed: backlog
+  17-4-get-emojis-接口: backlog
+  17-5-ws-emoji-send-处理-emoji-received-广播: backlog
+  epic-17-retrospective: optional
+  epic-18: backlog
+  18-1-表情面板-swiftui: backlog
+  18-2-点击自己猫触发表情面板: backlog
+  18-3-选中表情-本地立即动效-ws-发送-emoji-send: backlog
+  18-4-接收-emoji-received-在对应成员猫上方播放飞出动效: backlog
+  epic-18-retrospective: optional
+  epic-19: backlog
+  19-1-跨端集成测试场景-表情发送-接收动效-e2e: backlog
+  19-2-节点-6-demo-验收: backlog
+  19-3-文档同步与-tech-debt-登记: backlog
+  epic-19-retrospective: optional
+  epic-20: backlog
+  20-1-接口契约最终化: backlog
+  20-2-cosmetic_items-migration: backlog
+  20-3-cosmetic_items-seed: backlog
+  20-4-chest_open_logs-migration: backlog
+  20-5-get-chest-current-接口: backlog
+  20-6-post-chest-open-事务-idempotencykey-加权抽取: backlog
+  20-7-dev-端点-post-dev-force-unlock-chest: backlog
+  20-8-dev-端点-post-dev-grant-cosmetic-batch: backlog
+  20-9-layer-2-集成测试-开箱事务全流程: backlog
+  epic-20-retrospective: optional
+  epic-21: backlog
+  21-1-首页宝箱组件-swiftui: backlog
+  21-2-get-chest-current-调用-状态展示-主动定时纠正: backlog
+  21-3-开箱按钮-调用-post-chest-open: backlog
+  21-4-奖励弹窗-popup: backlog
+  21-5-开箱前主动同步步数: backlog
+  epic-21-retrospective: optional
+  epic-22: backlog
+  22-1-跨端集成测试场景-宝箱开箱-e2e: backlog
+  22-2-节点-7-demo-验收: backlog
+  22-3-文档同步与-tech-debt-登记: backlog
+  epic-22-retrospective: optional
+  epic-23: backlog
+  23-1-接口契约最终化: backlog
+  23-2-user_cosmetic_items-migration: backlog
+  23-3-get-cosmetics-catalog-接口: backlog
+  23-4-get-cosmetics-inventory-接口: backlog
+  23-5-修改开箱事务-创建-user_cosmetic_items-实例-补-chest_open_logs-reward_user_cosmetic_item_id: backlog
+  epic-23-retrospective: optional
+  epic-24: backlog
+  24-1-仓库页-swiftui-骨架: backlog
+  24-2-loadinventoryusecase-get-cosmetics-inventory-调用: backlog
+  24-3-基础筛选交互: backlog
+  24-4-主界面-仓库-按钮入口完善: backlog
+  24-5-穿戴入口按钮位置预留: backlog
+  epic-24-retrospective: optional
+  epic-25: backlog
+  25-1-跨端集成测试场景-仓库链路-e2e: backlog
+  25-2-节点-8-demo-验收: backlog
+  25-3-文档同步与-tech-debt-登记: backlog
+  epic-25-retrospective: optional
+  epic-26: backlog
+  26-1-接口契约最终化: backlog
+  26-2-user_pet_equips-migration: backlog
+  26-3-post-cosmetics-equip-事务: backlog
+  26-4-post-cosmetics-unequip-事务: backlog
+  26-5-layer-2-集成测试-穿戴事务全流程: backlog
+  26-6-get-home-扩展-pet-equips-真实数据: backlog
+  epic-26-retrospective: optional
+  epic-27: backlog
+  27-1-激活-story-24-5-预留的-穿戴-按钮: backlog
+  27-2-equipusecase-unequipusecase-调-server-接口: backlog
+  27-3-装扮文字降级-ui-组件: backlog
+  27-4-同槽位换装动效: backlog
+  27-5-主界面猫显示区按当前装备实时刷新: backlog
+  epic-27-retrospective: optional
+  epic-28: backlog
+  28-1-跨端集成测试场景-穿戴流程-e2e: backlog
+  28-2-节点-9-demo-验收: backlog
+  28-3-文档同步与-tech-debt-登记: backlog
+  epic-28-retrospective: optional
+  epic-29: backlog
+  29-1-接口契约最终化: backlog
+  29-2-cosmetic_items-加-render_config-列-migration: backlog
+  29-3-render_config-seed: backlog
+  29-4-catalog-inventory-接口返回-render_config: backlog
+  29-5-同步更新-docs-宠物互动app_数据库设计-md-5-8-增加-render_config-字段说明: backlog
+  29-6-get-home-扩展-pet-equips-renderconfig-字段下发: backlog
+  epic-29-retrospective: optional
+  epic-30: backlog
+  30-1-renderconfig-数据模型-codable-解析: backlog
+  30-2-spriterenderer-封装: backlog
+  30-3-升级-equippedcosmeticview-renderconfig-完整时走图像-缺失时退回文字降级: backlog
+  30-4-槽位锚点常量化: backlog
+  epic-30-retrospective: optional
+  epic-31: backlog
+  31-1-跨端集成测试场景-装扮渲染-e2e: backlog
+  31-2-节点-10-demo-验收: backlog
+  31-3-文档同步与-tech-debt-登记: backlog
+  epic-31-retrospective: optional
+  epic-32: backlog
+  32-1-接口契约最终化: backlog
+  32-2-compose_logs-compose_log_materials-migration: backlog
+  32-3-get-compose-overview-接口: backlog
+  32-4-post-compose-upgrade-事务-idempotencykey-加权产出: backlog
+  32-5-layer-2-集成测试-合成事务全流程: backlog
+  epic-32-retrospective: optional
+  epic-33: backlog
+  33-1-合成页骨架: backlog
+  33-2-loadcomposeoverviewusecase-get-compose-overview-调用: backlog
+  33-3-手动选-10-实例交互-数量-品质校验: backlog
+  33-4-composeupgradeusecase-post-compose-upgrade: backlog
+  33-5-成功-popup-失败错误处理: backlog
+  33-6-主界面-合成-按钮入口完善: backlog
+  epic-33-retrospective: optional
+  epic-34: backlog
+  34-1-跨端集成测试场景-合成链路-e2e: backlog
+  34-2-节点-11-demo-验收: backlog
+  34-3-文档同步与-tech-debt-登记: backlog
+  epic-34-retrospective: optional
+  epic-35: backlog
+  35-1-链接技术方案选型-spike-info-plist-配置: backlog
+  35-2-房间页内-分享-按钮-链接生成: backlog
+  35-3-链接解析处理: backlog
+  35-4-已登录时自动-join-跳转房间页: backlog
+  epic-35-retrospective: optional
+  epic-36: backlog
+  36-1-跨端集成测试场景-分享链接-e2e: backlog
+  36-2-节点-12-demo-验收: backlog
+  36-3-文档同步与-tech-debt-登记-mvp-整体收官: backlog
+  epic-36-retrospective: optional
