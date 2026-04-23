@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Auto-installed by ios/scripts/install-hooks.sh — DO NOT EDIT
+# Triggers iOS build.sh (without --test) before every git push.
+# Story 1A.1 · Source: ios/CatPhone/_bmad-output/implementation-artifacts/1a-1-build-sh-install-hooks-swift-format.md
+
+exec "$(git rev-parse --show-toplevel)/ios/scripts/build.sh"
