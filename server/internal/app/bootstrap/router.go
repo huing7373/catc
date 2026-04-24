@@ -15,10 +15,10 @@ import (
 //
 // 运维端点（不走 /api/v1 前缀，不走业务 auth）：
 //   - GET /ping    — liveness 探活
+//   - GET /version — 构建信息（commit / builtAt，编译期 ldflags 注入）
 //   - GET /metrics — Prometheus scrape 端点
 //
-// Future: Story 1.4 adds GET /version;
-//         Story 1.6 registers /dev/* group behind BUILD_DEV flag.
+// Future: Story 1.6 registers /dev/* group behind BUILD_DEV flag.
 // TODO(Epic-36): /metrics 上线前需要加 auth / 独立端口。
 func NewRouter() *gin.Engine {
 	r := gin.New()
@@ -27,6 +27,7 @@ func NewRouter() *gin.Engine {
 	r.Use(middleware.Recovery())
 
 	r.GET("/ping", handler.PingHandler)
+	r.GET("/version", handler.VersionHandler)
 	r.GET("/metrics", gin.WrapH(metrics.Handler()))
 
 	return r

@@ -57,7 +57,10 @@
       "Bash(/c/fork/cat/build/catserver.exe -config /tmp/nonexistent.yaml)",
       "Bash(echo \"exit=$?\")",
       "Bash(tasklist //FI \"IMAGENAME eq catserver.exe\")",
-      "Bash(taskkill //IM catserver.exe //F)"
+      "Bash(taskkill //IM catserver.exe //F)",
+      "Bash(../build/catserver.exe *)",
+      "Bash(curl -s http://127.0.0.1:8080/version)",
+      "Bash(curl -s http://127.0.0.1:18082/version)"
     ]
   }
 }
