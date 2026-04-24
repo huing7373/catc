@@ -2,7 +2,7 @@
 date: 2026-04-25
 source_review: manual review from user (inline comment via /fix-review)
 story: 1-3-中间件-request_id-recover-logging
-commit: <pending>
+commit: 0a0d108
 lesson_count: 1
 ---
 
