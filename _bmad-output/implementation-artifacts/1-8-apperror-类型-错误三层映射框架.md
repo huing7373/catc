@@ -1,6 +1,6 @@
 # Story 1.8: AppError 类型 + 错误三层映射框架（NFR18）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
