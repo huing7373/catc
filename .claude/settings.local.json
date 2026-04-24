@@ -53,7 +53,11 @@
       "Bash(taskkill //PID 46008 //F)",
       "Bash(taskkill //PID 35692 //F)",
       "Bash(taskkill //PID 17240 //F)",
-      "Bash(grep *)"
+      "Bash(grep *)",
+      "Bash(/c/fork/cat/build/catserver.exe -config /tmp/nonexistent.yaml)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(tasklist //FI \"IMAGENAME eq catserver.exe\")",
+      "Bash(taskkill //IM catserver.exe //F)"
     ]
   }
 }
