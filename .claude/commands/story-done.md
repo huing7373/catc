@@ -50,30 +50,49 @@ argument-hint: [story-key? | "custom commit message"?]
   - 若**零个** → 回退扫描 `in-progress`；还是零个则报告"无可收官的 story，你可能需要先跑 `/bmad-dev-story`"并退出
 - 用 `Glob` 在 `_bmad-output/implementation-artifacts/` 下查找 `<story-key>*.md`，确保只有 1 个匹配；读文件第一行提取 Title（形如 `# Story X.Y: 具体标题`）
 
-### 3. 生成 commit message 草稿（若用户未提供自定义 message）
+### 3. 分组工作区变更 + 机械生成每组 commit message
 
-- 先 `git log -5 --oneline` 看最近 5 条 commit，学该仓库的 Conventional Commits 风格（例如已有 `docs(mvp): ...` / `chore(sprint): ...` / `docs(decision): ...`）
-- 按变更内容**推断 type**：
-  - 仅 `.md` + yaml 文件 → `docs(<scope>)`
-  - 含 `.go` / `go.mod` 文件 → `feat(<scope>)` 或 `fix(<scope>)`（看 story 性质：新功能用 feat，bug 修复用 fix）
-  - 仅 `_bmad-output/**` → `chore(story-X-Y)` 或 `docs(story-X-Y)`
-  - 包含 `scripts/` / `.claude/` → `chore(<scope>)`
-- **scope 建议**：`story-<story-key-short>` 或 `epic-<N>` 或模块名（如 `decision` / `sprint` / `cmd`）
-- **subject 格式**：简短中文，动宾结构，说清这个 story 产出了什么（从 story title + Dev Agent Record → Completion Notes 提取关键动作）
-- **message body**（可选）：若有关键决策/否决点值得 commit log 中记住，补 1-3 行；否则省略
+**分组规则（机械执行，不询问用户）**：按 `git status --short` 输出里的文件路径前缀把所有变更拆成独立分组，每组对应一个 commit。顺序：Group A（story-done 主）先提交，其余按字母序。
 
-**Commit message 格式**（HEREDOC 传递，保留换行）：
-```
-<type>(<scope>): <subject>
+> 用户明确要求："每次都分开提交，有无关文件也一起提交"—— 本命令默认**把工作区所有变更分组提交干净**，不留在工作区。若用户想排除某些文件，在调用本命令前自行 `git stash push <path>`。
 
-[可选 body]
+**Group A — story-done 主**（必然存在，必然第一个）：
 
-story-done: <story-key> → done
+- **文件**：`_bmad-output/implementation-artifacts/sprint-status.yaml` + `_bmad-output/implementation-artifacts/<story-key>.md`
+- **Commit message（固定模板，不可调整）**：
+  ```
+  chore(story-<X-Y>): 收官 Story X.Y + 归档 story 文件
 
-Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
-```
+  story-done: <story-key> → done
 
-### 4. 先更新 story 状态（让一个 commit 同时含实装 + 状态）
+  Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+  ```
+  - `<X-Y>` = story key 的前两段（例如 `1-5-测试基础设施搭建` → `1-5`）
+  - `X.Y` = 同上转成点分（例如 `1.5`）
+
+**Group B+（按路径前缀机械分组）**：除 Group A 外所有文件，按下表归类。同组内多文件共用一个 commit；不同组必须分别 commit：
+
+| 文件路径模式 | Type | Scope | Subject 模板 |
+|---|---|---|---|
+| `.claude/commands/*.md`（单个） | chore | commands | `更新 /<命令名> 命令` |
+| `.claude/commands/*.md`（多个） | chore | commands | `更新 N 个命令定义` |
+| `.claude/settings*.json` | chore | claude | `更新 Bash allowlist` |
+| `.claude/agents/**` | chore | agents | `更新 <agent 名>` |
+| `.claude/skills/**` | chore | skills | `更新 <skill 名>` |
+| `.claude/*`（其他） | chore | claude | `更新 <文件 stem>` |
+| `docs/lessons/*.md` | docs | lessons | `补充 <lesson 标题>`（从 H1 提取） |
+| `docs/**`（其他） | docs | `<一级子目录名>` 或 `docs` | `更新 <文件 stem>` |
+| `scripts/**` | chore | scripts | `更新 <文件 stem>` |
+| `_bmad-output/**`（不属于 Group A 的 .md / .yaml） | docs | bmad-output | `更新 <文件 stem>` |
+| 其他 | chore | — | `更新 <文件 stem>` |
+
+**Body 默认空**。除非分组内涉及多文件且主题非平凡（例如一组命令定义同时改了 3+ 个文件），可在 body 自动列出文件名清单；否则省略 body。
+
+**严格遵守**：按上述规则直接生成每组 message 并提交，**不向用户展示草稿、不询问"调整 message"**。这是本命令的**硬约定**，由用户在命令设计阶段明确要求（与 /fix-review 一致）。
+
+**异常中断条件（仅此一项）**：若某组含 `server/**.go` 或 `server/go.mod` / `go.sum` → **HALT 并警告**「Story-done 期间检测到服务端代码未 commit：<文件列表>。这通常表示 dev 阶段有代码漏了。请确认：① 这些文件是否真属于 Story <X-Y> 的交付？② 还是你忘了跑 `/bmad-dev-story` 的后段？」让用户手动决策（`git stash` 出去 / 手动 commit 进 dev 阶段 / 显式同意并入 story-done）。该异常场景罕见，出现时必须打破"不询问"约定。
+
+### 4. 先更新 story 状态（让 Group A commit 同时含状态）
 
 - **编辑 `sprint-status.yaml`**：
   - 把 `<story-key>: review`（或 `in-progress`）改为 `<story-key>: done`
@@ -82,31 +101,40 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
   - 把 `Status: review`（或 `Status: in-progress`）改为 `Status: done`
 - 不要动 story 文件里的 Tasks/Subtasks / Dev Agent Record / Change Log —— 只改 `Status:` 那一行
 
-### 5. 向用户展示待提交内容，等待确认
+### 5. 输出执行摘要（不询问）
 
-**必须输出**：
-- 目标 story：`<story-key> — <title>`
-- 工作区变更清单（`git status --short`）
-- 即将执行的 commit message（完整 HEREDOC 内容）
-- 即将把 story 状态改为 `done` 的确认
+机械列出即将发生的 N 个 commit：
 
-**询问**：「确认执行吗？（yes 继续 / 让我调整 message / 取消）」
+```
+📦 本次将创建 N 个 commit：
 
-- 若用户要调整 message → 改完重新问确认
-- 若用户取消 → **回滚步骤 4 的编辑**（把状态改回 `review` 或原始值），报告"已取消，工作区未提交"
+Group A: story-done 主
+  files: sprint-status.yaml, <story-key>.md
+  msg:   chore(story-<X-Y>): 收官 Story X.Y + 归档 story 文件
 
-### 6. 提交
+Group B: <type>(<scope>)
+  files: ...
+  msg:   <subject>
 
-- `git add` **逐个文件**添加（按 `git status --short` 的输出循环），**不用 `git add -A` / `git add .`**
-  - 若变更文件超过 10 个，允许在确认阶段用 `git add -A`，但显式告诉用户
-- `git commit -m "$(cat <<'EOF' ... EOF)"` 方式提交（保留 Conventional Commits 格式 + Co-Authored-By 尾行）
-- 若 pre-commit hook 失败 → 修问题后**新建 commit**，**禁用 `--amend`**
-- `git log -1 --stat` 验证提交成功
+...（其他组）
+```
+
+**不询问 yes/no**。直接进步骤 6 循环提交。
+
+> 用户若要取消必须手动 `Ctrl+C`；或者在调用前自行 `git stash` 排除不想入 commit 的文件。
+
+### 6. 按分组循环提交
+
+对每个 Group 依次执行：
+1. `git add <组内文件，逐个显式列出>` — **不用 `git add -A`**
+2. `git commit -m "$(cat <<'EOF' ... EOF)"`（保留 Conventional Commits + Co-Authored-By 尾行）
+3. 记录 commit hash
+4. 若 pre-commit hook 失败 → 修问题后**新建 commit**，禁用 `--amend`
 
 ### 7. 输出最终状态
 
-显示：
-- ✅ Commit hash + 简短 message
+- ✅ Group A commit hash + message 首行（story-done 主）
+- ✅ Group B+ commit hash 列表（每组一行）
 - ✅ Story `<story-key>` 状态：`review → done`
 - 📋 剩余 sprint 统计：`grep -c 'ready-for-dev\|in-progress\|review' sprint-status.yaml`
 - 💡 建议下一步：
