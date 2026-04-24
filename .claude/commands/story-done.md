@@ -5,7 +5,7 @@ argument-hint: [story-key? | "custom commit message"?]
 
 # /story-done
 
-**目的**：把刚实装完的 story 收官 — 把工作区所有修改作为**单个 commit** 提交到当前 branch，并把该 story 在 `sprint-status.yaml` 和 story 文件中的状态更新为 `done`。
+**目的**：把刚实装完的 story 收官 — 把工作区所有修改**按端 / 职能分组提交**到当前 branch（端级实装 → 收官 chore → 其他杂项），并把该 story 在 `sprint-status.yaml` 和 story 文件中的状态更新为 `done`。
 
 ## 前置假设
 
@@ -56,7 +56,26 @@ argument-hint: [story-key? | "custom commit message"?]
 
 > 用户明确要求："每次都分开提交，有无关文件也一起提交"—— 本命令默认**把工作区所有变更分组提交干净**，不留在工作区。若用户想排除某些文件，在调用本命令前自行 `git stash push <path>`。
 
-**Group A — story-done 主**（必然存在，必然第一个）：
+**Group 0 — 端级实装**（零到多个，按端字母序排在最前）：
+
+对每个"端"子目录（`server/` / `ios/` / `watch/`）独立分组，**前提**是工作区有该前缀的未 commit 文件（.go / Swift / go.mod / go.sum / 该端目录下的 configs / migrations / 资源文件等所有 `<端>/**` 文件）。
+
+这是项目以往 commit 风格的固化（见 `7a12492 feat(server): Epic1/1.5 ...` / `0a0d108 feat(server): Epic1/1.3 ...` / `eade914 feat(server): Epic1/1.4 ...`）：实装类变更用 `feat(<端>)` 作为独立 commit，与收官 chore 分离 → 审计清晰 + revert 粒度天然对齐 story。
+
+- **文件**：`<端>/**` 下所有工作区变更（含 modified + untracked + deleted；不含本命令异常条目如 `.gitignore` / `.claude/` / `_bmad-output/` / `docs/`）
+- **Commit message 模板**：
+  ```
+  feat(<端>): Epic<E>/<X.Y> <story 标题>
+
+  Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+  ```
+  - `<端>` = 目录名（`server` / `ios` / `watch`）
+  - `<E>` = epic 编号（story key 第一段，例如 `1-6-...` → `1`）
+  - `<X.Y>` = 点分编号（例如 `1.6`）
+  - `<story 标题>` = 从 story file 第一行 `# Story X.Y: <标题>` 机械提取（不做二次精简，保持可复现）
+- **顺序**：多个端同时实装时按 `ios` → `server` → `watch` 字母序分别 commit
+
+**Group A — story-done 主**（必然存在，排在所有 Group 0 之后）：
 
 - **文件**：`_bmad-output/implementation-artifacts/sprint-status.yaml` + `_bmad-output/implementation-artifacts/<story-key>.md`
 - **Commit message（固定模板，不可调整）**：
@@ -70,7 +89,7 @@ argument-hint: [story-key? | "custom commit message"?]
   - `<X-Y>` = story key 的前两段（例如 `1-5-测试基础设施搭建` → `1-5`）
   - `X.Y` = 同上转成点分（例如 `1.5`）
 
-**Group B+（按路径前缀机械分组）**：除 Group A 外所有文件，按下表归类。同组内多文件共用一个 commit；不同组必须分别 commit：
+**Group B+（按路径前缀机械分组）**：除 Group 0 / Group A 外所有文件，按下表归类。同组内多文件共用一个 commit；不同组必须分别 commit：
 
 | 文件路径模式 | Type | Scope | Subject 模板 |
 |---|---|---|---|
@@ -90,7 +109,7 @@ argument-hint: [story-key? | "custom commit message"?]
 
 **严格遵守**：按上述规则直接生成每组 message 并提交，**不向用户展示草稿、不询问"调整 message"**。这是本命令的**硬约定**，由用户在命令设计阶段明确要求（与 /fix-review 一致）。
 
-**异常中断条件（仅此一项）**：若某组含 `server/**.go` 或 `server/go.mod` / `go.sum` → **HALT 并警告**「Story-done 期间检测到服务端代码未 commit：<文件列表>。这通常表示 dev 阶段有代码漏了。请确认：① 这些文件是否真属于 Story <X-Y> 的交付？② 还是你忘了跑 `/bmad-dev-story` 的后段？」让用户手动决策（`git stash` 出去 / 手动 commit 进 dev 阶段 / 显式同意并入 story-done）。该异常场景罕见，出现时必须打破"不询问"约定。
+**异常中断条件**：无（原"server 代码未 commit → HALT"规则已改为 Group 0 默认行为；用户 2026-04-24 确认后续一律按此处理）。
 
 ### 4. 先更新 story 状态（让 Group A commit 同时含状态）
 
@@ -106,7 +125,11 @@ argument-hint: [story-key? | "custom commit message"?]
 机械列出即将发生的 N 个 commit：
 
 ```
-📦 本次将创建 N 个 commit：
+📦 本次将创建 N 个 commit（顺序：Group 0 → Group A → Group B+）：
+
+Group 0 (server): feat(server): Epic<E>/<X.Y> <story 标题>
+  files: server/...
+  msg:   feat(server): ...
 
 Group A: story-done 主
   files: sprint-status.yaml, <story-key>.md
