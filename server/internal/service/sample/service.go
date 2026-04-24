@@ -54,7 +54,15 @@ func NewSampleService(repo SampleRepo) *SampleService {
 // GetValue 演示 service 层的标准调用链：
 //   - id 为空串 → 返回 ErrSampleNotFound（预校验，不落 repo）
 //   - repo 返回 err → service 原样向上传（Story 1.8 会替换为 apperror.Wrap）
-//   - repo 返回 dto → 返回 dto.Value
+//   - repo 返回 (nil, nil) → 翻译为 ErrSampleNotFound（业务语义"找不到"）
+//   - repo 返回 (dto, nil) → 返回 dto.Value
+//
+// 关于 `(nil, nil)` 的约定（**重要，复制本模板时必须保留**）：
+// 常见的 repo 实装会把 `sql.ErrNoRows` / `redis.Nil` / MongoDB "no document"
+// 转成 `(nil, nil)` 作为"正常的不存在"语义上传（而不是 err 非 nil）。
+// 如果 service 只检查 `err != nil`、不检查 `dto == nil`，下一行
+// `dto.Value` 会 panic。本模板**显式**兜底，让 Epic 4+ 复制模板时自然
+// 继承该保护；如果真实业务确实需要"找到空对象"语义（少见），重写这段即可。
 //
 // 本方法刻意保持最小，避免 sample 吸收任何"sample 专属业务"。
 // 复制本方法作为模板时，将 id 校验 / repo 调用 / 返回包装三段分别替换为
@@ -66,6 +74,9 @@ func (s *SampleService) GetValue(ctx context.Context, id string) (int, error) {
 	dto, err := s.repo.FindByID(ctx, id)
 	if err != nil {
 		return 0, err
+	}
+	if dto == nil {
+		return 0, ErrSampleNotFound
 	}
 	return dto.Value, nil
 }

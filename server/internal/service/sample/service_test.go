@@ -75,6 +75,20 @@ func TestSampleService_GetValue(t *testing.T) {
 			wantErrMsg: "db down",
 		},
 		{
+			// 常见于 sql.ErrNoRows / redis.Nil / Mongo "no document" 被 repo
+			// 翻译成 (nil, nil) 的场景 —— service 必须兜底为 ErrSampleNotFound，
+			// 不能对 nil dto 做 dto.Value 解引用（否则整条 sample 模板会把
+			// panic path 复制到未来每一条 service）。
+			name: "edge: repo 返回 (nil, nil) 翻译为 ErrSampleNotFound",
+			id:   "missing",
+			setup: func(m *MockSampleRepo) {
+				m.On("FindByID", mock.Anything, "missing").
+					Return(nil, nil).Once()
+			},
+			wantValue: 0,
+			wantErr:   sample.ErrSampleNotFound,
+		},
+		{
 			name: "happy: ctx 正确传递到 repo",
 			id:   "abc",
 			ctxBuilder: func() context.Context {
