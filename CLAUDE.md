@@ -32,19 +32,20 @@
 
 ## Build & Test
 
-Server 是 `server/` 下的 Go 工程。当前 build 脚本：
+Server 是 `server/` 下的 Go 工程。build 脚本（入口 `./cmd/server/`，`-ldflags` 注入 `internal/buildinfo.Commit` / `.BuiltAt` 供 `/version` 端点用）：
 
 ```bash
-bash scripts/build.sh           # vet + build
-bash scripts/build.sh --test    # 加跑单测
-bash scripts/build.sh --race --test
+bash scripts/build.sh                      # vet + build → build/catserver[.exe]
+bash scripts/build.sh --test               # 加跑单测 go test -count=1 ./...
+bash scripts/build.sh --race --test        # 加 -race 同时作用于 build 和 test
+bash scripts/build.sh --test --coverage    # 产出 build/coverage.out（--coverage 要求 --test）
+bash scripts/build.sh --integration        # 单跑 -tags=integration 集成测试
+bash scripts/build.sh --devtools           # 加 -tags devtools → build/catserver-dev[.exe]
 ```
 
-二进制输出：`build/catserver`。
+二进制输出：`build/catserver`（Windows 自动带 `.exe`，靠 `$(go env GOEXE)`）；`--devtools` 出 `build/catserver-dev`。`--devtools` 与 `--integration` 互斥。
 
-写完或改完 Go 代码后跑 `bash scripts/build.sh --test` 验证。
-
-> **TODO**：当前 `scripts/build.sh` 仍引用旧的 `cmd/cat`、`docs/api/openapi.yaml`、`scripts/check_time_now.sh`（M9 时间检查）—— 这些属于旧架构残留。节点 1 实装时一并重做，让 build 脚本对齐新的 `cmd/server/main.go` 入口和新的目录结构。
+写完或改完 Go 代码后跑 `bash scripts/build.sh --test` 验证。脚本契约来源：`_bmad-output/implementation-artifacts/decisions/0001-test-stack.md` §3.5 + `_bmad-output/implementation-artifacts/1-7-重做-scripts-build-sh.md`。
 
 ## 节点 1 之后的目录形态（target）
 

@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-04-24
+# last_updated: 2026-04-24T18:58:00+08:00
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-04-24
+last_updated: 2026-04-24T18:58:00+08:00
 project: cat
 project_key: NOKEY
 tracking_system: file-system
@@ -49,7 +49,7 @@ development_status:
   1-4-version-接口: done
   1-5-测试基础设施搭建: done
   1-6-dev-tools-框架: done
-  1-7-重做-scripts-build-sh: backlog
+  1-7-重做-scripts-build-sh: review
   1-8-apperror-类型-错误三层映射框架: backlog
   1-9-go-context-传播框架-cancellation-验证: backlog
   1-10-server-readme-本地开发指南: backlog
