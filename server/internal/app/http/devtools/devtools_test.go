@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/huing/cat/server/internal/app/http/devtools"
+	"github.com/huing/cat/server/internal/app/http/middleware"
 	"github.com/huing/cat/server/internal/pkg/testing/slogtest"
 )
 
@@ -96,7 +97,15 @@ func TestRegister_BuildDevFalse_PingDevReturns404(t *testing.T) {
 // --- AC7 case 4 ------------------------------------------------------------
 
 // TestDevOnlyMiddleware_RejectsWhenDisabled 单独测 DevOnlyMiddleware：
-// BUILD_DEV 未设时返回 envelope 404 (code=1003) + 打 WARN 日志。
+// BUILD_DEV 未设时推 ErrResourceNotFound 到 c.Errors → ErrorMappingMiddleware
+// 统一翻成 envelope (code=1003, HTTP 200) + 打 WARN 日志。
+//
+// 本测试挂 ErrorMappingMiddleware：因为选 A（envelope 必须经 ErrorMappingMiddleware
+// 统一产出）之后，DevOnlyMiddleware 本身不再直接写 envelope，脱离 ErrorMappingMiddleware
+// 测响应结果无意义。
+//
+// HTTP status=200 原因：ErrorMappingMiddleware 的 status 决策规则（error_mapping.go:98-103）
+// 只有 ErrServiceBusy(1009) 走 500，其它业务码一律 200（业务码与 HTTP status 正交）。
 //
 // 断言日志：slogtest.Handler 捕获至少一条 level=WARN 的记录，msg 含
 // "dev_only middleware rejected"，attrs 含 api_path / method / client_ip。
@@ -111,6 +120,8 @@ func TestDevOnlyMiddleware_RejectsWhenDisabled(t *testing.T) {
 	slog.SetDefault(slog.New(h))
 
 	r := newEngine()
+	// 挂 ErrorMappingMiddleware：DevOnlyMiddleware 依赖它把 c.Errors 翻成 envelope。
+	r.Use(middleware.ErrorMappingMiddleware())
 	g := r.Group("/dev")
 	g.Use(devtools.DevOnlyMiddleware())
 	// 挂一个 noop handler，保证路由存在，middleware 会真正执行。
@@ -118,14 +129,15 @@ func TestDevOnlyMiddleware_RejectsWhenDisabled(t *testing.T) {
 
 	w := doGet(r, "/dev/foo")
 
-	// 1. HTTP 层：404 + envelope code=1003
-	assert.Equal(t, http.StatusNotFound, w.Code)
+	// 1. HTTP 层：HTTP 200 + envelope code=1003（ErrorMappingMiddleware 规则）
+	assert.Equal(t, http.StatusOK, w.Code, "ErrorMappingMiddleware 对非 1009 的 AppError 走 HTTP 200")
 	var env envelope
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env), "body must be JSON envelope; got=%s", w.Body.String())
 	assert.Equal(t, 1003, env.Code, "envelope.code should be 1003 (资源不存在)")
 	assert.Equal(t, "资源不存在", env.Message)
 
 	// 2. 日志层：至少一条 WARN 含 "dev_only middleware rejected"
+	// （ErrorMappingMiddleware 也会打自己的 WARN "error_mapping"，不影响本匹配）
 	records := h.Records()
 	var hit *slog.Record
 	for i, rec := range records {

@@ -8,7 +8,9 @@
 package bootstrap
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -80,4 +82,83 @@ func TestRouter_DevPingEnabled_EnvToggle(t *testing.T) {
 			t.Errorf("body = %q, want Gin default NoRoute text", w.Body.String())
 		}
 	})
+}
+
+// TestRouter_DevOnlyMiddleware_FallbackPath_LogsCanonicalErrorCode 覆盖 DevOnlyMiddleware
+// 的**兜底**触发路径：启动时 BUILD_DEV=true 已把 /dev/* 路由挂上 engine，运行期
+// 运维切 BUILD_DEV="" —— 路由仍存在，middleware 在请求期触发 reject。
+//
+// 本测试是 fix-review P2（DevOnlyMiddleware 绕过 canonical error_code 广播）的防回归：
+// 验证在**真实**中间件栈（Logging → ErrorMapping → Recovery → DevOnly）下
+//
+//	客户端看到的 envelope.code
+//	==
+//	http_request 日志的 error_code 字段
+//
+// 始终一致。若 DevOnlyMiddleware 未来再次退化为自己写 envelope（response.Error）
+// 而不 Set canonical key，本测试会因日志缺 error_code 红掉。
+//
+// 见 docs/lessons/2026-04-24-error-envelope-single-producer.md。
+func TestRouter_DevOnlyMiddleware_FallbackPath_LogsCanonicalErrorCode(t *testing.T) {
+	// Step 1：启动时 BUILD_DEV=true → Register 挂 /dev/* 路由组
+	t.Setenv("BUILD_DEV", "true")
+	gin.SetMode(gin.TestMode)
+
+	// 捕获 slog：在 NewRouter 前接管，保证 Logging 中间件的 slog.Default() 走 buf
+	var buf bytes.Buffer
+	origDefault := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(origDefault) })
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	r := NewRouter()
+
+	// Step 2：运维热切换 BUILD_DEV="" → 路由仍在，但 DevOnlyMiddleware 将在请求期 reject
+	t.Setenv("BUILD_DEV", "")
+
+	req := httptest.NewRequest(http.MethodGet, "/dev/ping-dev", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	// Step 3：HTTP 层断言 —— HTTP 200 + envelope code=1003
+	// （ErrorMappingMiddleware 的 status 决策：非 1009 的 AppError → HTTP 200）
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var env struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("body not JSON envelope: %v; body=%s", err, w.Body.String())
+	}
+	if env.Code != 1003 {
+		t.Errorf("envelope.code = %d, want 1003", env.Code)
+	}
+	if env.Message != "资源不存在" {
+		t.Errorf("envelope.message = %q, want '资源不存在'", env.Message)
+	}
+
+	// Step 4：日志层断言 —— 找到 msg=http_request 的那条，必须含 error_code=1003
+	lines := bytes.Split(bytes.TrimRight(buf.Bytes(), "\n"), []byte("\n"))
+	var httpReqLog map[string]any
+	for _, line := range lines {
+		var m map[string]any
+		if err := json.Unmarshal(line, &m); err != nil {
+			continue
+		}
+		if msg, _ := m["msg"].(string); msg == "http_request" {
+			httpReqLog = m
+			break
+		}
+	}
+	if httpReqLog == nil {
+		t.Fatalf("未找到 http_request 日志行；buf=%s", buf.String())
+	}
+	code, ok := httpReqLog["error_code"].(float64)
+	if !ok {
+		t.Fatalf("http_request 日志缺 error_code 字段（canonical envelope.code 广播契约破坏）；log=%v", httpReqLog)
+	}
+	if int(code) != 1003 {
+		t.Errorf("http_request.error_code = %v, want 1003 （envelope.code 与日志 error_code 必须一致）", code)
+	}
 }

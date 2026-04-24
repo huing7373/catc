@@ -12,8 +12,14 @@
 // # 双闸门（防御纵深）
 //
 //  1. Register 在 IsEnabled()==false 时直接返回，不挂 /dev/* 路由组 → Gin 默认 NoRoute 返回文本 404
-//  2. DevOnlyMiddleware 在 request 时再做一次 IsEnabled() 校验 → false 则返回 envelope 404（code=1003）
+//  2. DevOnlyMiddleware 在 request 时再做一次 IsEnabled() 校验 → false 则推一个 ErrResourceNotFound
+//     到 c.Errors，由 ErrorMappingMiddleware 统一翻译成 envelope（code=1003 资源不存在，HTTP 200）。
 //     这为"挂了路由但运行期关闭 BUILD_DEV"（极边缘但实现成本为零）与"单独被测 middleware"场景兜底
+//
+//  注意：闸门 2 的对外响应是 HTTP 200 + JSON envelope（由 V1接口设计 §2.4 统一规则决定，
+//  业务码与 HTTP status 正交，仅 ErrServiceBusy=1009 走 500），**不再**仿 Gin NoRoute 的文本 404。
+//  "让被拒的 dev 端点外观与路径不存在无差别" 这层 OpSec 外观想恢复的话，应在 router 层
+//  定制 NoRoute handler 统一所有未命中路径的响应形态，**不**由业务 middleware 各自写死 HTTP status。
 //
 // # 验证命令
 //
@@ -31,24 +37,17 @@ package devtools
 
 import (
 	"log/slog"
-	"net/http"
 	"os"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/huing/cat/server/internal/infra/logger"
+	apperror "github.com/huing/cat/server/internal/pkg/errors"
 	"github.com/huing/cat/server/internal/pkg/response"
 )
 
 // envBuildDev 是启用 dev 模式的运行期环境变量名。严格字面 "true" 才视为真。
 const envBuildDev = "BUILD_DEV"
-
-// devNotFoundCode 是 DevOnlyMiddleware 被拒请求返回的业务错误码，
-// 对齐 V1接口设计 §3 的 `1003 资源不存在`。
-//
-// 选 1003（而非 403/401）是出于 OpSec 考虑：对外与"路径不存在"无差别，
-// 不泄露"dev 端点存在但被拒"的信息。
-const devNotFoundCode = 1003
 
 // IsEnabled 返回 dev 模式是否启用。
 //
@@ -96,7 +95,17 @@ func Register(r *gin.Engine) {
 //     2. 打一条 WARN：`dev_only middleware rejected request`
 //     携带 api_path / method / client_ip（**不**记 user_id：dev 端点不走 auth；
 //     **不**记 request body：可能过大，日志放大）
-//     3. 返回 envelope 404（code=1003 "资源不存在"）+ c.Abort()
+//     3. 推一个 ErrResourceNotFound(1003) 到 c.Errors + c.Abort()，由 ErrorMappingMiddleware
+//     统一写 envelope + Set ResponseErrorCodeKey，保证 http_request 日志的 error_code 字段与
+//     envelope.code 始终一致（见 docs/lessons/2026-04-24-error-envelope-single-producer.md）。
+//
+// # 为什么选 code=1003（资源不存在）而非 401/403
+//
+// OpSec：envelope 层面对外与"路径不存在"无差别（message="资源不存在"）。
+// 但**注意**：HTTP status 由 ErrorMappingMiddleware 统一决策（非 1009 → HTTP 200），
+// **不再**仿 Gin 默认 NoRoute 的 404 文本响应。扫描器仍可通过 `200 JSON envelope` 与
+// `404 text/plain` 的差异识别 dev 路由存在；若需要严格外观隐藏，应在 router 层加
+// custom NoRoute handler 让整个系统对未命中路径统一响应形态。
 //
 // 日志级别为 WARN 而非 ERROR：被拒是**预期**防御路径，不是错误（ERROR 会污染告警）。
 func DevOnlyMiddleware() gin.HandlerFunc {
@@ -111,7 +120,7 @@ func DevOnlyMiddleware() gin.HandlerFunc {
 			slog.String("method", c.Request.Method),
 			slog.String("client_ip", c.ClientIP()),
 		)
-		response.Error(c, http.StatusNotFound, devNotFoundCode, "资源不存在")
+		_ = c.Error(apperror.New(apperror.ErrResourceNotFound, "资源不存在"))
 		c.Abort()
 	}
 }

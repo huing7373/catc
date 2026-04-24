@@ -15,8 +15,20 @@ import (
 // 写完 envelope 后，本中间件把它实际选定的 envelope.code 存到 c.Keys，
 // Logging 中间件读取该 key 决定 http_request 日志中的 `error_code` 字段值。
 //
-// 设计意图：让 ErrorMappingMiddleware 成为 "canonical response error code"
-// 的**唯一权威生产者**，所有下游消费者（目前只有 Logging）一律读本 key，
+// # 唯一权威生产者：ErrorMappingMiddleware
+//
+// 本项目钦定：**只有 ErrorMappingMiddleware 写 error envelope + Set 本 key**。
+// 其它任何中间件 / handler 想报告业务错误，一律通过 `c.Error(apperror.New(...))` +
+// `c.Abort()` 把错误推到 c.Errors，由 ErrorMappingMiddleware 统一翻译成 envelope。
+//
+// **禁止**直接调 `response.Error(...)` 绕开本管道 —— 即便随手 `c.Set(ResponseErrorCodeKey, ...)`
+// 同步 canonical key 看似也行，但这会把 HTTP status 决策权分散到各中间件，让
+// V1接口设计 §2.4 "业务码与 HTTP status 正交，仅 1009 走 500" 的集中决策失控。
+// 见 docs/lessons/2026-04-24-error-envelope-single-producer.md。
+//
+// # 为什么需要本 key
+//
+// 让下游消费者（目前只有 Logging）一律读本 key 拿 canonical envelope.code，
 // 不再各自从 c.Errors 原始状态推断 —— 否则会出现两类 bug：
 //
 //  1. 非 AppError 路径：handler `c.Error(io.EOF)` 时 c.Errors[0] 是 io.EOF，
@@ -31,7 +43,8 @@ import (
 //   - double-write path（ErrorMappingMiddleware 故意跳过 envelope 写入，
 //     成功响应是客户端实际看到的，不应在日志声称错误）
 //
-// 见 docs/lessons/2026-04-24-middleware-canonical-decision-key.md。
+// 见 docs/lessons/2026-04-24-middleware-canonical-decision-key.md +
+// docs/lessons/2026-04-24-error-envelope-single-producer.md。
 const ResponseErrorCodeKey = "response_error_code"
 
 // ErrorMappingMiddleware 在 c.Next() 之后扫描 c.Errors，把错误统一翻译成
