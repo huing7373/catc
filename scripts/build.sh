@@ -80,7 +80,8 @@ mkdir -p "$OUTPUT_DIR"
 cd "$SERVER_DIR"
 
 echo "=== go vet ==="
-if ! go vet ./... 2>&1; then
+# shellcheck disable=SC2086  # intentional word-splitting on BUILD_TAGS
+if ! go vet $BUILD_TAGS ./... 2>&1; then
   echo "FAIL: go vet"
   exit 1
 fi
