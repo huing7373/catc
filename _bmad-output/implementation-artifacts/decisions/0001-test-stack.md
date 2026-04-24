@@ -242,3 +242,4 @@ require (
 | Date | Change | By |
 |---|---|---|
 | 2026-04-24 | 初稿，Story 1.1 交付 | Developer |
+| 2026-04-24 | Story 1.5 落地：装 testify v1.11.1 / sqlmock v1.5.2 / miniredis v2.37.0（按 §6 版本锁定）；dockertest **延迟到 Epic 4 Story 4-7**（首次 layer-2 集成测试场景引入，避免 `go mod tidy` 剔除未 import 的包）；sqlmock+GORM cheatsheet 延迟到 Epic 4 Story 4-2（GORM 落地后再新建 `0002-sqlmock-gorm-cheatsheet.md`）。本机 Windows Go install 缺 `race_windows_amd64.syso` + 下载的 toolchain 缺 `covdata.exe`，`go test -race -cover` 无法本地跑；按本 ADR §3.5 原则归 CI（Linux runner）执行，Story 1.7 重做 `scripts/build.sh` 时预留 `--race` / `--coverage` 开关。 | Developer |
