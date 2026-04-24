@@ -2,7 +2,7 @@
 date: 2026-04-24
 source_review: manual review by user (inline review comment on scripts/build.sh:82-83)
 story: 1-7-重做-scripts-build-sh
-commit: <pending>
+commit: 707b070
 lesson_count: 1
 ---
 
