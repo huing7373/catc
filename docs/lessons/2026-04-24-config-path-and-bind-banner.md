@@ -2,7 +2,7 @@
 date: 2026-04-24
 source_review: manual review from user (inline review comments via /fix-review)
 story: 1-2-cmd-server-入口-配置加载-gin-ping
-commit: <pending>
+commit: 8913fa7
 lesson_count: 2
 ---
 

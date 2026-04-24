@@ -6,4 +6,4 @@
 
 | 日期 | 主题 | 条数 | 分类 | commit |
 |---|---|---|---|---|
-| 2026-04-24 | [配置路径 CWD 耦合 与 启动 banner 时序错位](2026-04-24-config-path-and-bind-banner.md) | 2 | config, error-handling | `<pending>` |
+| 2026-04-24 | [配置路径 CWD 耦合 与 启动 banner 时序错位](2026-04-24-config-path-and-bind-banner.md) | 2 | config, error-handling | `8913fa7` |
