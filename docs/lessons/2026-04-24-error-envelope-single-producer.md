@@ -2,7 +2,7 @@
 date: 2026-04-24
 source_review: 人工 review（Story 1.8 收尾后补触发的盲区，P2 一条）
 story: 1-8-apperror-类型-错误三层映射框架
-commit: <pending>
+commit: 26b5692
 lesson_count: 1
 ---
 
