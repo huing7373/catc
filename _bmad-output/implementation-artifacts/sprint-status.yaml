@@ -47,7 +47,7 @@ development_status:
   1-2-cmd-server-入口-配置加载-gin-ping: done
   1-3-中间件-request_id-recover-logging: done
   1-4-version-接口: done
-  1-5-测试基础设施搭建: review
+  1-5-测试基础设施搭建: done
   1-6-dev-tools-框架: backlog
   1-7-重做-scripts-build-sh: backlog
   1-8-apperror-类型-错误三层映射框架: backlog
