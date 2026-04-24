@@ -60,7 +60,31 @@
       "Bash(taskkill //IM catserver.exe //F)",
       "Bash(../build/catserver.exe *)",
       "Bash(curl -s http://127.0.0.1:8080/version)",
-      "Bash(curl -s http://127.0.0.1:18082/version)"
+      "Bash(curl -s http://127.0.0.1:18082/version)",
+      "Bash(go env *)",
+      "Bash(which gcc *)",
+      "Bash(C:/Users/zhuming/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.windows-amd64/pkg/tool/windows_amd64/cgo.exe)",
+      "Read(//c/Users/zhuming/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.windows-amd64/src/runtime/cgo/**)",
+      "Bash(\"C:/Users/zhuming/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.windows-amd64/pkg/tool/windows_amd64/cgo.exe\" -objdir /tmp/cgotest -importpath runtime/cgo -import_runtime_cgo=false -import_syscall=false -- -I /tmp/cgotest cgo.go)",
+      "Bash(mkdir -p /tmp/cgotest)",
+      "Bash(\"C:/Users/zhuming/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.windows-amd64/pkg/tool/windows_amd64/cgo.exe\" -objdir \"C:/tmp/cgotest/\" -importpath runtime/cgo -import_runtime_cgo=false -import_syscall=false -- -I \"C:/tmp/cgotest/\" cgo.go)",
+      "Bash(mkdir -p /c/tmp/cgotest)",
+      "Bash(C:/Users/zhuming/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.windows-amd64/pkg/tool/windows_amd64/cgo.exe -objdir C:/tmp/cgotest/ -importpath runtime/cgo -import_runtime_cgo=false -import_syscall=false -- -I C:/tmp/cgotest/ C:/Users/zhuming/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.windows-amd64/src/runtime/cgo/cgo.go)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(GOTOOLCHAIN=local go env GOROOT GOTOOLCHAIN)",
+      "Bash(GOTOOLCHAIN=local go test -race -cover ./...)",
+      "Bash(C:/Program Files/Go/bin/go.exe version *)",
+      "Bash(\"/c/Program Files/Go/bin/go\" version)",
+      "Read(//c/Program Files/Go/**)",
+      "Bash(mkdir -p /tmp/fix-c-backup)",
+      "Bash(cp C:/fork/cat/server/internal/service/sample/service.go /tmp/fix-c-backup/service.go)",
+      "Bash(cp C:/fork/cat/server/internal/service/sample/service_test.go /tmp/fix-c-backup/service_test.go)",
+      "Bash(cp C:/fork/cat/server/internal/pkg/testing/slogtest/handler.go /tmp/fix-c-backup/handler.go)",
+      "Bash(cp C:/fork/cat/server/internal/pkg/testing/slogtest/handler_test.go /tmp/fix-c-backup/handler_test.go)",
+      "Bash(cp /tmp/fix-c-backup/service.go C:/fork/cat/server/internal/service/sample/service.go)",
+      "Bash(cp /tmp/fix-c-backup/service_test.go C:/fork/cat/server/internal/service/sample/service_test.go)",
+      "Bash(cp /tmp/fix-c-backup/handler.go C:/fork/cat/server/internal/pkg/testing/slogtest/handler.go)",
+      "Bash(cp /tmp/fix-c-backup/handler_test.go C:/fork/cat/server/internal/pkg/testing/slogtest/handler_test.go)"
     ]
   }
 }
