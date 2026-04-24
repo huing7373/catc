@@ -84,7 +84,22 @@
       "Bash(cp /tmp/fix-c-backup/service.go C:/fork/cat/server/internal/service/sample/service.go)",
       "Bash(cp /tmp/fix-c-backup/service_test.go C:/fork/cat/server/internal/service/sample/service_test.go)",
       "Bash(cp /tmp/fix-c-backup/handler.go C:/fork/cat/server/internal/pkg/testing/slogtest/handler.go)",
-      "Bash(cp /tmp/fix-c-backup/handler_test.go C:/fork/cat/server/internal/pkg/testing/slogtest/handler_test.go)"
+      "Bash(cp /tmp/fix-c-backup/handler_test.go C:/fork/cat/server/internal/pkg/testing/slogtest/handler_test.go)",
+      "Bash(echo \"---exit=$?---\")",
+      "Bash(bash C:/fork/cat/scripts/build.sh)",
+      "Bash(CAT_HTTP_PORT=18090 C:/fork/cat/build/catserver.exe *)",
+      "Bash(curl -s http://127.0.0.1:18090/version)",
+      "Bash(curl -s http://127.0.0.1:18090/ping)",
+      "Bash(powershell -c \"Get-Process -Name catserver -ErrorAction SilentlyContinue | Stop-Process -Force\")",
+      "Bash(bash C:/fork/cat/scripts/build.sh --test)",
+      "Bash(bash C:/fork/cat/scripts/build.sh --race --test)",
+      "Bash(bash C:/fork/cat/scripts/build.sh --devtools)",
+      "Bash(unset BUILD_DEV)",
+      "Bash(CAT_HTTP_PORT=18091 C:/fork/cat/build/catserver-dev.exe -config C:/fork/cat/server/configs/local.yaml)",
+      "Bash(curl -s http://127.0.0.1:18091/dev/ping-dev)",
+      "Bash(curl -s http://127.0.0.1:18091/version)",
+      "Bash(powershell -c \"Get-Process -Name 'catserver-dev' -ErrorAction SilentlyContinue | Stop-Process -Force ; Get-Process -Name 'catserver' -ErrorAction SilentlyContinue | Stop-Process -Force\")",
+      "Bash(bash -x ../scripts/build.sh --devtools)"
     ]
   }
 }
