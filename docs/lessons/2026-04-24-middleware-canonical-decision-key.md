@@ -2,7 +2,7 @@
 date: 2026-04-24
 source_review: manual review by user (2 findings on Story 1.8 implementation)
 story: 1-8-apperror-类型-错误三层映射框架
-commit: <pending>
+commit: f85064c
 lesson_count: 2
 ---
 
