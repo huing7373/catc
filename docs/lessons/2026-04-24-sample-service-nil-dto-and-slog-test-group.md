@@ -2,7 +2,7 @@
 date: 2026-04-24
 source_review: manual code review on Story 1.5 implementation (2 × P2 findings)
 story: 1-5-测试基础设施搭建
-commit: <pending>
+commit: 4519274
 lesson_count: 2
 ---
 
