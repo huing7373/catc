@@ -30,10 +30,12 @@ func captureSlog(t *testing.T) (*bytes.Buffer, func()) {
 // 历史背景：未拆分 Listen/Serve 前，log 先于 ListenAndServe 执行，
 // 端口占用时会留下 "server started" + 紧跟 "bind error" 的误导日志对。
 func TestRun_BindFailureReturnsErrorAndNoStartedBanner(t *testing.T) {
-	// Pre-bind on `:port`（0.0.0.0）—— 必须和 Run 使用的地址族一致，
+	// Pre-bind on `127.0.0.1:port` —— 必须和 Run 使用的地址族一致，
 	// 否则在 Windows 上 127.0.0.1:N 与 0.0.0.0:N 可以共存，bind 不会失败，
-	// 测试会悬挂（历史坑：一次踩中就是因为 occupier 绑在了 127.0.0.1）。
-	occupier, err := net.Listen("tcp", ":0")
+	// 测试会悬挂（历史坑：一次踩中就是因为 occupier 和 Run 绑的接口不一致）。
+	// 本测试 cfg.Server.BindHost = "127.0.0.1" → Run 也绑 loopback；
+	// loopback-only 绑定同时规避 Windows Firewall 对新 hash test 二进制的弹窗。
+	occupier, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("pre-bind failed: %v", err)
 	}
@@ -45,6 +47,7 @@ func TestRun_BindFailureReturnsErrorAndNoStartedBanner(t *testing.T) {
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{
+			BindHost:        "127.0.0.1",
 			HTTPPort:        port,
 			ReadTimeoutSec:  1,
 			WriteTimeoutSec: 1,
@@ -76,7 +79,8 @@ func TestRun_ShutdownStopsServer(t *testing.T) {
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			HTTPPort:        0, // 让 OS 分配端口；为此需用 127.0.0.1:0 的能力
+			BindHost:        "127.0.0.1", // loopback-only：避免 Windows Firewall 弹窗 + OS 分配端口
+			HTTPPort:        0,           // 让 OS 分配端口
 			ReadTimeoutSec:  1,
 			WriteTimeoutSec: 1,
 		},

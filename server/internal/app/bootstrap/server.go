@@ -22,7 +22,9 @@ const shutdownTimeout = 5 * time.Second
 // docs/lessons/2026-04-24-config-path-and-bind-banner.md。
 func Run(ctx context.Context, cfg *config.Config) error {
 	router := NewRouter()
-	addr := fmt.Sprintf(":%d", cfg.Server.HTTPPort)
+	// BindHost 空串保持原行为（0.0.0.0，所有接口）= 生产默认；
+	// 测试注入 "127.0.0.1" → loopback-only，避开 Windows Firewall 弹窗。
+	addr := fmt.Sprintf("%s:%d", cfg.Server.BindHost, cfg.Server.HTTPPort)
 	srv := &http.Server{
 		Handler:      router,
 		ReadTimeout:  time.Duration(cfg.Server.ReadTimeoutSec) * time.Second,
