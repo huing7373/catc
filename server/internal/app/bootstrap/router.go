@@ -9,10 +9,23 @@ import (
 	"github.com/huing/cat/server/internal/infra/metrics"
 )
 
-// NewRouter 构造挂好三件套中间件的 Gin engine。
+// NewRouter 构造挂好四件套中间件的 Gin engine。
 //
-// 中间件顺序严格：RequestID → Logging → Recovery → handler。
-// 反过来会导致 panic 请求在日志里消失（详情见 middleware/recover.go 顶部注释）。
+// 中间件顺序严格：
+//
+//	RequestID → Logging → ErrorMappingMiddleware → Recovery → handler
+//
+// 顺序约束：
+//   - RequestID 最外：所有后续中间件 / handler 都需要 request_id 进 ctx
+//   - Logging 次外：在 c.Next() 之前打开 logger 进 ctx，之后扫 c.Errors 写
+//     http_request 日志（含 error_code）
+//   - ErrorMappingMiddleware 在 Recovery **外层**：panic 流程是 "handler panic →
+//     Recovery defer recover → c.Error(AppError) + c.Abort → Recovery 返回 →
+//     ErrorMappingMiddleware 的 after-c.Next() 写 envelope"。把 ErrorMappingMiddleware
+//     放 Recovery 内层会让 envelope 写不出来（panic 已 unwind 越过它）。
+//   - Recovery 最内：直接包裹 handler 抓 panic
+//
+// 详情见 middleware/error_mapping.go + middleware/recover.go 顶部注释。
 //
 // 运维端点（不走 /api/v1 前缀，不走业务 auth）：
 //   - GET /ping      — liveness 探活
@@ -26,6 +39,7 @@ func NewRouter() *gin.Engine {
 	r := gin.New()
 	r.Use(middleware.RequestID())
 	r.Use(middleware.Logging())
+	r.Use(middleware.ErrorMappingMiddleware())
 	r.Use(middleware.Recovery())
 
 	r.GET("/ping", handler.PingHandler)
