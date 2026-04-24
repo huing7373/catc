@@ -44,7 +44,7 @@ story_location: "{project-root}/_bmad-output/implementation-artifacts"
 development_status:
   epic-1: in-progress
   1-1-mock-库选型-spike-logger-metrics-框架选型: done
-  1-2-cmd-server-入口-配置加载-gin-ping: backlog
+  1-2-cmd-server-入口-配置加载-gin-ping: done
   1-3-中间件-request_id-recover-logging: backlog
   1-4-version-接口: backlog
   1-5-测试基础设施搭建: backlog

@@ -34,7 +34,26 @@
       "Bash(grep -v \"^$\")",
       "Bash(go vet:*)",
       "Bash(grep -v \"//\")",
-      "Bash(grep -n \"func NewWSHandler\\\\|func NewHub\\\\|func NewRouter\" internal/handler/ws_handler.go internal/ws/*.go)"
+      "Bash(grep -n \"func NewWSHandler\\\\|func NewHub\\\\|func NewRouter\" internal/handler/ws_handler.go internal/ws/*.go)",
+      "Bash(go version *)",
+      "Bash(CC=/c/msys64/ucrt64/bin/gcc CGO_ENABLED=1 go test -race ./...)",
+      "Bash(CC=/c/msys64/ucrt64/bin/gcc CGO_ENABLED=1 go test -race ./internal/infra/config/)",
+      "Bash(CC=/c/msys64/ucrt64/bin/gcc CGO_ENABLED=1 go test -race -v ./internal/infra/config/)",
+      "Bash(CC=/c/msys64/ucrt64/bin/gcc CGO_ENABLED=1 go build -race -x ./cmd/server/)",
+      "Bash(/c/fork/cat/build/catserver.exe -config configs/local.yaml)",
+      "Bash(echo \"PID: $!\")",
+      "Bash(curl -sS -i http://127.0.0.1:8080/ping)",
+      "Bash(kill %1)",
+      "Bash(wait)",
+      "Bash(taskkill //PID 9205 //F)",
+      "Bash(tasklist //FI \"IMAGENAME eq go.exe\")",
+      "Bash(tasklist //FI \"IMAGENAME eq bootstrap.test.exe\")",
+      "Bash(taskkill //PID 36832 //F)",
+      "Bash(taskkill //PID 45136 //F)",
+      "Bash(taskkill //PID 46008 //F)",
+      "Bash(taskkill //PID 35692 //F)",
+      "Bash(taskkill //PID 17240 //F)",
+      "Bash(grep *)"
     ]
   }
 }
