@@ -3,7 +3,7 @@ package bootstrap
 import (
 	"bytes"
 	"context"
-	"log"
+	"log/slog"
 	"net"
 	"strings"
 	"testing"
@@ -11,6 +11,17 @@ import (
 
 	"github.com/huing/cat/server/internal/infra/config"
 )
+
+// captureSlog 暂时把 slog.Default() 重定向到 buf（TextHandler，方便 strings.Contains 断言），
+// 返回 cleanup。Story 1.3 把 bootstrap/server.go 从 stdlib log 切到 slog，原来的
+// `log.SetOutput(&buf)` 捕获策略失效 —— 这是从 Story 1.2 迁移过来的关键适配。
+func captureSlog(t *testing.T) (*bytes.Buffer, func()) {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	return &buf, func() { slog.SetDefault(prev) }
+}
 
 // TestRun_BindFailureReturnsErrorAndNoStartedBanner 验证 bind 失败时：
 //  1. Run 同步返回 error（不在 goroutine 里消失）
@@ -29,15 +40,8 @@ func TestRun_BindFailureReturnsErrorAndNoStartedBanner(t *testing.T) {
 	defer occupier.Close()
 	port := occupier.Addr().(*net.TCPAddr).Port
 
-	var buf bytes.Buffer
-	oldOut := log.Writer()
-	oldFlags := log.Flags()
-	log.SetOutput(&buf)
-	log.SetFlags(0)
-	defer func() {
-		log.SetOutput(oldOut)
-		log.SetFlags(oldFlags)
-	}()
+	buf, restore := captureSlog(t)
+	defer restore()
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{
@@ -67,15 +71,8 @@ func TestRun_BindFailureReturnsErrorAndNoStartedBanner(t *testing.T) {
 // TestRun_ShutdownStopsServer 验证 bind 成功后，ctx 取消能触发 graceful shutdown
 // 并打印 "server stopped"。同时确认 "server started" banner 在这个 happy path 下会出现。
 func TestRun_ShutdownStopsServer(t *testing.T) {
-	var buf bytes.Buffer
-	oldOut := log.Writer()
-	oldFlags := log.Flags()
-	log.SetOutput(&buf)
-	log.SetFlags(0)
-	defer func() {
-		log.SetOutput(oldOut)
-		log.SetFlags(oldFlags)
-	}()
+	buf, restore := captureSlog(t)
+	defer restore()
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{

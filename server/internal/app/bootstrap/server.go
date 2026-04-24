@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -33,7 +33,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
-	log.Printf("server started on %s", addr)
+	slog.Info("server started", slog.String("addr", addr))
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -49,10 +49,10 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
-			log.Printf("server shutdown error: %v", err)
+			slog.Error("server shutdown error", slog.Any("error", err))
 			return err
 		}
-		log.Printf("server stopped")
+		slog.Info("server stopped")
 		return nil
 	case err := <-errCh:
 		return err

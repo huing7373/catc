@@ -35,6 +35,11 @@ func Error(c *gin.Context, httpStatus, code int, message string) {
 }
 
 func requestIDFromCtx(c *gin.Context) string {
+	if v, ok := c.Get("request_id"); ok {
+		if rid, ok := v.(string); ok && rid != "" {
+			return rid
+		}
+	}
 	if v := c.Request.Header.Get("X-Request-Id"); v != "" {
 		return v
 	}
