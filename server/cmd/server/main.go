@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/huing/cat/server/internal/app/bootstrap"
+	"github.com/huing/cat/server/internal/app/http/devtools"
 	"github.com/huing/cat/server/internal/infra/config"
 	"github.com/huing/cat/server/internal/infra/logger"
 )
@@ -44,6 +45,14 @@ func main() {
 		slog.Int("http_port", cfg.Server.HTTPPort),
 		slog.String("log_level", cfg.Log.Level),
 	)
+
+	// Dev 模式（BUILD_DEV=true 或 build tag `devtools`）启用时在启动阶段打一条
+	// 醒目 WARN。放在 logger.Init(cfg.Log.Level) 之后 → 用户配置的 log level
+	// 已生效；devtools.Register 内部会在路由实际注册完成后再打一条同内容 WARN，
+	// 两条共同构成完整的"触发源 → 注册完成"链路，便于 ops 排障。
+	if devtools.IsEnabled() {
+		slog.Warn("DEV MODE ENABLED - DO NOT USE IN PRODUCTION")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

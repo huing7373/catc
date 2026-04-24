@@ -1,4 +1,8 @@
 server:
+  # 本地开发默认绑 loopback：Windows Defender Firewall 对 127.0.0.1 免检，
+  # 避免每次重编译 exe（新哈希）都弹一次"专用网络访问"授权窗。
+  # 生产部署删掉此行（或改 0.0.0.0）让 server 监听所有网卡。
+  bind_host: 127.0.0.1
   http_port: 8080
   read_timeout_sec: 5
   write_timeout_sec: 10
