@@ -161,29 +161,43 @@ lesson_count: <条数>
 
 ### 6. 向用户展示待提交内容 → 等待确认
 
-输出 4 块：
-1. **分诊总表**（复用步骤 2 的结果）
+**不询问 commit message** —— message 由步骤 7 按固定模板机械生成（见步骤 7 的"commit message 构造规则"），**不**在此步骤展示草稿、**不**允许"调整 message"作为选项。用户通过步骤 2 的分诊确认已经锁定语义，message 只是这份语义的机械表达，不需要二次议事。
+
+输出 3 块：
+
+1. **分诊总表**（复用步骤 2 的结果，提醒用户上下文）
 2. **代码变更清单**：`git status --short`
 3. **将创建的 lesson 文件路径 + 预览**：展示 lesson 文件的开头和 "预防规则" 部分（全文可能较长，不必 dump）
-4. **即将执行的 commit message**：
 
-```
-fix(review): <一句话主旨，从 lesson 文件的标题提炼>
+询问：「确认执行吗？（yes / 调整 lesson / 取消）」
 
-- 修复 N 条 finding（High X / Med Y / Low Z）
-- <1-3 个 lesson 标题要点>
-- 归档经验：docs/lessons/<date>-<slug>.md
-- 未修复：K 条（wontfix R，defer D；详见 lesson 文档）
-
-Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
-```
-
-询问：「确认执行吗？（yes / 调整 lesson / 调整 message / 取消）」
-
-- 用户要调 lesson 内容 → 改完重新展示 → 再问
-- 用户取消 → **回滚**：删除步骤 5 生成的 lesson 文件、撤回对 index.md 的追加、`git checkout --` 所有本命令做的代码修改（或更安全地用 `git stash push` + 报告 stash 名让用户自行恢复）。**必须向用户明示回滚动作**
+- **yes**：进入步骤 7，按模板生成 commit message 并直接 commit，**不再询问 message**
+- **调整 lesson**：用户给出调整点 → 改完重新展示 → 再问
+- **取消**：**回滚**：删除步骤 5 生成的 lesson 文件、撤回对 index.md 的追加、`git checkout --` 所有本命令做的代码修改（或更安全地用 `git stash push` + 报告 stash 名让用户自行恢复）。**必须向用户明示回滚动作**
 
 ### 7. 提交
+
+**commit message 构造规则（机械生成，不询问用户）**：
+
+- **Subject**（第一行）：`fix(review): <主旨>`
+  - `<主旨>` 来源：直接用步骤 5 生成的 lesson 文件 H1 标题里 `—` 之后的片段（如 lesson 标题是 `Review Lessons — 2026-04-24 — Sample 模板的 nil DTO 兜底 & slog 测试 fixture 的 WithGroup 语义`，subject 主旨 = `Sample 模板的 nil DTO 兜底 & slog 测试 fixture 的 WithGroup 语义`）
+  - 主旨过长（> 60 字符）时，用 "severity × 数量 + Category 关键词" 压缩，如 `P2×2 — architecture / testing`
+- **Body**（空行后）：4 行固定结构，按模板填充
+  ```
+  - 修复 N 条 finding（High X / Med Y / Low Z）
+  - <逐条 lesson 标题一句话复述，最多 3 条；超过 3 条省略号>
+  - 归档经验：docs/lessons/<date>-<slug>.md
+  - 未修复：K 条（wontfix R，defer D；详见 lesson 文档）
+  ```
+  - 若 K = 0，"未修复" 行改成 `- 未修复：0 条`（保留这行，**不**省略）
+- **Footer**（空行后）：
+  ```
+  Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+  ```
+
+**严格遵守**：按上述规则直接生成 message 并 `git commit`，**不向用户展示草稿、不询问"是否调整 message"**。这是本命令的**硬约定**，由用户在命令设计阶段明确要求（避免每次 commit 前都被打断问一遍）。
+
+**提交机制**：
 
 - `git add` 逐个文件添加（代码变更 + lesson md + index.md），**不用 `git add -A`**
 - 超过 10 个文件才允许 `git add -A`，且必须先告知用户
