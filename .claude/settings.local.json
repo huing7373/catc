@@ -99,7 +99,8 @@
       "Bash(curl -s http://127.0.0.1:18091/dev/ping-dev)",
       "Bash(curl -s http://127.0.0.1:18091/version)",
       "Bash(powershell -c \"Get-Process -Name 'catserver-dev' -ErrorAction SilentlyContinue | Stop-Process -Force ; Get-Process -Name 'catserver' -ErrorAction SilentlyContinue | Stop-Process -Force\")",
-      "Bash(bash -x ../scripts/build.sh --devtools)"
+      "Bash(bash -x ../scripts/build.sh --devtools)",
+      "Bash(bash /c/fork/cat/scripts/build.sh --test)"
     ]
   }
 }
