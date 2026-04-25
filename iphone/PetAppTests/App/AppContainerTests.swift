@@ -45,7 +45,57 @@ final class AppContainerTests: XCTestCase {
         XCTAssertNotNil(container.makePingUseCase(), "默认 container 应能产出 PingUseCase")
     }
 
-    /// case#4 (round 3)：PetApp 的 Info.plist 必须配置 NSAppTransportSecurity → NSAllowsLocalNetworking = true。
+    // MARK: - round 4 [P2]：validatedBaseURL(fromString:) 拒绝 malformed 输入
+
+    /// case#4a (round 4)：`URL(string:)` 对 malformed 输入过于宽容，需在 resolve 层补校验。
+    /// codex round 4 finding：`URL(string: "localhost:8080")` 返回 non-nil
+    /// （Apple parser 把它当成 `scheme=localhost, path=8080`），但 `APIClient` 构请求会失败，
+    /// 表现是 ping/version 永远 offline。所以 resolve 层必须自己卡 scheme + host。
+    /// 详见 docs/lessons/2026-04-26-url-string-malformed-tolerance.md。
+    func testValidatedBaseURLRejectsMalformedInputs() {
+        // 1. 无 scheme（仅 host:port） — Apple URL parser 不会拒，但语义错。
+        XCTAssertNil(AppContainer.validatedBaseURL(fromString: "localhost:8080"),
+                     "缺 scheme 的 host:port 字符串应被拒绝")
+
+        // 2. 仅有 scheme 没有 host
+        XCTAssertNil(AppContainer.validatedBaseURL(fromString: "http://"),
+                     "缺 host 的 URL 字符串应被拒绝")
+
+        // 3. 不支持的 scheme（ftp / ws / file 等都不应作为 HTTP API baseURL）
+        XCTAssertNil(AppContainer.validatedBaseURL(fromString: "ftp://example.com"),
+                     "ftp scheme 不支持 → 应被拒绝")
+        XCTAssertNil(AppContainer.validatedBaseURL(fromString: "ws://example.com"),
+                     "ws scheme 不支持（WebSocket 用 wss/ws 走另一通道）→ 应被拒绝")
+
+        // 4. 空字符串
+        XCTAssertNil(AppContainer.validatedBaseURL(fromString: ""),
+                     "空字符串应被拒绝")
+
+        // 5. 含空格的非法 URL（URL parser 也会拒）
+        XCTAssertNil(AppContainer.validatedBaseURL(fromString: "http://example .com"),
+                     "含空格的字符串应被拒绝")
+    }
+
+    /// case#4b (round 4)：合法 http/https URL 必须被接受，scheme 大小写不敏感。
+    func testValidatedBaseURLAcceptsValidHTTPAndHTTPS() {
+        // 标准 http
+        XCTAssertEqual(
+            AppContainer.validatedBaseURL(fromString: "http://localhost:8080")?.absoluteString,
+            "http://localhost:8080"
+        )
+        // 标准 https
+        XCTAssertEqual(
+            AppContainer.validatedBaseURL(fromString: "https://api.example.com")?.absoluteString,
+            "https://api.example.com"
+        )
+        // 大写 scheme 也接受（lowercased 后比较）
+        XCTAssertNotNil(AppContainer.validatedBaseURL(fromString: "HTTPS://api.example.com"))
+        XCTAssertNotNil(AppContainer.validatedBaseURL(fromString: "HTTP://localhost:8080"))
+        // 带 path / trailing slash 也接受（trailing slash normalize 由 APIClient init 负责，与 baseURL 校验解耦）
+        XCTAssertNotNil(AppContainer.validatedBaseURL(fromString: "http://localhost:8080/api/v1/"))
+    }
+
+    /// case#5 (round 3)：PetApp 的 Info.plist 必须配置 NSAppTransportSecurity → NSAllowsLocalNetworking = true。
     /// 否则 cleartext HTTP（http://localhost:8080）会被 iOS ATS 在 OS 层拒绝，feature 永远 offline。
     /// 详见 docs/lessons/2026-04-26-ios-ats-cleartext-http.md。
     ///

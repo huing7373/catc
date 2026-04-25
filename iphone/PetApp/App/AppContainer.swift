@@ -53,15 +53,39 @@ public final class AppContainer: ObservableObject {
     /// 解析默认 baseURL：从给定 bundle 的 Info.plist 读 `PetAppBaseURL`，否则回退到 fallback。
     /// 提取为 static + 接受 bundle 参数：方便测试通过 mock bundle / fixture plist 验证读取逻辑。
     ///
-    /// 解析失败（key 不存在 / 类型错 / URL 格式错）一律静默回退到 fallback；不抛、不打 log
-    /// （MVP 阶段保持 init 路径无副作用；future 改进可加 #if DEBUG print）。
+    /// 解析失败（key 不存在 / 类型错 / URL 格式错 / scheme 非 http(s) / host 缺失）一律静默回退到
+    /// fallback；不抛、不打 log（MVP 阶段保持 init 路径无副作用；future 改进可加 #if DEBUG print）。
+    ///
+    /// **关于 `URL(string:)` 的宽容性**（codex round 4 [P2] finding）：
+    /// `URL(string: "localhost:8080")` 返回 non-nil（Apple URL parser 把它解析成
+    /// `scheme=localhost, path=8080`）；`URL(string: "http://")` 也 non-nil 但 host 为 nil。
+    /// 这类 malformed 输入若直接进 `APIClient`，`URLRequest` 会构造出无效请求，所有 ping/version
+    /// 调用都落到 offline 路径——表现是"App 看似 OK 但 server 永远 offline"。
+    /// 为兑现注释承诺的"malformed 一律 fallback"，必须显式校验 scheme + host。
+    /// 详见 docs/lessons/2026-04-26-url-string-malformed-tolerance.md。
     public static func resolveDefaultBaseURL(from bundle: Bundle) -> URL {
         if let raw = bundle.object(forInfoDictionaryKey: baseURLInfoKey) as? String,
-           let url = URL(string: raw) {
+           let url = validatedBaseURL(fromString: raw) {
             return url
         }
         // swiftlint:disable:next force_unwrapping
         return URL(string: fallbackBaseURLString)!
+    }
+
+    /// 校验字符串能否构成合法的 baseURL：必须能被 `URL(string:)` 解析，且 scheme 是 http/https，
+    /// host 非空。任一条件不满足返回 nil，由调用方决定 fallback 策略。
+    /// 提为独立 static 方法：让测试可直接覆盖各种 malformed 输入而无需构造 mock Bundle。
+    /// 详见 docs/lessons/2026-04-26-url-string-malformed-tolerance.md。
+    public static func validatedBaseURL(fromString raw: String) -> URL? {
+        guard let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host,
+              !host.isEmpty
+        else {
+            return nil
+        }
+        return url
     }
 
     /// 工厂：构造 PingUseCase。每次调用返回新实例（UseCase 是 value type，构造廉价）。
