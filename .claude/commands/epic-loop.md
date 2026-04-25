@@ -87,14 +87,34 @@ b) **看 git log 推断实际进度**：跑 `git log --oneline -10`，识别本 
    - `chore(story-<X-Y>): 收官 ...` → story X-Y 已完成 story-done 流程
    - `fix(review): ...` → 至少跑过 1 轮 fix-review（无法精确定位是哪个 story 的，commit subject 看 lesson 标题推断）
    - `feat(<端>): Epic<E>/<X.Y> ...` → story X-Y 走过了"无 fix-review 直接 story-done"路径
-3. **一致性校验**：
+c) **状态-文件一致性校验**（resume_point 是否有对应产物）：
+   - status = `backlog` → 期待 `_bmad-output/implementation-artifacts/<story_key>.md` **不存在**（文件由 create-story 阶段创建）
+     - 文件**已存在** → ⚠️ 警告但**不** HALT；可能是上次 create-story 跑完但状态没流转，让主循环按 backlog dispatch 时 create-story 自己处理（idempotent）
+   - status ∈ `{ready-for-dev, in-progress, review}` → 必须能找到 `_bmad-output/implementation-artifacts/<story_key>.md` 文件
+     - 文件**不存在** → **HALT**：
+       ```
+       🛑 sprint-status 状态超前于产物：story 文件未创建
+
+       sprint-status 说: <story_key> 是 <S>
+       但文件 _bmad-output/implementation-artifacts/<story_key>.md **不存在**
+
+       根因（最常见）：
+         - 你手动把 sprint-status 状态改了，但没跑 /bmad-create-story 把文件蒸出来
+
+       恢复方法（推荐）：
+         1) 把 sprint-status 中 <story_key> 状态改回 backlog
+         2) 重跑 /epic-loop <N>，主循环会进 case 'backlog' → 派 create-story 自动补文件 + 推到 ready-for-dev
+         （或者手动跑一次 /bmad-create-story，但需要先把状态改回 backlog 让它"看到"该 story）
+       ```
+
+d) **状态-git log 一致性校验**：
    - 看 `resume_point.status` 与 git log 是否吻合：
      - status = `ready-for-dev` 或 `backlog` → 期待 git log 中**没有**该 story 相关 commit ✓
      - status = `review` → 期待 git log 中**没有** chore(story-<X-Y>) 但**可能**有 fix(review) ✓
      - status = `done` → 不应作为 resume_point（已被步骤 a 排除）
      - status = `in-progress` → 异常状态（详见步骤 3 case 'in-progress'）
 
-d) **输出恢复诊断**（不询问，让用户看到状态）：
+e) **输出恢复诊断**（不询问，让用户看到状态）：
    ```
    🔄 恢复点诊断
 
@@ -106,7 +126,7 @@ d) **输出恢复诊断**（不询问，让用户看到状态）：
    下一步动作: <create | dev | review | done> sub-agent
    ```
 
-e) **不一致处理**：
+f) **不一致处理**（步骤 d 的状态-git log 不吻合时）：
    ```
    🛑 sprint-status 与 git log 不一致
 
@@ -220,55 +240,57 @@ loop until break:
     → break
   
   # ========== 跑 codex review（命令选择按轮次切换）==========
+  # ⚠️ 重要：codex review 的 --uncommitted / --base 选项跟 [PROMPT] 位置参数
+  # **互斥**（codex CLI v0.121+ 限制：传 PROMPT 会报 "argument cannot be used
+  # with [PROMPT]"）。所以**不传**自定义 prompt —— codex 自己会 agentic 地读
+  # 项目根的 CLAUDE.md / docs/lessons/ / _bmad-output/.../decisions/ 等做上下文，
+  # 实战表现良好（首跑 epic-1 story 1-10 时 3 轮 review 都准确识别问题）。
   if review_round == 1:
     # 第 1 轮：dev_story_subagent 留下的改动 = 工作区 dirty（dev-story 不 commit）
-    review_cmd = "codex review --uncommitted -"
+    review_cmd = "codex review --uncommitted"
   else:
     # 第 2+ 轮：上轮 fix-review 已 commit；working tree clean
     # 用 --base 看从 baseline 起的累计 diff（含上轮 fix-review 的 commit）
-    review_cmd = "codex review --base ${baseline_commit} -"
+    review_cmd = "codex review --base ${baseline_commit}"
   
   output_path = "/tmp/epic-loop-review-<story-key>-r<round>.md"
   
   # 主 agent 用 Bash tool 调（关键：timeout 600000ms 而非默认 120000ms，
-  # codex 大 diff 一次可跑 2-5 分钟）
+  # codex 大 diff + agentic 跑 build/test 验证一次可跑 2-5 分钟）
   Bash(
-    command: "${review_cmd} <<'EOF' > ${output_path} 2>&1\n${REVIEW_PROMPT}\nEOF",
+    command: "${review_cmd} > ${output_path} 2>&1",
     timeout: 600000,
     description: "codex review round <round> for <story-key>"
   )
   
-  REVIEW_PROMPT（here-doc 内容）:
-    Review the diff against this story spec:
-      _bmad-output/implementation-artifacts/<story-key>.md
-    
-    Project conventions to enforce:
-      - CLAUDE.md (Tech Stack 红线 / 工作纪律)
-      - _bmad-output/implementation-artifacts/decisions/*.md (ADRs)
-      - docs/lessons/*.md (past review lessons)
-    
-    Focus: bugs, regressions, scope creep beyond AC, missed test cases,
-    contract violations, security issues. Skip pure style nits.
-    
-    Output format: markdown with sections per finding:
-      ### Finding N: <title>
-      - Severity: high|medium|low
-      - Category: testing|error-handling|...
-      - Location: file:line
-      - Issue: ...
-      - Suggestion: ...
-    
-    If no findings: output a single line "REVIEW APPROVED — no findings"
-  
   # ========== 主 agent 读 codex 输出，LLM 自己判断 ==========
   读 ${output_path}
   
-  判断（不用关键词扫描；主 agent 综合理解）:
-    - 含 "REVIEW APPROVED" 明确通过语 → 视为通过
-    - 有 "### Finding" + 至少一条 severity high/medium → 视为不通过
-    - 只有 low severity findings → 视为通过 + 在最终报告 flag "次要 finding 见 ${output_path}"
-    - 输出为空 / codex 报错（API quota / 网络）→ HALT，**不**消耗 review_round 计数
-    - 输出无明确 finding 也无 APPROVED → 视为通过 + flag "review 输出异常，人工复核 ${output_path}"
+  ⚠️ **第 2+ 轮的输出陷阱**：`codex review --base <baseline>` 看 base..HEAD
+  累计 diff 时，会把上轮 fix-review 留下的 lesson md 全文也当 diff 内容输出
+  在文件**前面**（比如 round 2 输出可能 2900+ 行，前面是 lesson 内容引用）。
+  **真实的 review 结论永远在文件末尾的 "codex" 段**（最后约 30-100 行）—— 主
+  agent 判断时**只看末尾 codex 段**，前面 lesson 引用部分忽略。
+  
+  判断（用 LLM 综合理解，不要硬卡格式）：
+    - codex 实际输出格式不固定：可能是 `### Finding N` / `- [P2] xxx` /
+      自然语言 "did not find any actionable issues" / 等。**不**强求标准格式
+    - **通过**信号（任一）：
+      - 末尾 codex 段含 "REVIEW APPROVED" / "no findings" / "no actionable
+        correctness issues" / "no issues found" / 等明确通过语
+      - 末尾 codex 段没有任何 finding 标记（无 `[P1/P2/P3]` / 无 `### Finding`
+        / 无 "must fix" / 无 "should be addressed"）
+    - **不通过**信号（任一）：
+      - 末尾 codex 段含 `[P1]` / `[P2]` 标记（P1/P2 = high/medium → 必修）
+      - 含 "should be addressed before considering" / "actionable issue" / 等
+      - 含 `### Finding` + severity high/medium
+    - **次要 finding**（仅 [P3] / low severity / "nit" / "style only"）→
+      视为通过 + 在最终报告 flag "次要 finding 见 ${output_path}（未自动修，
+      可后续单 PR 处理）"
+    - 输出为空 / codex 报错（API quota / 网络挂）/ exit 非 0 → HALT，**不**
+      消耗 review_round 计数（重启 /epic-loop 时计数器从 0 起算）
+    - 含 "Reconnecting..." / "ERROR: ..." 但末尾仍有 codex 段 → 视为有效，
+      按 codex 段判断（这是 codex 的瞬时网络抖动，能补救）
   
   if 视为通过 OR 通过 + flag:
     break  # 退出子循环，回主循环让 story-done 收官
@@ -362,7 +384,7 @@ codex review 的输出。
 review 原文文件: <review_findings_path>
 目标 story: <story_key>
 
-⚠️ **关键 override**（必须严格遵守）:
+⚠️ **关键 override #1**（必须严格遵守）:
   fix-review.md 步骤 2 写"把分诊结果以表格形式输出给用户，**此时先等
   用户确认**" —— 在你这个 sub-agent 上下文里，**你就是用户的代理**：
     1) 读 review 原文 + 自己分诊（按 fix-review.md 步骤 1-2 的启发式）
@@ -370,6 +392,23 @@ review 原文文件: <review_findings_path>
     3) **不**等任何 ask / 确认 —— 你既没 user 通道也没主 agent 反馈通道
     4) 直接进步骤 3 修复
   违反这条会让你卡死等输入 → 主 agent 收到空响应 → epic-loop HALT。
+
+⚠️ **关键 override #2 — review 文件解析陷阱**（必须严格遵守）:
+  review_findings_path 文件**只有末尾的"codex"段是真实 review 结论**。第 2+ 轮
+  时 codex 跑 `--base <baseline>` 会把上轮 fix-review commit 的 lesson md 全文
+  也当成 diff 内容输出在文件**前面**（可能 2000+ 行）—— 那是上轮已修过的
+  lesson 引用，**不是**本轮新 finding。
+  
+  解析顺序（必须按此）：
+    1) tail -100 review_findings_path 先看末尾
+    2) 找最后一个 `^codex$` 行，从那行往后读 = 本轮真实 review 结论
+    3) 真实结论里的 finding（`[P1/P2/P3]` / `### Finding` / 自然语言指出的
+       问题）才是你要修的
+    4) 文件前面的 `### Lesson N:` / `## Lesson N` / `# Review Lessons —`
+       等 lesson 文档片段**全部忽略**（那是上轮产物的 git diff 引用）
+  
+  反例：把上轮 lesson 里的"反例"段当成本轮 finding 又修一遍 → 重复修复 +
+  浪费一轮 review_round 计数。
 
 其他约束:
   - 修完后**正常 commit**（按 fix-review 步骤 7 既定行为）
@@ -463,14 +502,28 @@ epic 全 done 时输出：
   - 总 commit 数: K（feat: X / chore: Y / docs: Z / fix(review): W）
   - codex review 跑了 R 次，第一次通过率 P%
   - 5 轮 review 才过的 story: <list>（如有）
+  - 创建的 lesson 文档: L 个（路径列出）
 
 epic 状态: in-progress → 仍然 in-progress（**不**自动改 done；用户决定）
+
+📝 待手工 backfill（如有 lesson 文档）:
+  fix_review_subagent 按 epic-loop override 跳过了 fix-review.md 步骤 7 末尾
+  的 `chore(lessons): backfill <hash>` 二次 commit。lesson 文档里的 frontmatter
+  `commit:` 字段 + index.md 末行 commit 列**保留为 <pending>**。
+  
+  要补 backfill：
+    1) 跑 git log --oneline --grep='^fix(review):' -n L
+       把每个 fix(review) commit hash 找出来
+    2) 对每个 lesson 文档，把 frontmatter `commit: <pending>` 改成对应 hash
+    3) 同步改 docs/lessons/index.md 末尾 N 行的 commit 列
+    4) 单 commit 收：chore(lessons): backfill commit hash for <epic-N>
 
 建议下一步:
   1. 跑 /bmad-retrospective <N> 收 epic 经验
   2. 手动把 epic-<N> 状态改 done
   3. 跑 /epic-loop <N+1> 推下一个 epic（如果不是 demo epic）
   4. 或者 git push 把这批 commit 推远程
+  5. 补 lesson backfill commit（见上方"待手工 backfill"段）
 ```
 
 ### 8. 边界情况
