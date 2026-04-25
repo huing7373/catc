@@ -35,6 +35,12 @@ targets:
         # 缺失时 fallback 到 http://localhost:8080。真机联调请通过 xcconfig 覆盖。
         # 详见 docs/lessons/2026-04-26-baseurl-from-info-plist.md
         PetAppBaseURL: http://localhost:8080
+        # Story 2.5 review fix round 3：iOS ATS 默认拒 cleartext HTTP；
+        # 用 NSAllowsLocalNetworking 例外允许 localhost / .local / 私有 IP，
+        # 不允许公网 cleartext，比 NSAllowsArbitraryLoads 安全。
+        # 详见 docs/lessons/2026-04-26-ios-ats-cleartext-http.md
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zhuming.pet.app
