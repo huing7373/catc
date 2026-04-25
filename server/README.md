@@ -189,7 +189,17 @@ curl http://127.0.0.1:8080/dev/ping-dev
 
 ### 生产部署 SOP
 
-生产二进制必须 `bash scripts/build.sh`（**不带** `--devtools`）+ 部署环境**禁止**设置 `BUILD_DEV` 环境变量。双闸门确保任一漏放都不会泄漏 dev 端点（详见 [`server/internal/app/http/devtools/devtools.go`](internal/app/http/devtools/devtools.go) 包注释 §防御纵深）。
+`devtools.IsEnabled()` 的两个触发源是 **OR 语义**——**任一**成立即开 dev 模式：
+
+1. 编译期：`-tags devtools`（即 `bash scripts/build.sh --devtools` 产出的 `catserver-dev`）
+2. 运行期：环境变量 `BUILD_DEV=true`（严格字面匹配）
+
+因此生产部署必须**同时关闭两个触发源**，**不存在**"任一漏放仍能兜住"的双重保险：
+
+- 生产二进制走 `bash scripts/build.sh`（**不带** `--devtools`），让 `forceDevEnabled=false`
+- 部署环境**禁止**设置 `BUILD_DEV` 环境变量（不设 / 设为非 `"true"` 字面值都行）
+
+`devtools.go` 包注释里的"双闸门（防御纵深）"指的是**路由注册闸门**（`Register` 在 `IsEnabled()==false` 时不挂 `/dev/*`）+ **请求时闸门**（`DevOnlyMiddleware` 再 check 一次）——两道闸门**查的是同一个 `IsEnabled()` 表达式**，抵御的是"挂了路由但运行期热切关闭 BUILD_DEV"这种边缘情形（实现成本为零的 in-depth 防御），**不**抵御"build tag 关闭但 `BUILD_DEV=true` 误设"——后者只能靠运维 SOP 双重确认两个触发源都为关闭态。详见 [`server/internal/app/http/devtools/devtools.go`](internal/app/http/devtools/devtools.go) 包注释 §双闸门。
 
 ---
 
