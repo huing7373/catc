@@ -100,7 +100,12 @@
       "Bash(curl -s http://127.0.0.1:18091/version)",
       "Bash(powershell -c \"Get-Process -Name 'catserver-dev' -ErrorAction SilentlyContinue | Stop-Process -Force ; Get-Process -Name 'catserver' -ErrorAction SilentlyContinue | Stop-Process -Force\")",
       "Bash(bash -x ../scripts/build.sh --devtools)",
-      "Bash(bash /c/fork/cat/scripts/build.sh --test)"
+      "Bash(bash /c/fork/cat/scripts/build.sh --test)",
+      "Bash(awk '/^development_status:/{flag=1; next} flag' /c/fork/cat/_bmad-output/implementation-artifacts/sprint-status.yaml)",
+      "Bash(awk -F': ' '{print $2}')",
+      "Bash(awk '/^development_status:/{flag=1; next} flag {print}' /c/fork/cat/_bmad-output/implementation-artifacts/sprint-status.yaml)",
+      "Bash(codex --help)",
+      "Bash(codex review *)"
     ]
   }
 }
