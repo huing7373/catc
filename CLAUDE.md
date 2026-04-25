@@ -73,6 +73,7 @@ server/
 - **幂等键**：`/chest/open` 和 `/compose/upgrade` 必须支持 `idempotencyKey`，存 Redis（`idem:{userId}:{apiName}:{key}`）并设 TTL。
 - **状态以 server 为准**：步数余额、宝箱状态、背包归属、合成结果、房间成员关系都以 server 响应为最终态，客户端只能做本地预展示。
 - **错误码统一**：见 `V1接口设计.md` §3，repo 返回底层错误 → service 转业务错误 → handler 映射统一响应结构。
+- **ctx 必传**：service / repo 所有导出函数第一参数 `ctx context.Context`；handler 从 `c.Request.Context()` 取 ctx 向下传（**不**把 `*gin.Context` 直接当 ctx 用，它的 Done() 是 nil channel）；repo 调 DB / Redis 必用 `*WithContext` 方法；`txManager.WithTx(ctx, fn)` 里 fn 内所有 repo 调用用 **`txCtx`** 而非外层 ctx。见 ADR-0007。
 
 ## 开 session 起手式
 
