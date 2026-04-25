@@ -8,9 +8,14 @@
 // Story 2.5 扩展（**追加，不删除老接口**）：
 // - 新增 init(pingUseCase:) 重载，按需注入 PingUseCaseProtocol
 // - 新增 bind(pingUseCase:) 单次绑定（RootView .task 路径用，规避 @StateObject init 注入限制）
-// - 新增 start() async 触发 ping，重复调用通过 pingTask 短路
+// - 新增 start() async 触发 ping，重复调用通过 pingTask + hasFetched 双层短路
 // - 新增 applyPingResult(_:) 三态文案投影（offline / v? / commit）
 // - 新增 nonisolated static func readAppVersion() 从 Bundle 读 CFBundleShortVersionString
+//
+// Story 2.5 review fix round 2（codex P2）：
+// - start() 加 `hasFetched` flag，跨"任务完成 → view 重新出现"边界 short-circuit。
+//   原因：SwiftUI `.task` 在 view 重新出现时会重启；只用 pingTask 短路无法防 sheet 关闭后重跑。
+//   详见 docs/lessons/2026-04-26-swiftui-task-modifier-reentrancy.md。
 //
 // 设计选择（参照 Story 2.5 Dev Note #2 / #3 / #5）：
 // - appVersion 仅存数字部分（如 "1.0.0" 或 "0.0.0"），View 层拼接 "v\(appVersion) · \(serverInfo)"
@@ -39,6 +44,16 @@ public final class HomeViewModel: ObservableObject {
 
     /// 当前是否有进行中的 ping 任务。再次调用 start() 时短路（防 SwiftUI .task 多次触发引发重复请求）。
     private var pingTask: Task<Void, Never>?
+
+    /// 是否已经成功跑完一次 ping（含失败也置 true）。用于跨"task 完成 → view 重新出现"边界 short-circuit。
+    ///
+    /// 背景（review fix round 2）：SwiftUI 的 `.task` modifier 在 view 重新出现时（如 `.fullScreenCover`
+    /// 关闭后回到 RootView）会重启 task。此时 `pingTask` 已经完成被置 nil，原有的"并发短路"防御不生效，
+    /// 每次 sheet 关闭都会重发一次 ping —— 业务上 ping/version 是"App 启动一次性探针"，不应在普通导航时重跑。
+    /// 加 `hasFetched` flag 让 start() 在已完成一次（无论成功/失败）后直接 return。
+    /// 失败也置 true 的理由：避免 server 不可达时反复重试；错误恢复 UI 是 Story 2.6 的责任。
+    /// 详见 docs/lessons/2026-04-26-swiftui-task-modifier-reentrancy.md。
+    private var hasFetched: Bool = false
 
     /// 老 init（Story 2.2 / 2.3 路径）：保留 hardcode 默认值，pingUseCase = nil；不破坏老调用方 / Preview。
     public init(
@@ -93,13 +108,17 @@ public final class HomeViewModel: ObservableObject {
         self.appVersion = HomeViewModel.readAppVersion()
     }
 
-    /// 触发 ping。重复调用时短路（pingTask 非 nil → 直接 return）。
-    /// RootView 在 `.task { await viewModel.start() }` 中调用，App 启动时执行一次。
+    /// 触发 ping。三层短路：
+    ///   1. 已成功跑完一次（hasFetched=true）→ 直接 return（防 SwiftUI .task 在 view 重新出现时重跑）。
+    ///   2. 进行中的任务（pingTask 非 nil）→ 直接 return（防并发触发同时调两次）。
+    ///   3. 未注入 UseCase → no-op。
+    /// RootView 在 `.task { await viewModel.start() }` 中调用，App 启动时执行一次（成功/失败都只一次）。
     public func start() async {
         // 取注入实例（init 路径优先，回退 bind 路径）。
         let useCase = pingUseCase ?? boundPingUseCase
         guard let useCase = useCase else { return }   // 未注入：no-op
-        guard pingTask == nil else { return }          // 已有进行中任务：短路
+        guard !hasFetched else { return }              // 已完成一轮：短路（跨 task 边界）
+        guard pingTask == nil else { return }          // 已有进行中任务：短路（同一 task 边界内并发）
 
         let task = Task { [weak self] in
             let result = await useCase.execute()
@@ -108,6 +127,7 @@ public final class HomeViewModel: ObservableObject {
         pingTask = task
         await task.value
         pingTask = nil
+        hasFetched = true   // 失败也置 true：避免不可达 server 时反复重试；错误恢复 UI 见 Story 2.6
     }
 
     /// 把 PingResult 投影成 serverInfo 文案。

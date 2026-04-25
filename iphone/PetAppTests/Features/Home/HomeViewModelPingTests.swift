@@ -103,6 +103,39 @@ final class HomeViewModelPingTests: XCTestCase {
         XCTAssertEqual(stub2.executeCallCount, 0)
     }
 
+    /// case#10 (review fix round 2)：start() 已成功完成一次后，再次调用应短路（不重发请求）。
+    ///
+    /// 触发场景：SwiftUI `.task` 在 view 重新出现（如 .fullScreenCover 关闭后回到 RootView）时会重启，
+    /// 此时 pingTask 已被置 nil，原"并发短路"防御失效。`hasFetched` flag 跨任务边界保证 ping 只跑一次。
+    /// 防御对象是"App 启动一次性探针"语义，不应在普通导航流程中反复触发。
+    func testStartShortCircuitsAfterFirstCompletion() async {
+        let stub = StubPingUseCase(stubResult: PingResult(reachable: true, serverCommit: "abc1234"))
+        let viewModel = HomeViewModel(pingUseCase: stub)
+
+        // 第一次：完成一次完整请求
+        await viewModel.start()
+        XCTAssertEqual(stub.executeCallCount, 1)
+        XCTAssertEqual(viewModel.serverInfo, "abc1234")
+
+        // 第二次（模拟 sheet 关闭后 .task 重启）：必须短路，executeCallCount 维持 1
+        await viewModel.start()
+        XCTAssertEqual(stub.executeCallCount, 1, "已完成一次后再次 start() 应短路，不重新调 UseCase")
+    }
+
+    /// case#11 (review fix round 2)：失败路径（reachable=false）也应置 hasFetched=true，避免反复重试。
+    /// 错误恢复 UI 由 Story 2.6 负责，本 ViewModel 只保证"一次性"语义。
+    func testStartShortCircuitsAfterFailure() async {
+        let stub = StubPingUseCase(stubResult: PingResult(reachable: false, serverCommit: nil))
+        let viewModel = HomeViewModel(pingUseCase: stub)
+
+        await viewModel.start()
+        XCTAssertEqual(stub.executeCallCount, 1)
+        XCTAssertEqual(viewModel.serverInfo, "offline")
+
+        await viewModel.start()
+        XCTAssertEqual(stub.executeCallCount, 1, "失败后再次 start() 也应短路（避免反复重试不可达 server）")
+    }
+
     /// case#9 (review fix round 1)：bind() 注入时同步刷新 appVersion = readAppVersion()。
     /// 防止 RootView 走老 init 路径时 appVersion 永远停在 "0.0.0" hardcode 默认值。
     /// 测试 host bundle 的 CFBundleShortVersionString 不可控，所以只断言：
