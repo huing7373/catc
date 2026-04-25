@@ -200,6 +200,31 @@ final class APIClientTests: XCTestCase {
         }
     }
 
+    // MARK: - regression: baseURL 带 trailing slash 不应产生 `//` 双斜杠
+    /// codex review round 2 P2：baseURL `.../api/v1/` + endpoint.path `/version`
+    /// 旧实现会拼成 `.../api/v1//version`。init 内 normalize 后必须落到 `.../api/v1/version`。
+    func testBaseURLTrailingSlashIsNormalizedAtInit() async throws {
+        let session = MockURLSession()
+        let body = """
+        {"code":0,"message":"ok","data":{"version":"v1.0.0"},"requestId":"req_norm"}
+        """.data(using: .utf8)!
+        session.stubbedResponse = (body, makeHTTPResponse(statusCode: 200))
+
+        // 故意传带 trailing slash 的 baseURL
+        let baseURLWithSlash = URL(string: "http://localhost:8080/api/v1/")!
+        let client = APIClient(baseURL: baseURLWithSlash, session: session)
+        let endpoint = Endpoint(path: "/version", method: .get, requiresAuth: false)
+
+        let _: PingResponseMock = try await client.request(endpoint)
+
+        XCTAssertEqual(session.invocations.count, 1)
+        XCTAssertEqual(
+            session.invocations.first?.url?.absoluteString,
+            "http://localhost:8080/api/v1/version",
+            "trailing slash 必须在 init 中被吸收，最终 URL 不应含 `//`"
+        )
+    }
+
     // MARK: - case#8: POST + body 编码 → httpBody / Content-Type 正确
     func testPostRequestEncodesBodyAndSetsContentType() async throws {
         let session = MockURLSession()

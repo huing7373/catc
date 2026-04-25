@@ -47,8 +47,21 @@ public final class APIClient: APIClientProtocol {
         baseURL: URL,
         session: URLSessionProtocol = URLSession.shared
     ) {
-        self.baseURL = baseURL
+        // 规范化 baseURL：去掉 trailing slash，保证后续 `baseURL + endpoint.path` 拼接
+        // 不会产生 `.../api/v1//version` 双斜杠。
+        // 调用方传 `https://api.example.com/api/v1` 或 `https://api.example.com/api/v1/`
+        // 都被吸收成无 trailing slash 形式；endpoint.path 必须以 `/` 开头（Endpoint 自带契约）。
+        self.baseURL = Self.normalize(baseURL)
         self.session = session
+    }
+
+    /// 去掉 baseURL 的 trailing slash（保留 scheme / host / path 其余部分）。
+    /// 失败回退原 URL（极少见——absoluteString 总是合法 URL string）。
+    private static func normalize(_ url: URL) -> URL {
+        let s = url.absoluteString
+        guard s.hasSuffix("/") else { return url }
+        let trimmed = String(s.dropLast())
+        return URL(string: trimmed) ?? url
     }
 
     // MARK: - Coder factory
@@ -148,7 +161,9 @@ public final class APIClient: APIClientProtocol {
 
     private func buildURLRequest(_ endpoint: Endpoint) throws -> URLRequest {
         // baseURL 已含 `/api/v1` 前缀（构造 APIClient 时由调用方决定，AppContainer 阶段做）。
-        // path 以 `/` 开头，直接 appendingPathComponent 会丢前导 `/`，用 absoluteString 拼接。
+        // baseURL 在 init 里被 normalize 过（无 trailing slash），endpoint.path 必须 `/` 开头，
+        // 故 absoluteString 直接拼接结果一定形如 `https://host/api/v1/path`，不会出现双斜杠。
+        // 不用 appendingPathComponent：它会丢前导 `/`、还会对 path 内的特殊字符做奇怪转义。
         guard let url = URL(string: baseURL.absoluteString + endpoint.path) else {
             throw APIError.network(
                 underlying: NSError(

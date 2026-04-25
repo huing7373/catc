@@ -5,7 +5,14 @@
 // 本集成测试用真 URLSession + StubURLProtocol 拦截，确保 URLSession middleware /
 // JSONDecoder / URLProtocol 三件套联调正确。
 //
-// 注意 register / unregister / reset 严格成对——StubURLProtocol 的 stub 是 static 全局状态。
+// 拦截策略：**仅 session-local 注入**（`URLSessionConfiguration.protocolClasses`），
+// **不**用 `URLProtocol.registerClass`（process-global）—— 后者会 hook 整个测试进程
+// 的 URL loading，让任何并行运行的 *Tests 子类发出的 URLSession 请求都被 StubURLProtocol
+// 接管，引发 cross-test 污染 / flaky。session-local 方案让 stub 拦截范围严格限定在
+// 本 class makeClient() 创建的 session 里。
+//
+// 配套约束：StubURLProtocol 的 static stub 字段仍然是 process-global，因此
+// setUp/tearDown 的 reset() 仍然必要（详见 docs/lessons/2026-04-26-urlprotocol-stub-global-state.md）。
 
 import XCTest
 @testable import PetApp
@@ -22,17 +29,16 @@ final class APIClientIntegrationTests: XCTestCase {
     override func setUp() {
         super.setUp()
         StubURLProtocol.reset()
-        URLProtocol.registerClass(StubURLProtocol.self)
     }
 
     override func tearDown() {
-        URLProtocol.unregisterClass(StubURLProtocol.self)
         StubURLProtocol.reset()
         super.tearDown()
     }
 
     private func makeClient() -> APIClient {
         let config = URLSessionConfiguration.ephemeral
+        // session-local 注入：StubURLProtocol 只拦截这个 session 的请求，不影响其它 *Tests。
         config.protocolClasses = [StubURLProtocol.self]
         let session = URLSession(configuration: config)
         return APIClient(baseURL: baseURL, session: session)
