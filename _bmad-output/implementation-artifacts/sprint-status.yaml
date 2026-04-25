@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-04-25T14:00:00+08:00
+# last_updated: 2026-04-25
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-04-25T14:00:00+08:00
+last_updated: 2026-04-25
 project: cat
 project_key: NOKEY
 tracking_system: file-system
@@ -56,7 +56,7 @@ development_status:
   epic-1-retrospective: optional
   epic-2: in-progress
   2-1-ios-mock-框架选型-ios-目录决策-spike: done
-  2-2-swiftui-app-入口-主界面骨架-信息架构定稿: review
+  2-2-swiftui-app-入口-主界面骨架-信息架构定稿: done
   2-3-导航架构搭建: backlog
   2-4-apiclient-封装: backlog
   2-5-ping-调用-主界面显示-server-version-信息: backlog
