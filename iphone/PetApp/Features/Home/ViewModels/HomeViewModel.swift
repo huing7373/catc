@@ -10,6 +10,7 @@
 // View 层拼接 "v\(appVersion) · \(serverInfo)" → 输出 "v0.0.0 · ----"，避免双 v 前缀。
 
 import Foundation
+import Combine
 
 @MainActor
 public final class HomeViewModel: ObservableObject {
