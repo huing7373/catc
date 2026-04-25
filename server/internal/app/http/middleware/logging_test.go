@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -89,10 +90,11 @@ func TestLogging_HappyPath_HasSixFields(t *testing.T) {
 		t.Errorf("client_ip should be non-empty when RemoteAddr set")
 	}
 
-	// user_id / business_result / error_code 留空 —— 断言 key 不出现
-	for _, forbidden := range []string{"user_id", "business_result", "error_code"} {
+	// user_id / business_result / error_code / ctx_done 留空 —— 断言 key 不出现
+	// （error_code 由 Story 1.8 落地；ctx_done 由 Story 1.9 落地；两者成功路径都省略）
+	for _, forbidden := range []string{"user_id", "business_result", "error_code", "ctx_done"} {
 		if _, present := m[forbidden]; present {
-			t.Errorf("field %q should NOT appear in Story 1.3 log; got %v", forbidden, m[forbidden])
+			t.Errorf("field %q should NOT appear in success-path log; got %v", forbidden, m[forbidden])
 		}
 	}
 }
@@ -210,6 +212,83 @@ func TestLogging_NoErrorCodeForDoubleWrite(t *testing.T) {
 	if _, present := m["error_code"]; present {
 		t.Errorf("double-write 场景下 http_request log 不应有 error_code；响应是 success，"+
 			"日志声称错误会误触发告警。实际 log: %v", m)
+	}
+}
+
+// TestLogging_NoCtxDoneOnSuccess：正常完成的请求 http_request log 中
+// **不**出现 ctx_done 字段（缺省即 false，与 error_code 惯例一致）。
+//
+// Story 1.9 AC3 / ADR-0007 §4.3。
+func TestLogging_NoCtxDoneOnSuccess(t *testing.T) {
+	r, buf := newLoggingRouter(t, func(r *gin.Engine) {
+		r.GET("/ok", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/ok", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	m := parseLastLogLine(t, buf)
+	if _, present := m["ctx_done"]; present {
+		t.Errorf("正常请求不应出现 ctx_done 字段；实际 log 含 ctx_done=%v", m["ctx_done"])
+	}
+}
+
+// TestLogging_CtxDoneWhenClientDisconnects：通过 req.WithContext 注入一个
+// 已 cancel 的 ctx 模拟客户端断开；http_request log 必须含 ctx_done=true。
+//
+// Gin 默认不主动中断 handler —— handler 仍会跑完。但 c.Request.Context().Err()
+// 在 c.Next() 之后读时为非 nil，Logging 中间件应追加 ctx_done=true 字段。
+//
+// Story 1.9 AC3 / ADR-0007 §4.1-4.2。
+func TestLogging_CtxDoneWhenClientDisconnects(t *testing.T) {
+	r, buf := newLoggingRouter(t, func(r *gin.Engine) {
+		// handler 正常成功返回；真正的 cancel 信号通过 req.Context() 注入
+		r.GET("/canceled", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 立即 cancel：模拟 client 在请求处理期间断开
+
+	req := httptest.NewRequest(http.MethodGet, "/canceled", nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	m := parseLastLogLine(t, buf)
+	if m["msg"] != "http_request" {
+		t.Fatalf("expected http_request log line; got %v", m["msg"])
+	}
+	got, ok := m["ctx_done"].(bool)
+	if !ok {
+		t.Fatalf("ctx_done 字段缺失或非 bool；实际 log: %v", m)
+	}
+	if !got {
+		t.Errorf("ctx_done = false, want true（ctx 已 cancel，Logging 应识别）")
+	}
+}
+
+// TestLogging_CtxDoneOnDeadlineExceeded：ctx WithTimeout 到期也应触发 ctx_done=true
+// （ADR-0007 §4.4 "不区分 Canceled vs DeadlineExceeded"的对称验证）。
+func TestLogging_CtxDoneOnDeadlineExceeded(t *testing.T) {
+	r, buf := newLoggingRouter(t, func(r *gin.Engine) {
+		r.GET("/timeout", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	})
+
+	// 0ns timeout：创建即过期
+	ctx, cancel := context.WithTimeout(context.Background(), 0)
+	defer cancel()
+
+	req := httptest.NewRequest(http.MethodGet, "/timeout", nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	m := parseLastLogLine(t, buf)
+	got, ok := m["ctx_done"].(bool)
+	if !ok {
+		t.Fatalf("ctx_done 字段缺失或非 bool；实际 log: %v", m)
+	}
+	if !got {
+		t.Errorf("ctx_done = false, want true（ctx deadline 已过，Logging 应识别）")
 	}
 }
 
