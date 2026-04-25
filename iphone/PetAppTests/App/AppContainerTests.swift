@@ -74,16 +74,27 @@ final class AppContainerTests: XCTestCase {
         // 5. 含空格的非法 URL（URL parser 也会拒）
         XCTAssertNil(AppContainer.validatedBaseURL(fromString: "http://example .com"),
                      "含空格的字符串应被拒绝")
+
+        // 6. (round 5 [P2]) 带 path prefix 的 baseURL —— host-only 契约要求拒。
+        //    若 xcconfig 误带 `/api/v1` 前缀，APIClient 拼出 `/api/v1/ping`、`/api/v1/version`，
+        //    server 全部返 404，ping/version 永远 offline。
+        //    详见 docs/lessons/2026-04-26-baseurl-host-only-contract.md。
+        XCTAssertNil(AppContainer.validatedBaseURL(fromString: "https://api.example.com/api/v1"),
+                     "带 path prefix 的 baseURL 违反 host-only 契约 → 应被拒绝")
+        XCTAssertNil(AppContainer.validatedBaseURL(fromString: "http://localhost:8080/api/v1/"),
+                     "带 path prefix（含 trailing slash）的 baseURL 也应被拒绝")
+        XCTAssertNil(AppContainer.validatedBaseURL(fromString: "https://api.example.com/v2/foo"),
+                     "任何非空非 `/` 的 path 都应被拒绝")
     }
 
     /// case#4b (round 4)：合法 http/https URL 必须被接受，scheme 大小写不敏感。
     func testValidatedBaseURLAcceptsValidHTTPAndHTTPS() {
-        // 标准 http
+        // 标准 http（无 path）
         XCTAssertEqual(
             AppContainer.validatedBaseURL(fromString: "http://localhost:8080")?.absoluteString,
             "http://localhost:8080"
         )
-        // 标准 https
+        // 标准 https（无 path）
         XCTAssertEqual(
             AppContainer.validatedBaseURL(fromString: "https://api.example.com")?.absoluteString,
             "https://api.example.com"
@@ -91,8 +102,11 @@ final class AppContainerTests: XCTestCase {
         // 大写 scheme 也接受（lowercased 后比较）
         XCTAssertNotNil(AppContainer.validatedBaseURL(fromString: "HTTPS://api.example.com"))
         XCTAssertNotNil(AppContainer.validatedBaseURL(fromString: "HTTP://localhost:8080"))
-        // 带 path / trailing slash 也接受（trailing slash normalize 由 APIClient init 负责，与 baseURL 校验解耦）
-        XCTAssertNotNil(AppContainer.validatedBaseURL(fromString: "http://localhost:8080/api/v1/"))
+        // (round 5 [P2]) 仅 trailing slash 应被接受 —— `URL.path` 此时为 "/"，host-only 契约容忍。
+        XCTAssertNotNil(AppContainer.validatedBaseURL(fromString: "https://api.example.com/"),
+                        "仅 trailing slash 不属于 path prefix，应被接受")
+        XCTAssertNotNil(AppContainer.validatedBaseURL(fromString: "http://localhost:8080/"),
+                        "localhost trailing slash 应被接受")
     }
 
     /// case#5 (round 3)：PetApp 的 Info.plist 必须配置 NSAppTransportSecurity → NSAllowsLocalNetworking = true。

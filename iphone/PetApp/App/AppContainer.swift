@@ -73,9 +73,22 @@ public final class AppContainer: ObservableObject {
     }
 
     /// 校验字符串能否构成合法的 baseURL：必须能被 `URL(string:)` 解析，且 scheme 是 http/https，
-    /// host 非空。任一条件不满足返回 nil，由调用方决定 fallback 策略。
+    /// host 非空，且 **path 必须为空或仅 `/`**（host-only baseURL 契约，禁带 `/api/v1` 等前缀）。
+    /// 任一条件不满足返回 nil，由调用方决定 fallback 策略。
     /// 提为独立 static 方法：让测试可直接覆盖各种 malformed 输入而无需构造 mock Bundle。
-    /// 详见 docs/lessons/2026-04-26-url-string-malformed-tolerance.md。
+    /// 详见 docs/lessons/2026-04-26-url-string-malformed-tolerance.md
+    /// 与 docs/lessons/2026-04-26-baseurl-host-only-contract.md。
+    ///
+    /// **path 校验缘由**（codex round 5 [P2] finding）：
+    /// 本 story Dev Note #1 钦定 baseURL 为 host-only —— `/ping`、`/version` 在 server 根路径暴露，
+    /// `APIClient` 直接把 endpoint.path 拼到 baseURL 上。若 xcconfig 误带 `/api/v1` 前缀（仓库早期约定），
+    /// 拼出的 URL 会变成 `/api/v1/ping`、`/api/v1/version`，server 全部返 404，ping 永远落 offline 路径。
+    /// 校验在配置入口拒绝带 path 的 baseURL，让 fallback 立刻生效，比让下游 silent 404 易诊断得多。
+    ///
+    /// `URL.path` 行为：
+    ///   - `URL(string: "https://example.com")?.path` → `""`（接受）
+    ///   - `URL(string: "https://example.com/")?.path` → `"/"`（接受，trailing slash 由 APIClient.init normalize）
+    ///   - `URL(string: "https://example.com/api/v1")?.path` → `"/api/v1"`（拒绝）
     public static func validatedBaseURL(fromString raw: String) -> URL? {
         guard let url = URL(string: raw),
               let scheme = url.scheme?.lowercased(),
@@ -83,6 +96,10 @@ public final class AppContainer: ObservableObject {
               let host = url.host,
               !host.isEmpty
         else {
+            return nil
+        }
+        // host-only 契约：path 仅允许空串或单 `/`。任何其他 path 前缀（如 `/api/v1`）都拒。
+        if !url.path.isEmpty && url.path != "/" {
             return nil
         }
         return url
