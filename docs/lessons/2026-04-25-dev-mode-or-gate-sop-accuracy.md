@@ -2,7 +2,7 @@
 date: 2026-04-25
 source_review: codex review --base 51ae73b round 2 (file: /tmp/epic-loop-review-1-10-r2.md)
 story: 1-10-server-readme-本地开发指南
-commit: <pending>
+commit: bcfcf71
 lesson_count: 1
 ---
 

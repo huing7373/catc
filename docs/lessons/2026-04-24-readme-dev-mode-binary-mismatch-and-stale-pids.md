@@ -2,7 +2,7 @@
 date: 2026-04-24
 source_review: "file: /tmp/epic-loop-review-1-10-r1.md (codex review --uncommitted, Story 1.10 README)"
 story: 1-10-server-readme-本地开发指南
-commit: <pending>
+commit: 2a2ebfb
 lesson_count: 2
 ---
 
