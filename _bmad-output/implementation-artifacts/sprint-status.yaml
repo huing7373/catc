@@ -52,7 +52,7 @@ development_status:
   1-7-重做-scripts-build-sh: done
   1-8-apperror-类型-错误三层映射框架: done
   1-9-go-context-传播框架-cancellation-验证: done
-  1-10-server-readme-本地开发指南: backlog
+  1-10-server-readme-本地开发指南: ready-for-dev
   epic-1-retrospective: optional
   epic-2: backlog
   2-1-ios-mock-框架选型-ios-目录决策-spike: backlog
