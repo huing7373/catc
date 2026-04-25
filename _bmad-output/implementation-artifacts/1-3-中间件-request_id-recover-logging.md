@@ -461,7 +461,7 @@ Story 1.2 遗留的原 `TestRouter_Ping` case：由于挂中间件后 `requestId
    - handler 层要写 log 时 `slog.InfoContext(c.Request.Context(), "msg", ...)` 直接拿 child（Story 1.3 的 handler 只有 `/ping`，不写业务 log）
    - **切勿** `slog.Info("msg", ...)` 裸调用 —— 会丢 request_id / api_path 字段
 4. **recover 的 panic 必须仍走 logging 中间件**：挂载顺序保证；panic 被 recover 捕获后 `c.Next()` 正常返回，logging 在 deferred / 函数末尾读到 final status = 500；如果交换顺序（logging 在 recover 之前），logging 的 deferred panic recovery 会吃掉 panic，recover 中间件就看不到。
-5. **Story 1.9 追加字段 `ctx_done`**（epics.md Story 1.9 AC）：logging 中间件末尾读 `c.Request.Context().Err()` 判断 cancel。**本 story 不做**，Story 1.9 会 revisit 本文件。
+5. **Story 1.9 追加字段 `ctx_done`**（epics.md Story 1.9 AC）：logging 中间件末尾读 `c.Request.Context().Err()` 判断 cancel。~~**本 story 不做**，Story 1.9 会 revisit 本文件。~~ → **已于 Story 1.9 落地**（见 ADR-0007 §4 + logging.go 尾部 `attrs = append(attrs, slog.Bool("ctx_done", true))`；缺省即 false，与 error_code 惯例一致）。
 6. **`c.FullPath()` 未命中路由时返回空串**：这是 Gin 行为特性，logging 里字段保留空串；metrics 里换成 `"UNKNOWN"`（基数隔离）。
 7. **Gin 的 Abort 与 panic**：`c.Abort()` 不等于 panic，只是标记"跳过后续 handler"。recover 里 `response.Error` 之后 `c.Abort()` 是双保险。
 
@@ -625,7 +625,7 @@ Story 1.2 的 `bootstrap/server.go` 里 `log.Printf("server shutdown error: %v",
 - [Source: _bmad-output/planning-artifacts/epics.md#Story-1.4] — 下游 `/version`（本 story 留 TODO 注释）
 - [Source: _bmad-output/planning-artifacts/epics.md#Story-1.6] — 下游 `/dev/*`（本 story 留 TODO 注释）
 - [Source: _bmad-output/planning-artifacts/epics.md#Story-1.8] — 下游 AppError（本 story 用 literal 1009）
-- [Source: _bmad-output/planning-artifacts/epics.md#Story-1.9] — 下游 ctx propagation（logging 中间件追加 `ctx_done`）
+- [Source: _bmad-output/planning-artifacts/epics.md#Story-1.9] — 下游 ctx propagation（logging 中间件追加 `ctx_done`）— **已于 Story 1.9 落地，见 ADR-0007 §4**
 - [Source: _bmad-output/planning-artifacts/epics.md#Story-4.5] — 下游 auth 中间件 + `user_id` 字段接入
 - [Source: CLAUDE.md#Build-Test] — build 脚本现状（Story 1.7 重做；本 story 仍用 `go build` 验收）
 
@@ -718,7 +718,7 @@ cat_api_request_duration_seconds_count{api_path="/ping",method="GET"} 2
 - `/metrics` 暂无 auth 保护（Epic 36 上线前处理）；router.go 顶部已留 TODO 注释
 - `user_id` / `business_result` / `error_code` 三字段本 story 不输出 —— Epic 4（auth）/ 各 service / Story 1.8（AppError）接入时补齐
 - Story 1.7 重做 `scripts/build.sh` 时一并加 `--race` 开关（当前 Windows 本地 cgo.exe 与 toolchain 的 race 检测不兼容，遗留问题与 Story 1.2 相同）
-- Story 1.9 `ctx_done` 字段：logging 中间件末尾需读 `c.Request.Context().Err()`，Story 1.9 revisit 本文件
+- ~~Story 1.9 `ctx_done` 字段：logging 中间件末尾需读 `c.Request.Context().Err()`，Story 1.9 revisit 本文件~~ → **Story 1.9 已落地**（ADR-0007 §4 + logging.go 尾部 `if err := c.Request.Context().Err(); err != nil { ... ctx_done=true }`）
 
 ### File List
 
