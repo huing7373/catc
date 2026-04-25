@@ -26,9 +26,17 @@
 - **形态**：模块化单体（**不**拆微服务）
 - **iOS**：MVVM + UseCase + Repository，HealthKit / CoreMotion 接入
 
-## Repo Separation（三端独立）
+## Repo Separation（重启阶段过渡态）
 
-三个独立目录：`server/` (Go) / `ios/` (iOS) / `watch/`（watchOS，当前重启阶段暂不考虑）。server 测试自包含，不依赖 APP / watch 真机；真机联调类工作单独排期，不塞业务节点。跨端契约通过 `docs/宠物互动App_V1接口设计.md` 统一同步，不通过共享代码。
+三个目录（按运行时端 + 当前真实状态）：
+
+- **`server/`**（Go server，新方向）— Epic 1 已 done
+- **`iphone/`**（iPhone App，新方向；Story 2.2 起在此目录落地）— 由 ADR-0002 §3.3 选定
+- **`ios/`**（旧产物归档，含 `Cat.xcodeproj` / `CatPhone/` / `CatShared/` / `CatWatch*/` 等）— 重启阶段**整个不动**；watch 仍可在 `ios/Cat.xcodeproj` 内打开 / build；未来恢复 watchOS 或废弃旧产物时另做迁移决策（参见 ADR-0002 §5.3 四条路径）
+
+**端独立原则**：server 测试自包含，不依赖 iPhone App / watch 真机；真机联调类工作单独排期，不塞业务节点。跨端契约通过 `docs/宠物互动App_V1接口设计.md` 统一同步，不通过共享代码。
+
+**iPhone 端工程目录由 ADR-0002 锁定**：`_bmad-output/implementation-artifacts/decisions/0002-ios-stack.md`。该 ADR 是 Story 2.2 / 2.7 等 iPhone 实装 story 的唯一权威。
 
 ## Build & Test
 
