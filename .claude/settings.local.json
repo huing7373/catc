@@ -40,7 +40,13 @@
       "Bash(mkdir -p:*)",
       "Read(//tmp/**)",
       "WebSearch",
-      "Bash(codex:*)"
+      "Bash(codex:*)",
+      "Bash(xcodegen --version)",
+      "Bash(xcodebuild -version)",
+      "Bash(swift --version)",
+      "Bash(xcrun simctl *)",
+      "Bash(swift-format --version)",
+      "Bash(brew info *)"
     ],
     "deny": [
       "Bash(rm -rf:*)",
