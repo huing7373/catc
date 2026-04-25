@@ -23,12 +23,18 @@ targets:
       path: PetApp/Resources/Info.plist
       properties:
         CFBundleDisplayName: PetApp
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
         UILaunchScreen: {}
         LSRequiresIPhoneOS: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
+        # Story 2.5 review fix round 1：默认 baseURL 由 AppContainer 从此 key 读取，
+        # 缺失时 fallback 到 http://localhost:8080。真机联调请通过 xcconfig 覆盖。
+        # 详见 docs/lessons/2026-04-26-baseurl-from-info-plist.md
+        PetAppBaseURL: http://localhost:8080
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zhuming.pet.app
