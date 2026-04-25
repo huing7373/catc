@@ -46,7 +46,10 @@
       "Bash(swift --version)",
       "Bash(xcrun simctl *)",
       "Bash(swift-format --version)",
-      "Bash(brew info *)"
+      "Bash(brew info *)",
+      "Bash(xcodegen generate *)",
+      "Bash(xcodebuild build *)",
+      "Bash(xcodebuild test *)"
     ],
     "deny": [
       "Bash(rm -rf:*)",

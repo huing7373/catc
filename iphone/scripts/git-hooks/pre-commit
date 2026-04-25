@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# iphone/scripts/git-hooks/pre-commit
+# Story 2.2 阶段：占位 hook，仅 exit 0。
+#
+# 真实 swift-format 调用 / SwiftLint 规则 / 全工程检查作为 tech debt，
+# 在后续 story（建议 Story 2.7 / Story 3.3）视需要扩展。
+#
+# 本 hook 存在的目的：
+# - 防止后续 commit 时 .git/hooks/pre-commit 不存在导致 hook 安装失败（rare edge case）
+# - 给 dev 一个明确的扩展点（可在此叠加 swift-format check 等）
+
+set -euo pipefail
+
+exit 0
