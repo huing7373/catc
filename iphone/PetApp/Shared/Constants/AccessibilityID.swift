@@ -19,4 +19,16 @@ public enum AccessibilityID {
         public static let btnCompose = "home_btnCompose"
         public static let versionLabel = "home_versionLabel"
     }
+
+    // Story 2.3 新增：主界面跳转的全屏 Sheet placeholder a11y 标识。
+    // 后续 Epic 12 / 24 / 33 实装真实 Room/Inventory/Compose View 时整体下线。
+    public enum SheetPlaceholder {
+        public static let roomContainer = "sheetPlaceholder_room"
+        public static let roomTitle = "sheetPlaceholder_roomTitle"
+        public static let inventoryContainer = "sheetPlaceholder_inventory"
+        public static let inventoryTitle = "sheetPlaceholder_inventoryTitle"
+        public static let composeContainer = "sheetPlaceholder_compose"
+        public static let composeTitle = "sheetPlaceholder_composeTitle"
+        public static let btnClose = "sheetPlaceholder_btnClose"
+    }
 }
