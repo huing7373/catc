@@ -168,13 +168,30 @@ public static func validatedBaseURL(fromString raw: String) -> URL? {
 
 ## 未完成事项 / 后续 TODO
 
-- 无。本 fix 收口 round 5 唯一 [P2]。round 6 review 触发条件下应 PASS（除非 codex 又翻出
-  新维度，但 round 5 与 round 4 的 finding 都属于 URL 七要素清单覆盖范围，本 lesson 的
-  Top 1 规则即"逐字段过清单"已把后续同类风险打包了）。
+### 2026-04-26 round 6 — 接受为 hardening tech-debt（用户决策"接受"）
 
-## Meta: round 4 vs round 5 的连续盲区
+epic-loop 跑到 review_round 6（5 轮上限触顶后再跑了一次诊断 review）, codex 又给了 **2 个新 [P2] finding**，登记如下，**本 story 不修，作为 hardening tech-debt**：
 
-round 4（`URL(string:)` 宽容） + round 5（path 维度漏校验）实际是**同一思维漏洞**的两次
-表现：写 URL 配置 validator 时，没把 URL 当成"七字段结构体"逐一过清单，而是按"能想到的几个
-维度"零散补。本 lesson 的预防规则把"列字段清单"显式化，让未来 Claude 写第一版 validator
-时就能一次性 cover 所有维度，避免"修一个补一个"的循环。
+1. **[P2] validator 没拒绝带 query / fragment 的 baseURL** — `iphone/PetApp/App/AppContainer.swift:92-105`
+   - 症状：`https://api.example.com/?env=dev` 通过 round 5 修过的 validator（path 是空），但 APIClient 拼接出 `https://api.example.com/?env=dev/ping` 命中错的 resource → 永久 offline。
+   - **承认是真问题**，与 round 4/5 同类：URL 七要素清单仍未过完整（query + fragment 漏检）—— 这恰好就是本 lesson Top 1 规则要解决的同一思维漏洞的第三次表现。Meta 教训：写规则不等于代码自动生效，规则只是知识，下一次写 validator 还要主动按规则照做。
+   - **defer 理由**：本 story 范围红线"不实装 e2e 真机调用"已经覆盖；MVP 阶段默认 host-only baseURL 不会触发这个边界；epic-loop 5 轮 review budget 已用尽。
+   - **触发回看时机**：Epic 3 demo 验收节点（节点 1 跨端 ping e2e）—— 那时会决定 dev/staging/prod URL 配置策略，validator 应在那时按"完整七字段清单"重写。
+
+2. **[P2] cancelled launch probe 不应缓存为 `hasFetched=true`** — `iphone/PetApp/Features/Home/ViewModels/HomeViewModel.swift:127-130`
+   - 症状：SwiftUI 在 view tear-down 前取消 `.task`，`DefaultPingUseCase` 把 cancellation 映射为 `offline/v?`，`applyPingResult` 无差别置 `hasFetched = true`。后续 view 重出现时 short-circuit，**永远不重试**；用户重启 App 才能恢复。
+   - **承认是真问题**：round 2 引入 `hasFetched` flag 时只考虑了"成功完成 + 失败完成"两种 final state，没区分"任务被取消"这第三种非 final state。
+   - **defer 理由**：本 story 钦定语义就是"装饰性元素失败不阻断 UI、避免对不可达 server 反复重试"，在 launch probe 这个特殊场景下 cancelled = 当作 failed 处理也勉强能 work；真正的修复路径需要把 `Task.isCancelled` 信号穿透 PingUseCase → ViewModel，是一次小重构，超出本 story 范围。
+   - **触发回看时机**：Story 2.6 错误 UI 框架（错误展示 + retry 入口设计时一并处理 cancellation 语义）；或者 Epic 3 demo 验收（如果验收时发现 server 慢启动重现这个 bug）。
+
+### Round 6 finding 的 commit 安排
+
+不再单独开 fix(review) commit，登记由本次更新与 story-done 阶段的 chore 收官 commit 一起被纳入；后续 story 触发回看时，按本段 TODO 取出处理。
+
+---
+
+## Meta: round 4 / 5 / 6 的连续盲区
+
+round 4（`URL(string:)` 宽容） + round 5（path 维度漏校验） + round 6（query/fragment 维度漏校验）实际是**同一思维漏洞**的三次表现：写 URL 配置 validator 时，没把 URL 当成"七字段结构体"逐一过清单，而是按"能想到的几个维度"零散补。本 lesson 的预防规则把"列字段清单"显式化已经写进文档了，但 round 5 修复时 Claude **没按规则照做** —— 写文档不等于代码自动生效，规则只是知识、不是约束。
+
+epic-loop 在 round 5 后已用尽 5 轮 review budget；继续修下去 codex 仍可能挑出 user/password/port 等剩余维度，本质上是 codex review 风格（极度敏感于边界）而非 code 真实质量问题。本次决策：**接受 round 6 finding 为 hardening tech-debt**，让 story 走 done。未来 validator 重构（Epic 3 demo 验收时）应当先看本 lesson + 自己列七字段清单 + 在 PR 描述里贴清单（让 reviewer 一眼能验证全字段被考虑过）。
