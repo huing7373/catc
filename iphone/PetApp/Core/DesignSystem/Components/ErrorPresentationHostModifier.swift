@@ -6,7 +6,13 @@
 // 渲染策略（按 ErrorPresentation case）：
 // - `.toast(message)` → ToastView 顶部浮现，叠在主内容之上（zIndex 4，allowsHitTesting=false）
 // - `.alert(title, message)` → AlertOverlayView 居中弹出，遮罩全屏阻塞（zIndex 3）
-// - `.retry(message)` → RetryView 全屏覆盖（zIndex 2，下方 content opacity=0 + accessibilityHidden=true）
+// - `.retry(message)` → RetryView 全屏覆盖（zIndex 2）
+//
+// **Modal blocking 语义**（alert / retry 都是 modal）：
+// - 下层 content 应用 `.accessibilityHidden(true)`：VoiceOver 不能 focus 后面控件
+// - 下层 content 应用 `.allowsHitTesting(false)`：tap / touch 不会穿透到后面
+// - retry 额外 opacity=0（视觉全覆盖）；alert 视觉上不全覆盖（半透明遮罩在 AlertOverlayView 内自带），但访问性/交互必须屏蔽
+// 单纯靠 overlay zIndex 不足以实现 modal blocking——VoiceOver / Hit-testing 默认仍能穿透。
 //
 // 动画（hardcoded MVP）：
 // - toast：`.transition(.move(edge: .top).combined(with: .opacity))`
@@ -27,9 +33,11 @@ public struct ErrorPresentationHostModifier: ViewModifier {
 
     public func body(content: Content) -> some View {
         ZStack {
-            // 主内容；retry 出现时被全屏覆盖（隐藏 + 不可点）
+            // 主内容；alert / retry 出现时同步屏蔽访问性 + hit-testing（modal blocking 语义）
+            // retry 额外 opacity=0（视觉全覆盖）；alert 视觉上保留下层（AlertOverlayView 自带半透明遮罩）
             content
-                .accessibilityHidden(retryActive)
+                .accessibilityHidden(modalActive)
+                .allowsHitTesting(!modalActive)
                 .opacity(retryActive ? 0 : 1)
 
             // Retry 全屏覆盖
@@ -62,7 +70,16 @@ public struct ErrorPresentationHostModifier: ViewModifier {
         .animation(.easeInOut(duration: 0.2), value: presenter.current)
     }
 
-    private var retryActive: Bool {
+    /// retry 状态（视觉上需要把下层 opacity 置 0）
+    var retryActive: Bool {
+        if case .retry = presenter.current { return true }
+        return false
+    }
+
+    /// modal 状态（alert / retry 都需要屏蔽下层访问性 + hit-testing）。
+    /// toast 不是 modal，下层 content 保持可交互；nil 同理（无错误展示）。
+    var modalActive: Bool {
+        if case .alert = presenter.current { return true }
         if case .retry = presenter.current { return true }
         return false
     }

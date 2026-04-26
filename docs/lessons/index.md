@@ -28,3 +28,4 @@
 | 2026-04-26 | [baseURL host-only 契约：设计承诺与 validator 必须对齐](2026-04-26-baseurl-host-only-contract.md) | 1 | reliability | `f6d910b` |
 | 2026-04-26 | [队列型 UI 状态机存储 presentation 必须连带 callback 一起入队](2026-04-26-error-presenter-queue-onretry-loss.md) | 1 | error-handling | `<pending>` |
 | 2026-04-26 | [SwiftUI fullScreenCover 是隔离 window scene，全局 overlay UI 必须在 sheet 子树重复 attach](2026-04-26-fullscreencover-isolated-environment.md) | 1 | architecture, ui | `<pending>` |
+| 2026-04-26 | [SwiftUI modal overlay 必须做下层 hit-testing + accessibility 双屏蔽](2026-04-26-modal-overlay-content-shield.md) | 1 | accessibility, ui | `<pending>` |
