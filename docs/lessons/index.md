@@ -29,3 +29,5 @@
 | 2026-04-26 | [队列型 UI 状态机存储 presentation 必须连带 callback 一起入队](2026-04-26-error-presenter-queue-onretry-loss.md) | 1 | error-handling | `634c564` |
 | 2026-04-26 | [SwiftUI fullScreenCover 是隔离 window scene，全局 overlay UI 必须在 sheet 子树重复 attach](2026-04-26-fullscreencover-isolated-environment.md) | 1 | architecture, ui | `634c564` |
 | 2026-04-26 | [SwiftUI modal overlay 必须做下层 hit-testing + accessibility 双屏蔽](2026-04-26-modal-overlay-content-shield.md) | 1 | accessibility, ui | `3b40ba8` |
+| 2026-04-26 | [Shell 包装脚本的 flag 组合矩阵必须显式枚举 + 默认行为按主路径选](2026-04-26-build-script-flag-matrix.md) | 1 | config | `<pending>` |
+| 2026-04-26 | [`ObservableObject.objectWillChange` 不 emit initial value，helper API contract 必须显式声明](2026-04-26-objectwillchange-no-initial-emit.md) | 1 | testing | `<pending>` |

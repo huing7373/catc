@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-04-25 (story 2-6 done)
+# last_updated: 2026-04-25 (story 2-7 review)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-04-26
+last_updated: 2026-04-25
 project: cat
 project_key: NOKEY
 tracking_system: file-system
@@ -61,7 +61,7 @@ development_status:
   2-4-apiclient-封装: done
   2-5-ping-调用-主界面显示-server-version-信息: done
   2-6-基础错误-ui-框架: done
-  2-7-ios-测试基础设施搭建: backlog
+  2-7-ios-测试基础设施搭建: review
   2-8-dev-重置-keychain-按钮: backlog
   2-9-launchingview-设计: backlog
   2-10-ios-readme-模拟器开发指南: backlog
