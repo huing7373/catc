@@ -60,3 +60,4 @@
 | 2026-04-26 | [locate auto-detect 逻辑必须 cwd + exe-relative 双 fallback（与 config.LocateDefault 一致）](2026-04-26-locate-cwd-and-exe-relative-fallback.md) | 1 | config | `88e07bd` |
 | 2026-04-26 | [JWT util 校验必填 claim + 所有 sign 路径必须 enforce 配置约束](2026-04-26-jwt-required-claim-and-sign-policy-enforcement.md) | 2 | security | `<pending>` |
 | 2026-04-26 | [checked-in dev config 必须能直接跑 + 部署文档必须与新增配置项同步](2026-04-26-checked-in-config-must-boot-default.md) | 1 | config | `<pending>` |
+| 2026-04-26 | [secret 字段必须空字符串 + fail-fast，不能 checked-in dev fallback（即使加了警告注释）](2026-04-26-checked-in-secret-must-fail-fast.md) | 1 | security, config | `<pending>` |

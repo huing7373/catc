@@ -20,21 +20,34 @@ mysql:
 auth:
   # JWT signing secret（HS256；Story 4.4 接入）。
   #
-  # === DEV ONLY — production MUST override via CAT_AUTH_TOKEN_SECRET env ===
-  # 这里填的是 **本地开发专用** 的语义化默认 secret（≥32 字节，明显 dev 用途）。
-  # 目的：fresh clone 后 `./build/catserver -config server/configs/local.yaml`
-  # 可以**直接跑起来**，不需要先 export env，降低本地 / iOS simulator 联调摩擦。
-  # 由于本字符串显式标注 "do-not-use-in-prod"，被生产环境误用的成本很低
-  # （任何 secret scanner 命中都会拦下；运维也会一眼看出是 dev 占位）。
+  # === 故意留空 —— 启动前必须 export CAT_AUTH_TOKEN_SECRET 覆盖 ===
+  # 这里**不**放 dev fallback secret。原因（round 3 codex review [P1] 拦下的反向纠偏）：
   #
-  # 生产 / staging：**必须** 通过环境变量 `CAT_AUTH_TOKEN_SECRET` 覆盖
-  # （loader.go 已挂 env 优先级；部署 / K8s Secret 注入，避免把密钥写进
-  # ConfigMap / 仓库）。
+  #   - `LocateDefault()` 和 README 都把这个 yaml 路径作为推荐启动入口；
+  #   - 任何 staging / prod 环境只要误用此 yaml + 漏注入 `CAT_AUTH_TOKEN_SECRET`
+  #     env，server 就会用**公开仓库已知**的 secret 启动，任何看过 repo 的人都
+  #     可以伪造 HS256 token 绕过 auth；
+  #   - 留空（""）反而**更安全**：auth.New("") → error → main.go fail-fast
+  #     (os.Exit 1)，misconfiguration 永远上不了线，避免"工作但 insecure"路径。
   #
-  # 自定义 dev secret：`export CAT_AUTH_TOKEN_SECRET="<your-secret>"` 即可覆盖本默认。
+  # 关键 trade-off：fresh clone "1 步上手" vs "安全默认" → 选**安全**（fail-fast）
+  # + 让 README 引导 onboarding 流程：
+  #   1) clone repo + 跑 ./build/catserver → 立刻 exit 1，slog.Error 提示
+  #      "auth: secret is empty (set CAT_AUTH_TOKEN_SECRET or auth.token_secret)"
+  #   2) 读 README "快速启动" → 看到 "必须 export CAT_AUTH_TOKEN_SECRET"
+  #   3) export 后重跑 → 成功
   #
-  # 故意改成空串 / 非法值（< 16 字节）→ 启动时 auth.New 返 error → main.go fail-fast（os.Exit 1）。
-  token_secret: "local-dev-secret-do-not-use-in-prod-32bytes"
+  # 本地 dev 启动（任选其一）：
+  #
+  #   export CAT_AUTH_TOKEN_SECRET="$(openssl rand -hex 32)"   # 随机
+  #   export CAT_AUTH_TOKEN_SECRET="my-local-dev-secret-32-bytes-min"  # 固定值（重启后 token 不失效）
+  #
+  # 生产 / staging：通过部署侧 K8s Secret / Vault 注入 `CAT_AUTH_TOKEN_SECRET`，
+  # 避免把密钥写进 ConfigMap / 仓库。
+  #
+  # 这个空串**不是**疏漏；任何尝试在这里填 fallback 值的 PR 必须先看
+  # docs/lessons/2026-04-26-checked-in-secret-must-fail-fast.md 再说。
+  token_secret: ""
   token_expire_sec: 604800  # 7 天，epics.md §Story 4.4 行 1014 钦定
 
 log:

@@ -8,26 +8,33 @@
 
 ## 快速启动
 
-3 行命令把 server 跑起来 + 验证。**从仓库根目录** `C:\fork\cat` 跑（Windows 用 Git Bash / WSL；macOS / Linux 自带 bash）：
+**从仓库根目录** `C:\fork\cat` 跑（Windows 用 Git Bash / WSL；macOS / Linux 自带 bash）：
 
 ```bash
-# 第一次：编译 + 跑
+# 第一步（必做，否则 server 启动 fail-fast）：导出 JWT signing secret
+export CAT_AUTH_TOKEN_SECRET="$(openssl rand -hex 32)"
+# 没有 openssl？任意 ≥16 字节字符串都行：
+# export CAT_AUTH_TOKEN_SECRET="my-local-dev-secret-32-bytes-min"
+
+# 第二步：编译 + 跑
 bash scripts/build.sh
 ./build/catserver -config server/configs/local.yaml
 
-# 验证（另开一个 shell）
+# 验证（另开一个 shell；新 shell 不需要再 export，server 已经读过 env）
 curl http://127.0.0.1:8080/ping       # → {"code":0,"message":"pong",...}
 curl http://127.0.0.1:8080/version    # → {"code":0,"data":{"commit":"<short hash>","builtAt":"..."}}
 ```
+
+> **关于 `CAT_AUTH_TOKEN_SECRET`**：[`local.yaml`](configs/local.yaml) 的 `auth.token_secret` **故意留空**（不是疏漏）。原因：这份 yaml 是 `LocateDefault()` 的推荐启动入口，如果 checked-in 一个 fallback 值，staging / prod 误用该 yaml 时会用**仓库公开**的 secret 启动 → 任何看过 repo 的人都能伪造 token 绕过 auth。空串触发 `auth.New` 返 error → `main.go` fail-fast (`os.Exit(1)`)，永远阻止 misconfiguration 上线。dev 友好性由 README 这一步 export 兜底，**不**让代码 / 配置默认值承担。详见 [`docs/lessons/2026-04-26-checked-in-secret-must-fail-fast.md`](../docs/lessons/2026-04-26-checked-in-secret-must-fail-fast.md)。
 
 > Windows 上 `./build/catserver` 实际是 `./build/catserver.exe`（`scripts/build.sh` 用 `$(go env GOEXE)` 自动加后缀）。
 
 **坑提醒**：
 
+- **没 export `CAT_AUTH_TOKEN_SECRET` 就启动**：会立刻 `os.Exit(1)`，slog.Error 含 `auth: secret is empty (set CAT_AUTH_TOKEN_SECRET or auth.token_secret)`。修复：回到上面"第一步"。
 - **不要**用 `go run ./cmd/server` 替代 `bash scripts/build.sh`：前者绕过 `-ldflags` 注入，`/version` 会返回 `"unknown"`（详见 [Troubleshooting #4](#troubleshooting)）。
 - 端口 `8080` 与 IP `127.0.0.1` 与 [`server/configs/local.yaml`](configs/local.yaml) 默认值一致；改端口走环境变量 `CAT_HTTP_PORT`，不要在 README 命令里随手换成 `:8090`。
 - `-config server/configs/local.yaml` 显式传 path 最稳；`LocateDefault()` 也能自动找，但 CWD 漂移会让自动查找失败（详见 [配置 → 配置路径解析](#配置)）。
-- [`local.yaml`](configs/local.yaml) 已带 **dev-only 默认 JWT secret**（`local-dev-secret-do-not-use-in-prod-32bytes`），fresh clone 直接跑即可；**生产必须**用环境变量 `CAT_AUTH_TOKEN_SECRET` 覆盖（详见 [配置 → 环境变量覆盖](#环境变量覆盖)）。本地想自定义 dev secret：`export CAT_AUTH_TOKEN_SECRET="<≥16 字节随机字符串>"`。
 
 ---
 
@@ -76,7 +83,7 @@ curl http://127.0.0.1:8080/version    # → {"code":0,"data":{"commit":"<short h
 | `server.http_port` | `8080` | int | HTTP 监听端口 | 端口冲突时改其他可用端口（如 18090），或走环境变量 `CAT_HTTP_PORT` |
 | `server.read_timeout_sec` | `5` | int | HTTP read header / body 超时（秒） | 上传大体积 payload 时调大；MVP 阶段保持默认 |
 | `server.write_timeout_sec` | `10` | int | HTTP response 写超时（秒） | server-side 流式响应 / 大文件下载时调大；MVP 阶段保持默认 |
-| `auth.token_secret` | `local-dev-secret-do-not-use-in-prod-32bytes` | string | JWT HS256 签名 secret；空串 / `<16` 字节启动 fail-fast | **生产必须**用 env `CAT_AUTH_TOKEN_SECRET` 覆盖；本地 / CI 想换值可 export 同名 env |
+| `auth.token_secret` | `""`（**故意留空，启动必须 export `CAT_AUTH_TOKEN_SECRET`**） | string | JWT HS256 签名 secret；空串 / `<16` 字节启动 fail-fast | **任何环境**（dev / staging / prod）都用 env `CAT_AUTH_TOKEN_SECRET` 注入；checked-in 不放 fallback 是为了让 misconfiguration fail-fast，参考 [`docs/lessons/2026-04-26-checked-in-secret-must-fail-fast.md`](../docs/lessons/2026-04-26-checked-in-secret-must-fail-fast.md) |
 | `auth.token_expire_sec` | `604800`（7 天） | int | 默认 token 过期时间；`<=0` 或 `> 30天` 启动 fail-fast | dev 想短到 1 小时方便测试可改 `3600`；生产保持默认 |
 | `log.level` | `info` | string | slog level（`debug` / `info` / `warn` / `error`） | 本地排障改 `debug`；生产保持 `info` |
 
@@ -89,7 +96,7 @@ curl http://127.0.0.1:8080/version    # → {"code":0,"data":{"commit":"<short h
 | `CAT_HTTP_PORT` | `server.http_port` | ASCII 整数（如 `18090`） | 非法值（如 `abc`）启动报错 |
 | `CAT_LOG_LEVEL` | `log.level` | `debug` / `info` / `warn` / `error` | CI / 临时 demo 调级用 |
 | `CAT_MYSQL_DSN` | `mysql.dsn` | 完整 DSN 串（含密码） | **生产必走**：DSN 不入仓库 YAML，部署侧用 K8s Secret / Vault 注入；空串 = 不覆盖 |
-| `CAT_AUTH_TOKEN_SECRET` | `auth.token_secret` | ≥16 字节字符串 | **生产必走**：覆盖 `local.yaml` 的 dev-only 默认值；本地 / CI 想换值也可设此 env；空串 = 不覆盖 |
+| `CAT_AUTH_TOKEN_SECRET` | `auth.token_secret` | ≥16 字节字符串 | **所有环境必走**（含本地 dev）：`local.yaml` 留空时唯一注入 secret 的方式；不 export 启动直接 fail-fast；空串 = 不覆盖（等价于完全没设） |
 
 完整命令例：
 
