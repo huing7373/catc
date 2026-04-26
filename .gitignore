@@ -6,6 +6,7 @@
 ios/Cat.xcworkspace/xcuserdata/
 ios/Cat.xcodeproj/xcuserdata/
 ios/Cat.xcodeproj/project.xcworkspace/xcuserdata/
+**/xcuserdata/
 DerivedData/
 *.xcuserstate
 *.ipa
