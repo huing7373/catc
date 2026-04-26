@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: codex review round 3 on Story 2.5 (file: /tmp/epic-loop-review-2-5-r3.md)
 story: 2-5-ping-调用-主界面显示-server-version-信息
-commit: <pending>
+commit: 8054f23
 lesson_count: 1
 ---
 

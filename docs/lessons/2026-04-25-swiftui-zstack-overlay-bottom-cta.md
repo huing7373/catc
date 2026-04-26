@@ -2,7 +2,7 @@
 date: 2026-04-25
 source_review: codex review --uncommitted（epic-loop r1 for story 2-2-swiftui-app-入口-主界面骨架-信息架构定稿）
 story: 2-2-swiftui-app-入口-主界面骨架-信息架构定稿
-commit: <pending>
+commit: 4de0140
 lesson_count: 1
 ---
 

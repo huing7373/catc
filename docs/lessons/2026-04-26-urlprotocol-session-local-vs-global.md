@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: codex review round 2 on Story 2.4 (file: /tmp/epic-loop-review-2-4-r2.md)
 story: 2-4-apiclient-封装
-commit: <pending>
+commit: 5d97a74
 lesson_count: 1
 ---
 

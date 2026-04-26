@@ -2,7 +2,7 @@
 date: 2026-04-25
 source_review: codex round 2 review of Story 2.2（file: /tmp/epic-loop-review-2-2-r2.md）
 story: 2-2-swiftui-app-入口-主界面骨架-信息架构定稿
-commit: <pending>
+commit: 6b1f45e
 lesson_count: 1
 ---
 
