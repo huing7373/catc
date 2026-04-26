@@ -355,6 +355,16 @@ open iphone/PetApp.xcodeproj
 
 ### 真机联调（Epic 5+ / TestFlight 准备）
 
+**前置步骤（仅真机首次必跑）—— 配置 code signing**：
+
+仓库 `iphone/project.yml` 里 `DEVELOPMENT_TEAM: ""` 是空字符串（dev-tools 框架钦定的占位）。真机 `Cmd+R` 在签名前会 build fail，连 ATS / 网络都还没触发。每个开发者必须在本地 Xcode 里配 personal team（不会改 project.yml，是 Xcode local override）：
+
+1. Xcode 打开 `iphone/PetApp.xcodeproj`
+2. 左侧 navigator 选 PetApp project → TARGETS 选 PetApp → 顶部 tab 选 **Signing & Capabilities**
+3. 勾选 **Automatically manage signing** → **Team** 下拉选你的 Apple ID
+   - 首次需先去 **Xcode → Settings → Accounts** 加个人 Apple ID（免费 personal team 即可）
+4. 真机 USB 连 Mac → Xcode 顶部 device picker 选你的真机
+
 ```bash
 # 1. Mac 找局域网 IP
 ifconfig | grep 'inet 192' | head -1
@@ -371,10 +381,15 @@ bash iphone/scripts/build.sh
 # 改 server/configs/local.yaml 的 server.bind_host: 0.0.0.0
 # 或删此行让 server 监听所有网卡
 
-# 5. Xcode 选真机 + Cmd+R
+# 5. 重启 server（必须！现有进程仍监听 127.0.0.1，配置文件改了不会热加载）
+pkill catserver  # 或 Ctrl+C 之前那个进程
+bash scripts/build.sh
+./build/catserver -config server/configs/local.yaml &
+
+# 6. Xcode 选真机 + Cmd+R
 ```
 
-> **注意**：`server/configs/local.yaml` 默认 `bind_host: 127.0.0.1` loopback **拒绝**真机连接；必须改 `0.0.0.0` 或删此行（详见 [`server/README.md`](../server/README.md) §配置 `bind_host` 字段说明）。Mac 与真机必须同 Wi-Fi。
+> **注意**：`server/configs/local.yaml` 默认 `bind_host: 127.0.0.1` loopback **拒绝**真机连接；必须改 `0.0.0.0` 或删此行（详见 [`server/README.md`](../server/README.md) §配置 `bind_host` 字段说明）。`bind_host` 改了**必须重启** catserver 进程（无 hot reload），否则现有进程仍监听旧地址，phone 显示 `offline`。Mac 与真机必须同 Wi-Fi。
 
 ### `PetAppBaseURL` 解析逻辑
 
