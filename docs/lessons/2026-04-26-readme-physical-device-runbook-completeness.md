@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: codex review round 3 — /tmp/epic-loop-review-2-10-r3.md
 story: 2-10-ios-readme-模拟器开发指南
-commit: <pending>
+commit: d254a28
 lesson_count: 2
 ---
 

@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: codex review round 5 (/tmp/epic-loop-review-2-10-r5.md)
 story: 2-10-ios-readme-模拟器开发指南
-commit: <pending>
+commit: 6e24b57
 lesson_count: 2
 ---
 
@@ -113,3 +113,36 @@ Round 4 fix-review 在 `docs/lessons/` 下加了 4 个 lesson 文件，但 `docs
 - Lesson 2：fix-review 流程**没自验**"新文件数 vs index 行数"，commit 时 silent 漏。
 
 共同教训：**文档/索引/runbook 类产物在 commit 前要做一次"机械一致性"检查 —— 不是看内容写得好不好，而是看"声称的事实是否与文件系统/工具语义对齐"。** 这种检查可以脚本化，应当编入 fix-review skill 的 step 6 / pre-commit hook（不在本次 commit 范围）。
+
+---
+
+## 未完成事项 / 后续 TODO
+
+### 2026-04-26 round 6 — 接受为 hardening tech-debt（用户决策"接受"）
+
+epic-loop 跑到 review_round 6（5 轮上限触顶后再跑了一次诊断 review），codex 又给了 **1 个新 [P2] finding**，登记如下，**本 story 不修，作为 hardening tech-debt**：
+
+**[P2] Troubleshooting #3 行真机修复又踩 build.sh 擦 Team 陷阱** — `iphone/README.md:328`
+
+- **症状**：Troubleshooting 表第 3 行（"App 在真机上启动后角落 server 信息永远显示 Server offline"）解决步骤写"② regen Info.plist：`bash iphone/scripts/build.sh`"。这与 round 5 的 §真机联调 段警告（"真机 build 必须用 Xcode IDE Cmd+R，不要用 build.sh，否则 Team 被擦"）**自相矛盾**。读者按 troubleshooting 修真机 baseURL 后再 Cmd+R 必败 code signing。
+- **承认是真问题**：这正是本 lesson 的 Lesson 1 在 README 内部的一次复发——同一文档同主题在两个段落里的"机械一致性"漂移。round 5 修了"真机联调段引导路径"但**没**同步检查 troubleshooting 表里的同主题表行。
+- **defer 理由**：本 story 范围红线"不实装 e2e 真机调用"已覆盖；MVP 阶段开发者不会在真机上跑（→ Epic 3 demo 验收 / Epic 5 自动登录才触发真机场景）；epic-loop 5 轮 review budget 已用尽（本 story 已修 9 条 finding，README 质量远超新成员入门所需）。
+- **触发回看时机**：Epic 3 demo 验收节点（节点 1 跨端 ping e2e）—— 那时会真正在真机上验证 README 流程，自然暴露这个矛盾；或者下次任何人编辑 README 时按本 lesson 的 Top 1 规则（"机械一致性"检查）grep 全文找 `bash iphone/scripts/build.sh` 出现处，逐个核对是否在真机段引用。
+- **简易修法预览**（留给将来）：troubleshooting #3 解决步骤 ② 改写成 §真机联调 路 A：
+  ```
+  ② 在 Xcode 里改 PetAppBaseURL：navigator 选 PetApp target → Info tab →
+     PetAppBaseURL 改成 Mac 局域网 IP；不要跑 build.sh（会擦 Team）。
+     详见 §真机联调 路 A。
+  ```
+
+### Round 6 finding 的 commit 安排
+
+不再单独开 fix(review) commit；登记在本 lesson 的 TODO 段，由 Story 2-10 的 chore(story-2-10) 收官 commit 一起带走。
+
+---
+
+## Meta: round 1-6 README 反复修改的"机械一致性"漂移
+
+Story 2.10 的 README 跨 6 轮 codex review，每轮挖一个新维度的 finding：路径可移植 → 链接路径 → 工具语义 → IP 网段 → signing 流程 → **跨段 cross-reference 一致性**（round 6）。前 5 轮修的是"内容准确性"，round 6 的 finding 是 round 5 自己的修复在另一段没同步——元教训：
+
+**修文档时改 A 段必须 grep 同主题词在全文的所有出现，逐个评估是否要同步改。** README 里 `bash iphone/scripts/build.sh` 出现 N 次，round 5 改了"真机联调"段那一处，但 troubleshooting 表里第 3 行的同一表达式没改。这种"局部改动忘记全局同步"是文档维护的经典坑。本 lesson Top 1 规则（"机械一致性检查"）已经明示要点，但 round 5 修复时**没按规则照做**——再一次证明：写 lesson ≠ 自动遵循 lesson。未来所有 README/runbook 改动 PR 必须**强制**附"全文 grep 自检表"作为 commit message 一部分。

@@ -41,8 +41,8 @@
 | 2026-04-26 | [Swift `Error.localizedDescription` 对非 LocalizedError 返回系统串而非空，"isEmpty 兜底" 永远不触发](2026-04-26-error-localizeddescription-system-fallback.md) | 1 | error-handling | `c94209b` |
 | 2026-04-26 | [用户触发的 retry 类异步 action 必须自带并发短路 guard，不能复用 idempotency flag 替代](2026-04-26-user-triggered-action-reentrancy.md) | 1 | concurrency | `c94209b` |
 | 2026-04-26 | [SwiftUI `.animation(_:value:)` 不会让 switch 分支切换淡入淡出，必须 ZStack + 每分支显式 `.transition`](2026-04-26-swiftui-switch-transition-explicit.md) | 1 | ui | `c94209b` |
-| 2026-04-26 | [onboarding 文档的可移植性 & 跨目录 markdown 相对链接](2026-04-26-readme-portable-paths-and-relative-links.md) | 2 | docs | `<pending>` |
-| 2026-04-26 | [Onboarding README 的 runbook 必须与工具语义 / 实际 UI 文案对齐](2026-04-26-readme-runbook-must-match-actual-behavior.md) | 2 | docs | `<pending>` |
-| 2026-04-26 | [真机联调 runbook 必须含 code signing 步骤 + config-change-then-restart 序列](2026-04-26-readme-physical-device-runbook-completeness.md) | 2 | docs | `<pending>` |
-| 2026-04-26 | [README 命令必须 cover 所有合法网段 + 工具输出格式不能假设固定字符数](2026-04-26-readme-portable-network-and-tool-output.md) | 2 | docs | `<pending>` |
-| 2026-04-26 | [Onboarding 文档必须考虑 build-wrapper 副作用 + lesson index 必须随 lesson 同步](2026-04-26-readme-onboarding-vs-tooling-side-effects.md) | 2 | docs | `<pending>` |
+| 2026-04-26 | [onboarding 文档的可移植性 & 跨目录 markdown 相对链接](2026-04-26-readme-portable-paths-and-relative-links.md) | 2 | docs | `c95b1a6` |
+| 2026-04-26 | [Onboarding README 的 runbook 必须与工具语义 / 实际 UI 文案对齐](2026-04-26-readme-runbook-must-match-actual-behavior.md) | 2 | docs | `4d50993` |
+| 2026-04-26 | [真机联调 runbook 必须含 code signing 步骤 + config-change-then-restart 序列](2026-04-26-readme-physical-device-runbook-completeness.md) | 2 | docs | `d254a28` |
+| 2026-04-26 | [README 命令必须 cover 所有合法网段 + 工具输出格式不能假设固定字符数](2026-04-26-readme-portable-network-and-tool-output.md) | 2 | docs | `0da147e` |
+| 2026-04-26 | [Onboarding 文档必须考虑 build-wrapper 副作用 + lesson index 必须随 lesson 同步](2026-04-26-readme-onboarding-vs-tooling-side-effects.md) | 2 | docs | `6e24b57` |
