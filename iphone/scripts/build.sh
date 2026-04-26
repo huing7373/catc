@@ -171,12 +171,15 @@ if [ "$RUN_UITESTS" = true ]; then
   echo "=== xcodebuild test (ui, scheme=$SCHEME) ==="
   UI_RESULTS="${TEST_RESULTS%.xcresult}-ui.xcresult"
   rm -rf "$UI_RESULTS" 2>/dev/null || true
+  # `-enableCodeCoverage YES` 必须显式开启：xcodebuild 默认 NO，UI bundle 不开就没 coverage 数据
+  # → `--uitest --coverage-export` 组合下 xccov 输出 lineCoverage 全 0（lesson 2026-04-26-build-script-flag-matrix.md）
   if ! xcodebuild test \
       -project "$PROJECT_PATH" \
       -scheme "$SCHEME" \
       -destination "$RESOLVED_DESTINATION" \
       -resultBundlePath "$UI_RESULTS" \
       -derivedDataPath "$DERIVED_DATA" \
+      -enableCodeCoverage YES \
       -only-testing:PetAppUITests \
       2>&1; then
     echo "FAIL: ui tests"

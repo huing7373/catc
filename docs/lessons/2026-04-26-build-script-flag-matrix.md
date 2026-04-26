@@ -83,3 +83,25 @@ Story 2.7 实装 `iphone/scripts/build.sh` 作为 iPhone 端的 build / test wra
 ## Meta: 本次 review 的宏观教训
 
 shell 包装脚本是产品代码的"边缘地带"——没有 unit test 覆盖、没有类型系统、没有 IDE 补全；review 时容易扫一眼 happy path 通过就放行。这种地方的 bug 通过率高于业务代码，唯一对策是**把组合矩阵当作 review checklist**：reviewer 自己跑一遍每个组合，作者交付前自己跑一遍每个组合。
+
+## 未完成事项 / 后续补遗（round 2 补）
+
+codex review round 2 发现 round 1 修复仅解决了"coverage 源选择"，但 **`-enableCodeCoverage YES` 这个 flag 本身在 UI test xcodebuild 调用里漏了**。round 1 dogfood 时 `coverage.json` 输出 133KB 误以为"组合可用"，实则 xccov 对没 coverage 数据的 bundle 也会输出 JSON（lineCoverage 全 0）。
+
+修复（round 2）：
+
+```diff
+ if ! xcodebuild test \
+     -project "$PROJECT_PATH" \
+     -scheme "$SCHEME" \
+     ...
++    -enableCodeCoverage YES \
+     -only-testing:PetAppUITests \
+```
+
+验证：`bash iphone/scripts/build.sh --uitest --coverage-export` 后 `coverage.json` top-level lineCoverage 从 0 → 0.223，18 个 swift 文件有真实 line coverage 数据。
+
+预防规则补充：
+
+> **dogfood 验证不仅要"脚本不报错 + 输出文件存在"，还要打开输出文件检查内容是否符合 contract**。`xccov` / `jq` / 测试结果 JSON 这类工具的"成功输出"包括"空数据的合法 JSON"——文件存在 ≠ 数据有意义。组合矩阵的每个 cell 验收条件要写死："coverage source 包含 lineCoverage > 0 的 file"，而不是"脚本退码 0"。
+

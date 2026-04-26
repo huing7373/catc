@@ -4,8 +4,8 @@
 // 提供两个 helper：
 // 1. assertThrowsAsyncError(_:_:matcher:): 断言一段 async throws 表达式必抛错；
 //    ADR-0002 §3.2 已知坑第 3 条要求落地
-// 2. awaitPublishedChange(on:keyPath:count:timeout:): 等待 ObservableObject 的 @Published
-//    字段变化 N 次；ADR-0002 §3.2 "场景 1 多次值变化" 标准模式
+// 2. awaitPublishedChange(on:publisher:count:timeout:): 等待 @Published 字段变化 N 次；
+//    ADR-0002 §3.2 "场景 1 多次值变化" 标准模式
 //
 // lesson 2026-04-25-swift-explicit-import-combine.md：用 ObservableObject / @Published / sink
 // 必须显式 `import Combine`，本文件已显式 import 避免 implicit re-export 风险
@@ -48,15 +48,22 @@ public func assertThrowsAsyncError<T>(
     }
 }
 
-/// 等待 ObservableObject 上某个 @Published 字段变化 `count` 次后返回收集到的值数组。
+/// 等待某个 `@Published` 字段变化 `count` 次后返回收集到的值数组。
 ///
-/// **Contract**: `count` 表示**变化次数**（即 `objectWillChange` 信号次数），**不含初始值**。
-/// `ObservableObject.objectWillChange` 是变化通知，订阅时不会 emit 当前 state。
+/// **Contract**: `count` 表示**变化次数**，**不含初始值**。
 /// 调用方若需要 initial，请在调用前自己 `let initial = sut.status` 读出。
 ///
+/// **同 run loop turn 内多次 mutation 的处理**：本 helper 用 `Published.Publisher` 订阅
+/// （即 `\.$status` 这种 KeyPath），其语义是**每次 mutation 之前**同步 emit 即将赋的 NEW value。
+/// 这意味着：
+/// - 同一 run loop turn 内连续两次写 `.loading` 立即 `.ready`，会**同步**触发两次 emit，
+///   collector 同步 append 两次，拿到 `[.loading, .ready]`；
+/// - 而老的 `objectWillChange` + `DispatchQueue.main.async` 实现会让两次 sink 回调都跑在
+///   final state 之后，错读成 `[.ready, .ready]`（lesson 2026-04-26-published-publisher-vs-objectwillchange.md）
+///
 /// - Parameters:
-///   - object: ObservableObject 实例
-///   - keyPath: 指向 @Published 字段的 keyPath（用 `\.fieldName` 写法）
+///   - object: 持有 @Published 字段的对象（不限于 ObservableObject）
+///   - publisher: 指向 `Published<V>.Publisher` 的 KeyPath（用 `\.$fieldName` 写法 — 注意 `$`）
 ///   - count: 期望观察到的**变化**次数（不含初始值，默认 1 次）
 ///   - timeout: 超时秒数（默认 1 秒）
 ///
@@ -65,43 +72,49 @@ public func assertThrowsAsyncError<T>(
 /// let viewModel = SampleViewModel(useCase: mockUseCase)
 /// let initial = viewModel.status  // .idle —— 调用方自取，helper 不返回
 /// async let trigger: Void = viewModel.load()
-/// // 期望 2 次变化：.idle → .loading（第 1 次）→ .ready（第 2 次）
-/// let changes = try await awaitPublishedChange(on: viewModel, keyPath: \.status, count: 2)
+/// // 期望 2 次变化：.loading（第 1 次）→ .ready（第 2 次）
+/// let changes = try await awaitPublishedChange(
+///     on: viewModel,
+///     publisher: \.$status,
+///     count: 2
+/// )
 /// XCTAssertEqual([initial] + changes, [.idle, .loading, .ready])
 /// _ = await trigger
 /// ```
 ///
 /// 实装参考 ADR-0002 §3.2 "场景 1: 观察 @Published / Combine publisher 的多次值变化"。
 /// Lesson 2026-04-26-objectwillchange-no-initial-emit.md 详述 contract 设计动机。
+/// Lesson 2026-04-26-published-publisher-vs-objectwillchange.md 详述为何用 Published.Publisher
+/// 而非 objectWillChange + dispatch async（避免 same-run-loop mutation 的 race）。
 ///
 /// 实装注意：
-/// - ObservableObject 的 `objectWillChange` 在字段变更**之前**触发，所以 sink 闭包里读
-///   `object[keyPath: keyPath]` 会读到旧值；用 `DispatchQueue.main.async` 让出一拍读到新值
-///   （SwiftUI 内部观察机制的标准 workaround）
+/// - `Published<V>.Publisher` 在每次字段 mutation 之前同步 emit NEW value（与 objectWillChange
+///   是变更通知不同 — 它直接 emit 即将赋的值），collector 同步 append，**不**经过 dispatch async
+/// - 该 publisher 订阅时**会**emit 当前值（initial sink），helper 内部 drop 掉首条以保持
+///   "不含初始值" 的 contract
 /// - 内部 NSLock 保护 collected 数组（短临界区，不持锁调外部回调）
-public func awaitPublishedChange<O: ObservableObject, V>(
+public func awaitPublishedChange<O: AnyObject, V>(
     on object: O,
-    keyPath: KeyPath<O, V>,
+    publisher keyPath: KeyPath<O, Published<V>.Publisher>,
     count: Int = 1,
     timeout: TimeInterval = 1.0,
     file: StaticString = #filePath,
     line: UInt = #line
-) async throws -> [V] where O.ObjectWillChangePublisher == ObservableObjectPublisher {
-    // ObservableObjectPublisher 在每次 @Published 字段变化前发出值；用它驱动观察。
+) async throws -> [V] {
     // 用 _AsyncTestCollector 收集 + 加锁，避免在 generic function 内嵌套 class
     // （Swift 不允许在 generic function 体内定义 class）
     let collector = _AsyncTestCollector<V>()
     let expectation = XCTestExpectation(description: "awaitPublishedChange(\(keyPath))")
     expectation.expectedFulfillmentCount = count
 
-    let cancellable = object.objectWillChange
-        .sink { _ in
-            // objectWillChange 发出时字段尚未更新；用 DispatchQueue.main.async 让出一拍读到新值
-            DispatchQueue.main.async {
-                let value = object[keyPath: keyPath]
-                collector.append(value)
-                expectation.fulfill()
-            }
+    // Published.Publisher 在订阅时会同步 emit 当前值；用 dropFirst() 屏蔽 initial，
+    // 保持 contract "不含初始值"。后续每次 mutation 之前 publisher 同步 emit NEW value，
+    // collector 同步 append，拿到完整变化序列（即使同 run loop turn 内连发多次）。
+    let cancellable = object[keyPath: keyPath]
+        .dropFirst()
+        .sink { value in
+            collector.append(value)
+            expectation.fulfill()
         }
 
     let result = await XCTWaiter.fulfillment(of: [expectation], timeout: timeout)

@@ -52,7 +52,7 @@ final class SampleViewModelTests: XCTestCase {
 
         XCTAssertEqual(sut.status, .ready(value: 42))
         XCTAssertEqual(mockUseCase.callCount(of: "execute(input:)"), 1)
-        XCTAssertEqual(mockUseCase.lastArguments.first as? String, "hello")
+        XCTAssertEqual(mockUseCase.lastArgumentsSnapshot().first as? String, "hello")
     }
 
     /// edge: useCase 抛错 → ViewModel 状态切到 .failed
@@ -72,9 +72,10 @@ final class SampleViewModelTests: XCTestCase {
 
     /// happy: 状态转换序列被正确记录（演示 awaitPublishedChange 用法）
     ///
-    /// 实装注意：`objectWillChange` 必须在 status 变化**之前**完成 sink 订阅。
-    /// 用 `async let` 与 `awaitPublishedChange` 并发启动时无法保证订阅先到，
-    /// 所以这里用 Task 显式延迟一拍触发 load，让 sink 先建立。
+    /// 实装注意：`Published.Publisher` 在订阅时同步 emit initial，helper 内部 dropFirst 屏蔽掉；
+    /// 后续每次 mutation 都会同步 emit NEW value。所以 sink 订阅 + 触发 load 的顺序无所谓，
+    /// 即使同 run loop turn 内连发多次 mutation 也都能捕获到（不像旧的 objectWillChange +
+    /// dispatch async 实现会因 race 错读 final state）。
     ///
     /// Contract（lesson 2026-04-26-objectwillchange-no-initial-emit.md）：
     /// `count` 表示**变化次数**，不含 initial。调用方自己读 `sut.status` 取初值。
@@ -89,7 +90,7 @@ final class SampleViewModelTests: XCTestCase {
         }
         let captured = try await awaitPublishedChange(
             on: sut,
-            keyPath: \.status,
+            publisher: \.$status,
             count: 1,
             timeout: 2.0
         )
@@ -123,7 +124,7 @@ final class SampleViewModelTests: XCTestCase {
         }
         let captured = try await awaitPublishedChange(
             on: sut,
-            keyPath: \.status,
+            publisher: \.$status,
             count: 2,
             timeout: 2.0
         )
@@ -139,6 +140,46 @@ final class SampleViewModelTests: XCTestCase {
         } else {
             XCTFail("captured.last expected .ready(99), got \(String(describing: captured.last))")
         }
+    }
+
+    /// contract (round 2): 同 run loop turn 内的多次 mutation 必须**全部**被捕获，
+    /// 不能因 dispatch async 让 sink 回调跑在 final state 之后而丢失中间值。
+    ///
+    /// 验证 lesson 2026-04-26-published-publisher-vs-objectwillchange.md 核心规则：
+    /// `Published.Publisher` 在 mutation 之前同步 emit NEW value，按顺序到达。
+    /// 旧的 `objectWillChange + DispatchQueue.main.async` 实现在此场景下会读到
+    /// `[.ready, .ready]`（两次 callback 都跑在 final state 之后），而新实现拿到
+    /// `[.loading, .ready]`。
+    func testAwaitPublishedChangeCapturesAllIntermediateValues() async throws {
+        // Helper 对象：在单个 run loop turn 内同步连发两次 @Published mutation
+        final class Burst: ObservableObject {
+            @Published var value: Int = 0
+            func bump() {
+                value = 1
+                value = 2
+            }
+        }
+        let burst = Burst()
+
+        // 50ms 后让 burst 在同一 run loop turn 内连发两次 mutation
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            burst.bump()
+        }
+
+        let captured = try await awaitPublishedChange(
+            on: burst,
+            publisher: \.$value,
+            count: 2,
+            timeout: 2.0
+        )
+
+        // 关键断言：同 run loop turn 内的两次 mutation 都被同步捕获，**不**漏中间值 1
+        XCTAssertEqual(
+            captured,
+            [1, 2],
+            "Published.Publisher 必须按 mutation 顺序同步 emit；旧 objectWillChange + dispatch async 在此场景会错读为 [2, 2]"
+        )
     }
 
     /// edge: assertThrowsAsyncError helper 用法演示

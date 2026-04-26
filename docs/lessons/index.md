@@ -31,3 +31,5 @@
 | 2026-04-26 | [SwiftUI modal overlay 必须做下层 hit-testing + accessibility 双屏蔽](2026-04-26-modal-overlay-content-shield.md) | 1 | accessibility, ui | `3b40ba8` |
 | 2026-04-26 | [Shell 包装脚本的 flag 组合矩阵必须显式枚举 + 默认行为按主路径选](2026-04-26-build-script-flag-matrix.md) | 1 | config | `<pending>` |
 | 2026-04-26 | [`ObservableObject.objectWillChange` 不 emit initial value，helper API contract 必须显式声明](2026-04-26-objectwillchange-no-initial-emit.md) | 1 | testing | `<pending>` |
+| 2026-04-26 | [`Published.Publisher` 是 mutation 之前同步 emit NEW value，比 `objectWillChange + dispatch async` 更可靠](2026-04-26-published-publisher-vs-objectwillchange.md) | 1 | testing | `<pending>` |
+| 2026-04-26 | [`MockBase` 内部存储字段一律 `private`，只通过 snapshot helper 读 — 不要 expose mutable storage](2026-04-26-mockbase-snapshot-only-reads.md) | 1 | testing, concurrency | `<pending>` |

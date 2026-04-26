@@ -47,15 +47,21 @@ import Foundation
 /// 注意：`MockBase` 本身**不**标 `@unchecked Sendable`。子类持有 stub 字段（mutable 状态）
 /// 的 Sendable 性由子类决策；让子类显式 `@unchecked Sendable`，避免 MockBase 替子类做隐式承诺
 /// （与 MockURLSession / MockAPIClient 同模式）。
+///
+/// **线程安全 contract（lesson 2026-04-26-mockbase-snapshot-only-reads.md）**：
+/// 内部存储字段（invocations / lastArguments / callCounts）一律 `private`，
+/// **唯一**对外读 API 是 `*Snapshot()` / `wasCalled(...)` / `callCount(of:)` 这一组方法 —
+/// 它们都在 `lock` 内拷贝再返回，调用者拿到的是不可变 snapshot。**禁止**把存储字段提升为
+/// public 让外部直接读（即使加 `private(set)`），那会 bypass 锁形成 race（TSAN 必报）。
 public class MockBase {
-    /// 调用记录（每次 record() 追加一条）。线程安全。
-    public private(set) var invocations: [String] = []
+    /// 调用记录（每次 record() 追加一条）。`private` — 仅通过 `invocationsSnapshot()` 读。
+    private var invocations: [String] = []
 
-    /// 最近一次调用的参数（任意类型 array）。线程安全。
-    public private(set) var lastArguments: [Any] = []
+    /// 最近一次调用的参数（任意类型 array）。`private` — 仅通过 `lastArgumentsSnapshot()` 读。
+    private var lastArguments: [Any] = []
 
-    /// 每个方法名 → 调用次数。线程安全。
-    public private(set) var callCounts: [String: Int] = [:]
+    /// 每个方法名 → 调用次数。`private` — 仅通过 `callCountsSnapshot()` 读。
+    private var callCounts: [String: Int] = [:]
 
     private let lock = NSLock()
 
@@ -79,6 +85,13 @@ public class MockBase {
         lock.lock()
         defer { lock.unlock() }
         return invocations
+    }
+
+    /// 快照式读 lastArguments（最近一次 record 的实参 array 拷贝）。
+    public func lastArgumentsSnapshot() -> [Any] {
+        lock.lock()
+        defer { lock.unlock() }
+        return lastArguments
     }
 
     /// 快照式读 callCounts。
