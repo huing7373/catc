@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: codex review round 4 on Story 4.3 (五张表 migrations)
 story: 4-3-五张表-migrations
-commit: <pending>
+commit: fc91816
 lesson_count: 2
 ---
 

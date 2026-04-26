@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: file:/tmp/epic-loop-review-4-3-r5.md (codex review round 5 of Story 4.3)
 story: 4-3-五张表-migrations
-commit: <pending>
+commit: 88e07bd
 lesson_count: 1
 ---
 
