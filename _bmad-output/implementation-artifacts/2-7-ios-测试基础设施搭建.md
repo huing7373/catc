@@ -1,6 +1,6 @@
 # Story 2.7: iOS 测试基础设施搭建（按 Story 2.1 / ADR-0002 选型落地）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
