@@ -414,8 +414,10 @@ review 原文文件: <review_findings_path>
   - 修完后**正常 commit**（按 fix-review 步骤 7 既定行为）
   - lesson 文档归档到 docs/lessons/ 按 fix-review 标准模板
   - **不要**走 commit hash backfill 的"第二个 commit"环节（fix-review 步骤 7
-    末尾的 `chore(lessons): backfill <hash>`）—— 占用主 agent 重读
-    sprint-status 的判断成本；让 backfill commit 留给后续手工或后台 agent 做
+    末尾的 `chore(lessons): backfill <hash>`）—— epic-loop 把所有 lesson 的
+    backfill 统一推迟到 story_done 阶段一次性收（避免每条 finding 都多一个
+    backfill commit 让 commit 历史噪音过多）；本轮 lesson 的 frontmatter
+    `commit:` 字段保持 `<pending>`，story_done sub-agent 会扫并填上
 
 完成判定:
   - 工作区 clean（修复已 commit）
@@ -439,24 +441,75 @@ review 原文文件: <review_findings_path>
 #### 5d. `story_done_subagent(story_key)`
 
 ```
-task: 按 /story-done 命令的工作流（.claude/commands/story-done.md）收官
-当前 story <story_key>，把 review → done + 按分组提交所有工作区残留改动。
+task: 分两步收官当前 story <story_key>。
+
+【步骤 0：lesson backfill（先做，**不**单独 commit）】
+
+epic-loop 在 fix-review sub-agent 里跳过了 lesson `commit:` frontmatter 字段
+的 backfill；要在 story-done 工作流之前一次性补上，让这些改动跟着 story-done
+工作流的 docs(lessons) 分组提交一起走（不新增 commit 类型 / 不破坏 commit
+归属清晰原则）。
+
+具体做法：
+  1) 找本 story 起点：
+       prev_story_done=$(git log --oneline --grep='^chore(story-' -n 1 \
+                          --format=%H | head -1)
+     拿不到（本 epic 第 1 条 story）时用 git log 倒数到本 epic 起点的合理基线
+     （如 epic-N-1 的最后一个 chore(story-...) commit）。
+  2) 列本 story 期间的 fix(review) commits + 它们引入的 lesson 文件：
+       git log --oneline --grep='^fix(review):' "${prev_story_done}..HEAD" \
+         --format=%H | while read h; do
+         lesson=$(git show --name-only --format= "$h" | \
+                    grep '^docs/lessons/.*\.md$' | grep -v 'index.md')
+         echo "$h $lesson"
+       done
+  3) 对每个 (commit_hash, lesson_path) 对：
+       short=$(git rev-parse --short "$commit_hash")  # 7 位短 hash
+       sed -i '' "s/^commit: <pending>$/commit: ${short}/" "$lesson_path"
+       # 同步改 docs/lessons/index.md 里那条 lesson 行的 commit 列：
+       # index.md 末尾表格里这条 lesson 的行格式是
+       #   | <date> | [<title>](<file>.md) | N | <cat> | <pending> |
+       # 把 <pending> 替换为 short 即可
+  4) 校验：
+       grep -l '<pending>' docs/lessons/*.md 应当**为空**（本 story 范围内）
+       grep '<pending>' docs/lessons/index.md 应当**没有本 story 的行**
+  5) **不要**单独 commit —— 让步骤 1 的 story-done 工作流的分组提交（docs(lessons)
+     类型 commit）把这些改动一起带走
+
+边界：
+  - 如果本 story 没有 fix(review) commit（第 1 轮就过）→ 步骤 0 是 no-op，跳过
+  - 如果某个 fix(review) commit 没引入 docs/lessons/*.md（只改了代码 + 测试，
+    比如 wontfix 类型 review）→ 跳过该 commit
+  - 如果某个 lesson 文件 `commit:` 字段不是 `<pending>`（用户已手工填过）→
+    保留不动（不覆盖用户改动）
+  - 如果 prev_story_done 找不到（仓库根本没收过 story）→ 用 epic 起点 commit
+    或 main 分支起点；找不到 → 跳过 backfill 并在返回报告里 flag
+
+【步骤 1：跑 story-done】
+
+按 /story-done 命令的工作流（.claude/commands/story-done.md）收官当前
+story <story_key>，把 review → done + 按分组提交所有工作区残留改动。
 
 注: story-done.md 自身就**不询问 yes/no**（步骤 5 末尾"不询问 yes/no。
 直接进步骤 6 循环提交"）—— 不需要额外 override。直接读文档执行即可。
+步骤 0 留下的 lesson 文件改动 + index.md 改动会被 story-done 的分组规则
+归到 docs(lessons): ... 类型 commit 里（与 fix-review 用同类前缀对齐）。
 
 完成判定:
   - sprint-status.yaml 里 <story_key> 状态变成 done
   - story 文件第 3 行 "Status:" 变成 done
   - 工作区 clean
+  - 本 story 期间产生的 lesson 文件 `commit:` 字段全部填好（无 <pending>）
   - git log 至少多 1 条 commit（chore(story-X-Y): 收官 ...）
   - 如果 review 第 1 轮就通过（未走 fix-review）→ 还会有
     feat(server) / docs / chore(claude) 等多个 commit（按分组规则）
-  - 如果走过 fix-review → working tree 进 story-done 时已 clean →
-    只 1 个 chore(story-X-Y) commit
+  - 如果走过 fix-review → working tree 进 story-done 时（步骤 0 之前）clean，
+    步骤 0 后只多了 lesson + index 文件改动 → docs(lessons) commit + 1 个
+    chore(story-X-Y) commit
 ```
 
-→ Skill 调用：`Skill(skill="story-done", args="")`
+→ Skill 调用：`Skill(skill="story-done", args="")`（步骤 0 在 sub-agent 里直接
+用 Bash + Edit 工具做，不走 skill；只有步骤 1 走 Skill）。
 
 注意：story-done 也注册成 skill（commands 都自动注册）。空 args 让命令按既定
 逻辑自动识别"唯一 review 状态的 story"作为目标 —— 当前进 story_done 子分支
@@ -506,24 +559,15 @@ epic 全 done 时输出：
 
 epic 状态: in-progress → 仍然 in-progress（**不**自动改 done；用户决定）
 
-📝 待手工 backfill（如有 lesson 文档）:
-  fix_review_subagent 按 epic-loop override 跳过了 fix-review.md 步骤 7 末尾
-  的 `chore(lessons): backfill <hash>` 二次 commit。lesson 文档里的 frontmatter
-  `commit:` 字段 + index.md 末行 commit 列**保留为 <pending>**。
-  
-  要补 backfill：
-    1) 跑 git log --oneline --grep='^fix(review):' -n L
-       把每个 fix(review) commit hash 找出来
-    2) 对每个 lesson 文档，把 frontmatter `commit: <pending>` 改成对应 hash
-    3) 同步改 docs/lessons/index.md 末尾 N 行的 commit 列
-    4) 单 commit 收：chore(lessons): backfill commit hash for <epic-N>
+注：本 epic 期间产生的所有 lesson 文档的 `commit:` frontmatter 字段已经在
+每条 story 的 story_done 阶段一次性 backfill 完成（见 step 5d 步骤 0）；
+不需要手工补。
 
 建议下一步:
   1. 跑 /bmad-retrospective <N> 收 epic 经验
   2. 手动把 epic-<N> 状态改 done
   3. 跑 /epic-loop <N+1> 推下一个 epic（如果不是 demo epic）
   4. 或者 git push 把这批 commit 推远程
-  5. 补 lesson backfill commit（见上方"待手工 backfill"段）
 ```
 
 ### 8. 边界情况
