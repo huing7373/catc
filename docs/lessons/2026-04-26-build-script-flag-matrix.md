@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: codex review round 1, /tmp/epic-loop-review-2-7-r1.md
 story: 2-7-ios-测试基础设施搭建
-commit: <pending>
+commit: e0c3617
 lesson_count: 1
 ---
 

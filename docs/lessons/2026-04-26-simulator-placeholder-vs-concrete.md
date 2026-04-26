@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: file:/tmp/epic-loop-review-2-7-r5.md (codex P1 + P3)
 story: 2-7-ios-测试基础设施搭建
-commit: <pending>
+commit: e328838
 lesson_count: 1
 ---
 
@@ -112,3 +112,36 @@ round 4 / round 5 的两轮发现都集中在同一个文件 (`iphone/scripts/bu
 - 这条判定在 **scheme 本身有问题** 导致 `-showdestinations` 输出空的情况下会怎样？
 
 每个反向问对应一个 hardening 维度，初版脚本通常只通过其中一两个；后续 review 会逐个揪出剩下的。如果一开始就把这些反向问列成清单，可以一次到位避免连续多轮。
+
+## 未完成事项 / 后续 TODO
+
+### 2026-04-26 round 6 — 接受为 hardening tech-debt（用户决策"接受"）
+
+epic-loop 跑到 review_round 6（5 轮上限触顶后再跑了一次诊断 review），codex 又给了 **1 个新 [P1] finding**，登记如下，**本 story 不修，作为 hardening tech-debt**：
+
+**[P1] `set -euo pipefail` + `xcrun simctl | grep | head | tr` pipeline 提前退出** — `iphone/scripts/build.sh:141`
+- **症状**：当机器没装 iOS Simulator runtime（CI/fresh macOS），`-showdestinations` 只输出 `Any iOS Simulator Device` placeholder（已在 round 5 处理）→ 落到 UUID fallback 分支 → `xcrun simctl list devices iOS available 2>/dev/null | grep -Eo '\([0-9A-F-]{36}\)' | head -1 | tr -d '()'` 这条 pipeline 中 `grep` 没匹配返 1，触发 `set -e`，脚本在赋值时直接退出，永远到不了下面写好的 `if [ -z "$FALLBACK_UUID" ]` 错误路径，最终 fail 时也没有 actionable 错误信息。
+- **承认是真问题**：`set -euo pipefail` 与 pipeline 中 grep 可能空命中天然冲突，是经典 shell 坑。修法极简：行末加 `|| true`，让赋值即使 grep 没匹配也成功 → 进入 `[ -z "$FALLBACK_UUID" ]` 分支输出明确错误。
+- **defer 理由**：本 story 范围红线"测试基础设施 + 本机开发"已覆盖；CI / 无 simulator runtime 环境本 story 没承诺支持（Epic 3 demo 验收 / 后续 CI 接入 story 才会触发）；epic-loop 5 轮 review budget 已用尽（本 story 已修 7 个 [P1] / 3 个 [P2] / 1 [P3]，质量已超 MVP 所需）。
+- **触发回看时机**：Story 2-7 范围内的 CI 文档化任务（`iphone/docs/CI.md`）+ 后续真正接入 GitHub Actions / 任何 fresh CI runner 时；那时一并处理 `set -e` + pipeline 兼容性。
+- **简易修法预览**（留给将来）：
+  ```bash
+  FALLBACK_UUID="$(xcrun simctl list devices iOS available 2>/dev/null | grep -Eo '\([0-9A-F-]{36}\)' | head -1 | tr -d '()' || true)"
+  ```
+
+### Round 6 finding 的 commit 安排
+
+不再单独开 fix(review) commit；登记在本 lesson 的 TODO 段，由 Story 2-7 的 chore(story-2-7) 收官 commit 一起带走。后续 CI 接入 story 触发回看时，按本段取出处理。
+
+---
+
+## Meta: round 4 / 5 / 6 三轮 build.sh hardening 的连续盲区
+
+`iphone/scripts/build.sh` destination 解析与 fallback 链跨 3 轮被 codex 揪出三种独立 bug：
+- **round 4**：`xcodebuild -showdestinations` 输出按段切分，Ineligible 段不能命中
+- **round 5**：Available 段里 `Any X Device` placeholder 不算"真可用"
+- **round 6**：`set -euo pipefail` 下 `xcrun simctl | grep` pipeline grep 空命中会让赋值失败 → 整脚本提前退出
+
+三轮 finding 都是同一个文件同一段逻辑的不同盲区，本质上都是 "环境探测 + fallback" 这种 shell 模式的天然脆弱性。如果一开始按 Meta 段列出的"反向问"清单 + 把 `set -e` 与 pipeline 可空命中行的兼容性也纳入清单（"这条赋值在 grep 没匹配时会发生什么？"），可以一次到位避免连续多轮。
+
+epic-loop 在 round 5 后已用尽 5 轮 review budget；继续修下去 codex 仍可能挖更多边界。本次决策：**接受 round 6 finding 为 hardening tech-debt**，让 story 走 done。未来 build.sh 改动应当先看本 lesson 的"反向问 + set -e 清单" + 在 PR 描述里贴清单（让 reviewer 一眼能验证全维度被考虑过）。
