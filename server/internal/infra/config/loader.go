@@ -25,6 +25,12 @@ const (
 	defaultHTTPPort       = 8080
 	defaultLogLevel       = "info"
 	defaultTokenExpireSec = 604800 // 7 天，epics.md §Story 4.4 行 1014 钦定
+	// defaultRateLimitPerKeyPerMin 是 rate_limit 中间件每 key 每分钟默认允许的请求数。
+	// epics.md §Story 4.5 行 1039 + V1 §4.1 行 218 钦定。Story 4.5 引入。
+	defaultRateLimitPerKeyPerMin = 60
+	// defaultRateLimitBucketsLimit 是 rate_limit 中间件内存 bucket 数上限（防 IP 洪泛 OOM）。
+	// 约 1MB 内存（每 limiter ~100 字节）。Story 4.5 引入。
+	defaultRateLimitBucketsLimit = 10000
 )
 
 func Load(path string) (*Config, error) {
@@ -70,6 +76,18 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Auth.TokenExpireSec == 0 {
 		cfg.Auth.TokenExpireSec = defaultTokenExpireSec
+	}
+	// RateLimit 默认值兜底（Story 4.5 引入）：缺失字段自动填默认；
+	// fail-fast 由 middleware.RateLimit 工厂承担（PerKeyPerMin ≤ 0 → panic），
+	// 这里只补空字段不做业务校验（与 MySQL / Auth 配置同模式）。
+	if cfg.RateLimit.PerKeyPerMin == 0 {
+		cfg.RateLimit.PerKeyPerMin = defaultRateLimitPerKeyPerMin
+	}
+	if cfg.RateLimit.BurstSize == 0 {
+		cfg.RateLimit.BurstSize = cfg.RateLimit.PerKeyPerMin
+	}
+	if cfg.RateLimit.BucketsLimit == 0 {
+		cfg.RateLimit.BucketsLimit = defaultRateLimitBucketsLimit
 	}
 
 	return &cfg, nil

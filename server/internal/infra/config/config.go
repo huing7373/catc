@@ -1,10 +1,11 @@
 package config
 
 type Config struct {
-	Server ServerConfig `yaml:"server"`
-	MySQL  MySQLConfig  `yaml:"mysql"`
-	Auth   AuthConfig   `yaml:"auth"`
-	Log    LogConfig    `yaml:"log"`
+	Server    ServerConfig    `yaml:"server"`
+	MySQL     MySQLConfig     `yaml:"mysql"`
+	Auth      AuthConfig      `yaml:"auth"`
+	RateLimit RateLimitConfig `yaml:"ratelimit"`
+	Log       LogConfig       `yaml:"log"`
 }
 
 type ServerConfig struct {
@@ -86,6 +87,49 @@ type AuthConfig struct {
 	//
 	// loader.go 兜底：YAML 没填 → 默认 604800（7 天）。
 	TokenExpireSec int64 `yaml:"token_expire_sec"`
+}
+
+// RateLimitConfig 是限频中间件配置。Story 4.5 引入；选型 / 默认值由 epics.md
+// §Story 4.5（行 1039）+ V1 §4.1 行 218 钦定。
+//
+// 字段不在 config 包做业务校验（无 Validate 方法），fail-fast 由
+// `internal/app/http/middleware.RateLimit` 工厂在启动期承担：PerKeyPerMin ≤ 0
+// → panic（启动期就暴露，与 4.4 auth.New 同模式）。
+//
+// **节点 2 阶段是内存 token bucket**：单实例部署 OK；多实例 / 节点 10+
+// Story 10.6 接 Redis 后，本 struct 加 `Backend string yaml:"backend"`
+// 字段切换实装。
+//
+// 没有 secret 类字段：本 struct 全是非敏感参数，可放 checked-in YAML 默认值
+// （与 docs/lessons/2026-04-26-checked-in-config-must-boot-default.md 钦定的
+// "非 secret 字段必须 fresh clone 直接跑" 一致）；**不**加 env override
+// （节点 2 阶段所有 env 都用 60，无差异化需求）。
+type RateLimitConfig struct {
+	// PerKeyPerMin 是每 key（IP 或 userID）每分钟允许的请求数。
+	//
+	// 默认 60（epics.md 行 1039 + V1 §4.1 行 218 钦定）。可调小（如 30）保守
+	// 限频或调大（如 120）放宽（但 > 600 接近"无限频"，违反限频初衷）。
+	//
+	// 范围限制：(0, +∞)，由 middleware.RateLimit 工厂在启动期校验；≤ 0 → panic。
+	PerKeyPerMin int `yaml:"per_key_per_min"`
+
+	// BurstSize 是 token bucket 容量（瞬时突发上限）。
+	//
+	// 默认 = PerKeyPerMin（让 epics.md 钦定的"1 分钟内 60 次内 → 通过"
+	// 测试 happy path 一次 burst 60 也能通过；epics.md 行 1047 钦定的语义就是
+	// burst-friendly）。
+	//
+	// 调小（如 10）让 burst 更保守 —— 防 client bug 突发雪崩 server。
+	BurstSize int `yaml:"burst_size"`
+
+	// BucketsLimit 是内存中保存的 bucket 数上限（防 IP 洪泛 OOM）。
+	//
+	// 默认 10000（约 1MB 内存）。每个 limiter ~100 字节；超过该上限的新 key
+	// 走共享降级 bucket。生产单实例 QPS 不高（节点 2 阶段未对外发布）→
+	// 10000 远超实际负载。
+	//
+	// 节点 10+ 切 Redis 后本字段废弃（Redis 自身 eviction 处理）。
+	BucketsLimit int `yaml:"buckets_limit"`
 }
 
 type LogConfig struct {

@@ -15,7 +15,7 @@ var uuidV4Pattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[8
 
 func TestRouter_Ping(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	r := NewRouter()
+	r := NewRouter(Deps{})
 
 	req := httptest.NewRequest(http.MethodGet, "/ping", nil)
 	w := httptest.NewRecorder()
@@ -56,7 +56,7 @@ func TestRouter_Ping(t *testing.T) {
 // header X-Request-Id 一致。
 func TestRouter_PingRequestIDIsUUIDv4(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	r := NewRouter()
+	r := NewRouter(Deps{})
 
 	req := httptest.NewRequest(http.MethodGet, "/ping", nil)
 	w := httptest.NewRecorder()
@@ -82,7 +82,7 @@ func TestRouter_PingRequestIDIsUUIDv4(t *testing.T) {
 // 后续 /ping 请求仍然 200（服务未挂）。
 func TestRouter_PanicRouteAndSubsequentPing(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	r := NewRouter()
+	r := NewRouter(Deps{})
 	// 在 NewRouter 的基础上额外注册一个 /panic 路由
 	r.GET("/panic-for-test", func(c *gin.Context) { panic("deliberate panic for integration test") })
 
@@ -115,7 +115,7 @@ func TestRouter_PanicRouteAndSubsequentPing(t *testing.T) {
 // Story 1.3 指标名。
 func TestRouter_MetricsEndpoint(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	r := NewRouter()
+	r := NewRouter(Deps{})
 
 	// 先发一次 /ping 触发 metric observe
 	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ping", nil))

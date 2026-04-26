@@ -59,7 +59,7 @@ func TestRun_BindFailureReturnsErrorAndNoStartedBanner(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	err = Run(ctx, cfg, nil, nil, nil)
+	err = Run(ctx, cfg, Deps{})
 	if err == nil {
 		t.Fatalf("Run returned nil error, want bind failure on occupied port %d", port)
 	}
@@ -88,7 +88,7 @@ func TestRun_ShutdownStopsServer(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, cfg, nil, nil, nil) }()
+	go func() { done <- Run(ctx, cfg, Deps{}) }()
 
 	time.Sleep(50 * time.Millisecond)
 	cancel()

@@ -50,5 +50,15 @@ auth:
   token_secret: ""
   token_expire_sec: 604800  # 7 天，epics.md §Story 4.4 行 1014 钦定
 
+ratelimit:
+  # 每 key（IP 或 userID）每分钟允许的请求数。Story 4.5 引入；
+  # epics.md §Story 4.5 行 1039 + V1 §4.1 行 218 钦定默认 60。
+  # 节点 2 阶段不对外发布，60 完全够用。生产 launch 阶段（Epic 36）按需调整。
+  per_key_per_min: 60
+  # token bucket 容量（瞬时突发上限）。默认 = per_key_per_min（让一次 burst 60 次也能过）。
+  burst_size: 60
+  # 内存 bucket 数上限（防 IP 洪泛 OOM）。约 1MB 内存；节点 10+ 切 Redis 后此项废弃。
+  buckets_limit: 10000
+
 log:
   level: info

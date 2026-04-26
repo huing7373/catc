@@ -142,3 +142,62 @@ func TestLoad_AuthYAMLParsing(t *testing.T) {
 		t.Errorf("Auth.TokenExpireSec = %d, want 3600 (explicit YAML value, no env override)", cfg.Auth.TokenExpireSec)
 	}
 }
+
+// TestLoad_RateLimitDefaults 验证 fixture 没显式写 ratelimit: 段时，loader
+// 兜底为 (60, 60, 10000)（Story 4.5 引入；epics.md §Story 4.5 行 1039 + V1 §4.1
+// 行 218 钦定默认每 key 每分钟 60；BurstSize 默认 = PerKeyPerMin；BucketsLimit
+// 默认 10000）。
+func TestLoad_RateLimitDefaults(t *testing.T) {
+	cfg, err := Load(fixturePath)
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.RateLimit.PerKeyPerMin != 60 {
+		t.Errorf("RateLimit.PerKeyPerMin = %d, want 60", cfg.RateLimit.PerKeyPerMin)
+	}
+	if cfg.RateLimit.BurstSize != 60 {
+		t.Errorf("RateLimit.BurstSize = %d, want 60 (= PerKeyPerMin default)", cfg.RateLimit.BurstSize)
+	}
+	if cfg.RateLimit.BucketsLimit != 10000 {
+		t.Errorf("RateLimit.BucketsLimit = %d, want 10000", cfg.RateLimit.BucketsLimit)
+	}
+}
+
+// TestLoad_RateLimitYAMLParsing 验证 YAML 显式写 ratelimit: 段时正确解析。
+// Story 4.5 引入。
+func TestLoad_RateLimitYAMLParsing(t *testing.T) {
+	cfg, err := Load("testdata/ratelimit.yaml")
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.RateLimit.PerKeyPerMin != 120 {
+		t.Errorf("RateLimit.PerKeyPerMin = %d, want 120 (explicit YAML)", cfg.RateLimit.PerKeyPerMin)
+	}
+	if cfg.RateLimit.BurstSize != 30 {
+		t.Errorf("RateLimit.BurstSize = %d, want 30 (explicit YAML)", cfg.RateLimit.BurstSize)
+	}
+	if cfg.RateLimit.BucketsLimit != 5000 {
+		t.Errorf("RateLimit.BucketsLimit = %d, want 5000 (explicit YAML)", cfg.RateLimit.BucketsLimit)
+	}
+}
+
+// TestLoad_RateLimitPartialFields 验证 YAML 仅显式写一部分 ratelimit 字段时，
+// 其它字段走默认值（per_key_per_min: 30 显式 → BurstSize 兜底成 30；
+// BucketsLimit 兜底成 10000）。Story 4.5 引入。
+func TestLoad_RateLimitPartialFields(t *testing.T) {
+	cfg, err := Load("testdata/ratelimit_partial.yaml")
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.RateLimit.PerKeyPerMin != 30 {
+		t.Errorf("RateLimit.PerKeyPerMin = %d, want 30 (explicit YAML)", cfg.RateLimit.PerKeyPerMin)
+	}
+	// burst_size 未显式 → 兜底 = PerKeyPerMin (30)
+	if cfg.RateLimit.BurstSize != 30 {
+		t.Errorf("RateLimit.BurstSize = %d, want 30 (default = PerKeyPerMin)", cfg.RateLimit.BurstSize)
+	}
+	// buckets_limit 未显式 → 默认 10000
+	if cfg.RateLimit.BucketsLimit != 10000 {
+		t.Errorf("RateLimit.BucketsLimit = %d, want 10000 (default)", cfg.RateLimit.BucketsLimit)
+	}
+}

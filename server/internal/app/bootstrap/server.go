@@ -9,11 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"gorm.io/gorm"
-
 	"github.com/huing/cat/server/internal/infra/config"
-	"github.com/huing/cat/server/internal/pkg/auth"
-	"github.com/huing/cat/server/internal/repo/tx"
 )
 
 const shutdownTimeout = 5 * time.Second
@@ -25,25 +21,19 @@ const shutdownTimeout = 5 * time.Second
 // 这样避免了 "server started" 假阳性 banner —— 历史坑见
 // docs/lessons/2026-04-24-config-path-and-bind-banner.md。
 //
-// 参数（Story 4.2 / 4.4 扩展）：
+// 参数（Story 4.5 收敛后）：
 //
-//   - gormDB / txMgr 是 Story 4.2 接入 MySQL 后的依赖。本 story 阶段 router / handler
-//     **暂不消费**（Story 4.6 挂业务 handler 时才用）；签名先扩展是为了：
-//     (1) Story 4.6 落地时不再改 main.go → bootstrap.Run 调用链
-//     (2) 测试可注入：Story 4.7 Layer 2 集成测试 / 现有 server_test 通过显式参数
-//         传入 mock 或 dockertest 真实 db handle
-//   - signer 是 Story 4.4 接入 JWT 后的依赖。本 story 阶段 router / handler 暂不消费
-//     （Story 4.5 auth 中间件 / 4.6 login handler 才用）；签名先扩展同理避免未来 churn。
-//   - 允许 gormDB / txMgr / signer 为 nil：仅当现有不需要相关依赖的测试路径
-//     （如本包 server_test 验证 bind 失败 / 优雅关停）。生产路径 main.go 必传非 nil。
-func Run(ctx context.Context, cfg *config.Config, gormDB *gorm.DB, txMgr tx.Manager, signer *auth.Signer) error {
-	// 防御式：避免参数变量未读触发 vet "declared and not used"。本 story 阶段
-	// router 暂不消费，但保留参数让未来 Story 4.5 / 4.6 落地时无需再改签名。
-	_ = gormDB
-	_ = txMgr
-	_ = signer
-
-	router := NewRouter()
+//   - cfg 是已加载并默认值兜底完成的全局 Config。
+//   - deps 是 bootstrap 期收集的依赖集合（GormDB / TxMgr / Signer / RateLimitCfg）；
+//     字段 nil-tolerant，测试路径可传 Deps{} 零值（仅依赖 router 四件套 + 运维端点）。
+//
+// 历史背景（4.4 → 4.5 演进）：
+//   - Story 4.2 把 Run 扩成 4 参数（加 gormDB / txMgr）
+//   - Story 4.4 又扩成 5 参数（加 signer）
+//   - Story 4.5 第二次扩（加 rateLimitCfg）时收敛为 Deps struct，避免每加一个依赖
+//     就改 Run 签名 + 全部测试。后续 4.6 / 4.8 / Epic 5+ 加共享依赖时只改 Deps 字段。
+func Run(ctx context.Context, cfg *config.Config, deps Deps) error {
+	router := NewRouter(deps)
 	// BindHost 空串保持原行为（0.0.0.0，所有接口）= 生产默认；
 	// 测试注入 "127.0.0.1" → loopback-only，避开 Windows Firewall 弹窗。
 	addr := fmt.Sprintf("%s:%d", cfg.Server.BindHost, cfg.Server.HTTPPort)

@@ -179,7 +179,15 @@ func main() {
 	}
 	slog.Info("auth token signer ready", slog.Int64("default_expire_sec", cfg.Auth.TokenExpireSec))
 
-	if err := bootstrap.Run(ctx, cfg, gormDB, txMgr, signer); err != nil {
+	// Story 4.5：bootstrap.Run 签名收敛为 Deps struct（替代之前 5 个平铺参数）。
+	// 后续 Story 4.6 / 4.8 / Epic 5+ 加共享依赖时只改 Deps 字段，不再改 Run 签名。
+	deps := bootstrap.Deps{
+		GormDB:       gormDB,
+		TxMgr:        txMgr,
+		Signer:       signer,
+		RateLimitCfg: cfg.RateLimit,
+	}
+	if err := bootstrap.Run(ctx, cfg, deps); err != nil {
 		slog.Error("server run failed", slog.Any("error", err))
 		os.Exit(1)
 	}

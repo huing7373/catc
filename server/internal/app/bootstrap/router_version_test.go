@@ -26,7 +26,7 @@ func TestRouter_Version(t *testing.T) {
 	buildinfo.BuiltAt = "2026-04-26T00:00:00Z"
 
 	gin.SetMode(gin.TestMode)
-	r := NewRouter()
+	r := NewRouter(Deps{})
 
 	req := httptest.NewRequest(http.MethodGet, "/version", nil)
 	w := httptest.NewRecorder()

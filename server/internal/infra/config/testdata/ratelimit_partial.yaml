@@ -1,0 +1,10 @@
+server:
+  http_port: 8080
+  read_timeout_sec: 5
+  write_timeout_sec: 10
+
+ratelimit:
+  per_key_per_min: 30
+
+log:
+  level: info

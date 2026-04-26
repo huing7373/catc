@@ -33,7 +33,7 @@ func TestRouter_DevPingEnabled_EnvToggle(t *testing.T) {
 	t.Run("BUILD_DEV=true → /dev/ping-dev 200 + envelope.data.mode=dev", func(t *testing.T) {
 		t.Setenv("BUILD_DEV", "true")
 		gin.SetMode(gin.TestMode)
-		r := NewRouter()
+		r := NewRouter(Deps{})
 
 		req := httptest.NewRequest(http.MethodGet, "/dev/ping-dev", nil)
 		w := httptest.NewRecorder()
@@ -68,7 +68,7 @@ func TestRouter_DevPingEnabled_EnvToggle(t *testing.T) {
 	t.Run("BUILD_DEV empty → /dev/ping-dev 404 (Gin NoRoute)", func(t *testing.T) {
 		t.Setenv("BUILD_DEV", "")
 		gin.SetMode(gin.TestMode)
-		r := NewRouter()
+		r := NewRouter(Deps{})
 
 		req := httptest.NewRequest(http.MethodGet, "/dev/ping-dev", nil)
 		w := httptest.NewRecorder()
@@ -110,7 +110,7 @@ func TestRouter_DevOnlyMiddleware_FallbackPath_LogsCanonicalErrorCode(t *testing
 	t.Cleanup(func() { slog.SetDefault(origDefault) })
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
-	r := NewRouter()
+	r := NewRouter(Deps{})
 
 	// Step 2：运维热切换 BUILD_DEV="" → 路由仍在，但 DevOnlyMiddleware 将在请求期 reject
 	t.Setenv("BUILD_DEV", "")
