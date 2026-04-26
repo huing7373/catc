@@ -349,7 +349,7 @@ open iphone/PetApp.xcodeproj
 # Xcode 选 PetApp scheme + iPhone 17 simulator + Cmd+R
 ```
 
-成功标志：simulator 启动后 HomeView 右下角版本标签从 `v0.0.0 · ----` 变成 `v<X.Y.Z> · <8位commit>`（成功，X.Y.Z 是 iPhone App 版本号、8 位 commit 是 server 的 git short hash）；server 未启则显示 `v<X.Y.Z> · offline`；server 启了但 `/version` 解析异常会显示 `v<X.Y.Z> · v?`。
+成功标志：simulator 启动后 HomeView 右下角版本标签从 `v0.0.0 · ----` 变成 `v<X.Y.Z> · <short-commit>`（成功，X.Y.Z 是 iPhone App 版本号；`<short-commit>` 是 server `git rev-parse --short HEAD` 的输出，长度由 git 决定，本仓库当前为 7 字符，未来可能因 hash 冲突自动加长）；server 未启则显示 `v<X.Y.Z> · offline`；server 启了但 `/version` 解析异常会显示 `v<X.Y.Z> · v?`。
 
 > `PetAppBaseURL` 默认 `http://localhost:8080`，与 [`server/configs/local.yaml`](../server/configs/local.yaml) `bind_host: 127.0.0.1` + `http_port: 8080` 对齐。simulator 上 `localhost` 实际指向 Mac 本机 loopback（与真机不同）。
 
@@ -366,9 +366,10 @@ open iphone/PetApp.xcodeproj
 4. 真机 USB 连 Mac → Xcode 顶部 device picker 选你的真机
 
 ```bash
-# 1. Mac 找局域网 IP
-ifconfig | grep 'inet 192' | head -1
-# 假设输出 inet 192.168.1.100 ...
+# 1. Mac 找局域网 IP（不限网段：cover 192.168.x.x / 10.x.x.x / 172.16-31.x.x）
+ipconfig getifaddr en0 || ipconfig getifaddr en1
+# Wi-Fi 接口通常是 en0（部分 Mac 是 en1）；输出形如 192.168.1.100 / 10.0.1.50 / 172.20.3.7
+# fallback：ifconfig | grep 'inet ' | grep -v 127.0.0.1
 
 # 2. 改 iphone/project.yml 第 37 行 PetAppBaseURL
 # 从  PetAppBaseURL: http://localhost:8080
