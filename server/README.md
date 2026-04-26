@@ -48,7 +48,7 @@ curl http://127.0.0.1:8080/version    # → {"code":0,"data":{"commit":"<short h
 
 | 服务 | 启用节点 | 推荐本地启动方式 |
 |---|---|---|
-| MySQL 8.0 | Epic 4（Auth + 五张表 migration） | `docker run -d --name cat-mysql -e MYSQL_ROOT_PASSWORD=catdev -p 3306:3306 mysql:8.0`<br>或 `brew install mysql@8.0` (macOS) / `winget install Oracle.MySQL` (Windows) |
+| MySQL 8.0 | Epic 4（Auth + 五张表 migration） | `docker run -d --name cat-mysql -e MYSQL_ROOT_PASSWORD=catdev -e MYSQL_USER=cat -e MYSQL_PASSWORD=catdev -e MYSQL_DATABASE=cat -p 3306:3306 mysql:8.0`<br>或 `brew install mysql@8.0` (macOS) / `winget install Oracle.MySQL` (Windows)（非 docker 路径需手动 `CREATE USER 'cat'@'%' IDENTIFIED BY 'catdev'; CREATE DATABASE cat; GRANT ALL ON cat.* TO 'cat'@'%';`） |
 | Redis 6+ | Epic 10（WS gateway + presence） | `docker run -d --name cat-redis -p 6379:6379 redis:6-alpine`<br>或 `brew install redis` (macOS) / `winget install Redis.Redis-x64` (Windows) |
 
 > 端口 3306 / 6379 是 MySQL/Redis 标准端口；本地多实例冲突时自行改 `-p 13306:3306` / `-p 16379:6379`。

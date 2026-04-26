@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/huing/cat/server/internal/app/bootstrap"
 	"github.com/huing/cat/server/internal/app/http/devtools"
@@ -15,6 +16,21 @@ import (
 	"github.com/huing/cat/server/internal/infra/logger"
 	"github.com/huing/cat/server/internal/repo/tx"
 )
+
+// dbOpenTimeout 是启动阶段调 db.Open 的最大等待。
+//
+// 为什么独立于 main 的 signal-ctx：`signal.NotifyContext` 创建的 ctx 只在收到
+// SIGINT/SIGTERM 时 cancel，**没有 deadline**。如果 DSN 指向 blackholed host 或
+// DNS 解析慢，PingContext 会被 driver 的 default dial timeout（典型 30s+）卡住，
+// fail-fast 语义实际不快。这里包一层短 timeout，强制启动阶段 5s 内见结果。
+//
+// 选 5s 是平衡：
+//   - 太短（< 2s）会误杀慢机 / VPN / 本地 docker mysql 启动延迟场景
+//   - 太长（> 10s）违反 fail-fast 初衷（运维等不到 readiness 失败信号）
+//
+// 短 timeout 仅作用于 db.Open；后续 bootstrap.Run 仍用主 signal-ctx，正常 server
+// lifecycle 不受影响。详见 docs/lessons/2026-04-26-startup-blocking-io-needs-deadline.md。
+const dbOpenTimeout = 5 * time.Second
 
 func main() {
 	// Bootstrap logger 先拿 "info" level 的 JSON handler，确保 config 加载失败这类
@@ -66,7 +82,14 @@ func main() {
 	//
 	// 不容忍降级：用空连接池继续启动会让用户在第一个业务请求时才发现问题，
 	// 违反 NFR3 / 总体架构设计 §"状态以 server 为准" + MEMORY.md "No Backup Fallback"。
-	gormDB, err := db.Open(ctx, cfg.MySQL)
+	//
+	// **必须用本地短 timeout ctx**：主 signal-ctx 没 deadline，碰到 blackhole host /
+	// 慢 DNS 时 PingContext 会被 driver 卡 30s+，fail-fast 实际不快。dbOpenTimeout 强制
+	// 启动阶段 5s 内见结果；timeout 触发后 cancel 仅影响 db.Open 这一阻塞 IO，主 ctx
+	// 不受影响。Story 4.2 review round 2 补漏。
+	dbOpenCtx, dbOpenCancel := context.WithTimeout(ctx, dbOpenTimeout)
+	gormDB, err := db.Open(dbOpenCtx, cfg.MySQL)
+	dbOpenCancel()
 	if err != nil {
 		slog.Error("mysql open failed", slog.Any("error", err))
 		os.Exit(1)
