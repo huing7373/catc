@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: codex round 2 review of Story 2.6 (file: /tmp/epic-loop-review-2-6-r2.md)
 story: 2-6-基础错误-ui-框架
-commit: <pending>
+commit: 3b40ba8
 lesson_count: 1
 ---
 

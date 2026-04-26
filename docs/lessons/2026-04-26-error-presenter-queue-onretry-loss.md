@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: codex review round 1 — Story 2.6 基础错误 UI 框架
 story: 2-6-基础错误-ui-框架
-commit: <pending>
+commit: 634c564
 lesson_count: 1
 ---
 
