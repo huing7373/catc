@@ -24,19 +24,25 @@
 // 不会处于半执行状态）。
 //
 // 取舍：
-//   - cancel 后调用方立刻拿到 ctx.Err()（unblocked）
-//   - 后台 goroutine 仍会等到当前 statement 完成才退（确定性收尾）
+//   - cancel 后 runWithCtx **等 done channel 实际返回**再退出（最长
+//     gracefulStopTimeout = 30s）；若 grace timeout 触发会 slog.Warn 提示 schema
+//     可能 dirty。这样保证 caller 拿到 ctx.Err() 时，underlying migration 要么
+//     已经在 schema_migrations 写完 partial-progress + dirty=false，要么超时
+//     warn —— 不会"caller 立刻 return → defer Close 把 driver 关了 → 后台 goroutine
+//     失去连接 → schema_migrations 留在 dirty=true 状态"。
 //   - Close 路径上 sync.Once 仍保证只调一次底层 m.Close
 //
-// 详见 docs/lessons/2026-04-26-cli-cancellation-and-gomigrate-gracefulstop.md。
+// 详见 docs/lessons/2026-04-26-cli-relative-path-and-graceful-stop-wait.md。
 package migrate
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"sync"
+	"time"
 
 	gomigrate "github.com/golang-migrate/migrate/v4"
 	// 注册 mysql database driver（处理 mysql:// URL）
@@ -44,6 +50,20 @@ import (
 	// 注册 file source driver（读 file:// URL）
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 )
+
+// gracefulStopTimeout 是 ctx cancel 后等待 gomigrate 在 statement 边界真停下的
+// 最长时间。触发后 runWithCtx 仍返回 ctx.Err()，但允许 underlying migration goroutine
+// 把当前 statement wrap up（让 schema_migrations 表的 dirty 标记保持一致）。
+//
+// 选 30s 是平衡：
+//   - 太短（< 5s）一些大 ALTER 单语句可能跑不完，刚好 cancel 进来导致 dirty=true 锁住
+//   - 太长（> 1min）违反"用户按 Ctrl+C 期望快速退出"的体感
+//
+// 若超过这个时间 gomigrate 仍不返回，slog.Warn 提示 schema 可能 dirty —— 是极端
+// 情况（DDL 阻塞 / metadata lock 长锁），让运维介入而不是无限等。
+//
+// 详见 docs/lessons/2026-04-26-cli-relative-path-and-graceful-stop-wait.md。
+const gracefulStopTimeout = 30 * time.Second
 
 // Migrator 是 migration 操作的抽象，让 cli 包 / 测试可以注入 fake。
 type Migrator interface {
@@ -144,12 +164,18 @@ func pathToFileURI(p string) (string, error) {
 // runWithCtx 在独立 goroutine 跑 fn，并 select ctx.Done() 提前返回。
 //
 // 当 ctx cancel 时：
-//   - 立刻返回 ctx.Err() 给 caller（CLI 进程能马上响应 SIGINT）
 //   - 用非阻塞 send 把 GracefulStop=true 推到 *Migrate（让底层在下一个 statement
 //     边界停下；gomigrate 的设计：避免半执行状态）
-//   - 后台 goroutine 仍保留（让底层正确收尾后写入 done chan，避免 goroutine 泄漏）
+//   - **再等 done channel 返回**（最长 gracefulStopTimeout）—— 因为 GracefulStop
+//     只是个信号，实际 stop 在 next statement 边界异步发生；这段时间 gomigrate 还
+//     在持有 driver 连接、可能正在 commit schema_migrations 行。如果 caller 立刻
+//     return 让 defer Close 把 driver 关了，会让后台 goroutine 失去连接 → 半执行
+//     状态留在 schema_migrations（dirty=true 锁住，需手工修复）。
+//   - 等到 done 或 grace timeout 后，仍返回 ctx.Err()（语义不变：caller 知道是
+//     被 cancel 的，不是 fn 自己出错的）；grace timeout 触发额外 slog.Warn 提示
+//     schema 可能 dirty。
 //
-// 接 supportsGracefulStop 而非具体 *gomigrate.Migrate，方便单测注入 fakeRunner。
+// 接 stopSender interface 而非具体 *gomigrate.Migrate，方便单测注入 fake。
 type stopSender interface {
 	sendGracefulStop()
 }
@@ -167,6 +193,12 @@ func (r realStopSender) sendGracefulStop() {
 }
 
 func runWithCtx(ctx context.Context, stop stopSender, fn func() error) error {
+	return runWithCtxAndTimeout(ctx, stop, fn, gracefulStopTimeout)
+}
+
+// runWithCtxAndTimeout 是 runWithCtx 的可测试核心，参数化 graceTimeout 让单测能
+// 在毫秒级验证"等 done 返回"的行为。
+func runWithCtxAndTimeout(ctx context.Context, stop stopSender, fn func() error, graceTimeout time.Duration) error {
 	done := make(chan error, 1)
 	go func() { done <- fn() }()
 	select {
@@ -174,7 +206,28 @@ func runWithCtx(ctx context.Context, stop stopSender, fn func() error) error {
 		return err
 	case <-ctx.Done():
 		stop.sendGracefulStop()
-		return ctx.Err()
+		// ctx 已 cancel；GracefulStop 是异步信号 —— 必须等 done 实际返回再退出，
+		// 否则 caller 的 defer Close 会把 driver 关了，后台 goroutine 失去连接，
+		// schema_migrations 被锁在 dirty=true。
+		grace := time.NewTimer(graceTimeout)
+		defer grace.Stop()
+		select {
+		case <-done:
+			// gomigrate 已在 statement 边界干净停下；done 里的 err 通常是
+			// gomigrate.ErrAborted —— 但 caller 关心的是"是被 cancel 的"，
+			// 所以仍返回 ctx.Err() 让上层 errors.Is(ctx.Canceled) 路径生效。
+			return ctx.Err()
+		case <-grace.C:
+			// grace 超时：gomigrate 仍未在 statement 边界停（极端情况，
+			// 比如长 ALTER / metadata lock）。slog.Warn 提示 schema 可能
+			// dirty，让运维介入；caller 仍拿到 ctx.Err() 退出。
+			//
+			// 不再无限等 —— 长时间等没意义（caller 已 cancel）；让进程退出
+			// 比卡死更好，dirty 状态下次 status 会暴露。
+			slog.Warn("migrate: GracefulStop did not return within grace period, schema may be dirty",
+				slog.Duration("grace_timeout", graceTimeout))
+			return ctx.Err()
+		}
 	}
 }
 

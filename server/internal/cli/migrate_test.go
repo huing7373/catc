@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -256,4 +258,108 @@ func TestParseMigrateArgs_UnknownFlag(t *testing.T) {
 	if err == nil {
 		t.Fatal("got nil, want error")
 	}
+}
+
+// TestLocateMigrations_CwdHasMigrations 验证 cwd 下有 migrations 目录（dev 在 server/）
+// 时 LocateMigrations 返 "migrations"（第一个候选）。
+func TestLocateMigrations_CwdHasMigrations(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.Mkdir(filepath.Join(tmp, "migrations"), 0o755); err != nil {
+		t.Fatalf("mkdir migrations: %v", err)
+	}
+	chdir(t, tmp)
+
+	got, err := LocateMigrations()
+	if err != nil {
+		t.Fatalf("LocateMigrations: %v", err)
+	}
+	if got != "migrations" {
+		t.Errorf("got %q, want %q", got, "migrations")
+	}
+}
+
+// TestLocateMigrations_CwdHasServerMigrations 验证 cwd 是 repo-root（有 server/migrations）
+// 时 LocateMigrations 返 "server/migrations"。这是 review round 3 Finding 1 的核心场景：
+// scripts/build.sh 产物在 repo-root/build/catserver，运维从 repo-root 跑 `./build/catserver migrate up`
+// 时 cwd=repo-root，旧实装找 "migrations" 失败 → 现在 fallback 到 "server/migrations"。
+func TestLocateMigrations_CwdHasServerMigrations(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, "server", "migrations"), 0o755); err != nil {
+		t.Fatalf("mkdir server/migrations: %v", err)
+	}
+	chdir(t, tmp)
+
+	got, err := LocateMigrations()
+	if err != nil {
+		t.Fatalf("LocateMigrations: %v", err)
+	}
+	want := filepath.Join("server", "migrations")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestLocateMigrations_NoCandidates 验证两个候选都不存在时返带提示的 error。
+func TestLocateMigrations_NoCandidates(t *testing.T) {
+	tmp := t.TempDir()
+	chdir(t, tmp)
+
+	_, err := LocateMigrations()
+	if err == nil {
+		t.Fatal("got nil, want error")
+	}
+	if !strings.Contains(err.Error(), "migrations dir not found") {
+		t.Errorf("error %q does not mention 'migrations dir not found'", err.Error())
+	}
+	if !strings.Contains(err.Error(), "CAT_MIGRATIONS_PATH") {
+		t.Errorf("error %q does not mention CAT_MIGRATIONS_PATH override hint", err.Error())
+	}
+}
+
+// TestLocateMigrations_FilePrefersDir 验证 "migrations" 是文件而不是目录时跳过它，
+// 找下一个候选 server/migrations（防止误把同名文件当成 migrations 目录）。
+func TestLocateMigrations_FilePrefersDir(t *testing.T) {
+	tmp := t.TempDir()
+	// migrations 是文件，不是目录
+	if err := os.WriteFile(filepath.Join(tmp, "migrations"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatalf("write migrations file: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmp, "server", "migrations"), 0o755); err != nil {
+		t.Fatalf("mkdir server/migrations: %v", err)
+	}
+	chdir(t, tmp)
+
+	got, err := LocateMigrations()
+	if err != nil {
+		t.Fatalf("LocateMigrations: %v", err)
+	}
+	want := filepath.Join("server", "migrations")
+	if got != want {
+		t.Errorf("got %q (probably matched a file), want %q", got, want)
+	}
+}
+
+// TestLocateMigrationsIn_Empty 验证空候选列表返 error（防御性测试）。
+func TestLocateMigrationsIn_Empty(t *testing.T) {
+	_, err := locateMigrationsIn(nil)
+	if err == nil {
+		t.Fatal("got nil, want error")
+	}
+}
+
+// chdir 临时切到 dir，用 t.Cleanup 在测试结束时切回。
+func chdir(t *testing.T, dir string) {
+	t.Helper()
+	prev, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("os.Chdir(%q): %v", dir, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(prev); err != nil {
+			t.Errorf("restore cwd: %v", err)
+		}
+	})
 }

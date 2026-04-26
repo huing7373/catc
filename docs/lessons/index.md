@@ -55,3 +55,4 @@
 | 2026-04-26 | [启动路径阻塞 IO 必须有 deadline & dev 文档命令必须与默认配置自洽](2026-04-26-startup-blocking-io-needs-deadline.md) | 2 | error-handling, docs | `c96ef29` |
 | 2026-04-26 | [CLI 子命令 flag 解析必须用 NewFlagSet + 跨平台 file URI 必须避免 backslash 拼接](2026-04-26-cli-subcommand-flag-and-windows-file-uri.md) | 3 | error-handling, architecture, testing | `<pending>` |
 | 2026-04-26 | [CLI 子命令必须 lazy load config + 长 IO 操作必须 ctx-aware GracefulStop](2026-04-26-cli-lazy-config-and-gomigrate-gracefulstop.md) | 2 | config, architecture | `<pending>` |
+| 2026-04-26 | [CLI 默认相对路径必须 auto-detect 多 cwd & gomigrate GracefulStop 必须等 fn 真停](2026-04-26-cli-relative-path-and-graceful-stop-wait.md) | 2 | config, error-handling | `<pending>` |

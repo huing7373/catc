@@ -245,29 +245,51 @@ func TestRunWithCtx_FnReturnsNilBeforeCancel(t *testing.T) {
 	}
 }
 
-// TestRunWithCtx_CancelReturnsCtxErr 验证 ctx cancel 时 runWithCtx 立刻返 ctx.Err()
-// 并触发 stop.sendGracefulStop()，不等 fn 返回。
+// TestRunWithCtx_CancelWaitsForFnAfterStopSignal 验证 ctx cancel 时 runWithCtx：
+//  1. 触发 stop.sendGracefulStop()
+//  2. **等 fn 实际返回** 才退出（在 grace timeout 内）
+//  3. 仍返回 ctx.Err()（不是 fn 的 error）
 //
-// 这是 review round 2 Finding 2 的核心断言：CLI SIGINT 时调用方能立刻 unblock。
-func TestRunWithCtx_CancelReturnsCtxErr(t *testing.T) {
+// 这是 review round 3 Finding 2 的核心断言：CLI SIGINT 后必须等 gomigrate 在
+// statement 边界真停下，否则 defer Close 会让 schema_migrations 锁在 dirty=true。
+func TestRunWithCtx_CancelWaitsForFnAfterStopSignal(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	stop := &fakeStopSender{}
 
-	// fn 阻塞至少 5s（远超过 ctx cancel 后期望的返回时间）
+	// fn 模拟 gomigrate 行为：收到 stop 信号后过 50ms 才让 done 返回（模拟 statement
+	// boundary check）。ctx cancel 后 runWithCtx 应等到 fn 返回，再 return。
 	fnStarted := make(chan struct{})
-	fnDone := make(chan struct{})
+	fnReturned := make(chan struct{})
+	stopObserved := make(chan struct{})
+
+	// 监视 stop sender：当 stopped=true 时，触发 fn 在 50ms 后返回（模拟 gomigrate
+	// 的"接到 GracefulStop 后在 statement 边界停下"语义）。
+	go func() {
+		for {
+			stop.mu.Lock()
+			s := stop.stopped
+			stop.mu.Unlock()
+			if s {
+				close(stopObserved)
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
 	fn := func() error {
 		close(fnStarted)
-		select {
-		case <-time.After(5 * time.Second):
-		case <-fnDone:
-		}
-		return errors.New("late return")
+		<-stopObserved
+		// 模拟 statement boundary 处理时间
+		time.Sleep(50 * time.Millisecond)
+		close(fnReturned)
+		return errors.New("aborted at boundary")
 	}
 
 	got := make(chan error, 1)
+	start := time.Now()
 	go func() {
-		got <- runWithCtx(ctx, stop, fn)
+		got <- runWithCtxAndTimeout(ctx, stop, fn, 5*time.Second)
 	}()
 
 	<-fnStarted
@@ -275,8 +297,21 @@ func TestRunWithCtx_CancelReturnsCtxErr(t *testing.T) {
 
 	select {
 	case err := <-got:
+		elapsed := time.Since(start)
+		// 必须等 fn 实际返回（fnReturned 已 close）
+		select {
+		case <-fnReturned:
+			// good
+		default:
+			t.Errorf("runWithCtx returned before fn finished (no wait-for-done)")
+		}
+		// 必须返回 ctx.Err() 而不是 fn 的 "aborted at boundary"
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("got %v, want context.Canceled", err)
+		}
+		// 时间合理范围：> 50ms（等 fn 完成）但 < grace timeout
+		if elapsed < 30*time.Millisecond {
+			t.Errorf("runWithCtx returned too fast (%v), expected to wait for fn", elapsed)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("runWithCtx did not return within 2s after ctx cancel")
@@ -285,38 +320,101 @@ func TestRunWithCtx_CancelReturnsCtxErr(t *testing.T) {
 	if !stop.stopped {
 		t.Errorf("stop sender not called on ctx cancel")
 	}
+}
 
-	// 让后台 fn goroutine 退出（避免 goroutine leak 影响后续测试）
+// TestRunWithCtx_GraceTimeoutFiresOnHangingFn 验证 fn 在 ctx cancel + GracefulStop
+// 后**仍不返回**时，runWithCtx 在 graceTimeout 后强制退出（不无限等）。
+//
+// 模拟极端场景：长 ALTER 阻塞、metadata lock 锁住，gomigrate 即使收到 GracefulStop
+// 也回不到 statement boundary。CLI 不应永远卡住。
+func TestRunWithCtx_GraceTimeoutFiresOnHangingFn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := &fakeStopSender{}
+
+	fnStarted := make(chan struct{})
+	fnDone := make(chan struct{})
+	fn := func() error {
+		close(fnStarted)
+		<-fnDone // 永不返回（直到测试末尾）
+		return nil
+	}
+
+	graceTimeout := 100 * time.Millisecond
+	got := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		got <- runWithCtxAndTimeout(ctx, stop, fn, graceTimeout)
+	}()
+
+	<-fnStarted
+	cancel()
+
+	select {
+	case err := <-got:
+		elapsed := time.Since(start)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("got %v, want context.Canceled", err)
+		}
+		// 应在 graceTimeout 之后退出（grace 触发），但不应无限等
+		if elapsed < graceTimeout {
+			t.Errorf("runWithCtx returned in %v, expected >= %v (grace timeout)", elapsed, graceTimeout)
+		}
+		if elapsed > graceTimeout+500*time.Millisecond {
+			t.Errorf("runWithCtx took %v, much longer than grace timeout %v", elapsed, graceTimeout)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runWithCtx did not respect graceTimeout")
+	}
+
+	if !stop.stopped {
+		t.Errorf("stop sender not called on ctx cancel")
+	}
+
+	// 让后台 fn goroutine 退出（避免 goroutine leak）
 	close(fnDone)
 }
 
-// TestRunWithCtx_DeadlineExceededReturnsCtxErr 验证 ctx 超时也走 stop 路径。
-func TestRunWithCtx_DeadlineExceededReturnsCtxErr(t *testing.T) {
+// TestRunWithCtx_DeadlineExceededWaitsForFn 验证 ctx 超时（DeadlineExceeded）路径
+// 也同样 wait-for-done。
+func TestRunWithCtx_DeadlineExceededWaitsForFn(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	stop := &fakeStopSender{}
 
-	fnDone := make(chan struct{})
+	fnStarted := make(chan struct{})
+	stopObserved := make(chan struct{})
+	go func() {
+		for {
+			stop.mu.Lock()
+			s := stop.stopped
+			stop.mu.Unlock()
+			if s {
+				close(stopObserved)
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
 	fn := func() error {
-		<-fnDone
+		close(fnStarted)
+		<-stopObserved
 		return nil
 	}
 
 	start := time.Now()
-	err := runWithCtx(ctx, stop, fn)
+	err := runWithCtxAndTimeout(ctx, stop, fn, 5*time.Second)
 	elapsed := time.Since(start)
 
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("got %v, want context.DeadlineExceeded", err)
 	}
 	if elapsed > 1*time.Second {
-		t.Errorf("runWithCtx took %v, expected < 1s after deadline", elapsed)
+		t.Errorf("runWithCtx took %v, expected < 1s after deadline+stop", elapsed)
 	}
 	if !stop.stopped {
 		t.Errorf("stop sender not called on deadline")
 	}
-
-	close(fnDone)
 }
 
 // TestUp_NilMigratorWithCanceledCtx 验证 nil migrator 路径上即使传 canceled ctx，

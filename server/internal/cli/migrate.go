@@ -20,11 +20,48 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/huing/cat/server/internal/infra/config"
 	"github.com/huing/cat/server/internal/infra/migrate"
 )
+
+// DefaultMigrationsCandidates 是按 CWD 解析的 migrations 目录候选路径，
+// 按优先级从高到低，与 config.DefaultCWDCandidates 的语义对齐。
+//
+//   - "migrations"        → 对应 cwd=server/（dev `cd server && ./build/catserver migrate up`）
+//   - "server/migrations" → 对应 cwd=repo-root（文档化路径 `./build/catserver migrate up`）
+//
+// 不在这里 export "../migrations" / 绝对路径候选 —— 二进制相对路径模式由
+// 未来需要时再加；当前两条覆盖 build.sh 产物在 build/ 下的两种典型 cwd。
+var DefaultMigrationsCandidates = []string{
+	"migrations",
+	filepath.Join("server", "migrations"),
+}
+
+// LocateMigrations 在一组候选位置里找到第一个存在的 migrations 目录，返回其路径。
+// 与 config.LocateDefault 的设计动机一致：avoid 把"假设 cwd 是某个特定目录"硬编码进
+// 默认值，让 build.sh 产物从 repo-root / server/ 两个位置跑都能找到 migrations。
+//
+// 注意：CAT_MIGRATIONS_PATH（env 显式覆盖）的优先级**更高**，由 RunMigrate 决策；
+// 本函数只负责"没有 env 时的 auto-detect"。
+//
+// 详见 docs/lessons/2026-04-26-cli-relative-path-and-graceful-stop-wait.md。
+func LocateMigrations() (string, error) {
+	return locateMigrationsIn(DefaultMigrationsCandidates)
+}
+
+// locateMigrationsIn 是 LocateMigrations 的可测试核心：参数化候选路径以便在 tmp dir 测试。
+func locateMigrationsIn(candidates []string) (string, error) {
+	for _, p := range candidates {
+		info, err := os.Stat(p)
+		if err == nil && info.IsDir() {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("migrations dir not found; tried %v; set CAT_MIGRATIONS_PATH to override", candidates)
+}
 
 // Migrator 是 cli 包内部的 migration 抽象，签名与 internal/infra/migrate.Migrator 完全一致。
 //
@@ -119,8 +156,9 @@ func ParseMigrateArgs(args []string, errOutput io.Writer) (action, configPathOve
 //     -config（或 LocateDefault）自己加载；调用方传非 nil cfg → 仍允许 args 里的
 //     -config 覆盖（review round 2 修法：CI / container 只 ship dev.yaml 时
 //     main 不应先 LocateDefault 然后 fail，而应让 RunMigrate 拿到 -config 自己 Load）
-//   - migrationsPath 默认 "migrations"，可被 env CAT_MIGRATIONS_PATH 覆盖（局部开关，
-//     不入 cfg.Config —— Story 4.3 决策）
+//   - migrationsPath 通过 LocateMigrations() auto-detect（cwd=server/ 找
+//     "migrations"，cwd=repo-root 找 "server/migrations"），可被 env
+//     CAT_MIGRATIONS_PATH 显式覆盖（局部开关，不入 cfg.Config —— Story 4.3 决策）
 //
 // 错误返回时调用方（main.go）打 slog.Error + os.Exit(1)。
 // status 返回 dirty=true 时也返 error（让 CI 能感知 schema 处于 dirty 状态）。
@@ -162,9 +200,20 @@ func RunMigrate(ctx context.Context, cfg *config.Config, args []string) error {
 		slog.Info("migrate config loaded", slog.String("path", path))
 	}
 
+	// migrationsPath 解析顺序：
+	//   1. CAT_MIGRATIONS_PATH（env 显式覆盖；用户显式 > 自动探测）
+	//   2. LocateMigrations() auto-detect（cwd=server/ → "migrations"，cwd=repo-root → "server/migrations"）
+	//
+	// 不再硬编码默认值 "migrations" —— scripts/build.sh 产物在 build/catserver，
+	// 文档化跑法是从 repo-root：`./build/catserver migrate up`，cwd=repo-root 时
+	// "migrations" 不存在 → 失败。LocateMigrations 同时覆盖两种 cwd 场景。
 	migrationsPath := os.Getenv("CAT_MIGRATIONS_PATH")
 	if migrationsPath == "" {
-		migrationsPath = "migrations"
+		p, lerr := LocateMigrations()
+		if lerr != nil {
+			return fmt.Errorf("migrate: %w", lerr)
+		}
+		migrationsPath = p
 	}
 
 	mig, err := migrate.New(cfg.MySQL.DSN, migrationsPath)
