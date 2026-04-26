@@ -86,8 +86,19 @@ func TestVerify_Expired_ReturnsErrTokenExpired(t *testing.T) {
 // TestVerify_TamperedSignature_ReturnsErrTokenInvalid 验证签名被篡改 →
 // ErrTokenInvalid（epics.md §Story 4.4 行 1018）。
 //
-// 篡改 token 末尾字符，HMAC 签名验证 mismatch → 返 ErrTokenInvalid。
-// 这是潜在攻击场景，4.5 中间件用 errors.Is(ErrTokenInvalid) 走 WARN 级别日志。
+// 篡改 payload 段首字符 → 即使签名段不变，HMAC 也会 recompute 出不同值并
+// mismatch → 返 ErrTokenInvalid。这是潜在攻击场景，4.5 中间件用
+// errors.Is(ErrTokenInvalid) 走 WARN 级别日志。
+//
+// **不要改回"篡改 token 末尾字符"**（review round 4 P1 教训，docs/lessons/
+// 2026-04-26-jwt-tamper-test-must-mutate-non-terminal-byte.md）：
+// HS256 signature 是 32 字节 = 256 bits，base64url 编码 43 字符 = 258 bits（多
+// 2 bits padding，decode 时被丢弃）。所以末尾 base64url char 的低 2 bits 不
+// 影响 decode 出的字节 → tampered 末尾字符可能 decode 出**相同**的 32 字节
+// signature → Verify 通过 → 测试 flaky。**改 payload 段任意字节是最稳的
+// 篡改方案**，因为 HS256 校验时把 [header.payload] 拼起来重算 HMAC，payload
+// 任何 byte 变化都会让签名 mismatch；同时 payload 段是 base64url 编码的 JSON，
+// 改首字符基本必然破坏 JSON 解析或字段值（无 padding bits 共享风险）。
 func TestVerify_TamperedSignature_ReturnsErrTokenInvalid(t *testing.T) {
 	t.Parallel()
 
@@ -98,13 +109,22 @@ func TestVerify_TamperedSignature_ReturnsErrTokenInvalid(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, tok)
 
-	// 篡改签名段最后一个字符（base64url charset 内变换 → HMAC mismatch）
-	last := tok[len(tok)-1]
+	// 定位 payload 段：JWT 格式 = header.payload.signature，两个 '.' 分隔
+	firstDot := strings.Index(tok, ".")
+	require.Greater(t, firstDot, -1, "JWT must contain at least one '.'")
+	secondDot := strings.Index(tok[firstDot+1:], ".")
+	require.Greater(t, secondDot, -1, "JWT must contain two '.'")
+	payloadStart := firstDot + 1
+	require.Less(t, payloadStart, len(tok), "payload start must be within token")
+
+	// 篡改 payload 首字符为 charset 内不同值（base64url charset：A-Z a-z 0-9 - _）
+	original := tok[payloadStart]
 	swap := byte('A')
-	if last == 'A' {
+	if original == 'A' {
 		swap = 'B'
 	}
-	tampered := tok[:len(tok)-1] + string(swap)
+	tampered := tok[:payloadStart] + string(swap) + tok[payloadStart+1:]
+	require.NotEqual(t, tok, tampered, "tampered token must differ from original")
 
 	_, err = signer.Verify(tampered)
 	require.Error(t, err)
