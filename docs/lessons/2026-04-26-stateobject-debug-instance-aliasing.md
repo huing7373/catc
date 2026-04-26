@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: codex review round 1 on Story 2.8 (file: /tmp/epic-loop-review-2-8-r1.md)
 story: 2-8-dev-重置-keychain-按钮
-commit: <pending>
+commit: 3e5ad68
 lesson_count: 1
 ---
 
