@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-04-25 (story 2-10 review)
+# last_updated: 2026-04-25 (story 2-10 done)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -64,7 +64,7 @@ development_status:
   2-7-ios-测试基础设施搭建: done
   2-8-dev-重置-keychain-按钮: done
   2-9-launchingview-设计: done
-  2-10-ios-readme-模拟器开发指南: review
+  2-10-ios-readme-模拟器开发指南: done
   epic-2-retrospective: optional
   epic-3: backlog
   3-1-跨端集成测试场景-ping-e2e: backlog
