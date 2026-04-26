@@ -19,7 +19,7 @@
   2. 触发 server Epic 4 已完成 story 的回归（影响 Story 4.6 / 4.8 已落地的 handler）
   3. 在本 story 文件 + epics.md 同步标注变更原因 + 影响范围
 - 节点 3+ 接口（如 §6 步数 / §7 宝箱 / §8 装扮 / §9 合成 / §10 房间 / §11 表情）的契约锚定由对应 epic 的 §X.1 story 负责（如 Story 7.1 / 11.1 / 17.1 等），不在本 story 范围内。
-- Future Fields 标记的字段（`pet.equips` / `pet.equips[].renderConfig` / `room.currentRoomId` / `user.currentRoomId` 等）**不**视为契约变更，由对应节点 epic 自然激活。
+- Future Fields 标记的字段（`pet.equips` / `pet.equips[].renderConfig` / `room.currentRoomId` 等）**不**视为契约变更，由对应节点 epic 自然激活。注：`user.currentRoomId`（仅出现在 `GET /me`）**不**属于 Future Fields —— 该字段是**永久 schema 占位**（始终 `null`，无后续节点回填计划），见 §4.3 Future Fields 引用块。
 
 ---
 
@@ -145,11 +145,11 @@ Authorization: Bearer <token>
 
 | 字段 | 类型 | 必填 | 长度约束 | 说明 |
 |---|---|---|---|---|
-| `guestUid` | string | 必填 | 1 ≤ length ≤ 128 字节 | 客户端 Keychain 持久化的游客身份 UID（推荐 UUID v4 字符串）。空字符串或 > 128 字节 → 1002 参数错误 |
+| `guestUid` | string | 必填 | 1 ≤ length ≤ 128 字符 | 客户端 Keychain 持久化的游客身份 UID（推荐 UUID v4 字符串）。空字符串或 > 128 字符 → 1002 参数错误 |
 | `device` | object | 必填 | - | 设备信息对象，子字段见下 |
 | `device.platform` | string | 必填 | enum: `"ios"` / `"android"`（节点 2 仅 `"ios"`） | 客户端平台标识 |
-| `device.appVersion` | string | 必填 | 1 ≤ length ≤ 32 字节 | 客户端版本号（如 `"1.0.0"`） |
-| `device.deviceModel` | string | 必填 | 1 ≤ length ≤ 64 字节 | 设备型号（如 `"iPhone15,2"`） |
+| `device.appVersion` | string | 必填 | 1 ≤ length ≤ 32 字符 | 客户端版本号（如 `"1.0.0"`） |
+| `device.deviceModel` | string | 必填 | 1 ≤ length ≤ 64 字符 | 设备型号（如 `"iPhone15,2"`） |
 
 JSON 示例：
 
@@ -214,7 +214,7 @@ JSON 示例：
 
 | code | message | 触发条件 |
 |---|---|---|
-| 1002 | 参数错误 | `guestUid` 缺失 / 为空 / 长度超过 128 字节；`device` 字段缺失或子字段不全；`device.platform` 不在枚举中 |
+| 1002 | 参数错误 | `guestUid` 缺失 / 为空 / 长度超过 128 字符；`device` 字段缺失或子字段不全；`device.platform` 不在枚举中 |
 | 1005 | 操作过于频繁 | rate_limit 中间件拦截（同 IP 每分钟 > 60 次） |
 | 1009 | 服务繁忙 | 数据库异常 / 事务回滚 / 内部 panic（见 Story 4.6 事务实装） |
 
