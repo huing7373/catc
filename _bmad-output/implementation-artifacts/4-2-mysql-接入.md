@@ -1,6 +1,6 @@
 # Story 4.2: MySQL 接入（GORM/sqlx 选型 + 连接池 + tx manager）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
