@@ -45,6 +45,28 @@ final class HomeUITests: XCTestCase {
         XCTAssertTrue(versionLabel.waitForExistence(timeout: timeout), "版本号区块未找到")
     }
 
+    /// Story 2.8 round 2 fix：父容器 userInfoBar 在引入 ResetIdentityButton 后，
+    /// `.accessibilityElement(children: .contain)` 必须仍保留 `.accessibilityLabel(nickname)`，
+    /// 否则 VoiceOver 用户读 home_userInfo 时听不到 nickname summary（只听到子元素列表）。
+    /// 本 case 锁这条 a11y 契约：父级 a11y label 必须等于 viewModel.nickname。
+    func testUserInfoBarRetainsNicknameAccessibilityLabel() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let timeout: TimeInterval = 5
+
+        let userInfo = app.descendants(matching: .any)[AccessibilityID.Home.userInfo]
+        XCTAssertTrue(userInfo.waitForExistence(timeout: timeout), "userInfo 区块未找到")
+
+        // HomeViewModel.nickname 默认值 "用户1001"（见 HomeViewModel.swift init 默认参数）。
+        // SwiftUI `.accessibilityLabel(Text(...))` 会把字符串注入 element.label。
+        XCTAssertEqual(
+            userInfo.label,
+            "用户1001",
+            "userInfoBar 父容器应保留 nickname 作为 a11y label —— `.contain` 与 `.accessibilityLabel` 必须并存"
+        )
+    }
+
     /// Story 2.8 AC10：dev "重置身份" 按钮 + 点击 alert 链路。
     /// XCUITest 默认在 Debug configuration 跑（xcodebuild test 默认 Debug），#if DEBUG 分支生效。
     /// SwiftUI .alert(item:) 在 XCUITest 中表现为 app.alerts 集合；通过 alert 内文字定位。

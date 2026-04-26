@@ -67,8 +67,11 @@ public struct HomeView: View {
         }
         // Story 2.8: children 从 .ignore 改为 .contain —— 让按钮的 a11y identifier 可被 XCUITest 独立定位；
         // 父容器 a11y identifier 仍存在（既有 testHomeViewShowsAllSixPlaceholders 仍可定位 home_userInfo）。
-        // lesson 2026-04-26 SwiftUI 父容器 a11y identifier 默认传播覆盖子元素。
+        // 父级 .accessibilityLabel(nickname) 与 .contain 并存：VoiceOver 仍能读到 nickname summary，
+        // 子元素（ResetIdentityButton）也仍可被 a11y 树独立访问。
+        // lesson 2026-04-26 SwiftUI 父容器 a11y identifier 默认传播覆盖子元素 / a11y contain + label 兼容。
         .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text(viewModel.nickname))
         .accessibilityIdentifier(AccessibilityID.Home.userInfo)
     }
 
