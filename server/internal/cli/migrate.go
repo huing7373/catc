@@ -115,31 +115,51 @@ func ParseMigrateArgs(args []string, errOutput io.Writer) (action, configPathOve
 //
 //   - args = "migrate" 之后的全部参数（含可能的 -config flag）
 //   - 内部用 ParseMigrateArgs 拆 action + -config override
-//   - 若 args 含 -config 且与 cfg 加载路径不同 → 重新 Load 该 config 并覆盖（review fix）
+//   - **自己负责** config 加载：调用方传 nil cfg → RunMigrate 用 args 里的
+//     -config（或 LocateDefault）自己加载；调用方传非 nil cfg → 仍允许 args 里的
+//     -config 覆盖（review round 2 修法：CI / container 只 ship dev.yaml 时
+//     main 不应先 LocateDefault 然后 fail，而应让 RunMigrate 拿到 -config 自己 Load）
 //   - migrationsPath 默认 "migrations"，可被 env CAT_MIGRATIONS_PATH 覆盖（局部开关，
 //     不入 cfg.Config —— Story 4.3 决策）
 //
 // 错误返回时调用方（main.go）打 slog.Error + os.Exit(1)。
 // status 返回 dirty=true 时也返 error（让 CI 能感知 schema 处于 dirty 状态）。
 func RunMigrate(ctx context.Context, cfg *config.Config, args []string) error {
-	if cfg == nil {
-		return errors.New("RunMigrate: cfg is nil")
-	}
-
 	action, configOverride, err := ParseMigrateArgs(args, os.Stderr)
 	if err != nil {
 		return err
 	}
 
-	// 子命令位置的 -config 优先（更靠近 action 的语义胜出）。重新 Load + 覆盖 cfg。
-	// 这条路径覆盖 `catserver migrate up -config configs/dev.yaml` 的文档化形态。
-	if configOverride != "" {
+	// Config 解析顺序（优先级从高到低）：
+	//   1. 子命令位置的 -config（args 里的 -config flag）—— 显式给的最优先
+	//   2. 调用方传入的 cfg（main 在非 migrate 路径已经 Load 过的）
+	//   3. LocateDefault + Load（兜底；当 cfg=nil 且 args 里也没 -config 时）
+	//
+	// 这条路径覆盖：
+	//   - `catserver migrate up -config dev.yaml`（CI 场景，只 ship dev.yaml）
+	//   - `catserver migrate up`（本地默认，回退到 local.yaml）
+	switch {
+	case configOverride != "":
 		newCfg, lerr := config.Load(configOverride)
 		if lerr != nil {
 			return fmt.Errorf("migrate: load -config %q: %w", configOverride, lerr)
 		}
 		cfg = newCfg
 		slog.Info("migrate config override", slog.String("path", configOverride))
+	case cfg == nil:
+		// main 在 migrate 路径上 lazy load：让 RunMigrate 自己 LocateDefault + Load。
+		// 这样 `catserver migrate up`（无 -config）依然走默认路径；而用户显式给
+		// `-config dev.yaml` 时不会先被 default load 失败拦住。
+		path, lerr := config.LocateDefault()
+		if lerr != nil {
+			return fmt.Errorf("migrate: locate default config: %w", lerr)
+		}
+		newCfg, lerr := config.Load(path)
+		if lerr != nil {
+			return fmt.Errorf("migrate: load default config %q: %w", path, lerr)
+		}
+		cfg = newCfg
+		slog.Info("migrate config loaded", slog.String("path", path))
 	}
 
 	migrationsPath := os.Getenv("CAT_MIGRATIONS_PATH")

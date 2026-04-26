@@ -17,10 +17,18 @@
 //
 // # ctx 透传策略
 //
-// golang-migrate v4 的 Up/Down/Version 内部不接 context.Context（API 限制）。
-// 本包公开方法保留 ctx 第一参数（CLAUDE.md "ctx 必传"），实际未透传到底层。
-// 未来如需"外层 cancel 时停止 migrate"，可改为 goroutine + select ctx.Done()
-// 的模式，本 story 范围内保持最小实装。
+// golang-migrate v4 的 Up/Down/Version 内部不接 context.Context（API 限制），
+// 同步阻塞调用。本包通过 goroutine + select ctx.Done() 的模式让 ctx cancel
+// 能让 caller 提前返回；底层操作借 *Migrate.GracefulStop chan 通知 migrate
+// 在下一个 statement 边界停下（不是立即停 —— 这是 gomigrate 设计：保证 schema
+// 不会处于半执行状态）。
+//
+// 取舍：
+//   - cancel 后调用方立刻拿到 ctx.Err()（unblocked）
+//   - 后台 goroutine 仍会等到当前 statement 完成才退（确定性收尾）
+//   - Close 路径上 sync.Once 仍保证只调一次底层 m.Close
+//
+// 详见 docs/lessons/2026-04-26-cli-cancellation-and-gomigrate-gracefulstop.md。
 package migrate
 
 import (
@@ -133,17 +141,59 @@ func pathToFileURI(p string) (string, error) {
 	return "file://" + slashed, nil
 }
 
+// runWithCtx 在独立 goroutine 跑 fn，并 select ctx.Done() 提前返回。
+//
+// 当 ctx cancel 时：
+//   - 立刻返回 ctx.Err() 给 caller（CLI 进程能马上响应 SIGINT）
+//   - 用非阻塞 send 把 GracefulStop=true 推到 *Migrate（让底层在下一个 statement
+//     边界停下；gomigrate 的设计：避免半执行状态）
+//   - 后台 goroutine 仍保留（让底层正确收尾后写入 done chan，避免 goroutine 泄漏）
+//
+// 接 supportsGracefulStop 而非具体 *gomigrate.Migrate，方便单测注入 fakeRunner。
+type stopSender interface {
+	sendGracefulStop()
+}
+
+// realStopSender wraps *gomigrate.Migrate 暴露 GracefulStop chan。
+type realStopSender struct{ m *gomigrate.Migrate }
+
+func (r realStopSender) sendGracefulStop() {
+	// 非阻塞 send：channel 容量有限，重复 cancel 不应阻塞；丢失 send 也无副作用
+	// （下一次 boundary check 仍会停）
+	select {
+	case r.m.GracefulStop <- true:
+	default:
+	}
+}
+
+func runWithCtx(ctx context.Context, stop stopSender, fn func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		stop.sendGracefulStop()
+		return ctx.Err()
+	}
+}
+
 // Up 把 schema 推到最新。
 //
 // migrate.ErrNoChange（已是最新）→ 吞掉返 nil（业务语义上是"成功无操作"）。
+// ctx cancel → 返 ctx.Err()，底层借 GracefulStop 在 statement 边界停下。
 // 其他 error 直接 wrap 透传。
 func (mg *migrator) Up(ctx context.Context) error {
 	if mg.m == nil {
 		return errors.New("migrate: migrator is closed or uninitialized")
 	}
-	if err := mg.m.Up(); err != nil {
+	err := runWithCtx(ctx, realStopSender{m: mg.m}, mg.m.Up)
+	if err != nil {
 		if errors.Is(err, gomigrate.ErrNoChange) {
 			return nil
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
 		}
 		return fmt.Errorf("migrate up: %w", err)
 	}
@@ -153,13 +203,18 @@ func (mg *migrator) Up(ctx context.Context) error {
 // Down 把 schema 全回滚。
 //
 // migrate.ErrNoChange（已无 migration 可回滚）→ 吞掉返 nil。
+// ctx cancel → 返 ctx.Err()。
 func (mg *migrator) Down(ctx context.Context) error {
 	if mg.m == nil {
 		return errors.New("migrate: migrator is closed or uninitialized")
 	}
-	if err := mg.m.Down(); err != nil {
+	err := runWithCtx(ctx, realStopSender{m: mg.m}, mg.m.Down)
+	if err != nil {
 		if errors.Is(err, gomigrate.ErrNoChange) {
 			return nil
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
 		}
 		return fmt.Errorf("migrate down: %w", err)
 	}
@@ -169,14 +224,27 @@ func (mg *migrator) Down(ctx context.Context) error {
 // Status 返回 (version, dirty, err)。
 //
 // migrate.ErrNilVersion（还没跑过任何 migration）→ 吞掉返 (0, false, nil)。
+// ctx cancel → 返 (0, false, ctx.Err())。
+//
+// 注意：gomigrate.Version() 通常不阻塞（只读 schema_migrations 单行），但
+// metadata lock 抢占 / 慢网络仍可能让它挂；ctx-aware 兜底统一 CLI 体验。
 func (mg *migrator) Status(ctx context.Context) (uint, bool, error) {
 	if mg.m == nil {
 		return 0, false, errors.New("migrate: migrator is closed or uninitialized")
 	}
-	version, dirty, err := mg.m.Version()
+	var version uint
+	var dirty bool
+	err := runWithCtx(ctx, realStopSender{m: mg.m}, func() error {
+		v, d, verr := mg.m.Version()
+		version, dirty = v, d
+		return verr
+	})
 	if err != nil {
 		if errors.Is(err, gomigrate.ErrNilVersion) {
 			return 0, false, nil
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 0, false, err
 		}
 		return 0, false, fmt.Errorf("migrate status: %w", err)
 	}

@@ -133,11 +133,33 @@ func TestRunMigrateAction_UnknownAction(t *testing.T) {
 	}
 }
 
-// TestRunMigrate_NilCfg 验证 RunMigrate 对 nil cfg fail-fast。
-func TestRunMigrate_NilCfg(t *testing.T) {
+// TestRunMigrate_NilCfgNoOverrideFallsBackToLocate 验证 RunMigrate(nil, action) 走
+// LocateDefault 路径 —— 测试 cwd 是 internal/cli/，server/configs/local.yaml
+// 不存在，所以 LocateDefault 失败 → RunMigrate 返 error（review round 2 修法：
+// 不再对 nil cfg fail-fast，而是 lazy locate；找不到时才报错）。
+func TestRunMigrate_NilCfgNoOverrideFallsBackToLocate(t *testing.T) {
 	err := RunMigrate(context.Background(), nil, []string{"up"})
 	if err == nil {
-		t.Fatalf("RunMigrate(nil cfg): got nil, want error")
+		t.Fatalf("RunMigrate(nil cfg, no -config): got nil, want error from LocateDefault")
+	}
+	if !strings.Contains(err.Error(), "locate default config") && !strings.Contains(err.Error(), "no config file found") {
+		t.Errorf("expected LocateDefault failure, got %v", err)
+	}
+}
+
+// TestRunMigrate_NilCfgWithBadConfigOverride 验证 RunMigrate(nil, "-config bad.yaml ...")
+// 不会先走 LocateDefault（避免 main 流程 bug：CI 只 ship dev.yaml 的场景必须直接尝试
+// Load 用户给的 path，而不是因为 local.yaml 不存在就先 fail）。
+//
+// review round 2 Finding 1 的核心场景：cfg=nil + 显式 -config → 直接走 -config 路径。
+func TestRunMigrate_NilCfgWithBadConfigOverride(t *testing.T) {
+	err := RunMigrate(context.Background(), nil, []string{"-config", "/nonexistent/path/bad.yaml", "up"})
+	if err == nil {
+		t.Fatalf("RunMigrate(nil, -config bad): got nil, want error from Load override")
+	}
+	// 关键：错误必须来自 Load -config 路径，而不是 LocateDefault
+	if !strings.Contains(err.Error(), "load -config") {
+		t.Errorf("expected error from -config override Load (not LocateDefault), got %v", err)
 	}
 }
 

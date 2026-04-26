@@ -52,6 +52,43 @@ func main() {
 	// （覆盖 `catserver migrate up -config X` 形态）。两条路径都能拿到正确的 -config。
 	configPath, migrateArgs, isMigrate := parseTopLevelArgs(os.Args[1:])
 
+	// Story 4.3 review round 2 fix：migrate 子命令必须**绕过** main 的 default config load。
+	//
+	// 否则 `catserver migrate up -config dev.yaml`（CI/container 只 ship dev.yaml，
+	// 没有 local.yaml）会在下面 LocateDefault → Load 阶段直接 os.Exit(1)，根本走不到
+	// migrate 分支让 RunMigrate 消费自己的 -config。
+	//
+	// 修法：检测到 migrate 路径后立刻进入分支；让 RunMigrate 自己负责 config 加载
+	// （cfg=nil 传入，args 里有 -config 用 -config，没有走 LocateDefault）。
+	// 详见 docs/lessons/2026-04-26-cli-cancellation-and-gomigrate-gracefulstop.md。
+	if isMigrate {
+		// migrate 分支用**自己的** signal-ctx —— migrate up 跑多个 SQL 文件可能耗时
+		// 几十秒，且现在 ctx-aware（gomigrate.GracefulStop chan）能让 SIGINT 在
+		// statement 边界提前停下。详见 internal/infra/migrate/migrate.go。
+		migrateCtx, migrateStop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer migrateStop()
+		// preMigrate 路径上若也有 -config（`catserver -config X migrate up` 形态），
+		// 仍优先用它 —— 通过 Load 拿到 cfg 传给 RunMigrate；RunMigrate 内部 -config
+		// override 优先级仍比传入 cfg 高（`catserver -config A migrate up -config B`
+		// 用 B；这种调用形态边缘但语义一致）。
+		var preCfg *config.Config
+		if configPath != "" {
+			c, err := config.Load(configPath)
+			if err != nil {
+				slog.Error("config load failed", slog.Any("error", err), slog.String("path", configPath))
+				os.Exit(1)
+			}
+			preCfg = c
+			logger.Init(c.Log.Level)
+		}
+		if err := cli.RunMigrate(migrateCtx, preCfg, migrateArgs); err != nil {
+			slog.Error("migrate failed", slog.Any("error", err))
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	// 非 migrate 路径：走原有 default config load 流程。
 	if configPath == "" {
 		p, err := config.LocateDefault()
 		if err != nil {
@@ -73,27 +110,6 @@ func main() {
 		slog.Int("http_port", cfg.Server.HTTPPort),
 		slog.String("log_level", cfg.Log.Level),
 	)
-
-	// Story 4.3：migrate 子命令分支。
-	// `catserver migrate {up|down|status}` 走这条路径，之后 os.Exit 立刻退出，
-	// **不**进入 server 启动路径（不调 db.Open / bootstrap.Run）。
-	//
-	// 为什么必须在 db.Open **之前**：schema 不存在时 db.Open 的 PingContext 会失败
-	// （表不存在不是 ping 失败，但首次部署 / 全新 DB 场景仍可能遇到 schema 校验路径
-	// 失败）；更重要的是 migrate 工具自己用独立 driver 上 advisory lock，与 4.2 的
-	// gorm.DB 解耦，没有理由强制先 Open。
-	//
-	// 子命令分支用**自己的** signal-ctx，不复用 db.Open 的 5s timeout —— migrate up
-	// 跑多个 SQL 文件可能耗时几十秒。详见 Story 4.3 Dev Notes。
-	if isMigrate {
-		migrateCtx, migrateStop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-		defer migrateStop()
-		if err := cli.RunMigrate(migrateCtx, cfg, migrateArgs); err != nil {
-			slog.Error("migrate failed", slog.Any("error", err))
-			os.Exit(1)
-		}
-		os.Exit(0)
-	}
 
 	// Dev 模式（BUILD_DEV=true 或 build tag `devtools`）启用时在启动阶段打一条
 	// 醒目 WARN。放在 logger.Init(cfg.Log.Level) 之后 → 用户配置的 log level

@@ -2,12 +2,14 @@ package migrate
 
 import (
 	"context"
+	"errors"
 	nurl "net/url"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // nurlParse 是 net/url.Parse 的本地别名，避免 import 名冲突。
@@ -198,6 +200,138 @@ func TestPathToFileURI_RoundTripViaURLParse(t *testing.T) {
 		if len(p) >= 2 && p[1] != ':' {
 			t.Errorf("Windows recovered path %q does not start with 'X:' drive form", p)
 		}
+	}
+}
+
+// fakeStopSender 是 stopSender 的测试假实现，记录是否被调用。
+type fakeStopSender struct {
+	mu       sync.Mutex
+	stopped  bool
+	stopCnt  int
+}
+
+func (f *fakeStopSender) sendGracefulStop() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stopped = true
+	f.stopCnt++
+}
+
+// TestRunWithCtx_FnReturnsBeforeCancel 验证 fn 在 ctx cancel 之前完成时，
+// 直接拿到 fn 的 error，不调 stop sender。
+func TestRunWithCtx_FnReturnsBeforeCancel(t *testing.T) {
+	ctx := context.Background()
+	stop := &fakeStopSender{}
+	wantErr := errors.New("boom")
+	got := runWithCtx(ctx, stop, func() error { return wantErr })
+	if !errors.Is(got, wantErr) {
+		t.Errorf("got %v, want %v", got, wantErr)
+	}
+	if stop.stopped {
+		t.Errorf("stop sender called when fn returned normally")
+	}
+}
+
+// TestRunWithCtx_FnReturnsNilBeforeCancel 验证 fn 返 nil 时透传。
+func TestRunWithCtx_FnReturnsNilBeforeCancel(t *testing.T) {
+	ctx := context.Background()
+	stop := &fakeStopSender{}
+	got := runWithCtx(ctx, stop, func() error { return nil })
+	if got != nil {
+		t.Errorf("got %v, want nil", got)
+	}
+	if stop.stopped {
+		t.Errorf("stop sender called when fn returned nil")
+	}
+}
+
+// TestRunWithCtx_CancelReturnsCtxErr 验证 ctx cancel 时 runWithCtx 立刻返 ctx.Err()
+// 并触发 stop.sendGracefulStop()，不等 fn 返回。
+//
+// 这是 review round 2 Finding 2 的核心断言：CLI SIGINT 时调用方能立刻 unblock。
+func TestRunWithCtx_CancelReturnsCtxErr(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := &fakeStopSender{}
+
+	// fn 阻塞至少 5s（远超过 ctx cancel 后期望的返回时间）
+	fnStarted := make(chan struct{})
+	fnDone := make(chan struct{})
+	fn := func() error {
+		close(fnStarted)
+		select {
+		case <-time.After(5 * time.Second):
+		case <-fnDone:
+		}
+		return errors.New("late return")
+	}
+
+	got := make(chan error, 1)
+	go func() {
+		got <- runWithCtx(ctx, stop, fn)
+	}()
+
+	<-fnStarted
+	cancel()
+
+	select {
+	case err := <-got:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("got %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runWithCtx did not return within 2s after ctx cancel")
+	}
+
+	if !stop.stopped {
+		t.Errorf("stop sender not called on ctx cancel")
+	}
+
+	// 让后台 fn goroutine 退出（避免 goroutine leak 影响后续测试）
+	close(fnDone)
+}
+
+// TestRunWithCtx_DeadlineExceededReturnsCtxErr 验证 ctx 超时也走 stop 路径。
+func TestRunWithCtx_DeadlineExceededReturnsCtxErr(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	stop := &fakeStopSender{}
+
+	fnDone := make(chan struct{})
+	fn := func() error {
+		<-fnDone
+		return nil
+	}
+
+	start := time.Now()
+	err := runWithCtx(ctx, stop, fn)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("got %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed > 1*time.Second {
+		t.Errorf("runWithCtx took %v, expected < 1s after deadline", elapsed)
+	}
+	if !stop.stopped {
+		t.Errorf("stop sender not called on deadline")
+	}
+
+	close(fnDone)
+}
+
+// TestUp_NilMigratorWithCanceledCtx 验证 nil migrator 路径上即使传 canceled ctx，
+// 仍优先报"closed or uninitialized" —— 这是防护性 short-circuit。
+func TestUp_NilMigratorWithCanceledCtx(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	m := &migrator{m: nil}
+	err := m.Up(ctx)
+	if err == nil {
+		t.Fatal("got nil, want error")
+	}
+	// 必须报 closed 而不是 ctx.Canceled —— nil migrator 比 ctx 优先级高
+	if !strings.Contains(err.Error(), "closed or uninitialized") {
+		t.Errorf("error %q does not mention 'closed or uninitialized'", err.Error())
 	}
 }
 
