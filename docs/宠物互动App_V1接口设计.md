@@ -332,11 +332,12 @@ JSON 示例（服务端始终返回 `null`；获取真实房间归属请改用 `
 | `data.user.id` | string | 真实数据 | 用户主键 |
 | `data.user.nickname` | string | 真实数据 | 用户昵称 |
 | `data.user.avatarUrl` | string | `""` | 头像 URL |
-| `data.pet.id` | string | 真实数据 | 默认猫主键 |
-| `data.pet.petType` | number | `1` | 宠物类型枚举 |
-| `data.pet.name` | string | `"默认小猫"` | 宠物名 |
-| `data.pet.currentState` | number | `1`（rest） | 宠物当前状态枚举（1=rest, 2=walk, 3=run）；节点 2 阶段读 pets.current_state，初始为 `1` |
-| `data.pet.equips` | array | `[]` | 装扮列表；**节点 2 阶段强制返回 `[]`**（穿戴在节点 9 由 Story 26.6 落地） |
+| `data.pet` | object \| null | 真实数据 | 默认猫信息容器；用户**无默认 pet（理论不该发生，但 Story 4.8 edge case 强制覆盖）时返回 `null`**。客户端必须按可空对象解析（iOS 端 `Optional<PetDTO>` / Go 端 `*PetDTO`），不得假设 pet 永远非空。下方 `data.pet.*` 子字段**仅当 `data.pet ≠ null` 时存在** |
+| `data.pet.id` | string | 真实数据 | 默认猫主键（仅当 `data.pet ≠ null`） |
+| `data.pet.petType` | number | `1` | 宠物类型枚举（仅当 `data.pet ≠ null`） |
+| `data.pet.name` | string | `"默认小猫"` | 宠物名（仅当 `data.pet ≠ null`） |
+| `data.pet.currentState` | number | `1`（rest） | 宠物当前状态枚举（1=rest, 2=walk, 3=run）；节点 2 阶段读 pets.current_state，初始为 `1`（仅当 `data.pet ≠ null`） |
+| `data.pet.equips` | array | `[]` | 装扮列表；**节点 2 阶段强制返回 `[]`**（穿戴在节点 9 由 Story 26.6 落地）（仅当 `data.pet ≠ null`） |
 | `data.stepAccount.totalSteps` | number | `0`（首次登录） | 累计步数 |
 | `data.stepAccount.availableSteps` | number | `0`（首次登录） | 可用步数 |
 | `data.stepAccount.consumedSteps` | number | `0`（首次登录） | 已消耗步数 |
@@ -386,7 +387,7 @@ JSON 示例（节点 2 阶段示例 — 首次登录后立即调用）：
 }
 ```
 
-JSON 示例（节点 9 / 节点 10 之后的真实数据，pet.equips 由 Story 26.6 填充，pet.equips[].renderConfig 由 Story 29.6 填充）：
+JSON 示例（节点 9 之后的真实数据，pet.equips 由 Story 26.6 填充；节点 10 起 pet.equips[] 还会带 renderConfig 子对象，本示例**不**展示 —— 待 Story 29.6 落地时单独补充节点 10 版本示例）：
 
 ```json
 {
@@ -444,7 +445,7 @@ JSON 示例（节点 9 / 节点 10 之后的真实数据，pet.equips 由 Story 
 #### Future Fields
 
 > **Future Fields**（按节点 increment）：
-> - `data.pet.equips[]`：节点 9（Epic 26）穿戴链路落地后，由 Story 26.6 把 user_pet_equips JOIN cosmetic_items 的真实数据填充。每个元素 schema 见上方"节点 9 / 节点 10 之后的真实数据"示例，含 `slot / userCosmeticItemId / cosmeticItemId / name / rarity / assetUrl`。
+> - `data.pet.equips[]`：节点 9（Epic 26）穿戴链路落地后，由 Story 26.6 把 user_pet_equips JOIN cosmetic_items 的真实数据填充。每个元素 schema 见上方"节点 9 之后的真实数据"示例，含 `slot / userCosmeticItemId / cosmeticItemId / name / rarity / assetUrl`。
 > - `data.pet.equips[].renderConfig`：节点 10（Epic 29）渲染配置落地后，由 Story 29.6 在每个 equips 元素上追加 `renderConfig: { offsetX, offsetY, scale, rotation, zLayer }` 子对象。具体字段在 Epic 29 落地时再展开。
 > - `data.room.currentRoomId`：节点 4 起由 Story 11.10 注入真实房间 ID。
 
