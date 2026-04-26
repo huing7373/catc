@@ -341,9 +341,108 @@ func TestLocateMigrations_FilePrefersDir(t *testing.T) {
 
 // TestLocateMigrationsIn_Empty 验证空候选列表返 error（防御性测试）。
 func TestLocateMigrationsIn_Empty(t *testing.T) {
-	_, err := locateMigrationsIn(nil)
+	_, err := locateMigrationsIn(nil, nil)
 	if err == nil {
 		t.Fatal("got nil, want error")
+	}
+}
+
+// TestLocateMigrationsIn_ExeRelativeFallback 验证 cwd 候选都不存在时回退到
+// executable-relative 候选 —— 对应 review round 5 Finding 1 的核心场景：
+// 二进制从 cwd=/tmp 等无 migrations 目录的位置启动，仍能通过 binary 旁边的
+// server/migrations 找到 schema 文件。
+func TestLocateMigrationsIn_ExeRelativeFallback(t *testing.T) {
+	tmp := t.TempDir()
+	exeDir := filepath.Join(tmp, "exe-relative-migrations")
+	if err := os.Mkdir(exeDir, 0o755); err != nil {
+		t.Fatalf("mkdir exe-relative migrations: %v", err)
+	}
+
+	got, err := locateMigrationsIn(
+		[]string{filepath.Join(tmp, "never-exists")},
+		func() []string { return []string{exeDir} },
+	)
+	if err != nil {
+		t.Fatalf("locateMigrationsIn returned unexpected error: %v", err)
+	}
+	if got != exeDir {
+		t.Errorf("got %q, want %q", got, exeDir)
+	}
+}
+
+// TestLocateMigrationsIn_AllMissingError 验证 cwd 候选 + exe-relative 候选都不存在时
+// 返带提示的 error，错误信息必须提到 cwd 候选 + executable-relative 双 fallback +
+// CAT_MIGRATIONS_PATH 环境变量出口（保持与 LocateDefault 错误信息风格一致）。
+func TestLocateMigrationsIn_AllMissingError(t *testing.T) {
+	tmp := t.TempDir()
+	_, err := locateMigrationsIn(
+		[]string{filepath.Join(tmp, "a"), filepath.Join(tmp, "b")},
+		func() []string { return []string{filepath.Join(tmp, "c")} },
+	)
+	if err == nil {
+		t.Fatal("got nil, want error")
+	}
+	if !strings.Contains(err.Error(), "migrations dir not found") {
+		t.Errorf("error %q missing 'migrations dir not found'", err.Error())
+	}
+	if !strings.Contains(err.Error(), "executable-relative") {
+		t.Errorf("error %q should mention executable-relative fallback", err.Error())
+	}
+	if !strings.Contains(err.Error(), "CAT_MIGRATIONS_PATH") {
+		t.Errorf("error %q missing CAT_MIGRATIONS_PATH override hint", err.Error())
+	}
+}
+
+// TestLocateMigrationsIn_IgnoresFileMatches 验证候选指向文件（而非目录）时跳过它，
+// 等价于 dirExists 的 IsDir 校验（防止误把同名文件当成 migrations 目录）。
+func TestLocateMigrationsIn_IgnoresFileMatches(t *testing.T) {
+	tmp := t.TempDir()
+	// cwd 候选：同名文件，应被跳过
+	fileCandidate := filepath.Join(tmp, "looks-like-migrations")
+	if err := os.WriteFile(fileCandidate, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fake file: %v", err)
+	}
+	// exe-relative 候选：真实目录
+	dirCandidate := filepath.Join(tmp, "real-migrations")
+	if err := os.Mkdir(dirCandidate, 0o755); err != nil {
+		t.Fatalf("mkdir real: %v", err)
+	}
+
+	got, err := locateMigrationsIn(
+		[]string{fileCandidate},
+		func() []string { return []string{dirCandidate} },
+	)
+	if err != nil {
+		t.Fatalf("locateMigrationsIn returned unexpected error: %v", err)
+	}
+	if got != dirCandidate {
+		t.Errorf("got %q, want %q (file candidates must be skipped)", got, dirCandidate)
+	}
+}
+
+// TestExecutableRelativeMigrationsCandidates_NotEmpty 验证生产候选生成函数在
+// 测试环境（os.Executable 可用）下能返回非空候选列表，且候选路径都是 binary
+// 旁边的相对路径（避免被改成绝对硬编码）。
+func TestExecutableRelativeMigrationsCandidates_NotEmpty(t *testing.T) {
+	got := executableRelativeMigrationsCandidates()
+	if len(got) == 0 {
+		t.Fatal("got empty candidates, want non-empty (os.Executable should work in tests)")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skipf("os.Executable unavailable: %v", err)
+	}
+	binDir := filepath.Dir(exe)
+	// 至少一条候选必须是 binDir 子路径（防止函数被改成完全无关的硬编码路径）
+	hasBinRelated := false
+	for _, p := range got {
+		if strings.Contains(p, binDir) {
+			hasBinRelated = true
+			break
+		}
+	}
+	if !hasBinRelated {
+		t.Errorf("none of candidates %v contain bin dir %q", got, binDir)
 	}
 }
 

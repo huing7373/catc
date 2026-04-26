@@ -41,26 +41,62 @@ var DefaultMigrationsCandidates = []string{
 }
 
 // LocateMigrations 在一组候选位置里找到第一个存在的 migrations 目录，返回其路径。
-// 与 config.LocateDefault 的设计动机一致：avoid 把"假设 cwd 是某个特定目录"硬编码进
-// 默认值，让 build.sh 产物从 repo-root / server/ 两个位置跑都能找到 migrations。
+// 与 config.LocateDefault 的设计动机 / 查找顺序一致：
+//  1. CWD-relative 候选（DefaultMigrationsCandidates）
+//  2. 二进制所在目录 + 常见相对布局（需要 os.Executable 可用）
+//
+// avoid 把"假设 cwd 是某个特定目录"硬编码进默认值，让 build.sh 产物无论从 repo-root /
+// server/ 还是其他 cwd（例如 `cd /tmp && /repo/build/catserver migrate up`）都能找到
+// migrations。
 //
 // 注意：CAT_MIGRATIONS_PATH（env 显式覆盖）的优先级**更高**，由 RunMigrate 决策；
 // 本函数只负责"没有 env 时的 auto-detect"。
 //
 // 详见 docs/lessons/2026-04-26-cli-relative-path-and-graceful-stop-wait.md。
 func LocateMigrations() (string, error) {
-	return locateMigrationsIn(DefaultMigrationsCandidates)
+	return locateMigrationsIn(DefaultMigrationsCandidates, executableRelativeMigrationsCandidates)
 }
 
-// locateMigrationsIn 是 LocateMigrations 的可测试核心：参数化候选路径以便在 tmp dir 测试。
-func locateMigrationsIn(candidates []string) (string, error) {
-	for _, p := range candidates {
-		info, err := os.Stat(p)
-		if err == nil && info.IsDir() {
+// locateMigrationsIn 是 LocateMigrations 的可测试核心：参数化候选路径来源以便在 tmp dir 里测试。
+func locateMigrationsIn(cwdCandidates []string, exeCandidatesFn func() []string) (string, error) {
+	for _, p := range cwdCandidates {
+		if dirExists(p) {
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("migrations dir not found; tried %v; set CAT_MIGRATIONS_PATH to override", candidates)
+	if exeCandidatesFn != nil {
+		for _, p := range exeCandidatesFn() {
+			if dirExists(p) {
+				return p, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("migrations dir not found; tried CWD candidates %v + executable-relative fallback; set CAT_MIGRATIONS_PATH to override", cwdCandidates)
+}
+
+// executableRelativeMigrationsCandidates 基于当前二进制所在目录推断 migrations 目录候选。
+// 与 config.executableRelativeCandidates 的布局假设保持一致，常见布局：
+//   - 二进制 `repo-root/build/catserver.exe` → `../server/migrations`
+//   - 二进制和 migrations 同层（装机后 `install/bin` + `install/migrations`）→ `./migrations`
+//   - 二进制在 `server/build/catserver` → `../migrations`
+//
+// os.Executable 失败（例如 chroot / minimal env）→ 返 nil，调用方降级为"只看 cwd"。
+func executableRelativeMigrationsCandidates() []string {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil
+	}
+	binDir := filepath.Dir(exe)
+	return []string{
+		filepath.Join(binDir, "..", "server", "migrations"),
+		filepath.Join(binDir, "..", "migrations"),
+		filepath.Join(binDir, "migrations"),
+	}
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // Migrator 是 cli 包内部的 migration 抽象，签名与 internal/infra/migrate.Migrator 完全一致。
