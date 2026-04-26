@@ -17,9 +17,14 @@ const (
 	// 提交到仓库的 YAML，部署侧用环境变量或 K8s Secret 注入。Story 4.2 review
 	// 补漏，参见 docs/lessons/2026-04-26-config-env-override-and-gorm-auto-ping.md。
 	envMySQLDSN = "CAT_MYSQL_DSN"
+	// envAuthTokenSecret 是 staging / prod 注入 JWT signing secret 的标准入口。
+	// Story 4.4 引入。token_secret 含密钥语义 → 不入仓库 YAML，部署侧用 K8s
+	// Secret / Vault 注入；与 4.2 mysql.dsn env override 同模式。
+	envAuthTokenSecret = "CAT_AUTH_TOKEN_SECRET"
 
-	defaultHTTPPort = 8080
-	defaultLogLevel = "info"
+	defaultHTTPPort       = 8080
+	defaultLogLevel       = "info"
+	defaultTokenExpireSec = 604800 // 7 天，epics.md §Story 4.4 行 1014 钦定
 )
 
 func Load(path string) (*Config, error) {
@@ -51,12 +56,20 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv(envMySQLDSN); v != "" {
 		cfg.MySQL.DSN = v
 	}
+	// Auth token secret 含密钥语义不入仓 → 部署侧通过 CAT_AUTH_TOKEN_SECRET 注入；
+	// 空串视为 "不覆盖"（保留 YAML 默认或留空让 auth.New fail-fast）。
+	if v := os.Getenv(envAuthTokenSecret); v != "" {
+		cfg.Auth.TokenSecret = v
+	}
 
 	if cfg.Server.HTTPPort == 0 {
 		cfg.Server.HTTPPort = defaultHTTPPort
 	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = defaultLogLevel
+	}
+	if cfg.Auth.TokenExpireSec == 0 {
+		cfg.Auth.TokenExpireSec = defaultTokenExpireSec
 	}
 
 	return &cfg, nil

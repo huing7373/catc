@@ -58,3 +58,4 @@
 | 2026-04-26 | [CLI 默认相对路径必须 auto-detect 多 cwd & gomigrate GracefulStop 必须等 fn 真停](2026-04-26-cli-relative-path-and-graceful-stop-wait.md) | 2 | config, error-handling | `c1b7e4b` |
 | 2026-04-26 | [ctx-aware 包装必须 short-circuit pre-canceled ctx & 文件路径转 URI 必须 escape 元字符](2026-04-26-ctx-precancel-shortcircuit-and-uri-escape.md) | 2 | error-handling | `fc91816` |
 | 2026-04-26 | [locate auto-detect 逻辑必须 cwd + exe-relative 双 fallback（与 config.LocateDefault 一致）](2026-04-26-locate-cwd-and-exe-relative-fallback.md) | 1 | config | `88e07bd` |
+| 2026-04-26 | [JWT util 校验必填 claim + 所有 sign 路径必须 enforce 配置约束](2026-04-26-jwt-required-claim-and-sign-policy-enforcement.md) | 2 | security | `<pending>` |

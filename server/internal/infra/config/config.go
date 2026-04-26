@@ -3,6 +3,7 @@ package config
 type Config struct {
 	Server ServerConfig `yaml:"server"`
 	MySQL  MySQLConfig  `yaml:"mysql"`
+	Auth   AuthConfig   `yaml:"auth"`
 	Log    LogConfig    `yaml:"log"`
 }
 
@@ -58,6 +59,33 @@ type MySQLConfig struct {
 	//
 	// 0 = 不限制（连接永远不主动 refresh，不推荐生产用）。
 	ConnMaxLifetimeSec int `yaml:"conn_max_lifetime_sec"`
+}
+
+// AuthConfig 是 JWT 签发 / 校验配置。Story 4.4 引入；选型 / 默认值 / fail-fast
+// 由 epics.md §Story 4.4（行 999-1020）+ V1接口设计 §4.1 行 180 钦定。
+//
+// 字段不在 config 包做业务校验（无 Validate 方法），fail-fast 由
+// `internal/pkg/auth.New` 承担：TokenSecret 为空 / < 16 字节 / TokenExpireSec ≤ 0
+// 直接返 error，main.go 走 `slog.Error + os.Exit(1)`。
+type AuthConfig struct {
+	// TokenSecret 是 HS256 签名 secret。**生产必须用 env 注入**（CAT_AUTH_TOKEN_SECRET）；
+	// 仓库 YAML 默认留空让启动 fail-fast，避免空 secret 让 token 可任意伪造。
+	//
+	// 长度要求：≥ 16 字节（128 bit；HMAC-SHA256 推荐至少与 hash output size 等长，
+	// 16 字节 secret + HMAC 的 amplification 已可抗暴力破解）。
+	//
+	// 生产注入：K8s Secret / Vault → CAT_AUTH_TOKEN_SECRET env，与 4.2 mysql.dsn
+	// 同模式（密钥不入仓库 YAML）。
+	TokenSecret string `yaml:"token_secret"`
+
+	// TokenExpireSec 是默认 token 过期时间（秒）。epics.md 行 1014 钦定默认 7 天 = 604800。
+	//
+	// 配置可覆盖（如 dev 环境短到 1 小时方便测试）；范围限制 (0, 30*86400] 在
+	// `internal/pkg/auth.New` 内实装，超过 30 天的 token 接近 "永不过期"，
+	// 违反 V1 §4.1 "默认过期 7 天" 契约语义。
+	//
+	// loader.go 兜底：YAML 没填 → 默认 604800（7 天）。
+	TokenExpireSec int64 `yaml:"token_expire_sec"`
 }
 
 type LogConfig struct {

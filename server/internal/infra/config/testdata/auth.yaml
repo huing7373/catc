@@ -1,0 +1,11 @@
+server:
+  http_port: 8080
+  read_timeout_sec: 5
+  write_timeout_sec: 10
+
+auth:
+  token_secret: "yaml-only-secret-must-be-at-least-16-bytes"
+  token_expire_sec: 3600
+
+log:
+  level: info

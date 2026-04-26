@@ -15,6 +15,7 @@ import (
 	"github.com/huing/cat/server/internal/infra/config"
 	"github.com/huing/cat/server/internal/infra/db"
 	"github.com/huing/cat/server/internal/infra/logger"
+	"github.com/huing/cat/server/internal/pkg/auth"
 	"github.com/huing/cat/server/internal/repo/tx"
 )
 
@@ -159,7 +160,26 @@ func main() {
 	txMgr := tx.NewManager(gormDB)
 	slog.Info("mysql connected", slog.Int("max_open_conns", cfg.MySQL.MaxOpenConns))
 
-	if err := bootstrap.Run(ctx, cfg, gormDB, txMgr); err != nil {
+	// Story 4.4：JWT signer 构造 fail-fast。
+	//
+	// auth.New 校验：secret 空 / < 16 字节 / expireSec ≤ 0 / expireSec > 30 天 → 返 error。
+	// 任一失败必须 os.Exit(1)：
+	//   - 空 secret 让所有 token 可被任意伪造（严重安全漏洞）
+	//   - secret 过短易被暴力破解
+	//   - 异常 expireSec 违反 V1 §4.1 "默认过期 7 天" 契约
+	//
+	// 与 db.Open 同 fail-fast 模式（MEMORY.md "No Backup Fallback" 钦定反对 fallback
+	// 掩盖核心架构风险；启动时尽早暴露问题，避免业务请求才发现 secret 缺失）。
+	//
+	// 不需要 timeout ctx：auth.New 是纯 CPU < 1µs，不阻塞 IO（与 db.Open 不同）。
+	signer, err := auth.New(cfg.Auth.TokenSecret, cfg.Auth.TokenExpireSec)
+	if err != nil {
+		slog.Error("auth token signer init failed", slog.Any("error", err))
+		os.Exit(1)
+	}
+	slog.Info("auth token signer ready", slog.Int64("default_expire_sec", cfg.Auth.TokenExpireSec))
+
+	if err := bootstrap.Run(ctx, cfg, gormDB, txMgr, signer); err != nil {
 		slog.Error("server run failed", slog.Any("error", err))
 		os.Exit(1)
 	}

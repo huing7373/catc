@@ -17,5 +17,15 @@ mysql:
   max_idle_conns: 10
   conn_max_lifetime_sec: 1800
 
+auth:
+  # JWT signing secret（HS256；Story 4.4 接入）。
+  # 本地开发：用 export CAT_AUTH_TOKEN_SECRET="<≥16 字节随机字符串>" 注入，
+  # 或在本文件填 token_secret（不推荐，避免 secret 入仓）。
+  # 生产 / staging：通过环境变量 `CAT_AUTH_TOKEN_SECRET` 覆盖（loader.go 已挂；
+  # 部署 / K8s Secret 注入，避免把密钥写进 ConfigMap / 仓库）。
+  # 留空 → 启动时 auth.New 返 error → main.go fail-fast（os.Exit 1）。
+  token_secret: ""
+  token_expire_sec: 604800  # 7 天，epics.md §Story 4.4 行 1014 钦定
+
 log:
   level: info
