@@ -13,6 +13,9 @@
 //   - closure wire 放 .onAppear 而非 init：@StateObject 在 init 阶段未真正初始化，
 //     init 写会捕获到错误的实例；.onAppear 时 view 已显示，coordinator 已稳定。
 //   - capture list `[coordinator]` 显式声明（防强引用 self；闭包都是值类型，重复赋值仅覆盖）。
+//   - resetIdentityViewModel（仅 Debug）走 @State Optional + .onAppear 注入路径，
+//     与 container 共享同一 keychainStore instance（codex round 1 [P1] 修复）。
+//     详见 docs/lessons/2026-04-26-stateobject-debug-instance-aliasing.md。
 //
 // Story 2.9 落地 AppLaunchState 时改为根据状态路由到 LaunchingView / HomeView / RetryView。
 
@@ -23,10 +26,31 @@ struct RootView: View {
     @StateObject private var container = AppContainer()
     @StateObject private var homeViewModel = HomeViewModel()
 
+    #if DEBUG
+    /// Story 2.8: dev "重置身份" 按钮 ViewModel。仅 Debug build 存在；Release build 字段不存在。
+    ///
+    /// **注入路径**：用 `@State Optional` + `.onAppear` lazy 注入，**不**用 `@StateObject` + init 阶段构造。
+    /// 因为 `@StateObject` 必须在 init 阶段给值，但 RootView 的 `container` 同样是 `@StateObject`、
+    /// init 期间还**没**真正实体化，无法 `_resetIdentityViewModel = StateObject(...container.make...())`。
+    /// 早期实装走 standalone `AppContainer()` bootstrap 喂初值——但那会构造一个**新的** `InMemoryKeychainStore`
+    /// 实例，与 `container.keychainStore` 是两个不同的字典，重置按钮调的 `removeAll()` 清的是 bootstrap 那个，
+    /// container 实际持有的 keychain 仍残留——UI 显示成功但功能失效（codex round 1 [P1] finding）。
+    /// 详见 docs/lessons/2026-04-26-stateobject-debug-instance-aliasing.md。
+    @State private var resetIdentityViewModel: ResetIdentityViewModel?
+    #endif
+
     var body: some View {
-        HomeView(viewModel: homeViewModel)
+        homeView
             .onAppear {
                 wireHomeViewModelClosures()
+                #if DEBUG
+                // lazy 注入：第一次 .onAppear 时从已稳定的 container 拿 keychainStore，
+                // 保证 reset 按钮调的 removeAll() 清的是 container.keychainStore 这同一份。
+                // nil 守卫让 RootView 重建（如旋转 / 离开返回）时不会重新构造覆盖既有 instance。
+                if resetIdentityViewModel == nil {
+                    resetIdentityViewModel = container.makeResetIdentityViewModel()
+                }
+                #endif
             }
             .task {
                 // 把 container 创建的 PingUseCase 单次绑定到 homeViewModel，再触发 start()。
@@ -39,6 +63,18 @@ struct RootView: View {
                 sheetContent(for: sheet)
             }
             .errorPresentationHost(presenter: container.errorPresenter)
+    }
+
+    /// Debug build 走带 resetIdentityViewModel 的 init;Release build 走旧 init（按钮不存在）。
+    /// resetIdentityViewModel 在 .onAppear 之前为 nil；HomeView 已支持 Optional（按钮在 nil 时不渲染），
+    /// 短暂的 nil 期对 UX 无影响（dev 工具，非 release 关键路径）。
+    @ViewBuilder
+    private var homeView: some View {
+        #if DEBUG
+        HomeView(viewModel: homeViewModel, resetIdentityViewModel: resetIdentityViewModel)
+        #else
+        HomeView(viewModel: homeViewModel)
+        #endif
     }
 
     /// 把 HomeViewModel 三个 CTA 闭包接到 coordinator.present(...)。

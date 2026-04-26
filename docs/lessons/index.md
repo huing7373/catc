@@ -36,3 +36,4 @@
 | 2026-04-26 | [Combine `.prefix(N)` 替代手工 fulfill counter，避免 over-fulfillment + 让 publisher 自然 backpressure](2026-04-26-combine-prefix-vs-manual-fulfill.md) | 1 | testing | `6a2f62d` |
 | 2026-04-26 | [`xcodebuild -showdestinations` 必须按段过滤，grep 全文会选中 Ineligible 段](2026-04-26-xcodebuild-showdestinations-section-aware.md) | 1 | config | `61eecbc` |
 | 2026-04-26 | [Shell 判 simulator 可用性必须排除 `Any iOS Simulator Device` placeholder，concrete entry 才算真有 runtime](2026-04-26-simulator-placeholder-vs-concrete.md) | 1 | testing, config | `e328838` |
+| 2026-04-26 | [SwiftUI @StateObject init 阶段构造的 standalone container 与 RootView container 是别名陷阱](2026-04-26-stateobject-debug-instance-aliasing.md) | 1 | architecture | `<pending>` |

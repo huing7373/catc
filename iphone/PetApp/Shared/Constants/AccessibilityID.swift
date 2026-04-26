@@ -18,6 +18,9 @@ public enum AccessibilityID {
         public static let btnInventory = "home_btnInventory"
         public static let btnCompose = "home_btnCompose"
         public static let versionLabel = "home_versionLabel"
+        // Story 2.8: dev "重置身份" 按钮（仅 Debug build 渲染）+ alert reserved identifier。
+        public static let btnResetIdentity = "home_btnResetIdentity"
+        public static let resetIdentityAlert = "home_resetIdentityAlert"
     }
 
     // Story 2.3 新增：主界面跳转的全屏 Sheet placeholder a11y 标识。

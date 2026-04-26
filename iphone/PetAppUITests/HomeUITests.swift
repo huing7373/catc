@@ -44,4 +44,33 @@ final class HomeUITests: XCTestCase {
         let versionLabel = app.descendants(matching: .any)[AccessibilityID.Home.versionLabel]
         XCTAssertTrue(versionLabel.waitForExistence(timeout: timeout), "版本号区块未找到")
     }
+
+    /// Story 2.8 AC10：dev "重置身份" 按钮 + 点击 alert 链路。
+    /// XCUITest 默认在 Debug configuration 跑（xcodebuild test 默认 Debug），#if DEBUG 分支生效。
+    /// SwiftUI .alert(item:) 在 XCUITest 中表现为 app.alerts 集合；通过 alert 内文字定位。
+    func testResetIdentityButtonVisibleAndAlertOnTap() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let timeout: TimeInterval = 5
+
+        // 1. 按钮存在且可点击（AccessibilityID.Home.btnResetIdentity）
+        let btn = app.buttons[AccessibilityID.Home.btnResetIdentity]
+        XCTAssertTrue(btn.waitForExistence(timeout: timeout), "重置身份按钮未找到（应在 Debug build 渲染）")
+
+        // 2. 点击按钮
+        btn.tap()
+
+        // 3. alert 出现（通过 alert 内文字定位 — SwiftUI Alert 的 staticText 含 "已重置" 字样）
+        let alertTitle = app.staticTexts["已重置"]
+        XCTAssertTrue(alertTitle.waitForExistence(timeout: timeout), "重置成功 alert 未弹出")
+
+        // 4. 点 OK 关闭 alert
+        let okButton = app.alerts.buttons["OK"]
+        XCTAssertTrue(okButton.waitForExistence(timeout: timeout), "alert OK 按钮未找到")
+        okButton.tap()
+
+        // 5. alert 消失（回到主界面，按钮仍存在）
+        XCTAssertTrue(btn.waitForExistence(timeout: timeout), "回到主界面后按钮应仍存在")
+    }
 }

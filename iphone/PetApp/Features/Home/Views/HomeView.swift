@@ -17,8 +17,20 @@ import SwiftUI
 public struct HomeView: View {
     @ObservedObject public var viewModel: HomeViewModel
 
+    // Story 2.8: optional dev "重置身份" 按钮的 ViewModel（仅在 Debug build 由 RootView 注入）。
+    // 用 plain `let` 持有 — `@ObservedObject` 不接受 Optional；ResetIdentityButton 自己内部
+    // 持 `@ObservedObject viewModel`，订阅由 button 子 view 完成，HomeView 只做引用透传。
+    // 默认 nil 让 Story 2.2 / 2.5 既有 `HomeView(viewModel:)` 调用零改动；旧测试 / Preview 兼容。
+    private let resetIdentityViewModel: ResetIdentityViewModel?
+
     public init(viewModel: HomeViewModel) {
         self.viewModel = viewModel
+        self.resetIdentityViewModel = nil
+    }
+
+    public init(viewModel: HomeViewModel, resetIdentityViewModel: ResetIdentityViewModel?) {
+        self.viewModel = viewModel
+        self.resetIdentityViewModel = resetIdentityViewModel
     }
 
     public var body: some View {
@@ -47,9 +59,16 @@ public struct HomeView: View {
                 .fill(Color.gray)
                 .frame(width: 32, height: 32)
             Spacer()
+            #if DEBUG
+            if let resetIdentityViewModel = resetIdentityViewModel {
+                ResetIdentityButton(viewModel: resetIdentityViewModel)
+            }
+            #endif
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(viewModel.nickname))
+        // Story 2.8: children 从 .ignore 改为 .contain —— 让按钮的 a11y identifier 可被 XCUITest 独立定位；
+        // 父容器 a11y identifier 仍存在（既有 testHomeViewShowsAllSixPlaceholders 仍可定位 home_userInfo）。
+        // lesson 2026-04-26 SwiftUI 父容器 a11y identifier 默认传播覆盖子元素。
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier(AccessibilityID.Home.userInfo)
     }
 

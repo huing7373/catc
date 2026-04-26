@@ -32,6 +32,11 @@ public final class AppContainer: ObservableObject {
     /// 默认 `toastDuration = 2.0`；测试可通过未来追加的 init 重载注入自定义时长（本 story 不预留 YAGNI）。
     public let errorPresenter: ErrorPresenter
 
+    /// Story 2.8 新增：本地 KeychainStore 占位实装（InMemoryKeychainStore）。
+    /// 用于 dev "重置身份" 按钮触发 `removeAll()`；Story 5.1 替换为 KeychainServicesStore 时
+    /// 协议不变，所有 UseCase / ViewModel 测试零回归。
+    public let keychainStore: KeychainStoreProtocol
+
     /// Info.plist 中存放 baseURL 的 key（约定：`PetAppBaseURL`，避免与 Apple 系统 key 冲突）。
     /// 通过 build configuration / xcconfig 覆盖；缺省时回退到 `localhost` fallback。
     public static let baseURLInfoKey = "PetAppBaseURL"
@@ -51,9 +56,15 @@ public final class AppContainer: ObservableObject {
     }
 
     /// 注入式 init：测试中传 mock APIClient；未来 release build 切到 production baseURL 时也走此入口。
-    public init(apiClient: APIClientProtocol) {
+    /// Story 2.8：keychainStore 默认 InMemoryKeychainStore（占位实装），Story 5.1 替换为
+    /// KeychainServicesStore 时直接改默认值即可，调用方零改动。
+    public init(
+        apiClient: APIClientProtocol,
+        keychainStore: KeychainStoreProtocol = InMemoryKeychainStore()
+    ) {
         self.apiClient = apiClient
         self.errorPresenter = ErrorPresenter()
+        self.keychainStore = keychainStore
     }
 
     /// 解析默认 baseURL：从给定 bundle 的 Info.plist 读 `PetAppBaseURL`，否则回退到 fallback。
@@ -115,4 +126,18 @@ public final class AppContainer: ObservableObject {
     public func makePingUseCase() -> PingUseCaseProtocol {
         DefaultPingUseCase(client: apiClient)
     }
+
+    /// Story 2.8 新增：构造 ResetKeychainUseCase（dev "重置身份" 按钮）。
+    /// UseCase 是 value type，每次调用返回新实例；keychainStore 单例由 container 持有。
+    public func makeResetKeychainUseCase() -> ResetKeychainUseCaseProtocol {
+        DefaultResetKeychainUseCase(keychainStore: keychainStore)
+    }
+
+    #if DEBUG
+    /// Story 2.8 新增（仅 Debug build）：构造 ResetIdentityViewModel。
+    /// Release build 该方法不存在；调用方（RootView）也必须 #if DEBUG 包裹调用 — fail-closed。
+    public func makeResetIdentityViewModel() -> ResetIdentityViewModel {
+        ResetIdentityViewModel(useCase: makeResetKeychainUseCase())
+    }
+    #endif
 }

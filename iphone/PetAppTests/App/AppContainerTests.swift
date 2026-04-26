@@ -122,6 +122,36 @@ final class AppContainerTests: XCTestCase {
                         "localhost trailing slash 应被接受")
     }
 
+    // MARK: - round 1 [P1] (Story 2.8 dev-tools)：resetIdentityViewModel 必须共享 container.keychainStore
+
+    /// case#5a (Story 2.8 round 1 [P1])：通过 container.makeResetIdentityViewModel() 构造的 ViewModel
+    /// 必须用 container.keychainStore 同一 instance；不能像早期实装那样 standalone 新建一个 InMemoryKeychainStore，
+    /// 否则按下"重置身份"调的 removeAll() 清的不是 App 实际写入的那份字典 → UI 显示成功但功能失效。
+    ///
+    /// 验证策略：往 container.keychainStore 写一个值 → 调 reset ViewModel.tap() 触发 useCase.execute()
+    /// → 断言 container.keychainStore 里的值被清空。即"reset 影响 container 自己持有的 store"。
+    /// 详见 docs/lessons/2026-04-26-stateobject-debug-instance-aliasing.md。
+    #if DEBUG
+    func testResetIdentityViewModelSharesContainerKeychainStore() async throws {
+        let container = AppContainer()
+
+        // 1. 写入一个值，模拟 App 后续真实写 keychain（如 sessionToken / userId）。
+        try container.keychainStore.set("test-token", forKey: "sessionToken")
+        XCTAssertEqual(try container.keychainStore.get(forKey: "sessionToken"), "test-token",
+                       "前置：值已写入 container.keychainStore")
+
+        // 2. 通过 container factory 拿 ViewModel，触发 reset。
+        let viewModel = container.makeResetIdentityViewModel()
+        await viewModel.tap()
+
+        // 3. 必须读不到值——只有 reset 调到 container.keychainStore.removeAll() 才会发生。
+        //    若 ViewModel 拿的是另一个 standalone keychainStore（早期实装的 bug），container.keychainStore
+        //    里 "test-token" 不会被清，本断言会失败。
+        XCTAssertNil(try container.keychainStore.get(forKey: "sessionToken"),
+                     "reset 必须清 container.keychainStore；若失败说明 ViewModel 拿到的是别的 keychainStore instance")
+    }
+    #endif
+
     /// case#5 (round 3)：PetApp 的 Info.plist 必须配置 NSAppTransportSecurity → NSAllowsLocalNetworking = true。
     /// 否则 cleartext HTTP（http://localhost:8080）会被 iOS ATS 在 OS 层拒绝，feature 永远 offline。
     /// 详见 docs/lessons/2026-04-26-ios-ats-cleartext-http.md。
