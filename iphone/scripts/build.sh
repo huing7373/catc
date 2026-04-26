@@ -113,9 +113,20 @@ RESOLVED_DESTINATION=""
 
 # fallback 链：尝试用 xcodebuild -showdestinations 判断 primary 是否可解析
 # （比真跑 build 失败再 fallback 快）
-if xcodebuild -project "$PROJECT_PATH" -scheme "$SCHEME" -showdestinations 2>/dev/null | grep -q "iPhone 17"; then
+#
+# 关键：`xcodebuild -showdestinations` 输出有两段——
+#   "Available destinations for the \"<scheme>\" scheme:"
+#   "Ineligible destinations for the \"<scheme>\" scheme:"
+# Ineligible 段列出运行时缺失 / 不兼容的 destination；如果 grep 整段输出，
+# iPhone 17 哪怕只在 Ineligible 段出现脚本也会选它，后续 build 必定失败。
+# → 用 awk 范围选择只看 Available 段
+# （lesson 2026-04-26-xcodebuild-showdestinations-section-aware.md）
+SHOWDEST_OUTPUT="$(xcodebuild -project "$PROJECT_PATH" -scheme "$SCHEME" -showdestinations 2>/dev/null || true)"
+AVAILABLE_DESTINATIONS="$(echo "$SHOWDEST_OUTPUT" | awk '/Available destinations/{flag=1; next} /Ineligible destinations/{flag=0} flag')"
+
+if echo "$AVAILABLE_DESTINATIONS" | grep -q "iPhone 17"; then
   RESOLVED_DESTINATION="$DESTINATION_PRIMARY"
-elif xcodebuild -project "$PROJECT_PATH" -scheme "$SCHEME" -showdestinations 2>/dev/null | grep -q "iOS Simulator"; then
+elif echo "$AVAILABLE_DESTINATIONS" | grep -q "iOS Simulator"; then
   RESOLVED_DESTINATION="$DESTINATION_SECONDARY"
 else
   # 第三段 fallback：xcrun simctl 取第一个可用 simulator UUID
