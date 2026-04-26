@@ -92,6 +92,9 @@ public func assertThrowsAsyncError<T>(
 ///   是变更通知不同 — 它直接 emit 即将赋的值），collector 同步 append，**不**经过 dispatch async
 /// - 该 publisher 订阅时**会**emit 当前值（initial sink），helper 内部 drop 掉首条以保持
 ///   "不含初始值" 的 contract
+/// - 用 `.prefix(count)` 在收到 count 个值后让 publisher 自动 completion，避免 publisher
+///   emit 多于 count 时 sink 继续 fulfill 导致 XCTest over-fulfillment failure
+///   （round 3 修复，lesson 2026-04-26-combine-prefix-vs-manual-fulfill.md）
 /// - 内部 NSLock 保护 collected 数组（短临界区，不持锁调外部回调）
 public func awaitPublishedChange<O: AnyObject, V>(
     on object: O,
@@ -110,8 +113,14 @@ public func awaitPublishedChange<O: AnyObject, V>(
     // Published.Publisher 在订阅时会同步 emit 当前值；用 dropFirst() 屏蔽 initial，
     // 保持 contract "不含初始值"。后续每次 mutation 之前 publisher 同步 emit NEW value，
     // collector 同步 append，拿到完整变化序列（即使同 run loop turn 内连发多次）。
+    //
+    // **`.prefix(count)` 是关键**：让 publisher 在 emit count 个值后自动发送 completion，
+    // sink 上游被切断，不会再调 fulfill。否则 publisher emit > count 时（如 SampleViewModel.load
+    // 同 run loop 内连发 .loading + .ready 而调用方只要 count: 1），sink 会继续 fulfill，
+    // 触发 XCTest over-fulfillment failure（lesson 2026-04-26-combine-prefix-vs-manual-fulfill.md）
     let cancellable = object[keyPath: keyPath]
         .dropFirst()
+        .prefix(count)
         .sink { value in
             collector.append(value)
             expectation.fulfill()

@@ -182,6 +182,48 @@ final class SampleViewModelTests: XCTestCase {
         )
     }
 
+    /// contract (round 3): publisher emit 多于 count 个值时，helper 必须**不**报
+    /// XCTest over-fulfillment failure，且只取前 count 个。
+    ///
+    /// 验证 lesson 2026-04-26-combine-prefix-vs-manual-fulfill.md 核心规则：
+    /// 用 Combine `.prefix(count)` 让 publisher 在 emit count 个后自动 finish，
+    /// 而不是手工在 sink 内 fulfill 导致超量。
+    func testAwaitPublishedChangeStopsAtCountWhenPublisherEmitsMore() async throws {
+        // Helper 对象：单 run loop turn 内同步连发 5 次 mutation
+        final class Burst5: ObservableObject {
+            @Published var value: Int = 0
+            func bump5() {
+                value = 1
+                value = 2
+                value = 3
+                value = 4
+                value = 5
+            }
+        }
+        let burst = Burst5()
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            burst.bump5()
+        }
+
+        // 调用方只想观察前 2 次变化；publisher 实际 emit 5 次。
+        // 关键：sink 必须只 fulfill 2 次（不是 5 次），不能触发 over-fulfillment failure。
+        let captured = try await awaitPublishedChange(
+            on: burst,
+            publisher: \.$value,
+            count: 2,
+            timeout: 2.0
+        )
+
+        // 仅拿到前 2 个值
+        XCTAssertEqual(
+            captured,
+            [1, 2],
+            "prefix(count) 必须让 publisher 在 emit count 个值后停止；不应继续到 [1,2,3,4,5]"
+        )
+    }
+
     /// edge: assertThrowsAsyncError helper 用法演示
     func testAssertThrowsAsyncErrorHelper() async {
         struct StubError: Error, Equatable {}
