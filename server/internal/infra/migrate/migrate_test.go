@@ -448,3 +448,151 @@ func TestPathToFileURI_CallableFromNew(t *testing.T) {
 		t.Errorf("pathToFileURI itself failed unexpectedly: %v", err)
 	}
 }
+
+// TestRunWithCtx_PreCanceledCtxDoesNotCallFn 验证 runWithCtxAndTimeout 在 ctx 已经
+// cancel 时**立刻**返回 ctx.Err()，**不**启动 goroutine 调 fn。
+//
+// 这是 review round 4 Finding 1 的核心断言：caller 显式 cancel 后再调 Up/Down/Status
+// 不应让 fn 把 SQL 发给 MySQL（已发出去的 DDL 不可逆，即使后续 GracefulStop 也救不回来）。
+func TestRunWithCtx_PreCanceledCtxDoesNotCallFn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 先 cancel，再调 runWithCtxAndTimeout
+
+	stop := &fakeStopSender{}
+	var fnCalls int
+	var mu sync.Mutex
+	fn := func() error {
+		mu.Lock()
+		fnCalls++
+		mu.Unlock()
+		return nil
+	}
+
+	start := time.Now()
+	err := runWithCtxAndTimeout(ctx, stop, fn, 5*time.Second)
+	elapsed := time.Since(start)
+
+	// 必须立刻返回 ctx.Canceled（不等 fn、不等 grace timeout）
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("got %v, want context.Canceled", err)
+	}
+	// 应在 ms 级返回（绝不等 5s grace timeout）
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("pre-canceled ctx took %v, expected near-instant return", elapsed)
+	}
+	// fn 不应被调过：goroutine 都不应启动
+	mu.Lock()
+	calls := fnCalls
+	mu.Unlock()
+	if calls != 0 {
+		t.Errorf("fn called %d times on pre-canceled ctx, want 0 (must short-circuit before launching goroutine)", calls)
+	}
+	// 也不应触发 stop sender（因为根本没启动 fn，无需 stop）
+	if stop.stopped {
+		t.Errorf("stop sender called on pre-canceled ctx; should short-circuit before any goroutine work")
+	}
+
+	// 等一小段时间确认 fn 即使异步也不会被调（防 race）
+	time.Sleep(20 * time.Millisecond)
+	mu.Lock()
+	calls = fnCalls
+	mu.Unlock()
+	if calls != 0 {
+		t.Errorf("fn was called asynchronously after pre-canceled ctx return, count=%d", calls)
+	}
+}
+
+// TestRunWithCtx_PreExpiredDeadlineDoesNotCallFn 同上，但用 DeadlineExceeded 路径
+// （context.WithDeadline 的过期 ctx）。
+func TestRunWithCtx_PreExpiredDeadlineDoesNotCallFn(t *testing.T) {
+	// 立刻过期的 deadline
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
+	defer cancel()
+
+	stop := &fakeStopSender{}
+	var fnCalls int
+	var mu sync.Mutex
+	fn := func() error {
+		mu.Lock()
+		fnCalls++
+		mu.Unlock()
+		return nil
+	}
+
+	err := runWithCtxAndTimeout(ctx, stop, fn, 5*time.Second)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("got %v, want context.DeadlineExceeded", err)
+	}
+	mu.Lock()
+	calls := fnCalls
+	mu.Unlock()
+	if calls != 0 {
+		t.Errorf("fn called %d times on pre-expired ctx, want 0", calls)
+	}
+}
+
+// TestPathToFileURI_EscapesURIMetacharacters 验证路径含 URI 元字符（`#` / `?` /
+// 空格）时，pathToFileURI 正确 percent-encode，让 net/url.Parse 能还原回原 path。
+//
+// 这是 review round 4 Finding 2 的核心断言：用户 checkout 在 `C:\work\repo#1\...`
+// 路径下时 migrate 不应失败。
+func TestPathToFileURI_EscapesURIMetacharacters(t *testing.T) {
+	cases := []struct {
+		name string
+		// segment 是相对于 cwd 的子路径段，含 URI 元字符
+		segment string
+	}{
+		{"hash", "weird#dir/migrations"},
+		{"question", "weird?dir/migrations"},
+		{"space", "weird dir/migrations"},
+		{"hash_and_query", "a#b/c?d/migrations"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			uri, err := pathToFileURI(tc.segment)
+			if err != nil {
+				t.Fatalf("pathToFileURI(%q): %v", tc.segment, err)
+			}
+			if !strings.HasPrefix(uri, "file://") {
+				t.Errorf("got %q, want prefix 'file://'", uri)
+			}
+			// URI 必须不能裸含 # 或 ? —— 它们会被 net/url 当 fragment / query
+			rest := strings.TrimPrefix(uri, "file://")
+			if strings.Contains(rest, "#") {
+				t.Errorf("URI %q contains raw '#' (must be %%23-encoded)", uri)
+			}
+			if strings.Contains(rest, "?") {
+				t.Errorf("URI %q contains raw '?' (must be %%3F-encoded)", uri)
+			}
+			if strings.Contains(rest, " ") {
+				t.Errorf("URI %q contains raw space (must be %%20-encoded)", uri)
+			}
+
+			// 关键：解析后还原，必须等于原绝对路径（filepath.Abs 后的形态）
+			u, err := nurlParse(uri)
+			if err != nil {
+				t.Fatalf("net/url.Parse(%q): %v", uri, err)
+			}
+			// Fragment / RawQuery 必须为空（说明 # / ? 没被当 URI 元字符）
+			if u.Fragment != "" {
+				t.Errorf("URI %q parsed Fragment=%q (should be empty after escaping)", uri, u.Fragment)
+			}
+			if u.RawQuery != "" {
+				t.Errorf("URI %q parsed RawQuery=%q (should be empty after escaping)", uri, u.RawQuery)
+			}
+
+			// 还原 golang-migrate file source 的逻辑：p = u.Host + u.Path
+			// （u.Path 已被 net/url 自动 percent-decode）
+			recovered := u.Host + u.Path
+			expectedAbs, err := filepath.Abs(tc.segment)
+			if err != nil {
+				t.Fatalf("filepath.Abs(%q): %v", tc.segment, err)
+			}
+			expectedSlashed := filepath.ToSlash(expectedAbs)
+			if recovered != expectedSlashed {
+				t.Errorf("recovered path %q != expected %q (URI=%q, Host=%q, Path=%q)",
+					recovered, expectedSlashed, uri, u.Host, u.Path)
+			}
+		})
+	}
+}

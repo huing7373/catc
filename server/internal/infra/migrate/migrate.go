@@ -40,7 +40,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -141,24 +143,44 @@ func New(dsn, migrationsPath string) (Migrator, error) {
 //   - p[0]='C'（不是 '/'），golang-migrate parseURL 走 filepath.Abs(p)（在 Windows 上 noop
 //     因为 p 已绝对），最终 os.DirFS("C:/fork/cat/server/migrations") 正确工作
 //
+// # URI 元字符 escape（review round 4 P2）
+//
+// 直接 "file://" + slashed 在路径含 URI 元字符（`#` / `?` / 空格等）时炸：
+//   - 路径 `C:\work\repo#1\migrations` → ToSlash → `C:/work/repo#1/migrations`
+//     拼成 `file://C:/work/repo#1/migrations` → golang-migrate 内部用 net/url.Parse 解析 →
+//     `#1/migrations` 被当 fragment → Host="C:" Path="/work/repo" → os.DirFS 找不到目录
+//   - 同理 `?` 被当 query；空格也违反 URI 语法
+//
+// 修法：按 `/` 拆段后**逐段 url.PathEscape**，再用 `/` 拼回；这样 `/` 仍保留为路径分段符，
+// 而 `#` / `?` / 空格 / 其它非保留字符按 RFC 3986 percent-encoded。Windows drive 字母
+// 中的 `:` 也合法（PathEscape 不 escape `:`，net/url.Parse 解析 file://C:/... 时仍把 `C:`
+// 当 Host）—— 上面"双斜杠形态"约定不变。
+//
 // # 实装步骤
 //
 //  1. filepath.Abs 把相对路径转绝对（让结果稳定，不依赖 cwd）；Unix 输入返绝对 Unix 路径
 //  2. filepath.ToSlash 把 backslash 转 forward slash（Windows 必须，Unix no-op）
-//  3. 拼成 "file://" + slashed —— Unix 得到 file:///usr/...（slashed 自身以 / 开头，自然形成三斜杠），
+//  3. 按 `/` 拆段，每段过 url.PathEscape，再 `/` 拼回 → escapedPath
+//  4. 拼成 "file://" + escapedPath —— Unix 得到 file:///usr/...（slashed 自身以 / 开头，自然形成三斜杠），
 //     Windows 得到 file://C:/...（双斜杠 + drive 字母）
 //
-// 参考：RFC 8089 §2 + golang-migrate v4 source/file/file.go::parseURL。
+// 参考：RFC 8089 §2 + RFC 3986 §3.3 + golang-migrate v4 source/file/file.go::parseURL。
 func pathToFileURI(p string) (string, error) {
 	abs, err := filepath.Abs(p)
 	if err != nil {
 		return "", fmt.Errorf("filepath.Abs(%q): %w", p, err)
 	}
 	slashed := filepath.ToSlash(abs)
+	// 按 `/` 拆段后逐段 escape（保留分段符 `/` 不转义，仅转义段内的 URI 元字符）
+	parts := strings.Split(slashed, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	escaped := strings.Join(parts, "/")
 	// 显式不加 leading / —— Unix 路径本身已以 / 开头（→ file:///usr/...），
 	// Windows 路径以 drive 字母开头（→ file://C:/...，让 net/url 把 drive 当 Host）。
 	// 加 leading / 在 Windows 上会让 golang-migrate 把 "/C:/..." 直接喂给 os.DirFS 而炸。
-	return "file://" + slashed, nil
+	return "file://" + escaped, nil
 }
 
 // runWithCtx 在独立 goroutine 跑 fn，并 select ctx.Done() 提前返回。
@@ -198,7 +220,18 @@ func runWithCtx(ctx context.Context, stop stopSender, fn func() error) error {
 
 // runWithCtxAndTimeout 是 runWithCtx 的可测试核心，参数化 graceTimeout 让单测能
 // 在毫秒级验证"等 done 返回"的行为。
+//
+// # 早 cancel short-circuit（review round 4 P1）
+//
+// 如果 caller 传入的 ctx 已经 cancel / 超时（例：测试 / CLI 已经接到 SIGINT 后才调 Up），
+// 必须**先**返回 ctx.Err()，**不**启动 goroutine 调 fn —— 否则 fn 已经把 SQL 发给 MySQL
+// 开始改 schema，即使马上 sendGracefulStop 也已不可逆（已发出去的 DDL 一旦 server-side
+// 开始执行就改不回来）。这违反 ctx-aware API 的语义："caller 显式说取消 → 不应碰 DB"。
 func runWithCtxAndTimeout(ctx context.Context, stop stopSender, fn func() error, graceTimeout time.Duration) error {
+	// 早 cancel short-circuit：caller 已 cancel ctx 时不调 fn、不碰 DB
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	done := make(chan error, 1)
 	go func() { done <- fn() }()
 	select {
