@@ -68,7 +68,7 @@ Authorization: Bearer <token>
 - **时间字段**：**response 中的 datetime 类型字段**统一使用 ISO 8601 UTC 字符串（如 `"unlockAt": "2026-04-23T10:20:00Z"`），客户端按本地时区显示；**request 中的 epoch 时间戳类字段**（如 `POST /steps/sync` 的 `clientTimestamp`）保留 number 类型（毫秒整数），不做 ISO 字符串化 —— 该类字段在各接口章节单独标注。
 - **可空字段**：可空字段在 JSON 中显式以 `null` 表示（如 `"currentRoomId": null`），不省略 key；客户端解析为 `Optional<T>` / `T?`。
 - **占位字段（节点 2 阶段）**：节点 2 阶段尚未实装的字段（如 `pet.equips` / `room.currentRoomId` / `chest.unlockable` 等动态状态）按 "future fields" 标注，文档中会在每个接口章节末尾以 `> Future Fields (节点 X 落地)` 引用块列出。
-- **字符串长度约束**：所有字符串字段的最大长度以**字节**计（utf8mb4 编码下 1 个汉字占 3 字节），与 MySQL 表 `VARCHAR(N)` 一致。
+- **字符串长度约束**：所有字符串字段的最大长度以**字符数**计（与 MySQL 表 `VARCHAR(N)` 语义一致 —— `N` 是字符数 limit，**不是**字节数；utf8mb4 编码下 1 个字符在底层存储占 1-4 字节，但长度校验按字符计数）。客户端 / server 实施长度校验时**必须**按 Unicode 字符数（如 Go `utf8.RuneCountInString` / Swift `String.count`）判断，**不**按字节数判断，否则会误拒合法的多字节输入。
 - **枚举字段**：枚举字段以 `TINYINT` 数值下发（如 `petType: 1`），不下发字符串字面量；具体取值见各接口章节。
 
 ---
@@ -259,7 +259,7 @@ JSON 示例：
 | Path | /api/v1/me |
 | 认证 | **需要** Bearer token（auth 中间件） |
 | 限频 | 默认（按 Story 4.5 rate_limit 默认值） |
-| 节点 | 节点 2（Epic 4 落地，但节点 2 阶段 currentRoomId 必为 null；真实 currentRoomId 节点 4 由 Story 11.10 / 14.x 注入） |
+| 节点 | 节点 2（Epic 4 落地，且 `currentRoomId` **始终**返回 `null` —— 该字段保留为 schema 占位但不计划在后续节点回填真实数据；获取真实房间归属请改用 `GET /home`，详见本节 Future Fields） |
 
 #### 响应体
 
@@ -271,9 +271,9 @@ JSON 示例：
 | `data.user.nickname` | string | 用户昵称 |
 | `data.user.avatarUrl` | string | 头像 URL，首次创建为 `""` |
 | `data.user.hasBoundWechat` | boolean | 是否已绑定微信 |
-| `data.user.currentRoomId` | string \| null | 当前房间主键。**节点 2 阶段强制返回 `null`**（房间在节点 4 才落地）；客户端必须按 `Optional<String>` 解析 |
+| `data.user.currentRoomId` | string \| null | 当前房间主键。**始终返回 `null`** —— schema 占位字段，无后续节点回填计划（详见本节 Future Fields）；客户端必须按 `Optional<String>` 解析 |
 
-JSON 示例（节点 2 阶段示例 / 节点 4 之后真实数据见 Future Fields）：
+JSON 示例（服务端始终返回 `null`；获取真实房间归属请改用 `GET /home`，详见 Future Fields）：
 
 ```json
 {
