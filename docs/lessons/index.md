@@ -53,3 +53,4 @@
 | 2026-04-26 | [契约 schema 字段可空性必须显式声明 + JSON 示例标签必须与示例内容一致](2026-04-26-契约schema字段可空性必须显式声明.md) | 2 | docs | `ce5ef55` |
 | 2026-04-26 | [infrastructure 接入必须配齐 env override + 第三方库默认行为陷阱](2026-04-26-config-env-override-and-gorm-auto-ping.md) | 2 | config, architecture | `40f5d01` |
 | 2026-04-26 | [启动路径阻塞 IO 必须有 deadline & dev 文档命令必须与默认配置自洽](2026-04-26-startup-blocking-io-needs-deadline.md) | 2 | error-handling, docs | `c96ef29` |
+| 2026-04-26 | [CLI 子命令 flag 解析必须用 NewFlagSet + 跨平台 file URI 必须避免 backslash 拼接](2026-04-26-cli-subcommand-flag-and-windows-file-uri.md) | 3 | error-handling, architecture, testing | `<pending>` |

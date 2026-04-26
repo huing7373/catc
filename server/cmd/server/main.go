@@ -11,6 +11,7 @@ import (
 
 	"github.com/huing/cat/server/internal/app/bootstrap"
 	"github.com/huing/cat/server/internal/app/http/devtools"
+	"github.com/huing/cat/server/internal/cli"
 	"github.com/huing/cat/server/internal/infra/config"
 	"github.com/huing/cat/server/internal/infra/db"
 	"github.com/huing/cat/server/internal/infra/logger"
@@ -38,9 +39,18 @@ func main() {
 	// 见 docs/lessons/2026-04-25-slog-init-before-startup-errors.md。
 	logger.Init("info")
 
-	var configPath string
-	flag.StringVar(&configPath, "config", "", "path to config YAML (default: auto-detect server/configs/local.yaml or configs/local.yaml)")
-	flag.Parse()
+	// Story 4.3 review fix：子命令路径必须**先**拆 args 再 flag.Parse。
+	//
+	// `flag.Parse()` 在第一个非 flag 参数后停止解析。文档化的调用形态
+	// `catserver migrate up -config configs/dev.yaml` 中 args[0]="migrate" 是
+	// 第一个非 flag → 默认 flag.Parse 直接停在这里，**不**会解析后面的 -config，
+	// migrate 子命令会用 LocateDefault 找到的 local.yaml（错误的 DB）。
+	//
+	// 修法：parseTopLevelArgs 把 os.Args[1:] 拆成 (preMigrate, postMigrate)，
+	// preMigrate 走 flag.NewFlagSet 解析（覆盖 `catserver -config X migrate up` 形态），
+	// postMigrate 通过 cli.RunMigrate → cli.ParseMigrateArgs 用独立 NewFlagSet 解析
+	// （覆盖 `catserver migrate up -config X` 形态）。两条路径都能拿到正确的 -config。
+	configPath, migrateArgs, isMigrate := parseTopLevelArgs(os.Args[1:])
 
 	if configPath == "" {
 		p, err := config.LocateDefault()
@@ -63,6 +73,27 @@ func main() {
 		slog.Int("http_port", cfg.Server.HTTPPort),
 		slog.String("log_level", cfg.Log.Level),
 	)
+
+	// Story 4.3：migrate 子命令分支。
+	// `catserver migrate {up|down|status}` 走这条路径，之后 os.Exit 立刻退出，
+	// **不**进入 server 启动路径（不调 db.Open / bootstrap.Run）。
+	//
+	// 为什么必须在 db.Open **之前**：schema 不存在时 db.Open 的 PingContext 会失败
+	// （表不存在不是 ping 失败，但首次部署 / 全新 DB 场景仍可能遇到 schema 校验路径
+	// 失败）；更重要的是 migrate 工具自己用独立 driver 上 advisory lock，与 4.2 的
+	// gorm.DB 解耦，没有理由强制先 Open。
+	//
+	// 子命令分支用**自己的** signal-ctx，不复用 db.Open 的 5s timeout —— migrate up
+	// 跑多个 SQL 文件可能耗时几十秒。详见 Story 4.3 Dev Notes。
+	if isMigrate {
+		migrateCtx, migrateStop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer migrateStop()
+		if err := cli.RunMigrate(migrateCtx, cfg, migrateArgs); err != nil {
+			slog.Error("migrate failed", slog.Any("error", err))
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	// Dev 模式（BUILD_DEV=true 或 build tag `devtools`）启用时在启动阶段打一条
 	// 醒目 WARN。放在 logger.Init(cfg.Log.Level) 之后 → 用户配置的 log level
@@ -116,4 +147,50 @@ func main() {
 		slog.Error("server run failed", slog.Any("error", err))
 		os.Exit(1)
 	}
+}
+
+// parseTopLevelArgs 把 os.Args[1:] 拆分成 (configPath, migrateArgs, isMigrate)。
+//
+// 支持以下两种文档化调用形态：
+//
+//  1. `catserver -config X` / `catserver` —— 普通 server 启动；isMigrate=false
+//  2. `catserver -config X migrate <action> [-config Y]` ——
+//     migrate 子命令；isMigrate=true，migrateArgs 是 "migrate" 之后的全部参数
+//     （含可能再次出现的 -config，由 cli.RunMigrate 内部 NewFlagSet 解析）
+//
+// 实装策略：手动扫描 args 找到 "migrate" 的位置（不走 flag.Parse —— 它在第一个
+// 非 flag 参数停止）。"migrate" 之前的参数走主 flag.Parse 解析 -config；之后的
+// 参数原样转发给 cli.RunMigrate。
+//
+// 如果 "migrate" 之前 + 之后都给了 -config，**子命令的优先**（更靠近 action 的语义胜出）；
+// 这与"被显式指定的更晚的值覆盖默认"的常规 CLI 直觉一致。
+func parseTopLevelArgs(rawArgs []string) (configPath string, migrateArgs []string, isMigrate bool) {
+	// 找 "migrate" 在 rawArgs 里的位置。它必须是一个独立的 token（不是 -migrate 之类）。
+	migrateIdx := -1
+	for i, a := range rawArgs {
+		if a == "migrate" {
+			migrateIdx = i
+			break
+		}
+	}
+
+	var preMigrate []string
+	if migrateIdx == -1 {
+		preMigrate = rawArgs
+	} else {
+		preMigrate = rawArgs[:migrateIdx]
+		// migrateArgs 是 "migrate" **之后**的全部参数，cli.RunMigrate 自己拆 action + flags
+		migrateArgs = rawArgs[migrateIdx+1:]
+		isMigrate = true
+	}
+
+	// 用 ContinueOnError 避免 preMigrate 解析失败直接 os.Exit —— 主流程仍然 fail-fast，
+	// 但出错路径走 main 的 slog.Error + os.Exit（统一退出）。
+	fs := flag.NewFlagSet("catserver", flag.ContinueOnError)
+	fs.StringVar(&configPath, "config", "", "path to config YAML (default: auto-detect server/configs/local.yaml or configs/local.yaml)")
+	if err := fs.Parse(preMigrate); err != nil {
+		slog.Error("flag parse failed", slog.Any("error", err))
+		os.Exit(2)
+	}
+	return configPath, migrateArgs, isMigrate
 }

@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-04-26 (story 4-2 done)
+# last_updated: 2026-04-26 (story 4-3 ready-for-dev)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -36,7 +36,7 @@
 
 generated: 2026-04-23T22:58:47+08:00
 last_updated: 2026-04-26
-# story 4-2 done (this run)
+# story 4-3 review (dev-story complete)
 project: cat
 project_key: NOKEY
 tracking_system: file-system
@@ -75,7 +75,7 @@ development_status:
   epic-4: in-progress
   4-1-接口契约最终化: done
   4-2-mysql-接入: done
-  4-3-五张表-migrations: backlog
+  4-3-五张表-migrations: review
   4-4-token-util: backlog
   4-5-auth-rate_limit-中间件: backlog
   4-6-游客登录接口-首次初始化事务: backlog
