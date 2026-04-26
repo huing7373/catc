@@ -121,12 +121,20 @@ RESOLVED_DESTINATION=""
 # iPhone 17 哪怕只在 Ineligible 段出现脚本也会选它，后续 build 必定失败。
 # → 用 awk 范围选择只看 Available 段
 # （lesson 2026-04-26-xcodebuild-showdestinations-section-aware.md）
+#
+# 进一步：Available 段总会包含 placeholder entry —— `name:Any iOS Simulator Device`，
+# 即使机器上没装任何 iOS Simulator runtime / CoreSimulator 不可用，这条仍在。
+# 如果直接 grep "iOS Simulator" 命中 placeholder，脚本会落到
+# `platform=iOS Simulator,OS=latest` 这条不可运行的 destination 上，build 阶段才挂。
+# → 必须排除 `Any iOS Simulator Device` placeholder，确认存在具体 simulator 才用 SECONDARY
+# （lesson 2026-04-26-simulator-placeholder-vs-concrete.md）
 SHOWDEST_OUTPUT="$(xcodebuild -project "$PROJECT_PATH" -scheme "$SCHEME" -showdestinations 2>/dev/null || true)"
 AVAILABLE_DESTINATIONS="$(echo "$SHOWDEST_OUTPUT" | awk '/Available destinations/{flag=1; next} /Ineligible destinations/{flag=0} flag')"
+CONCRETE_SIMULATORS="$(echo "$AVAILABLE_DESTINATIONS" | grep 'iOS Simulator' | grep -v 'Any iOS Simulator Device' || true)"
 
-if echo "$AVAILABLE_DESTINATIONS" | grep -q "iPhone 17"; then
+if echo "$CONCRETE_SIMULATORS" | grep -q "iPhone 17"; then
   RESOLVED_DESTINATION="$DESTINATION_PRIMARY"
-elif echo "$AVAILABLE_DESTINATIONS" | grep -q "iOS Simulator"; then
+elif [ -n "$CONCRETE_SIMULATORS" ]; then
   RESOLVED_DESTINATION="$DESTINATION_SECONDARY"
 else
   # 第三段 fallback：xcrun simctl 取第一个可用 simulator UUID

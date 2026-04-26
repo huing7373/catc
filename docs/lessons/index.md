@@ -35,3 +35,4 @@
 | 2026-04-26 | [`MockBase` 内部存储字段一律 `private`，只通过 snapshot helper 读 — 不要 expose mutable storage](2026-04-26-mockbase-snapshot-only-reads.md) | 1 | testing, concurrency | `<pending>` |
 | 2026-04-26 | [Combine `.prefix(N)` 替代手工 fulfill counter，避免 over-fulfillment + 让 publisher 自然 backpressure](2026-04-26-combine-prefix-vs-manual-fulfill.md) | 1 | testing | `<pending>` |
 | 2026-04-26 | [`xcodebuild -showdestinations` 必须按段过滤，grep 全文会选中 Ineligible 段](2026-04-26-xcodebuild-showdestinations-section-aware.md) | 1 | config | `<pending>` |
+| 2026-04-26 | [Shell 判 simulator 可用性必须排除 `Any iOS Simulator Device` placeholder，concrete entry 才算真有 runtime](2026-04-26-simulator-placeholder-vs-concrete.md) | 1 | testing, config | `<pending>` |

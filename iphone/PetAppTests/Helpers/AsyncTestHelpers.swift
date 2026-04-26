@@ -104,6 +104,13 @@ public func awaitPublishedChange<O: AnyObject, V>(
     file: StaticString = #filePath,
     line: UInt = #line
 ) async throws -> [V] {
+    // XCTestExpectation.expectedFulfillmentCount 不接受 0；调用方若想断言 "无变化"
+    // 应该用别的手段（如 sleep + 直接读 @Published 当前值，或 sink 一段时间不 fulfill）。
+    // 这里直接 precondition fail，给出明确报错而不是从 XCTest 内部抛出 API violation
+    // 让调用方在 helper 调用栈外迷糊。
+    // （lesson 2026-04-26-simulator-placeholder-vs-concrete.md / TODO 段：count==0 防御）
+    precondition(count > 0, "awaitPublishedChange requires count > 0; to assert no changes, sample @Published value directly after a settled delay")
+
     // 用 _AsyncTestCollector 收集 + 加锁，避免在 generic function 内嵌套 class
     // （Swift 不允许在 generic function 体内定义 class）
     let collector = _AsyncTestCollector<V>()

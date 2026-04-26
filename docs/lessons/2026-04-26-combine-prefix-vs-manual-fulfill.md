@@ -96,3 +96,11 @@ let cancellable = object[keyPath: keyPath]
 - round 3：流终止条件（`.prefix` 替代手工 fulfill counter）
 
 通用规则：**写 Combine / async 测试 helper 时，把"订阅—收集—终止—断言"四个职责分开审视**，每个职责都要问"如果 publisher 表现非预期（emit 0 次 / emit 多次 / 同步 emit / 异步 emit），这条职责仍正确吗？"否则 review 会反复揪出同一个 helper 的不同侧面。
+
+## 未完成事项 / round 5 补遗
+
+round 5 codex 又发现一处 [P3] 缺陷：`awaitPublishedChange` 接受 `count == 0`，但 `XCTestExpectation.expectedFulfillmentCount` 不支持 0 → 从 XCTest 内部抛出 API violation，调用方难定位。round 5 已加 `precondition(count > 0, ...)` 防御。详见 `2026-04-26-simulator-placeholder-vs-concrete.md` 的 "Lesson 2 (TODO 段补遗)"。
+
+**追加预防规则**（merge 进上面的 round 3 规则）：写 XCTestExpectation 包装 helper 时，**`expectedFulfillmentCount` 字段不接受 0 或负数**，helper 入口必须 `precondition(count > 0)` 防御。"断言无变化" 的语义不能用 `count == 0` 表达，应该用别的手段（sample 状态值，或 `wait(for: [unfulfilled], timeout: short)` 后断言 fulfillCount == 0）。
+
+延续 round 3 的 Meta 教训：**helper 的"职责轴"不止四个**——还包括"输入参数边界"。round 5 揭示这个轴在 round 1/2/3 都没被审视到。下次写测试 helper，给所有数值参数列一个"边界值表"（0 / 1 / 负数 / 极大值），每个值过一遍语义检查。
