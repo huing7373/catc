@@ -65,7 +65,7 @@ Authorization: Bearer <token>
 ## 2.5 字段类型与编码约定
 
 - **主键 / 外键 ID**：所有 BIGINT 主键 / 外键在 JSON 里以**字符串**形式下发（如 `"id": "1001"`），避免 JavaScript 端 `Number.MAX_SAFE_INTEGER` 精度丢失；客户端解析为 `String`，如需算术运算自行转换为 `Int64` 或等价类型。
-- **时间字段**：所有时间字段统一使用 ISO 8601 UTC 格式（如 `"unlockAt": "2026-04-23T10:20:00Z"`），客户端按本地时区显示。
+- **时间字段**：**response 中的 datetime 类型字段**统一使用 ISO 8601 UTC 字符串（如 `"unlockAt": "2026-04-23T10:20:00Z"`），客户端按本地时区显示；**request 中的 epoch 时间戳类字段**（如 `POST /steps/sync` 的 `clientTimestamp`）保留 number 类型（毫秒整数），不做 ISO 字符串化 —— 该类字段在各接口章节单独标注。
 - **可空字段**：可空字段在 JSON 中显式以 `null` 表示（如 `"currentRoomId": null`），不省略 key；客户端解析为 `Optional<T>` / `T?`。
 - **占位字段（节点 2 阶段）**：节点 2 阶段尚未实装的字段（如 `pet.equips` / `room.currentRoomId` / `chest.unlockable` 等动态状态）按 "future fields" 标注，文档中会在每个接口章节末尾以 `> Future Fields (节点 X 落地)` 引用块列出。
 - **字符串长度约束**：所有字符串字段的最大长度以**字节**计（utf8mb4 编码下 1 个汉字占 3 字节），与 MySQL 表 `VARCHAR(N)` 一致。
@@ -301,8 +301,7 @@ JSON 示例（节点 2 阶段示例 / 节点 4 之后真实数据见 Future Fiel
 
 #### Future Fields
 
-> **Future Fields**（节点 4 起激活）：
-> - `data.user.currentRoomId`：节点 4 房间链路落地后，由 Story 11.x 在加入 / 退出房间事务里维护；节点 2 阶段服务端**强制**返回 `null`，客户端**必须**按可空解析。
+> **关于 `data.user.currentRoomId`**：本字段**保留为 schema 占位**但**不计划在后续节点回填真实数据**（planning artifacts 中无对应 story）。服务端**始终**返回 `null`，客户端**必须**按可空解析；获取真实房间归属请改用 `GET /home` 的 `data.room.currentRoomId`（节点 4 由 Story 11.10 回填真实数据）。
 
 ---
 
