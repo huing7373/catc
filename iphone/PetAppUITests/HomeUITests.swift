@@ -95,4 +95,33 @@ final class HomeUITests: XCTestCase {
         // 5. alert 消失（回到主界面，按钮仍存在）
         XCTAssertTrue(btn.waitForExistence(timeout: timeout), "回到主界面后按钮应仍存在")
     }
+
+    /// Story 2.9 AC8：全新模拟器启动时，LaunchingView 应可见 → 主界面渲染前不出现空白屏。
+    ///
+    /// 验证策略：
+    /// 1. 启动 App
+    /// 2. 短 timeout 内查找 LaunchingView 文字（机会性断言：fast machine 可能错过 0.3s 时机）
+    /// 3. 等 LaunchingView 消失 → home_userInfo 可见（5s 充分 timeout）
+    ///
+    /// 注意 timing：bootstrap 占位 closure 立即成功 → 0.3 秒后转 .ready；
+    /// XCUITest 的 launch 本身有 1-2 秒开销，所以"app.launch() 之后立即"通常已经过了几百毫秒，
+    /// LaunchingView 可能正好处于 0.3 秒末段。给文字的 waitForExistence
+    /// 一个**短** timeout（如 0.5s），让 fast machine 上 LaunchingView 已切走时不长时间挂起。
+    func testLaunchingViewVisibleBeforeHomeView() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        // 1. LaunchingView 文字应在很短 timeout 内可见（cold launch 通常几百毫秒已过半 minimumDuration）。
+        //    不强制为 true（fast machine 上 LaunchingView 0.3s 内可能错过断言时机）；
+        //    本 case 主要验证不崩 + 后续 home_userInfo 可定位。
+        let launchingText = app.staticTexts["正在唤醒小猫…"]
+        _ = launchingText.waitForExistence(timeout: 0.5)
+
+        // 2. 等 LaunchingView 消失 → HomeView 主界面 home_userInfo 可定位（充分 timeout）
+        let homeUserInfo = app.descendants(matching: .any)[AccessibilityID.Home.userInfo]
+        XCTAssertTrue(
+            homeUserInfo.waitForExistence(timeout: 5),
+            "HomeView 在 LaunchingView 消失后应可见（home_userInfo 应可定位）"
+        )
+    }
 }

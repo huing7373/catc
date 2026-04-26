@@ -49,4 +49,13 @@ public enum AccessibilityID {
         public static let retryMessage = "errorUI_retryMessage"
         public static let retryButton = "errorUI_retryButton"
     }
+
+    /// Story 2.9 新增：LaunchingView 的 a11y 标识。
+    /// 命名风格：launching_<element>（小驼峰前缀），与 `Home` / `SheetPlaceholder` / `ErrorUI` 一致。
+    public enum Launching {
+        public static let container = "launching_container"
+        public static let logo = "launching_logo"
+        public static let text = "launching_text"
+        public static let progressIndicator = "launching_progressIndicator"
+    }
 }

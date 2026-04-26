@@ -1,8 +1,9 @@
 // PetAppApp.swift
 // Story 2.2: SwiftUI App 入口（@main）
 //
-// 当前 RootView 直接渲染 HomeView。
-// Story 2.9 改为路由 LaunchingView / HomeView / RetryView。
+// Story 2.9 起：RootView 内含 AppLaunchStateMachine 启动状态机；
+// 根据 launchStateMachine.state 路由到 LaunchingView / HomeView / RetryView。
+// 详见 RootView.swift + AppLaunchStateMachine.swift。
 
 import SwiftUI
 
