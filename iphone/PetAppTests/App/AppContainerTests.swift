@@ -45,6 +45,19 @@ final class AppContainerTests: XCTestCase {
         XCTAssertNotNil(container.makePingUseCase(), "默认 container 应能产出 PingUseCase")
     }
 
+    /// codex round 1 [P1] 修复防回归：
+    /// AppContainer.errorPresenter 必须是同一个 instance（stable singleton 在 container 范围内）。
+    /// RootView 同时在 body 末尾和 sheetContent 内部 attach `errorPresentationHost(presenter:)`,
+    /// 两处必须共享同一个 ErrorPresenter，否则 sheet 子树会显示空状态、错过外层 publish 的 current。
+    /// 详见 docs/lessons/2026-04-26-fullscreencover-isolated-environment.md。
+    func testErrorPresenterIsStableSingletonWithinContainer() {
+        let container = AppContainer()
+        let first = container.errorPresenter
+        let second = container.errorPresenter
+        XCTAssertTrue(first === second,
+                      "container.errorPresenter 必须是同一个 instance；root host 和 sheet host 共享 source of truth")
+    }
+
     // MARK: - round 4 [P2]：validatedBaseURL(fromString:) 拒绝 malformed 输入
 
     /// case#4a (round 4)：`URL(string:)` 对 malformed 输入过于宽容，需在 resolve 层补校验。

@@ -27,6 +27,11 @@ import Combine
 public final class AppContainer: ObservableObject {
     public let apiClient: APIClientProtocol
 
+    /// Story 2.6 新增：全 App 共享的错误 UI 中心。RootView 通过 `.errorPresentationHost(presenter:)` ViewModifier
+    /// 把此实例挂到根视图；后续 Epic 4 GuestLogin / Epic 5 自动登录 / Epic 7+ 业务接口拿同一个实例即可。
+    /// 默认 `toastDuration = 2.0`；测试可通过未来追加的 init 重载注入自定义时长（本 story 不预留 YAGNI）。
+    public let errorPresenter: ErrorPresenter
+
     /// Info.plist 中存放 baseURL 的 key（约定：`PetAppBaseURL`，避免与 Apple 系统 key 冲突）。
     /// 通过 build configuration / xcconfig 覆盖；缺省时回退到 `localhost` fallback。
     public static let baseURLInfoKey = "PetAppBaseURL"
@@ -48,6 +53,7 @@ public final class AppContainer: ObservableObject {
     /// 注入式 init：测试中传 mock APIClient；未来 release build 切到 production baseURL 时也走此入口。
     public init(apiClient: APIClientProtocol) {
         self.apiClient = apiClient
+        self.errorPresenter = ErrorPresenter()
     }
 
     /// 解析默认 baseURL：从给定 bundle 的 Info.plist 读 `PetAppBaseURL`，否则回退到 fallback。

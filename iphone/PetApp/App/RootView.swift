@@ -38,6 +38,7 @@ struct RootView: View {
             .fullScreenCover(item: $coordinator.presentedSheet) { sheet in
                 sheetContent(for: sheet)
             }
+            .errorPresentationHost(presenter: container.errorPresenter)
     }
 
     /// 把 HomeViewModel 三个 CTA 闭包接到 coordinator.present(...)。
@@ -55,15 +56,24 @@ struct RootView: View {
         }
     }
 
+    /// sheet 内容也挂一份 errorPresentationHost：
+    /// SwiftUI 的 `.fullScreenCover` 在独立 window scene 渲染，外层 modifier 链不传播到 sheet 子树；
+    /// 主 host（在 RootView body 末尾）会被 sheet 整片盖住，导致 sheet 打开时全局错误 UI 隐形。
+    /// 让 sheet 子树共用同一个 ErrorPresenter 实例 → presenter.current 是 @Published source of truth →
+    /// 两个 host 都监听同一份状态、同步渲染 → sheet 内的 host 渲染在 sheet 顶层，错误 UI 始终可见。
+    /// 详见 docs/lessons/2026-04-26-fullscreencover-isolated-environment.md（codex round 1 [P1] finding 修复）。
     @ViewBuilder
     private func sheetContent(for sheet: SheetType) -> some View {
-        switch sheet {
-        case .room:
-            RoomPlaceholderView(onClose: { coordinator.dismiss() })
-        case .inventory:
-            InventoryPlaceholderView(onClose: { coordinator.dismiss() })
-        case .compose:
-            ComposePlaceholderView(onClose: { coordinator.dismiss() })
+        Group {
+            switch sheet {
+            case .room:
+                RoomPlaceholderView(onClose: { coordinator.dismiss() })
+            case .inventory:
+                InventoryPlaceholderView(onClose: { coordinator.dismiss() })
+            case .compose:
+                ComposePlaceholderView(onClose: { coordinator.dismiss() })
+            }
         }
+        .errorPresentationHost(presenter: container.errorPresenter)
     }
 }

@@ -31,4 +31,19 @@ public enum AccessibilityID {
         public static let composeTitle = "sheetPlaceholder_composeTitle"
         public static let btnClose = "sheetPlaceholder_btnClose"
     }
+
+    /// Story 2.6 新增：错误 UI 组件的 a11y 标识。
+    /// Toast / Alert / Retry 三组件 + 容器 / 内容 / 按钮的细分标识，便于未来 UITest 定位。
+    /// 命名风格与 `Home` / `SheetPlaceholder` 保持一致：`errorUI_<element>`（小驼峰前缀 + 下划线 + 元素名）。
+    public enum ErrorUI {
+        public static let toast = "errorUI_toast"
+        public static let toastMessage = "errorUI_toastMessage"
+        public static let alertOverlay = "errorUI_alertOverlay"
+        public static let alertTitle = "errorUI_alertTitle"
+        public static let alertMessage = "errorUI_alertMessage"
+        public static let alertOKButton = "errorUI_alertOKButton"
+        public static let retryView = "errorUI_retryView"
+        public static let retryMessage = "errorUI_retryMessage"
+        public static let retryButton = "errorUI_retryButton"
+    }
 }
