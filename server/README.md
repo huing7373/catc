@@ -27,6 +27,7 @@ curl http://127.0.0.1:8080/version    # → {"code":0,"data":{"commit":"<short h
 - **不要**用 `go run ./cmd/server` 替代 `bash scripts/build.sh`：前者绕过 `-ldflags` 注入，`/version` 会返回 `"unknown"`（详见 [Troubleshooting #4](#troubleshooting)）。
 - 端口 `8080` 与 IP `127.0.0.1` 与 [`server/configs/local.yaml`](configs/local.yaml) 默认值一致；改端口走环境变量 `CAT_HTTP_PORT`，不要在 README 命令里随手换成 `:8090`。
 - `-config server/configs/local.yaml` 显式传 path 最稳；`LocateDefault()` 也能自动找，但 CWD 漂移会让自动查找失败（详见 [配置 → 配置路径解析](#配置)）。
+- [`local.yaml`](configs/local.yaml) 已带 **dev-only 默认 JWT secret**（`local-dev-secret-do-not-use-in-prod-32bytes`），fresh clone 直接跑即可；**生产必须**用环境变量 `CAT_AUTH_TOKEN_SECRET` 覆盖（详见 [配置 → 环境变量覆盖](#环境变量覆盖)）。本地想自定义 dev secret：`export CAT_AUTH_TOKEN_SECRET="<≥16 字节随机字符串>"`。
 
 ---
 
@@ -75,6 +76,8 @@ curl http://127.0.0.1:8080/version    # → {"code":0,"data":{"commit":"<short h
 | `server.http_port` | `8080` | int | HTTP 监听端口 | 端口冲突时改其他可用端口（如 18090），或走环境变量 `CAT_HTTP_PORT` |
 | `server.read_timeout_sec` | `5` | int | HTTP read header / body 超时（秒） | 上传大体积 payload 时调大；MVP 阶段保持默认 |
 | `server.write_timeout_sec` | `10` | int | HTTP response 写超时（秒） | server-side 流式响应 / 大文件下载时调大；MVP 阶段保持默认 |
+| `auth.token_secret` | `local-dev-secret-do-not-use-in-prod-32bytes` | string | JWT HS256 签名 secret；空串 / `<16` 字节启动 fail-fast | **生产必须**用 env `CAT_AUTH_TOKEN_SECRET` 覆盖；本地 / CI 想换值可 export 同名 env |
+| `auth.token_expire_sec` | `604800`（7 天） | int | 默认 token 过期时间；`<=0` 或 `> 30天` 启动 fail-fast | dev 想短到 1 小时方便测试可改 `3600`；生产保持默认 |
 | `log.level` | `info` | string | slog level（`debug` / `info` / `warn` / `error`） | 本地排障改 `debug`；生产保持 `info` |
 
 > **不在 README 直接放 `local.yaml` 全文**：避免双源不一致。需要看完整内容直接打开 [`server/configs/local.yaml`](configs/local.yaml)。
@@ -85,6 +88,8 @@ curl http://127.0.0.1:8080/version    # → {"code":0,"data":{"commit":"<short h
 |---|---|---|---|
 | `CAT_HTTP_PORT` | `server.http_port` | ASCII 整数（如 `18090`） | 非法值（如 `abc`）启动报错 |
 | `CAT_LOG_LEVEL` | `log.level` | `debug` / `info` / `warn` / `error` | CI / 临时 demo 调级用 |
+| `CAT_MYSQL_DSN` | `mysql.dsn` | 完整 DSN 串（含密码） | **生产必走**：DSN 不入仓库 YAML，部署侧用 K8s Secret / Vault 注入；空串 = 不覆盖 |
+| `CAT_AUTH_TOKEN_SECRET` | `auth.token_secret` | ≥16 字节字符串 | **生产必走**：覆盖 `local.yaml` 的 dev-only 默认值；本地 / CI 想换值也可设此 env；空串 = 不覆盖 |
 
 完整命令例：
 
