@@ -355,9 +355,14 @@ open iphone/PetApp.xcodeproj
 
 ### 真机联调（Epic 5+ / TestFlight 准备）
 
+> **重要**：真机 build **必须**用 Xcode IDE 的 `Cmd+R`（Product → Run）。
+> **不要**用 `bash iphone/scripts/build.sh` —— 该脚本总是先跑 `xcodegen generate`，会从 `iphone/project.yml`（`DEVELOPMENT_TEAM: ""`）重建 `iphone/PetApp.xcodeproj`，把你刚在 Xcode 里选的 Team 配置擦掉、并把 `project.pbxproj` 写脏成你的 personal team 数据。Xcode IDE 跑 build / test 不会自动 xcodegen（与 [§Xcode IDE 入口](#xcode-ide-入口) line 100 一致），Team 配置安全保留。
+>
+> 真机跑测试同理：用 Xcode `Cmd+U`（Test）。`bash iphone/scripts/build.sh --test` 仅用于 simulator 自动化场景。
+
 **前置步骤（仅真机首次必跑）—— 配置 code signing**：
 
-仓库 `iphone/project.yml` 里 `DEVELOPMENT_TEAM: ""` 是空字符串（dev-tools 框架钦定的占位）。真机 `Cmd+R` 在签名前会 build fail，连 ATS / 网络都还没触发。每个开发者必须在本地 Xcode 里配 personal team（不会改 project.yml，是 Xcode local override）：
+仓库 `iphone/project.yml` 里 `DEVELOPMENT_TEAM: ""` 是空字符串（dev-tools 框架钦定的占位）。真机 `Cmd+R` 在签名前会 build fail，连 ATS / 网络都还没触发。每个开发者必须在本地 Xcode 里配 personal team（这是 Xcode local override，不会改 project.yml，但会改 `iphone/PetApp.xcodeproj/project.pbxproj`，**别 commit**）：
 
 1. Xcode 打开 `iphone/PetApp.xcodeproj`
 2. 左侧 navigator 选 PetApp project → TARGETS 选 PetApp → 顶部 tab 选 **Signing & Capabilities**
@@ -365,30 +370,28 @@ open iphone/PetApp.xcodeproj
    - 首次需先去 **Xcode → Settings → Accounts** 加个人 Apple ID（免费 personal team 即可）
 4. 真机 USB 连 Mac → Xcode 顶部 device picker 选你的真机
 
+**runbook（步骤 5 起 baseURL / server 那一段，**配完 Team 之后跑**）**：
+
 ```bash
-# 1. Mac 找局域网 IP（不限网段：cover 192.168.x.x / 10.x.x.x / 172.16-31.x.x）
+# 5. Mac 找局域网 IP（不限网段：cover 192.168.x.x / 10.x.x.x / 172.16-31.x.x）
 ipconfig getifaddr en0 || ipconfig getifaddr en1
 # Wi-Fi 接口通常是 en0（部分 Mac 是 en1）；输出形如 192.168.1.100 / 10.0.1.50 / 172.20.3.7
 # fallback：ifconfig | grep 'inet ' | grep -v 127.0.0.1
 
-# 2. 改 iphone/project.yml 第 37 行 PetAppBaseURL
-# 从  PetAppBaseURL: http://localhost:8080
-# 改  PetAppBaseURL: http://192.168.1.100:8080
-
-# 3. regen Info.plist
-bash iphone/scripts/build.sh
-
-# 4. server 端同步改 bind_host（loopback 拒绝外部连接）
+# 6. server 端改 bind_host（loopback 拒绝外部连接）
 # 改 server/configs/local.yaml 的 server.bind_host: 0.0.0.0
 # 或删此行让 server 监听所有网卡
 
-# 5. 重启 server（必须！现有进程仍监听 127.0.0.1，配置文件改了不会热加载）
+# 7. 重启 server（必须！现有进程仍监听 127.0.0.1，配置文件改了不会热加载）
 pkill catserver  # 或 Ctrl+C 之前那个进程
 bash scripts/build.sh
 ./build/catserver -config server/configs/local.yaml &
-
-# 6. Xcode 选真机 + Cmd+R
 ```
+
+8. 在 Xcode 里改 `PetAppBaseURL` 指向 Mac 局域网 IP。**两条路二选一**：
+   - **路 A（推荐，不擦 Team）**：Xcode 里直接改生成产物 `iphone/PetApp.xcodeproj` 的 Info.plist —— 在 Xcode navigator 选 PetApp target → **Info** tab → 把 `PetAppBaseURL` 从 `http://localhost:8080` 改成 `http://192.168.1.100:8080`。这是 in-place 编辑 generated `.xcodeproj`，不会触发 xcodegen，Team 不丢；但下次任何人跑 `bash iphone/scripts/build.sh` 都会 regen 把这个改动覆盖回 `localhost`。
+   - **路 B（用 build.sh，会擦 Team）**：改 `iphone/project.yml` 第 37 行 `PetAppBaseURL` → 跑 `bash iphone/scripts/build.sh` regen → **重新走前置步骤 1-4 配 Team**。每改一次 baseURL 都要重配一次，麻烦但确定不漂移。
+9. Xcode 选真机 + `Cmd+R`（**不**跑 build.sh！）
 
 > **注意**：`server/configs/local.yaml` 默认 `bind_host: 127.0.0.1` loopback **拒绝**真机连接；必须改 `0.0.0.0` 或删此行（详见 [`server/README.md`](../server/README.md) §配置 `bind_host` 字段说明）。`bind_host` 改了**必须重启** catserver 进程（无 hot reload），否则现有进程仍监听旧地址，phone 显示 `offline`。Mac 与真机必须同 Wi-Fi。
 
