@@ -38,6 +38,6 @@
 | 2026-04-26 | [Shell 判 simulator 可用性必须排除 `Any iOS Simulator Device` placeholder，concrete entry 才算真有 runtime](2026-04-26-simulator-placeholder-vs-concrete.md) | 1 | testing, config | `e328838` |
 | 2026-04-26 | [SwiftUI @StateObject init 阶段构造的 standalone container 与 RootView container 是别名陷阱](2026-04-26-stateobject-debug-instance-aliasing.md) | 1 | architecture | `3e5ad68` |
 | 2026-04-26 | [SwiftUI 父级 a11y `.contain` 必须保留 `.accessibilityLabel` 才不丢父 summary](2026-04-26-swiftui-a11y-contain-with-label.md) | 1 | a11y | `6bccf5a` |
-| 2026-04-26 | [Swift `Error.localizedDescription` 对非 LocalizedError 返回系统串而非空，"isEmpty 兜底" 永远不触发](2026-04-26-error-localizeddescription-system-fallback.md) | 1 | error-handling | `<pending>` |
-| 2026-04-26 | [用户触发的 retry 类异步 action 必须自带并发短路 guard，不能复用 idempotency flag 替代](2026-04-26-user-triggered-action-reentrancy.md) | 1 | concurrency | `<pending>` |
-| 2026-04-26 | [SwiftUI `.animation(_:value:)` 不会让 switch 分支切换淡入淡出，必须 ZStack + 每分支显式 `.transition`](2026-04-26-swiftui-switch-transition-explicit.md) | 1 | ui | `<pending>` |
+| 2026-04-26 | [Swift `Error.localizedDescription` 对非 LocalizedError 返回系统串而非空，"isEmpty 兜底" 永远不触发](2026-04-26-error-localizeddescription-system-fallback.md) | 1 | error-handling | `c94209b` |
+| 2026-04-26 | [用户触发的 retry 类异步 action 必须自带并发短路 guard，不能复用 idempotency flag 替代](2026-04-26-user-triggered-action-reentrancy.md) | 1 | concurrency | `c94209b` |
+| 2026-04-26 | [SwiftUI `.animation(_:value:)` 不会让 switch 分支切换淡入淡出，必须 ZStack + 每分支显式 `.transition`](2026-04-26-swiftui-switch-transition-explicit.md) | 1 | ui | `c94209b` |

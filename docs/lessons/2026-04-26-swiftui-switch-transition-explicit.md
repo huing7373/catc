@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: codex round 1 review on Story 2.9 LaunchingView 设计
 story: 2-9-launchingview-设计
-commit: <pending>
+commit: c94209b
 lesson_count: 1
 ---
 
