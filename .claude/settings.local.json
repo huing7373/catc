@@ -50,7 +50,8 @@
       "Bash(xcodegen generate *)",
       "Bash(xcodebuild build *)",
       "Bash(xcodebuild test *)",
-      "Bash(xcrun xcresulttool *)"
+      "Bash(xcrun xcresulttool *)",
+      "Bash(py --version)"
     ],
     "deny": [
       "Bash(rm -rf:*)",

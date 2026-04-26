@@ -11,6 +11,16 @@
 - 错误码
 - 幂等与事务建议
 
+**契约冻结策略**：
+
+- 自 2026-04-26（Story 4.1 完成日，对应 git commit hash 见 commit message）起，§4.1（POST /auth/guest-login）/ §4.3（GET /me）/ §5.1（GET /home）三个节点 2 接口的 schema 进入**冻结**状态。
+- 任何字段名 / 字段类型 / 错误码的修改都必须：
+  1. 触发 iOS Epic 5 重新评审（影响 Story 5.2 / 5.5）
+  2. 触发 server Epic 4 已完成 story 的回归（影响 Story 4.6 / 4.8 已落地的 handler）
+  3. 在本 story 文件 + epics.md 同步标注变更原因 + 影响范围
+- 节点 3+ 接口（如 §6 步数 / §7 宝箱 / §8 装扮 / §9 合成 / §10 房间 / §11 表情）的契约锚定由对应 epic 的 §X.1 story 负责（如 Story 7.1 / 11.1 / 17.1 等），不在本 story 范围内。
+- Future Fields 标记的字段（`pet.equips` / `pet.equips[].renderConfig` / `room.currentRoomId` / `user.currentRoomId` 等）**不**视为契约变更，由对应节点 epic 自然激活。
+
 ---
 
 ## 2. 统一约定
@@ -51,6 +61,15 @@ Authorization: Bearer <token>
 - `message`：错误提示或状态说明
 - `data`：业务数据
 - `requestId`：链路追踪 id
+
+## 2.5 字段类型与编码约定
+
+- **主键 / 外键 ID**：所有 BIGINT 主键 / 外键在 JSON 里以**字符串**形式下发（如 `"id": "1001"`），避免 JavaScript 端 `Number.MAX_SAFE_INTEGER` 精度丢失；客户端解析为 `String`，如需算术运算自行转换为 `Int64` 或等价类型。
+- **时间字段**：所有时间字段统一使用 ISO 8601 UTC 格式（如 `"unlockAt": "2026-04-23T10:20:00Z"`），客户端按本地时区显示。
+- **可空字段**：可空字段在 JSON 中显式以 `null` 表示（如 `"currentRoomId": null`），不省略 key；客户端解析为 `Optional<T>` / `T?`。
+- **占位字段（节点 2 阶段）**：节点 2 阶段尚未实装的字段（如 `pet.equips` / `room.currentRoomId` / `chest.unlockable` 等动态状态）按 "future fields" 标注，文档中会在每个接口章节末尾以 `> Future Fields (节点 X 落地)` 引用块列出。
+- **字符串长度约束**：所有字符串字段的最大长度以**字节**计（utf8mb4 编码下 1 个汉字占 3 字节），与 MySQL 表 `VARCHAR(N)` 一致。
+- **枚举字段**：枚举字段以 `TINYINT` 数值下发（如 `petType: 1`），不下发字符串字面量；具体取值见各接口章节。
 
 ---
 
@@ -111,7 +130,28 @@ Authorization: Bearer <token>
 - 首次创建游客账号
 - 已存在游客账号自动登录
 
+#### 接口元信息
+
+| 字段 | 值 |
+|---|---|
+| HTTP Method | POST |
+| Path | /api/v1/auth/guest-login |
+| 认证 | **不需要**（登录接口本身免 auth 中间件，但走 rate_limit 中间件） |
+| 限频 | 默认每客户端 IP 每分钟 60 次（按 Story 4.5 rate_limit 中间件全局默认值） |
+| 幂等 | 幂等（同一 guestUid 重复调用 → 同一 user_id；不需要 idempotencyKey） |
+| 节点 | 节点 2（Epic 4 落地，Epic 5 客户端集成） |
+
 #### 请求体
+
+| 字段 | 类型 | 必填 | 长度约束 | 说明 |
+|---|---|---|---|---|
+| `guestUid` | string | 必填 | 1 ≤ length ≤ 128 字节 | 客户端 Keychain 持久化的游客身份 UID（推荐 UUID v4 字符串）。空字符串或 > 128 字节 → 1002 参数错误 |
+| `device` | object | 必填 | - | 设备信息对象，子字段见下 |
+| `device.platform` | string | 必填 | enum: `"ios"` / `"android"`（节点 2 仅 `"ios"`） | 客户端平台标识 |
+| `device.appVersion` | string | 必填 | 1 ≤ length ≤ 32 字节 | 客户端版本号（如 `"1.0.0"`） |
+| `device.deviceModel` | string | 必填 | 1 ≤ length ≤ 64 字节 | 设备型号（如 `"iPhone15,2"`） |
+
+JSON 示例：
 
 ```json
 {
@@ -129,8 +169,24 @@ Authorization: Bearer <token>
 - 根据 `guestUid` 查找已有绑定
 - 若存在则直接登录
 - 若不存在则初始化用户、默认猫咪、步数账户、当前宝箱
+- 详细事务流程见 Story 4.6 + 数据库设计 §8.1
 
-#### 返回示例
+#### 响应体
+
+成功（code = 0）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `data.token` | string | JWT token，HS256 + auth.token_secret 签名（见 Story 4.4 token util）；默认过期 7 天 |
+| `data.user.id` | string | 用户主键（BIGINT 序列化为字符串，见 §2.5） |
+| `data.user.nickname` | string | 自动生成的昵称 `"用户{id}"`（首次创建时由 server 写入） |
+| `data.user.avatarUrl` | string | 头像 URL；首次创建为 `""`（空字符串而非 null） |
+| `data.user.hasBoundWechat` | boolean | 是否已绑定微信；游客首次创建为 `false` |
+| `data.pet.id` | string | 默认猫主键（BIGINT 序列化为字符串） |
+| `data.pet.petType` | number | 宠物类型枚举，节点 2 固定 `1`（猫） |
+| `data.pet.name` | string | 宠物名，首次创建为 `"默认小猫"` |
+
+JSON 示例：
 
 ```json
 {
@@ -153,6 +209,14 @@ Authorization: Bearer <token>
   "requestId": "req_xxx"
 }
 ```
+
+#### 可能的错误码
+
+| code | message | 触发条件 |
+|---|---|---|
+| 1002 | 参数错误 | `guestUid` 缺失 / 为空 / 长度超过 128 字节；`device` 字段缺失或子字段不全；`device.platform` 不在枚举中 |
+| 1005 | 操作过于频繁 | rate_limit 中间件拦截（同 IP 每分钟 > 60 次） |
+| 1009 | 服务繁忙 | 数据库异常 / 事务回滚 / 内部 panic（见 Story 4.6 事务实装） |
 
 ---
 
@@ -187,7 +251,29 @@ Authorization: Bearer <token>
 
 ### `GET /api/v1/me`
 
-#### 返回示例
+#### 接口元信息
+
+| 字段 | 值 |
+|---|---|
+| HTTP Method | GET |
+| Path | /api/v1/me |
+| 认证 | **需要** Bearer token（auth 中间件） |
+| 限频 | 默认（按 Story 4.5 rate_limit 默认值） |
+| 节点 | 节点 2（Epic 4 落地，但节点 2 阶段 currentRoomId 必为 null；真实 currentRoomId 节点 4 由 Story 11.10 / 14.x 注入） |
+
+#### 响应体
+
+成功（code = 0）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `data.user.id` | string | 用户主键 |
+| `data.user.nickname` | string | 用户昵称 |
+| `data.user.avatarUrl` | string | 头像 URL，首次创建为 `""` |
+| `data.user.hasBoundWechat` | boolean | 是否已绑定微信 |
+| `data.user.currentRoomId` | string \| null | 当前房间主键。**节点 2 阶段强制返回 `null`**（房间在节点 4 才落地）；客户端必须按 `Optional<String>` 解析 |
+
+JSON 示例（节点 2 阶段示例 / 节点 4 之后真实数据见 Future Fields）：
 
 ```json
 {
@@ -199,12 +285,24 @@ Authorization: Bearer <token>
       "nickname": "用户1001",
       "avatarUrl": "",
       "hasBoundWechat": true,
-      "currentRoomId": "3001"
+      "currentRoomId": null
     }
   },
   "requestId": "req_xxx"
 }
 ```
+
+#### 可能的错误码
+
+| code | message | 触发条件 |
+|---|---|---|
+| 1001 | 未登录 / token 无效 | auth 中间件拦截 |
+| 1009 | 服务繁忙 | DB 查询失败 |
+
+#### Future Fields
+
+> **Future Fields**（节点 4 起激活）：
+> - `data.user.currentRoomId`：节点 4 房间链路落地后，由 Story 11.x 在加入 / 退出房间事务里维护；节点 2 阶段服务端**强制**返回 `null`，客户端**必须**按可空解析。
 
 ---
 
@@ -216,7 +314,80 @@ Authorization: Bearer <token>
 
 用于首页一次拉取主要展示内容。
 
-#### 返回示例
+#### 接口元信息
+
+| 字段 | 值 |
+|---|---|
+| HTTP Method | GET |
+| Path | /api/v1/home |
+| 认证 | **需要** Bearer token |
+| 限频 | 默认 |
+| 节点 | 节点 2 initial 版（含 user + pet + stepAccount + chest + room 占位）；后续节点 increment 填充 pet.equips / room.currentRoomId / pet.equips[].renderConfig |
+
+#### 响应体
+
+成功（code = 0）：
+
+| 字段 | 类型 | 节点 2 阶段值 | 说明 |
+|---|---|---|---|
+| `data.user.id` | string | 真实数据 | 用户主键 |
+| `data.user.nickname` | string | 真实数据 | 用户昵称 |
+| `data.user.avatarUrl` | string | `""` | 头像 URL |
+| `data.pet.id` | string | 真实数据 | 默认猫主键 |
+| `data.pet.petType` | number | `1` | 宠物类型枚举 |
+| `data.pet.name` | string | `"默认小猫"` | 宠物名 |
+| `data.pet.currentState` | number | `1`（rest） | 宠物当前状态枚举（1=rest, 2=walk, 3=run）；节点 2 阶段读 pets.current_state，初始为 `1` |
+| `data.pet.equips` | array | `[]` | 装扮列表；**节点 2 阶段强制返回 `[]`**（穿戴在节点 9 由 Story 26.6 落地） |
+| `data.stepAccount.totalSteps` | number | `0`（首次登录） | 累计步数 |
+| `data.stepAccount.availableSteps` | number | `0`（首次登录） | 可用步数 |
+| `data.stepAccount.consumedSteps` | number | `0`（首次登录） | 已消耗步数 |
+| `data.chest.id` | string | 真实数据 | 当前宝箱主键 |
+| `data.chest.status` | number | `1`（counting） | 宝箱状态枚举（1=counting, 2=unlockable —— 见 §7.1 status 枚举 + 数据库设计 §6.7 user_chests.status）；节点 2 阶段所有宝箱在登录初始化后均为 `1`（counting），到 `unlockAt` 后服务端**动态判定**为 `2`（unlockable）—— 见 Story 4.8 happy path 第 2 case。**节点 2 不存在 `opened` 状态**：开箱功能在节点 7 / Epic 20 才上线，届时开箱后会立即重建下一轮 chest（仍为 `counting`），故 `/home` 永远不返回 opened 状态 |
+| `data.chest.unlockAt` | string (ISO 8601 UTC) | now + 10 min | 解锁时间 |
+| `data.chest.openCostSteps` | number | `1000` | 开启所需步数（节点 2 固定 1000） |
+| `data.chest.remainingSeconds` | number | 600 ~ 0 | 距离 unlockAt 的剩余秒数；> 0 表示 counting，≤ 0 表示已可开启 |
+| `data.room.currentRoomId` | string \| null | `null` | 当前房间主键；**节点 2 阶段强制 `null`**（节点 4 由 Story 11.10 注入真实数据） |
+
+JSON 示例（节点 2 阶段示例 — 首次登录后立即调用）：
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "user": {
+      "id": "1001",
+      "nickname": "用户1001",
+      "avatarUrl": ""
+    },
+    "pet": {
+      "id": "2001",
+      "petType": 1,
+      "name": "默认小猫",
+      "currentState": 1,
+      "equips": []
+    },
+    "stepAccount": {
+      "totalSteps": 0,
+      "availableSteps": 0,
+      "consumedSteps": 0
+    },
+    "chest": {
+      "id": "5001",
+      "status": 1,
+      "unlockAt": "2026-04-23T10:20:00Z",
+      "openCostSteps": 1000,
+      "remainingSeconds": 600
+    },
+    "room": {
+      "currentRoomId": null
+    }
+  },
+  "requestId": "req_xxx"
+}
+```
+
+JSON 示例（节点 9 / 节点 10 之后的真实数据，pet.equips 由 Story 26.6 填充，pet.equips[].renderConfig 由 Story 29.6 填充）：
 
 ```json
 {
@@ -263,6 +434,20 @@ Authorization: Bearer <token>
   "requestId": "req_xxx"
 }
 ```
+
+#### 可能的错误码
+
+| code | message | 触发条件 |
+|---|---|---|
+| 1001 | 未登录 / token 无效 | auth 中间件拦截 |
+| 1009 | 服务繁忙 | 任一聚合查询失败（按 epics.md §Story 4.8 AC：各部分 repo 错误 → 整体 1009 服务繁忙，不部分降级） |
+
+#### Future Fields
+
+> **Future Fields**（按节点 increment）：
+> - `data.pet.equips[]`：节点 9（Epic 26）穿戴链路落地后，由 Story 26.6 把 user_pet_equips JOIN cosmetic_items 的真实数据填充。每个元素 schema 见上方"节点 9 / 节点 10 之后的真实数据"示例，含 `slot / userCosmeticItemId / cosmeticItemId / name / rarity / assetUrl`。
+> - `data.pet.equips[].renderConfig`：节点 10（Epic 29）渲染配置落地后，由 Story 29.6 在每个 equips 元素上追加 `renderConfig: { offsetX, offsetY, scale, rotation, zLayer }` 子对象。具体字段在 Epic 29 落地时再展开。
+> - `data.room.currentRoomId`：节点 4 起由 Story 11.10 注入真实房间 ID。
 
 ---
 

@@ -46,3 +46,4 @@
 | 2026-04-26 | [真机联调 runbook 必须含 code signing 步骤 + config-change-then-restart 序列](2026-04-26-readme-physical-device-runbook-completeness.md) | 2 | docs | `d254a28` |
 | 2026-04-26 | [README 命令必须 cover 所有合法网段 + 工具输出格式不能假设固定字符数](2026-04-26-readme-portable-network-and-tool-output.md) | 2 | docs | `0da147e` |
 | 2026-04-26 | [Onboarding 文档必须考虑 build-wrapper 副作用 + lesson index 必须随 lesson 同步](2026-04-26-readme-onboarding-vs-tooling-side-effects.md) | 2 | docs | `6e24b57` |
+| 2026-04-26 | [V1 接口设计 /home chest.status 必须严格按节点阶段限定状态空间](2026-04-26-v1接口设计-home-chest-status-必须严格按节点阶段限定状态空间.md) | 1 | docs | `<pending>` |

@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-04-25 (story 2-10 done)
+# last_updated: 2026-04-26 (story 4-1 review)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-04-25
+last_updated: 2026-04-26
 project: cat
 project_key: NOKEY
 tracking_system: file-system
@@ -71,8 +71,8 @@ development_status:
   3-2-节点-1-demo-验收: backlog
   3-3-文档同步与-tech-debt-登记: backlog
   epic-3-retrospective: optional
-  epic-4: backlog
-  4-1-接口契约最终化: backlog
+  epic-4: in-progress
+  4-1-接口契约最终化: review
   4-2-mysql-接入: backlog
   4-3-五张表-migrations: backlog
   4-4-token-util: backlog
