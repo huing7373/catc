@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: codex review on Story 4.2 round 2 (/tmp/epic-loop-review-4-2-r2.md)
 story: 4-2-mysql-接入
-commit: <pending>
+commit: c96ef29
 lesson_count: 2
 ---
 
