@@ -46,8 +46,8 @@
 | 2026-04-26 | [真机联调 runbook 必须含 code signing 步骤 + config-change-then-restart 序列](2026-04-26-readme-physical-device-runbook-completeness.md) | 2 | docs | `d254a28` |
 | 2026-04-26 | [README 命令必须 cover 所有合法网段 + 工具输出格式不能假设固定字符数](2026-04-26-readme-portable-network-and-tool-output.md) | 2 | docs | `0da147e` |
 | 2026-04-26 | [Onboarding 文档必须考虑 build-wrapper 副作用 + lesson index 必须随 lesson 同步](2026-04-26-readme-onboarding-vs-tooling-side-effects.md) | 2 | docs | `6e24b57` |
-| 2026-04-26 | [V1 接口设计 /home chest.status 必须严格按节点阶段限定状态空间](2026-04-26-v1接口设计-home-chest-status-必须严格按节点阶段限定状态空间.md) | 1 | docs | `<pending>` |
-| 2026-04-26 | [V1 接口契约文档全局规则与具体字段 / planned story 必须一致](2026-04-26-v1接口契约全局规则与字段一致性.md) | 2 | docs | `<pending>` |
-| 2026-04-26 | [V1 契约 VARCHAR 长度按字符数 + 改文档某处必须 grep 全节防自相矛盾](2026-04-26-v1接口契约-varchar语义与同节自相矛盾.md) | 2 | docs | `<pending>` |
-| 2026-04-26 | [改契约文档时必须做完整 grep + 包括所有副本（产物 / story 文件）](2026-04-26-契约文档全文sweep与跨文件副本同步.md) | 3 | docs | `<pending>` |
-| 2026-04-26 | [契约 schema 字段可空性必须显式声明 + JSON 示例标签必须与示例内容一致](2026-04-26-契约schema字段可空性必须显式声明.md) | 2 | docs | `<pending>` |
+| 2026-04-26 | [V1 接口设计 /home chest.status 必须严格按节点阶段限定状态空间](2026-04-26-v1接口设计-home-chest-status-必须严格按节点阶段限定状态空间.md) | 1 | docs | `47c7998` |
+| 2026-04-26 | [V1 接口契约文档全局规则与具体字段 / planned story 必须一致](2026-04-26-v1接口契约全局规则与字段一致性.md) | 2 | docs | `d4b2aa6` |
+| 2026-04-26 | [V1 契约 VARCHAR 长度按字符数 + 改文档某处必须 grep 全节防自相矛盾](2026-04-26-v1接口契约-varchar语义与同节自相矛盾.md) | 2 | docs | `bcf665d` |
+| 2026-04-26 | [改契约文档时必须做完整 grep + 包括所有副本（产物 / story 文件）](2026-04-26-契约文档全文sweep与跨文件副本同步.md) | 3 | docs | `ad6789e` |
+| 2026-04-26 | [契约 schema 字段可空性必须显式声明 + JSON 示例标签必须与示例内容一致](2026-04-26-契约schema字段可空性必须显式声明.md) | 2 | docs | `ce5ef55` |

@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: codex review of Story 4-1 (round 1, /tmp/epic-loop-review-4-1-r1.md)
 story: 4-1-接口契约最终化
-commit: <pending>
+commit: 47c7998
 lesson_count: 1
 ---
 
