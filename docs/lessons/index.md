@@ -58,7 +58,7 @@
 | 2026-04-26 | [CLI 默认相对路径必须 auto-detect 多 cwd & gomigrate GracefulStop 必须等 fn 真停](2026-04-26-cli-relative-path-and-graceful-stop-wait.md) | 2 | config, error-handling | `c1b7e4b` |
 | 2026-04-26 | [ctx-aware 包装必须 short-circuit pre-canceled ctx & 文件路径转 URI 必须 escape 元字符](2026-04-26-ctx-precancel-shortcircuit-and-uri-escape.md) | 2 | error-handling | `fc91816` |
 | 2026-04-26 | [locate auto-detect 逻辑必须 cwd + exe-relative 双 fallback（与 config.LocateDefault 一致）](2026-04-26-locate-cwd-and-exe-relative-fallback.md) | 1 | config | `88e07bd` |
-| 2026-04-26 | [JWT util 校验必填 claim + 所有 sign 路径必须 enforce 配置约束](2026-04-26-jwt-required-claim-and-sign-policy-enforcement.md) | 2 | security | `<pending>` |
-| 2026-04-26 | [checked-in dev config 必须能直接跑 + 部署文档必须与新增配置项同步](2026-04-26-checked-in-config-must-boot-default.md) | 1 | config | `<pending>` |
-| 2026-04-26 | [secret 字段必须空字符串 + fail-fast，不能 checked-in dev fallback（即使加了警告注释）](2026-04-26-checked-in-secret-must-fail-fast.md) | 1 | security, config | `<pending>` |
-| 2026-04-26 | [JWT 篡改测试必须改非末尾字节（base64url padding bits 共享导致末尾字符 flip 可能 decode 出相同字节）](2026-04-26-jwt-tamper-test-must-mutate-non-terminal-byte.md) | 1 | testing | `<pending>` |
+| 2026-04-26 | [JWT util 校验必填 claim + 所有 sign 路径必须 enforce 配置约束](2026-04-26-jwt-required-claim-and-sign-policy-enforcement.md) | 2 | security | `174caab` |
+| 2026-04-26 | [checked-in dev config 必须能直接跑 + 部署文档必须与新增配置项同步](2026-04-26-checked-in-config-must-boot-default.md) | 1 | config | `d0870c1` |
+| 2026-04-26 | [secret 字段必须空字符串 + fail-fast，不能 checked-in dev fallback（即使加了警告注释）](2026-04-26-checked-in-secret-must-fail-fast.md) | 1 | security, config | `c9396aa` |
+| 2026-04-26 | [JWT 篡改测试必须改非末尾字节（base64url padding bits 共享导致末尾字符 flip 可能 decode 出相同字节）](2026-04-26-jwt-tamper-test-must-mutate-non-terminal-byte.md) | 1 | testing | `3344dee` |

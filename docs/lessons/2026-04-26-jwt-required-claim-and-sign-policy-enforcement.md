@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: codex review on Story 4.4 token-util (round 1) — /tmp/epic-loop-review-4-4-r1.md
 story: 4-4-token-util
-commit: <pending>
+commit: 174caab
 lesson_count: 2
 ---
 

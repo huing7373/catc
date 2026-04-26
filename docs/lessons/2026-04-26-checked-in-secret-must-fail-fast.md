@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: codex review on Story 4-4-token-util round 3 (file: /tmp/epic-loop-review-4-4-r3.md)
 story: 4-4-token-util
-commit: <pending>
+commit: c9396aa
 lesson_count: 1
 ---
 
