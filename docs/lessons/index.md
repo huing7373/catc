@@ -51,3 +51,4 @@
 | 2026-04-26 | [V1 契约 VARCHAR 长度按字符数 + 改文档某处必须 grep 全节防自相矛盾](2026-04-26-v1接口契约-varchar语义与同节自相矛盾.md) | 2 | docs | `bcf665d` |
 | 2026-04-26 | [改契约文档时必须做完整 grep + 包括所有副本（产物 / story 文件）](2026-04-26-契约文档全文sweep与跨文件副本同步.md) | 3 | docs | `ad6789e` |
 | 2026-04-26 | [契约 schema 字段可空性必须显式声明 + JSON 示例标签必须与示例内容一致](2026-04-26-契约schema字段可空性必须显式声明.md) | 2 | docs | `ce5ef55` |
+| 2026-04-26 | [infrastructure 接入必须配齐 env override + 第三方库默认行为陷阱](2026-04-26-config-env-override-and-gorm-auto-ping.md) | 2 | config, architecture | `<pending>` |

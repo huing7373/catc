@@ -51,7 +51,11 @@
       "Bash(xcodebuild build *)",
       "Bash(xcodebuild test *)",
       "Bash(xcrun xcresulttool *)",
-      "Bash(py --version)"
+      "Bash(py --version)",
+      "Bash(docker version *)",
+      "Bash(bash server/scripts/build.sh)",
+      "Bash(bash /c/fork/cat/scripts/build.sh)",
+      "Bash(bash /c/fork/cat/scripts/build.sh --test)"
     ],
     "deny": [
       "Bash(rm -rf:*)",
