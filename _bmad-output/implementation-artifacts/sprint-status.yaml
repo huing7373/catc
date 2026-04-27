@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-04-27 (story 5-4 review)
+# last_updated: 2026-04-27 (story 5-4 done)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -86,7 +86,7 @@ development_status:
   5-1-keychain-封装: done
   5-2-启动自动登录-usecase: done
   5-3-apiclient-interceptor-自动注入-bearer-token: done
-  5-4-无效-token-静默重新登录: review
+  5-4-无效-token-静默重新登录: done
   5-5-loadhomeusecase-主界面用-get-home-一次拉取全部数据: backlog
   epic-5-retrospective: optional
   epic-6: backlog

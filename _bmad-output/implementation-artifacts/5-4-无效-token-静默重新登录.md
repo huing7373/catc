@@ -1,6 +1,6 @@
 # Story 5.4: 无效 token 静默重新登录
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
