@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: codex review round 2 — /tmp/epic-loop-review-4-5-r2.md
 story: 4-5-auth-rate_limit-中间件
-commit: <pending>
+commit: b67cf45
 lesson_count: 1
 ---
 
