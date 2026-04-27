@@ -2,7 +2,7 @@
 date: 2026-04-26
 source_review: epic-loop-review-4-6-r1.md (codex P1)
 story: 4-6-游客登录接口-首次初始化事务
-commit: <pending>
+commit: be8c418
 lesson_count: 1
 ---
 
