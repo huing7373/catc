@@ -65,11 +65,31 @@ public final class AppContainer: ObservableObject {
     /// 一个新 instance 引发未来万一调整 namespace 时双源不一致风险。
     /// GuestLoginUseCase 写 token 后，下一次 APIClient 调 requiresAuth=true 接口
     /// 立刻从同一 keychain 读到（不会因 namespace 不一致或双 instance 而漏读）。
+    ///
+    /// Story 5.4：`baseAPIClient` 之上包一层 `AuthRetryingAPIClient` 装饰器 ——
+    /// 业务层（makeAuthRepository / 未来 makeHomeRepository 等）拿到的 apiClient 自动具备
+    /// 静默重登能力（401 → 自动调 /auth/guest-login 拿新 token → 重试一次）.
+    /// 注：`baseRepository` 持 unwrapped `baseAPIClient`，**专给** SilentReloginUseCase 用 ——
+    /// 严格隔离循环依赖（即使 /auth/guest-login requiresAuth=false 不会被 wrap 拦，unwrapped
+    /// 也是更清晰的语义边界，防御未来 endpoint 改动时的诡异 bug）.
     public convenience init() {
         let baseURL = AppContainer.resolveDefaultBaseURL(from: Bundle.main)
         let keychainStore = KeychainServicesStore()
+
+        // Story 5.4: 先建 baseAPIClient + baseRepository（**只**给 SilentReloginUseCase 用）
+        let baseAPIClient = APIClient(baseURL: baseURL, keychainStore: keychainStore)
+        let baseRepository = DefaultAuthRepository(apiClient: baseAPIClient)
+        let reloginUseCase = DefaultSilentReloginUseCase(
+            keychainStore: keychainStore,
+            repository: baseRepository
+        )
+        let coordinator = SilentReloginCoordinator(useCase: reloginUseCase)
+
+        // 业务层用包装后的 wrappedAPIClient ——  401 自动恢复
+        let wrappedAPIClient = AuthRetryingAPIClient(inner: baseAPIClient, coordinator: coordinator)
+
         self.init(
-            apiClient: APIClient(baseURL: baseURL, keychainStore: keychainStore),
+            apiClient: wrappedAPIClient,
             keychainStore: keychainStore
         )
     }
@@ -170,6 +190,18 @@ public final class AppContainer: ObservableObject {
     /// uuidGenerator / deviceProvider 走默认 closure（生产值）。测试场景直接 new DefaultGuestLoginUseCase 注入 mock。
     public func makeGuestLoginUseCase() -> GuestLoginUseCaseProtocol {
         DefaultGuestLoginUseCase(
+            keychainStore: keychainStore,
+            repository: makeAuthRepository()
+        )
+    }
+
+    /// Story 5.4 新增：构造 SilentReloginUseCase（默认走 container 持有的 keychain + 新建 repository）.
+    /// 让需要直接调 SilentRelogin 的场景（集成测试 / future 业务）走 container 入口.
+    /// 注：此处的 repository 是 wrap 过的（来自 makeAuthRepository）—— 因 /auth/guest-login
+    /// requiresAuth=false，AuthRetryingAPIClient 不会拦截；与 convenience init 内 baseRepository
+    /// 不同（后者直接用 baseAPIClient，**有意为之** —— 见 init 注释）.
+    public func makeSilentReloginUseCase() -> SilentReloginUseCaseProtocol {
+        DefaultSilentReloginUseCase(
             keychainStore: keychainStore,
             repository: makeAuthRepository()
         )
