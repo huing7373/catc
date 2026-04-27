@@ -2,12 +2,19 @@
 // Story 5.1 AC4: KeychainServicesStore 真实类单元测试。
 // 不用 MockKeychainStore —— 那是给上层用的；本 story 测真实 Security.framework 调用。
 //
-// 测试隔离强约束：setUp / tearDown 都必须 try? sut.removeAll()，避免：
-// 1. 上一轮测试残留干扰本轮（同一 simulator 跨 test bundle 共享 keychain namespace）
-// 2. 本轮测试残留泄漏到 simulator keychain 影响 dev 后续运行
+// 测试隔离强约束（codex round 2 [P2] finding 修复后的版本）：
+// - 每个 test class 实例在 setUp 时给 sut 注入 **专属 keychain service namespace**
+//   （`com.zhuming.pet.app.tests.<UUID>`），避免：
+//   1. 测试 setUp/tearDown 的 `removeAll()` 清掉生产 namespace 的 `guestUid`/`authToken`
+//      （手动调试 / PetAppUITests 都依赖这些）
+//   2. PetAppTests 与 PetAppUITests / 并行测试运行间的 cross-talk
+// - 由于 namespace 自带 UUID，理论上无残留风险；保留 setUp/tearDown 的 `removeAll()`
+//   仅作为该专属 namespace 内多个 test method 间的快速隔离
 //
 // 在 simulator 上跑（CI 与本地都是 simulator）：iOS simulator keychain 与 macOS 系统
 // keychain 隔离，写入不会污染 dev 主机的 keychain。
+//
+// 详见 docs/lessons/2026-04-27-keychain-service-namespace-injectable.md。
 
 import XCTest
 @testable import PetApp
@@ -15,11 +22,14 @@ import XCTest
 final class KeychainServicesStoreTests: XCTestCase {
 
     var sut: KeychainServicesStore!
+    /// 本 test 实例的专属 keychain namespace —— 与生产 `defaultService` 完全隔离。
+    var testService: String!
 
     override func setUp() {
         super.setUp()
-        sut = KeychainServicesStore()
-        // 测试隔离：每个 test 开始前确保 keychain 干净
+        testService = "com.zhuming.pet.app.tests.\(UUID().uuidString)"
+        sut = KeychainServicesStore(service: testService)
+        // 同 namespace 内不同 test method 间快速隔离（理论上 UUID 已隔离，此为兜底）
         try? sut.removeAll()
     }
 
@@ -27,6 +37,7 @@ final class KeychainServicesStoreTests: XCTestCase {
         // 测试隔离：每个 test 结束后清理，不泄漏
         try? sut?.removeAll()
         sut = nil
+        testService = nil
         super.tearDown()
     }
 
@@ -81,11 +92,13 @@ final class KeychainServicesStoreTests: XCTestCase {
 
     // 持久化跨实例（同 process 内）：写入 sut1 的 value 能被 sut2 读到
     // 验证 keychain 真实持久化语义（不是某个 sut 实例的内部 state）
+    // 注意：sut1/sut2 必须共用本 test 的 `testService` namespace，否则两实例操作的
+    // 是隔离的 keychain section，验证不到"持久化"语义。
     func testPersistenceAcrossInstances() throws {
-        let sut1 = KeychainServicesStore()
+        let sut1 = KeychainServicesStore(service: testService)
         try sut1.set("persist-test", forKey: KeychainKey.guestUid.rawValue)
 
-        let sut2 = KeychainServicesStore()
+        let sut2 = KeychainServicesStore(service: testService)
         let got = try sut2.get(forKey: KeychainKey.guestUid.rawValue)
         XCTAssertEqual(got, "persist-test")
     }
@@ -97,6 +110,28 @@ final class KeychainServicesStoreTests: XCTestCase {
         XCTAssertNoThrow(try sut.set("ad-hoc-value", forKey: adHocKey))
         let got = try sut.get(forKey: adHocKey)
         XCTAssertEqual(got, "ad-hoc-value")
+    }
+
+    // 不同 service namespace 互不干扰：sutA 和 sutB 用不同 service，
+    // sutA 写入的 key 在 sutB 里 get 必返 nil；sutB 的 removeAll 不影响 sutA。
+    // codex round 2 [P2] finding 修复后新增 —— 验证"测试不再污染生产 namespace"的根机制成立。
+    func testDifferentServiceNamespacesAreIsolated() throws {
+        let serviceA = "com.zhuming.pet.app.tests.iso.\(UUID().uuidString)"
+        let serviceB = "com.zhuming.pet.app.tests.iso.\(UUID().uuidString)"
+        let sutA = KeychainServicesStore(service: serviceA)
+        let sutB = KeychainServicesStore(service: serviceB)
+        defer {
+            try? sutA.removeAll()
+            try? sutB.removeAll()
+        }
+
+        try sutA.set("only-in-A", forKey: KeychainKey.guestUid.rawValue)
+        XCTAssertNil(try sutB.get(forKey: KeychainKey.guestUid.rawValue), "B 不应看到 A 写入的 key")
+
+        try sutB.set("only-in-B", forKey: KeychainKey.guestUid.rawValue)
+        try sutB.removeAll()
+        XCTAssertEqual(try sutA.get(forKey: KeychainKey.guestUid.rawValue), "only-in-A",
+                       "B 的 removeAll 不应影响 A 的 namespace")
     }
 
     // KeychainKey enum AC1 验证：raw value 即真实 keychain account

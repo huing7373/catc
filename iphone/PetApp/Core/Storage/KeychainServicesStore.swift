@@ -7,12 +7,11 @@
 //
 // 设计要点：
 // 1. kSecClass = kSecClassGenericPassword：通用密码项，最适合 token / id 这类字符串
-// 2. kSecAttrService = "com.zhuming.pet.app"（与 bundle ID 一致，硬编码）
-//    硬编码而非 Bundle.main.bundleIdentifier：unit test target 跑时 bundle id 是
-//    `com.zhuming.pet.app.tests`，会让测试与生产走不同 keychain namespace，
-//    导致 InMemoryKeychainStoreTests 之外的测试场景难定位；硬编码统一 service
-//    保证 test target 与生产 target 操作的是同一组 keychain items（已通过测试
-//    隔离 setUp/tearDown 的 removeAll() 兜住，详见 AC4）。
+// 2. kSecAttrService 默认 = "com.zhuming.pet.app"（与 bundle ID 一致），但 **可通过
+//    `init(service:)` 注入**：单元测试传专属 namespace（带 UUID 后缀），避免 setUp/tearDown
+//    的 `removeAll()` 清掉生产/手动调试遗留的 keychain items，也避免跨 test bundle
+//    （PetAppTests vs PetAppUITests）cross-talk。生产 App（AppContainer）继续走默认值。
+//    详见 docs/lessons/2026-04-27-keychain-service-namespace-injectable.md（codex round 2 [P2] finding）。
 // 3. kSecAttrAccount = key（调用方传入的 String，如 KeychainKey.guestUid.rawValue）
 // 4. kSecAttrAccessible = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly:
 //    - 设备解锁后可读（首次解锁前 App 起不来不是问题：iOS 启动 App 必定在解锁后）
@@ -33,11 +32,20 @@ import Foundation
 import Security
 
 public final class KeychainServicesStore: KeychainStoreProtocol, @unchecked Sendable {
-    /// keychain 命名空间：所有 item 共享此 service 字段（与 bundle ID 一致）。
-    /// 硬编码而非 Bundle.main.bundleIdentifier —— 见文件头第 2 点。
-    public static let service: String = "com.zhuming.pet.app"
+    /// 生产环境默认 keychain 命名空间（与 bundle ID 一致）。
+    /// 测试通过 `init(service:)` 注入专属 namespace，**禁止**测试用此默认值（见文件头第 2 点）。
+    public static let defaultService: String = "com.zhuming.pet.app"
 
-    public init() {}
+    /// 本实例使用的 keychain `kSecAttrService` 值。
+    /// 所有 set/get/remove/removeAll 都拼此 service —— 不同 service 的 keychain item 完全隔离。
+    public let service: String
+
+    /// - Parameter service: keychain `kSecAttrService` 命名空间。
+    ///   - 生产代码（AppContainer）传默认值 `defaultService`（= bundle ID）
+    ///   - 单元测试传专属 namespace（推荐 `"com.zhuming.pet.app.tests.\(UUID)"`），避免污染生产 namespace
+    public init(service: String = KeychainServicesStore.defaultService) {
+        self.service = service
+    }
 
     public func set(_ value: String, forKey key: String) throws {
         guard let data = value.data(using: .utf8) else {
@@ -47,7 +55,7 @@ public final class KeychainServicesStore: KeychainStoreProtocol, @unchecked Send
         // 标准 upsert 模式：先 add，撞重复时 update
         let addQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.service,
+            kSecAttrService as String: self.service,
             kSecAttrAccount as String: key,
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
@@ -61,7 +69,7 @@ public final class KeychainServicesStore: KeychainStoreProtocol, @unchecked Send
             // update path：query 不含 value / accessible，attrs 含 value
             let updateQuery: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: Self.service,
+                kSecAttrService as String: self.service,
                 kSecAttrAccount as String: key
             ]
             let attrsToUpdate: [String: Any] = [
@@ -79,7 +87,7 @@ public final class KeychainServicesStore: KeychainStoreProtocol, @unchecked Send
     public func get(forKey key: String) throws -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.service,
+            kSecAttrService as String: self.service,
             kSecAttrAccount as String: key,
             kSecReturnData as String: kCFBooleanTrue as Any,
             kSecMatchLimit as String: kSecMatchLimitOne
@@ -102,7 +110,7 @@ public final class KeychainServicesStore: KeychainStoreProtocol, @unchecked Send
     public func remove(forKey key: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.service,
+            kSecAttrService as String: self.service,
             kSecAttrAccount as String: key
         ]
         let status = SecItemDelete(query as CFDictionary)
@@ -117,7 +125,7 @@ public final class KeychainServicesStore: KeychainStoreProtocol, @unchecked Send
         // 整删本 App service 下所有 generic password；比遍历 KeychainKey.allCases 更彻底
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.service
+            kSecAttrService as String: self.service
         ]
         let status = SecItemDelete(query as CFDictionary)
         if status == errSecSuccess || status == errSecItemNotFound {
