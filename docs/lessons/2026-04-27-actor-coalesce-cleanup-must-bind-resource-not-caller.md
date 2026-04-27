@@ -2,7 +2,7 @@
 date: 2026-04-27
 source_review: codex review (epic-loop round 1) — /tmp/epic-loop-review-5-4-r1.md
 story: 5-4-无效-token-静默重新登录
-commit: <pending>
+commit: 31c4fe7
 lesson_count: 1
 ---
 

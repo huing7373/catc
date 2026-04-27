@@ -70,8 +70,8 @@
 | 2026-04-27 | [DI 容器 production 默认值切换后，所有触发外部存储副作用的容器测试都必须改走注入路径](2026-04-27-appcontainertests-must-inject-isolated-keychain-namespace.md) | 1 | testing | `4c08fc6` |
 | 2026-04-27 | [SessionStore 写入但视图未订阅会渲染陈旧身份](2026-04-27-sessionstore-home-nickname-source-of-truth.md) | 1 | architecture | `f08878c` |
 | 2026-04-27 | [Reset 类操作必须同步清空 in-memory session 状态](2026-04-27-reset-identity-must-clear-in-memory-session.md) | 1 | architecture | `9ed4f97` |
-| 2026-04-27 | [actor coalesce 协调器的 inFlight 清理必须绑定 spawned task 生命周期，而不是 caller defer](2026-04-27-actor-coalesce-cleanup-must-bind-resource-not-caller.md) | 1 | architecture | `<pending>` |
-| 2026-04-27 | [静默重登必须区分"本地无凭证"vs"server 拒绝 token"，前者**不**走 relogin](2026-04-27-silent-relogin-must-distinguish-local-vs-server-unauthorized.md) | 1 | architecture, error-handling | `<pending>` |
-| 2026-04-27 | [actor coalesce 仅靠 inFlight 字段不足以拦 stale-401，需要 generation snapshot](2026-04-27-silent-relogin-stale-401-needs-generation-dedup.md) | 1 | architecture | `<pending>` |
-| 2026-04-27 | [actor coalesce 失败路径必须连带清空 cached result，否则 generation 短路会返回已被 invalidate 的旧 token](2026-04-27-actor-coalesce-failure-must-clear-cached-token.md) | 1 | error-handling | `<pending>` |
-| 2026-04-27 | [Retry decorator 上线后，原 `.unauthorized` 文案的语义会反转 — 必须同步审计所有 user-visible mapping](2026-04-27-retry-decorator-changes-unauthorized-presentation-semantics.md) | 1 | error-handling | `<pending>` |
+| 2026-04-27 | [actor coalesce 协调器的 inFlight 清理必须绑定 spawned task 生命周期，而不是 caller defer](2026-04-27-actor-coalesce-cleanup-must-bind-resource-not-caller.md) | 1 | architecture | `31c4fe7` |
+| 2026-04-27 | [静默重登必须区分"本地无凭证"vs"server 拒绝 token"，前者**不**走 relogin](2026-04-27-silent-relogin-must-distinguish-local-vs-server-unauthorized.md) | 1 | architecture, error-handling | `99e8afd` |
+| 2026-04-27 | [actor coalesce 仅靠 inFlight 字段不足以拦 stale-401，需要 generation snapshot](2026-04-27-silent-relogin-stale-401-needs-generation-dedup.md) | 1 | architecture | `1579c9c` |
+| 2026-04-27 | [actor coalesce 失败路径必须连带清空 cached result，否则 generation 短路会返回已被 invalidate 的旧 token](2026-04-27-actor-coalesce-failure-must-clear-cached-token.md) | 1 | error-handling | `83f8292` |
+| 2026-04-27 | [Retry decorator 上线后，原 `.unauthorized` 文案的语义会反转 — 必须同步审计所有 user-visible mapping](2026-04-27-retry-decorator-changes-unauthorized-presentation-semantics.md) | 1 | error-handling | `8892a9a` |
