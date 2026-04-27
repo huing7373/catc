@@ -97,6 +97,14 @@ struct RootView: View {
                 )
                 .transition(.opacity)
             }
+
+            #if DEBUG
+            // Story 5.1 AC5: UITest hook —— XCUITest 通过 launchEnvironment
+            // 触发 keychain 写/读，把结果通过 hidden a11y text 暴露给 XCUIApplication 探测。
+            // 仅 #if DEBUG 编译；release build 该 view 不存在 → 生产代码零污染。
+            // 与 KeychainPersistenceUITests 配合实现"跨 App launch 持久化" 验证（NFR7）。
+            KeychainUITestHookView(container: container)
+            #endif
         }
         .animation(.easeInOut(duration: 0.2), value: launchStateMachine.state)
         .task {

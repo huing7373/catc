@@ -32,9 +32,10 @@ public final class AppContainer: ObservableObject {
     /// 默认 `toastDuration = 2.0`；测试可通过未来追加的 init 重载注入自定义时长（本 story 不预留 YAGNI）。
     public let errorPresenter: ErrorPresenter
 
-    /// Story 2.8 新增：本地 KeychainStore 占位实装（InMemoryKeychainStore）。
-    /// 用于 dev "重置身份" 按钮触发 `removeAll()`；Story 5.1 替换为 KeychainServicesStore 时
-    /// 协议不变，所有 UseCase / ViewModel 测试零回归。
+    /// Story 2.8 新增 / Story 5.1 升级：KeychainStore 实例。
+    /// Story 2.8 默认值为占位 `InMemoryKeychainStore`；Story 5.1 已切换为生产 `KeychainServicesStore`
+    /// （基于 Apple Security.framework / kSecClassGenericPassword）。
+    /// 协议 `KeychainStoreProtocol` 不变，所有 Story 2.8 UseCase / ViewModel / Mock 测试零回归。
     public let keychainStore: KeychainStoreProtocol
 
     /// Info.plist 中存放 baseURL 的 key（约定：`PetAppBaseURL`，避免与 Apple 系统 key 冲突）。
@@ -56,11 +57,14 @@ public final class AppContainer: ObservableObject {
     }
 
     /// 注入式 init：测试中传 mock APIClient；未来 release build 切到 production baseURL 时也走此入口。
-    /// Story 2.8：keychainStore 默认 InMemoryKeychainStore（占位实装），Story 5.1 替换为
-    /// KeychainServicesStore 时直接改默认值即可，调用方零改动。
+    /// Story 2.8 → Story 5.1 evolution：
+    /// - Story 2.8 默认值 `InMemoryKeychainStore()`（占位）
+    /// - Story 5.1 默认值切换为 `KeychainServicesStore()`（基于 Apple Security.framework，真实持久化）
+    /// 协议 `KeychainStoreProtocol` 四方法签名不变，Story 2.8 既有调用方零改动；
+    /// `InMemoryKeychainStore` 作为测试便利 + 模板示范保留（仍由 InMemoryKeychainStoreTests 维护）。
     public init(
         apiClient: APIClientProtocol,
-        keychainStore: KeychainStoreProtocol = InMemoryKeychainStore()
+        keychainStore: KeychainStoreProtocol = KeychainServicesStore()
     ) {
         self.apiClient = apiClient
         self.errorPresenter = ErrorPresenter()
