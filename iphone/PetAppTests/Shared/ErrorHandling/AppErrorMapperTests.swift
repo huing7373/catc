@@ -41,6 +41,13 @@ final class AppErrorMapperTests: XCTestCase {
         XCTAssertEqual(presentation, .toast(message: "登录已过期，正在重新登录..."))
     }
 
+    /// case#4b（Story 5.4 round 2 fix 新增）：.missingCredentials → Alert（"请重启应用"）.
+    /// 跟 .unauthorized 区分：本地态需要 cold-start 接手，**不**该让用户以为系统在自动恢复.
+    func testMissingCredentialsMapsToAlertWithRestartHint() {
+        let presentation = AppErrorMapper.presentation(for: APIError.missingCredentials)
+        XCTAssertEqual(presentation, .alert(title: "提示", message: "登录信息丢失，请重启应用"))
+    }
+
     /// case#5：.network → RetryView
     func testNetworkErrorMapsToRetry() {
         let presentation = AppErrorMapper.presentation(for: APIError.network(underlying: URLError(.timedOut)))

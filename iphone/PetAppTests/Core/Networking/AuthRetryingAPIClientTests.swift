@@ -1,5 +1,7 @@
 // AuthRetryingAPIClientTests.swift
 // Story 5.4 AC9: AuthRetryingAPIClient decorator 单元测试.
+// Story 5.4 round 2 [P2] fix：新增 case#7 验证 .missingCredentials（本地态）**不**触发 relogin
+//   —— 跟 .unauthorized（server 态）行为严格区分.
 //
 // 关键验证：
 //   1. happy: requiresAuth=true 第一次 401 → coordinator.relogin → 重试 success → 用户感知 0
@@ -8,6 +10,8 @@
 //   4. happy: 5 个并发 401 请求 → coordinator coalesce → 只 1 次 relogin + 5 次重试都成功
 //   5. edge: requiresAuth=false 抛 unauthorized → **不** relogin → 直接抛上去
 //   6. edge: 非 unauthorized 错误（.network / .business）→ **不** relogin → 直接抛
+//   7. (round 2) edge: requiresAuth=true 抛 .missingCredentials → **不** relogin → 直接抛
+//   8. (round 2) edge: requiresAuth=false 抛 .missingCredentials → **不** relogin → 直接抛
 //
 // Mock 策略：
 //   - inner: 用 StatefulMockAPIClient（按 path 维护 Stub 序列；按调用次数 pop）
@@ -182,6 +186,60 @@ final class AuthRetryingAPIClientTests: XCTestCase {
 
         XCTAssertEqual(inner.callCount(forPath: "/api/v1/home"), 1, "inner 仅 1 次")
         XCTAssertEqual(mockUseCase.callCount(of: "execute()"), 0, ".network 错误**绝不**触发 relogin")
+    }
+
+    // MARK: - case#7 (edge)：requiresAuth=true 抛 .missingCredentials → **不** relogin → 直接抛
+    // Story 5.4 round 2 [P2] fix —— 关键回归保护：
+    //   round 1 实装把 buildURLRequest 阶段的 .unauthorized 也送进 relogin 路径，
+    //   会屏蔽 cold-start / 配置错信号；本 case 锁死 .missingCredentials **绝不**触发 relogin.
+    func testMissingCredentialsOnAuthedEndpointDoesNotTriggerRelogin() async {
+        let inner = StatefulMockAPIClient()
+        // 模拟 APIClient.buildURLRequest 抛 .missingCredentials（本地无 token / keychain 配置错）
+        inner.responseSequence["/api/v1/home"] = [.failure(.missingCredentials)]
+        let mockUseCase = MockSilentReloginUseCase()
+        mockUseCase.executeStub = .success("new-token-1")  // 配了也不该被调
+        let coordinator = SilentReloginCoordinator(useCase: mockUseCase)
+        let wrapped = AuthRetryingAPIClient(inner: inner, coordinator: coordinator)
+
+        do {
+            let _: EmptyData = try await wrapped.request(authedEndpoint)
+            XCTFail("应抛 missingCredentials")
+        } catch let error as APIError {
+            XCTAssertEqual(error, .missingCredentials, "本地态应原样透传，**不**被翻译成 unauthorized")
+        } catch {
+            XCTFail("应抛 APIError.missingCredentials，实际 \(error)")
+        }
+
+        XCTAssertEqual(inner.callCount(forPath: "/api/v1/home"), 1, "inner 仅 1 次（不重试）")
+        XCTAssertEqual(
+            mockUseCase.callCount(of: "execute()"),
+            0,
+            ".missingCredentials **绝不**触发 relogin —— 这是跟 .unauthorized 的核心行为差"
+        )
+    }
+
+    // MARK: - case#8 (edge)：requiresAuth=false 抛 .missingCredentials → **不** relogin（防御性）
+    // 即使 endpoint.requiresAuth==false 路径上抛了 .missingCredentials（理论上不会发生 —
+    // APIClient false 路径跳过 keychain access；但放断言锁死语义边界）.
+    func testMissingCredentialsOnUnauthedEndpointDoesNotTriggerRelogin() async {
+        let inner = StatefulMockAPIClient()
+        inner.responseSequence["/api/v1/auth/guest-login"] = [.failure(.missingCredentials)]
+        let mockUseCase = MockSilentReloginUseCase()
+        mockUseCase.executeStub = .success("new-token-1")
+        let coordinator = SilentReloginCoordinator(useCase: mockUseCase)
+        let wrapped = AuthRetryingAPIClient(inner: inner, coordinator: coordinator)
+
+        do {
+            let _: EmptyData = try await wrapped.request(unauthedEndpoint)
+            XCTFail("应抛 missingCredentials")
+        } catch let error as APIError {
+            XCTAssertEqual(error, .missingCredentials)
+        } catch {
+            XCTFail("应抛 APIError.missingCredentials，实际 \(error)")
+        }
+
+        XCTAssertEqual(inner.callCount(forPath: "/api/v1/auth/guest-login"), 1)
+        XCTAssertEqual(mockUseCase.callCount(of: "execute()"), 0)
     }
 }
 

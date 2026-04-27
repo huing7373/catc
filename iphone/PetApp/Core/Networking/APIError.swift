@@ -7,7 +7,24 @@
 
 import Foundation
 
-/// APIClient 抛出的统一错误类型。四态对应 V1接口设计 §2.4 envelope 解析的四种失败路径。
+/// APIClient 抛出的统一错误类型。
+///
+/// 五态划分（Story 5.4 round 2 [P2] fix 把 `.unauthorized` 拆成两态）：
+/// - 前四态对应 V1接口设计 §2.4 envelope 解析的四条失败路径
+/// - `.missingCredentials` 是**本地态**：请求**未发出**就被 client 拒绝（无 token / keychain 配置错）
+///
+/// 分两态的语义动机（重要 —— 关系到静默重登 scope）：
+/// - `.unauthorized` = **server 拒绝**当前 token：HTTP 401 或 envelope.code=1001。
+///   表达"我已发请求 + server 否认了我的身份"。
+///   这是 Story 5.4 静默重登的**唯一**触发条件（"复用既有 guestUid 重新拿 token"语义）。
+/// - `.missingCredentials` = **本地端**没有可发请求的凭证：keychainStore 未注入 / keychain
+///   读失败 / token nil 或空串。表达"我根本没法发请求，server 还没看见过这次调用"。
+///   这种情况**不能**走静默重登 —— 因为：
+///   1. 如果 keychain 配置错，重登写出来的新 token 也读不回来 → 无限失败循环
+///   2. 用户可能只是丢了本地 token 但还有 guestUid → 不应当被隐式 relogin（违反 Story 5.4
+///      "静默重登限定 server 401" 的 intended scope；也违反 dev-story 文档非范围 §3 钦定）
+///   3. cold-start 路径（首次启动 / 卸载重装）应当走 `GuestLoginUseCase`，不该被
+///      AuthRetryingAPIClient 静默拦截掉真实的"无身份"信号
 public enum APIError: Error, Equatable {
     /// 业务错误：HTTP 200 + envelope.code != 0。
     /// 对应 V1接口设计 §3 的 32 个错误码（除 0=成功外）。
@@ -16,11 +33,29 @@ public enum APIError: Error, Equatable {
     /// - requestId: 服务端 envelope.requestId（链路追踪）
     case business(code: Int, message: String, requestId: String)
 
-    /// HTTP 401：token 失效 / 未登录。
-    /// 对应 envelope.code = 1001（V1接口设计 §3）。
+    /// **server 拒绝**当前 token：HTTP 401 或 envelope.code=1001（V1接口设计 §3）。
     /// 注意：HTTP 401 与 envelope.code=1001 是"或"关系——两条路径都视为 unauthorized。
-    /// 本 story 实装时按"先看 HTTP status，再看 envelope.code"决策。
+    /// APIClient 实装按"先看 HTTP status，再看 envelope.code"决策。
+    ///
+    /// **AuthRetryingAPIClient 仅 catch 这个 case** 触发静默重登；本地态走 `.missingCredentials`。
     case unauthorized
+
+    /// **本地端**凭证缺失：请求被 APIClient 在 `buildURLRequest` 阶段直接拒掉，**未触达 server**。
+    ///
+    /// 触发条件（与 APIClient §决策树对齐）：
+    /// 1. `endpoint.requiresAuth == true` 但 `keychainStore == nil`（DI 配置错）
+    /// 2. `keychainStore.get` 抛错（沙箱权限 / key 拼错等基础设施异常 → 降级为"无 token"）
+    /// 3. `keychainStore.get` 返 `nil` 或空字符串（token 未写入 / 已被 reset）
+    ///
+    /// **AuthRetryingAPIClient 不会 catch 这个 case** —— 让上层（如 RootView 冷启动门路 /
+    /// ErrorPresenter）能看到真实的"本地无身份"信号，触发 cold-start GuestLoginUseCase
+    /// 或显示配置错诊断，而**不是**被静默重登屏蔽掉。
+    ///
+    /// 当 `.missingCredentials` 抛到业务层时的恢复路径（按 dev-story 5-4 非范围 §3）：
+    /// - cold-start 启动序列读 keychain → 决定走 `GuestLoginUseCase` 重新生成 guestUid + token
+    /// - 用户主动 reset → ResetIdentityViewModel 已经清空全部本地态，下一次启动重走 cold-start
+    /// - 配置错（keychain 没注入）→ Dev / Release fail-fast，让开发者立刻看到错误
+    case missingCredentials
 
     /// 网络层错误：连不上 / 超时 / 连接重置 / DNS 失败 / SSL 错误 / 离线。
     /// 包装底层 URLError 或其它 transport 错误。
@@ -40,6 +75,8 @@ public enum APIError: Error, Equatable {
             return c1 == c2 && m1 == m2 && r1 == r2
         case (.unauthorized, .unauthorized):
             return true
+        case (.missingCredentials, .missingCredentials):
+            return true
         case let (.network(e1), .network(e2)):
             return (e1 as NSError).domain == (e2 as NSError).domain
                 && (e1 as NSError).code == (e2 as NSError).code
@@ -58,7 +95,9 @@ extension APIError: LocalizedError {
         case let .business(code, message, _):
             return "Business error \(code): \(message)"
         case .unauthorized:
-            return "Unauthorized (HTTP 401 or code 1001)"
+            return "Unauthorized (HTTP 401 or code 1001 — server rejected current token)"
+        case .missingCredentials:
+            return "Missing credentials (local: no keychain / token nil or empty / keychain read failed) — request not sent"
         case let .network(underlying):
             return "Network error: \(underlying.localizedDescription)"
         case let .decoding(underlying):

@@ -22,6 +22,9 @@ import Foundation
 ///   未命中时退回 server 返回的 `message`（再为空就给通用兜底）。
 /// - `.unauthorized` → Toast；文案 "登录已过期，正在重新登录..."（实际重登逻辑归 Epic 5 Story 5.4，
 ///   本 story 只负责 UI 提示）。
+/// - `.missingCredentials` → AlertOverlay；文案 "登录信息丢失，请重启应用"（Story 5.4 round 2 fix
+///   新增：本地态走"引导冷启动"路径，不该被 toast "正在重登"误导用户以为系统在自动恢复 —— 实际上
+///   AuthRetryingAPIClient **不**会 catch 这个 case，需要 cold-start GuestLoginUseCase 接手）。
 /// - `.network(_)` → RetryView；文案 "网络异常，请检查后重试"。
 /// - `.decoding(_)` → AlertOverlay；文案 "数据异常，请稍后重试"。
 public enum AppErrorMapper {
@@ -38,6 +41,11 @@ public enum AppErrorMapper {
 
         case .unauthorized:
             return ErrorPresentation.toast(message: "登录已过期，正在重新登录...")
+
+        case .missingCredentials:
+            // Story 5.4 round 2 fix: 跟 .unauthorized 区分 —— 本地态需要冷启动接手，
+            // 不能 toast "正在重登" 误导用户以为后台在自动恢复（AuthRetryingAPIClient 不接管）。
+            return ErrorPresentation.alert(title: "提示", message: "登录信息丢失，请重启应用")
 
         case .network:
             return ErrorPresentation.retry(message: "网络异常，请检查后重试")

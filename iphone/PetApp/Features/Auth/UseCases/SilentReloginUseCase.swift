@@ -7,7 +7,9 @@
 //
 // 流程：
 //   1. keychain.get(KeychainKey.guestUid.rawValue) —— 读现有 UID
-//   2. nil / 空字符串 → throw APIError.unauthorized（无身份可恢复 —— 让业务层 fallback 到 cold-start 流）
+//   2. nil / 空字符串 → throw APIError.missingCredentials（无身份可恢复 —— 让业务层 fallback 到 cold-start 流）
+//      (Story 5.4 round 2 fix：从 .unauthorized 改 .missingCredentials —— 跟 server 401 区分；
+//       AuthRetryingAPIClient 不会再看到这个 case 触发"用 relogin 救 relogin 自身缺失"的悖论)
 //   3. 调 repo.guestLogin(guestUid: uid, device: deviceProvider())
 //   4. 成功 → keychain.set(response.token, KeychainKey.authToken.rawValue) 写新 token
 //   5. 返回新 token（让上层 AuthRetryingAPIClient 不必再读 keychain 一次即可重试原请求）
@@ -28,7 +30,7 @@ public protocol SilentReloginUseCaseProtocol: Sendable {
     /// 复用 Keychain 中现有 guestUid 调 /auth/guest-login 拿新 token + 写 keychain.
     /// - Returns: 新 token（已写 keychain，调用方可直接用以重试原请求）
     /// - Throws:
-    ///   - APIError.unauthorized: keychain 中无 guestUid（无身份可恢复）
+    ///   - APIError.missingCredentials: keychain 中无 guestUid（无身份可恢复 —— 上层走 cold-start）
     ///   - KeychainError: keychain 读 / 写失败
     ///   - APIError.network / .business / .decoding: /auth/guest-login 调用失败
     func execute() async throws -> String
@@ -53,9 +55,10 @@ public struct DefaultSilentReloginUseCase: SilentReloginUseCaseProtocol {
         // Step 1: 读已有 guestUid
         let existing = try keychainStore.get(forKey: KeychainKey.guestUid.rawValue)
 
-        // Step 2: 无 guestUid → 不能"假装重登"——必须走 cold-start，故抛 unauthorized
+        // Step 2: 无 guestUid → 不能"假装重登"——必须走 cold-start，故抛 missingCredentials
+        // (Story 5.4 round 2 fix：从 .unauthorized 改 .missingCredentials —— 见 file header 注释)
         guard let guestUid = existing, !guestUid.isEmpty else {
-            throw APIError.unauthorized
+            throw APIError.missingCredentials
         }
 
         // Step 3: 调 /auth/guest-login（requiresAuth=false）

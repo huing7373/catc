@@ -2,11 +2,14 @@
 // Story 2.4 AC5：统一 REST 客户端，URLSession + JSON envelope 解析。
 // Story 5.3：在 buildURLRequest(_:) 内激活 Authorization Bearer token 自动注入
 //   （按 endpoint.requiresAuth 决策，从注入的 KeychainStoreProtocol 读 token）.
+// Story 5.4 round 2 [P2] fix：把"本地无 token / keychain 配置错"路径从 `.unauthorized`
+//   分离到新的 `.missingCredentials` —— 让 AuthRetryingAPIClient 只对 server 401 静默重登,
+//   不再把本地配置错误隐式当成 token 过期处理. 详见 APIError.missingCredentials 注释.
 //
 // 决策树（依次走，先匹配先抛）：
 //   1. URLSession throw → .network
 //   2. 非 HTTPURLResponse → .network
-//   3. status == 401 → .unauthorized
+//   3. status == 401 → .unauthorized（**server 拒绝当前 token**）
 //   4. status ∉ 2xx → .network
 //   5. envelope decode 失败 → .decoding
 //   6. envelope.code == 0 + data nil → .decoding
@@ -14,11 +17,12 @@
 //   8. envelope.code == 1001 → .unauthorized（envelope-level 401 别名）
 //   9. envelope.code ∈ {其它} → .business
 //
-// Token 注入决策树（Story 5.3，发生在 buildURLRequest 内、session.data(for:) 之前）：
+// Token 注入决策树（Story 5.3 + Story 5.4 round 2 fix；发生在 buildURLRequest 内、
+//   session.data(for:) 之前；**全部抛 `.missingCredentials` 而非 `.unauthorized`**）：
 //   1. requiresAuth == false → 跳过（false 路径行为零回归）
-//   2. requiresAuth == true + keychainStore == nil → throw .unauthorized（防御性）
-//   3. requiresAuth == true + keychainStore.get 抛错 → 降级为"无 token" → throw .unauthorized
-//   4. requiresAuth == true + token == nil 或空串 → throw .unauthorized
+//   2. requiresAuth == true + keychainStore == nil → throw .missingCredentials（DI 配置错）
+//   3. requiresAuth == true + keychainStore.get 抛错 → 降级为"无 token" → throw .missingCredentials
+//   4. requiresAuth == true + token == nil 或空串 → throw .missingCredentials
 //   5. requiresAuth == true + token 非空 → 写 "Authorization: Bearer <token>" header
 
 import Foundation
@@ -40,7 +44,9 @@ public protocol APIClientProtocol: Sendable {
 /// 5. 解 envelope（APIResponse<T>）
 /// 6. URLError 透传：底层 URLSession throw 出来的 URLError 包装成 APIError.network
 /// 7. (Story 5.3) 按 endpoint.requiresAuth 自动注入 `Authorization: Bearer <token>` header
-///    （token 从注入的 keychainStore 读；不存在 / 读失败 / 空串一律抛 .unauthorized）
+///    （token 从注入的 keychainStore 读；不存在 / 读失败 / 空串一律抛 .missingCredentials —
+///    Story 5.4 round 2 fix：从 .unauthorized 改 .missingCredentials，让 AuthRetryingAPIClient
+///    不会误把本地态当 server 401 触发静默重登）
 ///
 /// 不在本 story 范围内（→ 后续 story / Epic）：
 /// - 不重试（→ MVP 不做）
@@ -52,7 +58,7 @@ public final class APIClient: APIClientProtocol {
     private let session: URLSessionProtocol
     /// Story 5.3 新增：token 来源。Optional 默认 nil 保证向后兼容
     /// （Story 2.4 / 2.5 既有 `APIClient(baseURL:)` / `APIClient(baseURL:, session:)` 调用零改动）。
-    /// nil 时：任何 `requiresAuth: true` 的 endpoint 直接抛 `.unauthorized`（防御性 —— 配置错误）。
+    /// nil 时：任何 `requiresAuth: true` 的 endpoint 直接抛 `.missingCredentials`（防御性 —— 配置错误）。
     /// 非 nil 时：按决策树读 keychain 注入 header。
     private let keychainStore: KeychainStoreProtocol?
 
@@ -203,26 +209,31 @@ public final class APIClient: APIClientProtocol {
             }
         }
 
-        // Story 5.3 新增：按 requiresAuth 决策注入 Authorization header.
+        // Story 5.3 新增 / Story 5.4 round 2 fix 调整：按 requiresAuth 决策注入 Authorization header.
         //
-        // 决策树（与 file header 注释一致）：
+        // 决策树（与 file header 注释一致；本地态全部抛 `.missingCredentials`，与 server 401 区分）：
         //   1. requiresAuth == false → 跳过（false 路径行为零回归）
-        //   2. requiresAuth == true + keychainStore == nil → throw .unauthorized（防御性）
-        //   3. requiresAuth == true + keychainStore.get 抛错 → 降级为"无 token" → throw .unauthorized
-        //   4. requiresAuth == true + token == nil 或空串 → throw .unauthorized
+        //   2. requiresAuth == true + keychainStore == nil → throw .missingCredentials（DI 配置错）
+        //   3. requiresAuth == true + keychainStore.get 抛错 → 降级为"无 token" → throw .missingCredentials
+        //   4. requiresAuth == true + token == nil 或空串 → throw .missingCredentials
         //   5. requiresAuth == true + token 非空 → 写 "Authorization: Bearer <token>" header
         //
-        // 注意：抛 .unauthorized 必须发生在 session.data(for:) 调用之前，保证不浪费一次
+        // 注意：抛 .missingCredentials 必须发生在 session.data(for:) 调用之前，保证不浪费一次
         // 网络往返、不让 server 看到伪造请求；测试断言 `MockURLSession.invocations.count == 0`。
+        //
+        // **跟 .unauthorized 区分的语义**（Story 5.4 round 2 [P2] 修正）：
+        //   - 本地态 (.missingCredentials)：请求**未发出**，server 还没看见过 → AuthRetryingAPIClient
+        //     不该静默重登（避免屏蔽 cold-start / 配置错信号；详见 APIError.missingCredentials 注释）。
+        //   - server 态 (.unauthorized)：请求已发出 + server 拒绝 → AuthRetryingAPIClient 才静默重登。
         if endpoint.requiresAuth {
             guard let keychainStore else {
-                throw APIError.unauthorized
+                throw APIError.missingCredentials
             }
             // try? 而非 try：keychain access 失败（极少见沙箱问题）一律降级为"无 token"
-            // → 抛 unauthorized；不把基础设施细节 KeychainError 透传给上层业务。
+            // → 抛 .missingCredentials；不把基础设施细节 KeychainError 透传给上层业务。
             let token = try? keychainStore.get(forKey: KeychainKey.authToken.rawValue)
             guard let token, !token.isEmpty else {
-                throw APIError.unauthorized
+                throw APIError.missingCredentials
             }
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }

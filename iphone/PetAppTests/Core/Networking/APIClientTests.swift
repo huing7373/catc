@@ -88,6 +88,9 @@ final class APIClientTests: XCTestCase {
     }
 
     // MARK: - case#3: HTTP 401 → APIError.unauthorized
+    // Story 5.4 round 2 fix：endpoint.requiresAuth 改 false —— 本 case 关心的是 **server 路径**
+    // 决策（HTTP 401 短路），不关心本地 token 注入；requiresAuth=true + 无 keychainStore 会让
+    // buildURLRequest 阶段先抛 .missingCredentials，根本走不到 server，污染 case 语义.
     func testRequestThrowsUnauthorizedOnHttp401() async throws {
         let session = MockURLSession()
         // body 内容随便，APIClient 不会解 401 的 body
@@ -95,7 +98,7 @@ final class APIClientTests: XCTestCase {
                                    makeHTTPResponse(statusCode: 401))
 
         let client = makeClient(session: session)
-        let endpoint = Endpoint(path: "/home", method: .get, requiresAuth: true)
+        let endpoint = Endpoint(path: "/home", method: .get, requiresAuth: false)
 
         do {
             let _: PingResponseMock = try await client.request(endpoint)
@@ -108,6 +111,7 @@ final class APIClientTests: XCTestCase {
     }
 
     // MARK: - case#4: envelope code=1001 → APIError.unauthorized（envelope-level 别名）
+    // 同 case#3：本 case 测的是 envelope 决策路径，不测 token 注入。
     func testRequestThrowsUnauthorizedWhenEnvelopeCodeIs1001() async throws {
         let session = MockURLSession()
         let body = """
@@ -116,7 +120,7 @@ final class APIClientTests: XCTestCase {
         session.stubbedResponse = (body, makeHTTPResponse(statusCode: 200))
 
         let client = makeClient(session: session)
-        let endpoint = Endpoint(path: "/home", method: .get, requiresAuth: true)
+        let endpoint = Endpoint(path: "/home", method: .get, requiresAuth: false)
 
         do {
             let _: PingResponseMock = try await client.request(endpoint)

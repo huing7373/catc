@@ -1,5 +1,7 @@
 // APIClientAuthInjectionTests.swift
 // Story 5.3 AC5: APIClient interceptor 自动注入 Bearer token 单元测试.
+// Story 5.4 round 2 fix: 本地无 token / keychain 配置错路径断言从 .unauthorized 改 .missingCredentials,
+//   跟 server 401 区分（详见 APIError.missingCredentials 注释；AuthRetryingAPIClient 不会 catch 本地态）.
 //
 // 与 Story 2.4 APIClientTests 的区别：
 // - APIClientTests 覆盖 envelope decode / status code / business code 决策；本文件
@@ -12,10 +14,10 @@
 // 测试覆盖（≥ 4 case，本文件给 7 case）：
 // case#1 happy：requiresAuth=true + token 存在 → header 写
 // case#2 happy：requiresAuth=false → header 无（即使 keychain 有 token 也不读）
-// case#3 edge：requiresAuth=true + token nil → unauthorized + 不发请求
-// case#4 edge：requiresAuth=true + token 空串 → unauthorized + 不发请求（防御性）
-// case#5 edge：requiresAuth=true + keychain.get 抛错 → unauthorized + 不发请求（降级语义）
-// case#6 edge：requiresAuth=true + APIClient.init 未注 keychain → unauthorized + 不发请求
+// case#3 edge：requiresAuth=true + token nil → missingCredentials + 不发请求
+// case#4 edge：requiresAuth=true + token 空串 → missingCredentials + 不发请求（防御性）
+// case#5 edge：requiresAuth=true + keychain.get 抛错 → missingCredentials + 不发请求（降级语义）
+// case#6 edge：requiresAuth=true + APIClient.init 未注 keychain → missingCredentials + 不发请求
 // case#7 edge：同一 APIClient 并发 100 请求 → 全部正确注入（验线程安全）
 
 import XCTest
@@ -93,10 +95,11 @@ final class APIClientAuthInjectionTests: XCTestCase {
         XCTAssertEqual(keychain.callCount(of: "get(forKey:)"), 0)
     }
 
-    // MARK: - case#3 (edge)：requiresAuth=true 但 Keychain 无 token → 抛 APIError.unauthorized + 不发请求
-    func testThrowsUnauthorizedAndDoesNotSendRequestWhenTokenMissing() async {
+    // MARK: - case#3 (edge)：requiresAuth=true 但 Keychain 无 token → 抛 APIError.missingCredentials + 不发请求
+    // Story 5.4 round 2 fix：从 .unauthorized 改 .missingCredentials —— 跟 server 401 区分.
+    func testThrowsMissingCredentialsAndDoesNotSendRequestWhenTokenMissing() async {
         let session = MockURLSession()
-        // 故意不配 stubbedResponse —— 如果误发请求会抛 .badServerResponse 而非 .unauthorized
+        // 故意不配 stubbedResponse —— 如果误发请求会抛 .badServerResponse 而非 .missingCredentials
 
         let keychain = MockKeychainStore()
         keychain.getStubResult = .success(nil)  // keychain 无 token
@@ -106,11 +109,11 @@ final class APIClientAuthInjectionTests: XCTestCase {
 
         do {
             let _: EmptyDataMock = try await client.request(endpoint)
-            XCTFail("应抛 APIError.unauthorized")
+            XCTFail("应抛 APIError.missingCredentials")
         } catch let error as APIError {
-            XCTAssertEqual(error, .unauthorized)
+            XCTAssertEqual(error, .missingCredentials)
         } catch {
-            XCTFail("应抛 APIError.unauthorized，实际抛 \(error)")
+            XCTFail("应抛 APIError.missingCredentials，实际抛 \(error)")
         }
 
         // 关键断言：session.data(for:) 一次都不调（不浪费网络往返、不让 server 看到伪造请求）
@@ -119,8 +122,8 @@ final class APIClientAuthInjectionTests: XCTestCase {
         XCTAssertEqual(keychain.callCount(of: "get(forKey:)"), 1)
     }
 
-    // MARK: - case#4 (edge)：requiresAuth=true 但 keychain 返空字符串 → 视同不存在 → 抛 unauthorized
-    func testThrowsUnauthorizedWhenTokenIsEmptyString() async {
+    // MARK: - case#4 (edge)：requiresAuth=true 但 keychain 返空字符串 → 视同不存在 → 抛 missingCredentials
+    func testThrowsMissingCredentialsWhenTokenIsEmptyString() async {
         let session = MockURLSession()
         let keychain = MockKeychainStore()
         keychain.getStubResult = .success("")  // 空字符串视同不存在
@@ -130,18 +133,18 @@ final class APIClientAuthInjectionTests: XCTestCase {
 
         do {
             let _: EmptyDataMock = try await client.request(endpoint)
-            XCTFail("应抛 APIError.unauthorized")
+            XCTFail("应抛 APIError.missingCredentials")
         } catch let error as APIError {
-            XCTAssertEqual(error, .unauthorized)
+            XCTAssertEqual(error, .missingCredentials)
         } catch {
-            XCTFail("应抛 APIError.unauthorized，实际抛 \(error)")
+            XCTFail("应抛 APIError.missingCredentials，实际抛 \(error)")
         }
 
         XCTAssertEqual(session.invocations.count, 0)
     }
 
-    // MARK: - case#5 (edge)：requiresAuth=true 但 keychain.get 抛错 → 降级为"无 token" → 抛 unauthorized
-    func testThrowsUnauthorizedWhenKeychainGetFails() async {
+    // MARK: - case#5 (edge)：requiresAuth=true 但 keychain.get 抛错 → 降级为"无 token" → 抛 missingCredentials
+    func testThrowsMissingCredentialsWhenKeychainGetFails() async {
         let session = MockURLSession()
         let keychain = MockKeychainStore()
         keychain.getStubResult = .failure(KeychainError.osStatus(-25300, operation: "get"))
@@ -151,18 +154,18 @@ final class APIClientAuthInjectionTests: XCTestCase {
 
         do {
             let _: EmptyDataMock = try await client.request(endpoint)
-            XCTFail("应抛 APIError.unauthorized")
+            XCTFail("应抛 APIError.missingCredentials")
         } catch let error as APIError {
-            XCTAssertEqual(error, .unauthorized, "keychain 错误应降级为 unauthorized，不透传 KeychainError")
+            XCTAssertEqual(error, .missingCredentials, "keychain 错误应降级为 missingCredentials，不透传 KeychainError")
         } catch {
-            XCTFail("应抛 APIError.unauthorized，实际抛 \(error)")
+            XCTFail("应抛 APIError.missingCredentials，实际抛 \(error)")
         }
 
         XCTAssertEqual(session.invocations.count, 0)
     }
 
-    // MARK: - case#6 (edge)：requiresAuth=true 但 APIClient 构造时未注入 keychain → 抛 unauthorized
-    func testThrowsUnauthorizedWhenKeychainStoreNotInjected() async {
+    // MARK: - case#6 (edge)：requiresAuth=true 但 APIClient 构造时未注入 keychain → 抛 missingCredentials
+    func testThrowsMissingCredentialsWhenKeychainStoreNotInjected() async {
         let session = MockURLSession()
 
         // APIClient 构造时不传 keychainStore（走默认 nil） —— 模拟"配置错误"
@@ -171,11 +174,11 @@ final class APIClientAuthInjectionTests: XCTestCase {
 
         do {
             let _: EmptyDataMock = try await client.request(endpoint)
-            XCTFail("应抛 APIError.unauthorized")
+            XCTFail("应抛 APIError.missingCredentials")
         } catch let error as APIError {
-            XCTAssertEqual(error, .unauthorized)
+            XCTAssertEqual(error, .missingCredentials)
         } catch {
-            XCTFail("应抛 APIError.unauthorized，实际抛 \(error)")
+            XCTFail("应抛 APIError.missingCredentials，实际抛 \(error)")
         }
 
         XCTAssertEqual(session.invocations.count, 0)

@@ -44,8 +44,9 @@ final class SilentReloginUseCaseTests: XCTestCase {
         XCTAssertEqual(repo.lastGuestUid, "existing-uid-abc", "必须复用既有 guestUid")
     }
 
-    // MARK: - case#2 (edge)：keychain 无 guestUid → 抛 unauthorized + 不调 repo
-    func testThrowsUnauthorizedWhenGuestUidMissing() async {
+    // MARK: - case#2 (edge)：keychain 无 guestUid → 抛 missingCredentials + 不调 repo
+    // Story 5.4 round 2 fix：从 .unauthorized 改 .missingCredentials —— "本地无身份" 跟 "server 拒绝 token" 区分.
+    func testThrowsMissingCredentialsWhenGuestUidMissing() async {
         let keychain = MockKeychainStore()
         keychain.getStubResult = .success(nil)
         let repo = MockAuthRepository()
@@ -58,19 +59,19 @@ final class SilentReloginUseCaseTests: XCTestCase {
 
         do {
             _ = try await useCase.execute()
-            XCTFail("应抛 APIError.unauthorized")
+            XCTFail("应抛 APIError.missingCredentials")
         } catch let error as APIError {
-            XCTAssertEqual(error, .unauthorized)
+            XCTAssertEqual(error, .missingCredentials)
         } catch {
-            XCTFail("应抛 APIError.unauthorized，实际抛 \(error)")
+            XCTFail("应抛 APIError.missingCredentials，实际抛 \(error)")
         }
 
         XCTAssertEqual(repo.callCount(of: "guestLogin(guestUid:device:)"), 0, "无 guestUid 时**绝不**调 repo")
         XCTAssertEqual(keychain.callCount(of: "set(_:forKey:)"), 0, "也不该写 token")
     }
 
-    // MARK: - case#3 (edge)：keychain 无 guestUid（空字符串视同）→ 抛 unauthorized
-    func testThrowsUnauthorizedWhenGuestUidIsEmptyString() async {
+    // MARK: - case#3 (edge)：keychain 无 guestUid（空字符串视同）→ 抛 missingCredentials
+    func testThrowsMissingCredentialsWhenGuestUidIsEmptyString() async {
         let keychain = MockKeychainStore()
         keychain.getStubResult = .success("")
         let repo = MockAuthRepository()
@@ -82,11 +83,11 @@ final class SilentReloginUseCaseTests: XCTestCase {
 
         do {
             _ = try await useCase.execute()
-            XCTFail("应抛 APIError.unauthorized")
+            XCTFail("应抛 APIError.missingCredentials")
         } catch let error as APIError {
-            XCTAssertEqual(error, .unauthorized)
+            XCTAssertEqual(error, .missingCredentials)
         } catch {
-            XCTFail("应抛 APIError.unauthorized，实际抛 \(error)")
+            XCTFail("应抛 APIError.missingCredentials，实际抛 \(error)")
         }
 
         XCTAssertEqual(repo.callCount(of: "guestLogin(guestUid:device:)"), 0)
