@@ -55,13 +55,23 @@ public final class AppContainer: ObservableObject {
     /// 真机联调请通过 Info.plist `PetAppBaseURL` 覆盖（详见 lesson 2026-04-26-baseurl-from-info-plist）。
     public static let fallbackBaseURLString = "http://localhost:8080"
 
-    /// 默认 init：用 `APIClient(baseURL:)` 构造默认 client。
+    /// 默认 init：用 `APIClient(baseURL:, keychainStore:)` 构造默认 client。
     /// baseURL 来源优先级：Info.plist[`PetAppBaseURL`] → fallback `http://localhost:8080`。
     /// 不含 `/api/v1` 前缀（host-only baseURL 决策，见 Story 2.5 Dev Note #1）。
-    /// 测试 / 未来环境切换通过 `init(apiClient:)` 重载注入自定义 client。
+    /// 测试 / 未来环境切换通过 `init(apiClient:keychainStore:)` 重载注入自定义 client / keychain.
+    ///
+    /// Story 5.3：先 `let store = KeychainServicesStore()` 一次，然后两路注入 ——
+    /// APIClient 与 AppContainer 共享同一 keychain instance，避免 APIClient 内自己 new
+    /// 一个新 instance 引发未来万一调整 namespace 时双源不一致风险。
+    /// GuestLoginUseCase 写 token 后，下一次 APIClient 调 requiresAuth=true 接口
+    /// 立刻从同一 keychain 读到（不会因 namespace 不一致或双 instance 而漏读）。
     public convenience init() {
         let baseURL = AppContainer.resolveDefaultBaseURL(from: Bundle.main)
-        self.init(apiClient: APIClient(baseURL: baseURL))
+        let keychainStore = KeychainServicesStore()
+        self.init(
+            apiClient: APIClient(baseURL: baseURL, keychainStore: keychainStore),
+            keychainStore: keychainStore
+        )
     }
 
     /// 注入式 init：测试中传 mock APIClient；未来 release build 切到 production baseURL 时也走此入口。

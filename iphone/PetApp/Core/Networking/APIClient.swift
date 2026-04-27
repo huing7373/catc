@@ -1,5 +1,7 @@
 // APIClient.swift
 // Story 2.4 AC5：统一 REST 客户端，URLSession + JSON envelope 解析。
+// Story 5.3：在 buildURLRequest(_:) 内激活 Authorization Bearer token 自动注入
+//   （按 endpoint.requiresAuth 决策，从注入的 KeychainStoreProtocol 读 token）.
 //
 // 决策树（依次走，先匹配先抛）：
 //   1. URLSession throw → .network
@@ -12,7 +14,12 @@
 //   8. envelope.code == 1001 → .unauthorized（envelope-level 401 别名）
 //   9. envelope.code ∈ {其它} → .business
 //
-// 不在本 story 范围：Authorization header（→ Epic 5）、重试 / 限流 / 缓存 / 日志（MVP 不做或 → Story 2.7）。
+// Token 注入决策树（Story 5.3，发生在 buildURLRequest 内、session.data(for:) 之前）：
+//   1. requiresAuth == false → 跳过（false 路径行为零回归）
+//   2. requiresAuth == true + keychainStore == nil → throw .unauthorized（防御性）
+//   3. requiresAuth == true + keychainStore.get 抛错 → 降级为"无 token" → throw .unauthorized
+//   4. requiresAuth == true + token == nil 或空串 → throw .unauthorized
+//   5. requiresAuth == true + token 非空 → 写 "Authorization: Bearer <token>" header
 
 import Foundation
 
@@ -32,9 +39,10 @@ public protocol APIClientProtocol: Sendable {
 /// 4. 解析 HTTP status：见决策树
 /// 5. 解 envelope（APIResponse<T>）
 /// 6. URLError 透传：底层 URLSession throw 出来的 URLError 包装成 APIError.network
+/// 7. (Story 5.3) 按 endpoint.requiresAuth 自动注入 `Authorization: Bearer <token>` header
+///    （token 从注入的 keychainStore 读；不存在 / 读失败 / 空串一律抛 .unauthorized）
 ///
 /// 不在本 story 范围内（→ 后续 story / Epic）：
-/// - 不注入 Authorization header（→ Epic 5 AuthInterceptor）
 /// - 不重试（→ MVP 不做）
 /// - 不限流（→ MVP 不做）
 /// - 不做 request / response 日志（→ Story 2.7 测试基础设施落地 logger 后再对接）
@@ -42,10 +50,16 @@ public protocol APIClientProtocol: Sendable {
 public final class APIClient: APIClientProtocol {
     private let baseURL: URL
     private let session: URLSessionProtocol
+    /// Story 5.3 新增：token 来源。Optional 默认 nil 保证向后兼容
+    /// （Story 2.4 / 2.5 既有 `APIClient(baseURL:)` / `APIClient(baseURL:, session:)` 调用零改动）。
+    /// nil 时：任何 `requiresAuth: true` 的 endpoint 直接抛 `.unauthorized`（防御性 —— 配置错误）。
+    /// 非 nil 时：按决策树读 keychain 注入 header。
+    private let keychainStore: KeychainStoreProtocol?
 
     public init(
         baseURL: URL,
-        session: URLSessionProtocol = URLSession.shared
+        session: URLSessionProtocol = URLSession.shared,
+        keychainStore: KeychainStoreProtocol? = nil
     ) {
         // 规范化 baseURL：去掉 trailing slash，保证后续 `baseURL + endpoint.path` 拼接
         // 不会产生 `.../api/v1//version` 双斜杠。
@@ -53,6 +67,7 @@ public final class APIClient: APIClientProtocol {
         // 都被吸收成无 trailing slash 形式；endpoint.path 必须以 `/` 开头（Endpoint 自带契约）。
         self.baseURL = Self.normalize(baseURL)
         self.session = session
+        self.keychainStore = keychainStore
     }
 
     /// 去掉 baseURL 的 trailing slash（保留 scheme / host / path 其余部分）。
@@ -71,8 +86,8 @@ public final class APIClient: APIClientProtocol {
     // 是 reference type、未标 `Sendable`。虽然现代 Foundation（iOS 15+）的 decode/encode
     // 在实现上是 thread-safe 的，但这点不在 SDK 公开契约里，Swift 6 strict concurrency 不会
     // 自动认可它满足 `Sendable` 语义。每请求新建实例：
-    //   - 抹平歧义（不依赖任何 Apple 内部并发保证）
-    //   - 构造开销可忽略（< 1µs，远小于一次网络 I/O）
+    //   - 抹平歧义(不依赖任何 Apple 内部并发保证)
+    //   - 构造开销可忽略(< 1µs，远小于一次网络 I/O)
     //   - 未来需要定制 keyDecodingStrategy / dateDecodingStrategy 时改一处即可
     private func makeDecoder() -> JSONDecoder { JSONDecoder() }
     private func makeEncoder() -> JSONEncoder { JSONEncoder() }
@@ -188,8 +203,29 @@ public final class APIClient: APIClientProtocol {
             }
         }
 
-        // 注：requiresAuth 暂不处理（Epic 5 AuthInterceptor 落地时插入）
-        // 当前 MVP 所有 Epic 2 内的 endpoint 都用 requiresAuth=false（ping / version 接口本身无鉴权）
+        // Story 5.3 新增：按 requiresAuth 决策注入 Authorization header.
+        //
+        // 决策树（与 file header 注释一致）：
+        //   1. requiresAuth == false → 跳过（false 路径行为零回归）
+        //   2. requiresAuth == true + keychainStore == nil → throw .unauthorized（防御性）
+        //   3. requiresAuth == true + keychainStore.get 抛错 → 降级为"无 token" → throw .unauthorized
+        //   4. requiresAuth == true + token == nil 或空串 → throw .unauthorized
+        //   5. requiresAuth == true + token 非空 → 写 "Authorization: Bearer <token>" header
+        //
+        // 注意：抛 .unauthorized 必须发生在 session.data(for:) 调用之前，保证不浪费一次
+        // 网络往返、不让 server 看到伪造请求；测试断言 `MockURLSession.invocations.count == 0`。
+        if endpoint.requiresAuth {
+            guard let keychainStore else {
+                throw APIError.unauthorized
+            }
+            // try? 而非 try：keychain access 失败（极少见沙箱问题）一律降级为"无 token"
+            // → 抛 unauthorized；不把基础设施细节 KeychainError 透传给上层业务。
+            let token = try? keychainStore.get(forKey: KeychainKey.authToken.rawValue)
+            guard let token, !token.isEmpty else {
+                throw APIError.unauthorized
+            }
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
 
         return request
     }
