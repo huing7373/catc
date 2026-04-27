@@ -144,17 +144,25 @@ func NewRouter(deps Deps) *gin.Engine {
 		// auth handler
 		authHandler := handler.NewAuthHandler(authSvc)
 
+		// Story 4.8 加：home service + handler（4 repo 串行 + chest 动态判定；
+		// **不**依赖 authBindingRepo / txMgr / signer —— GET /home 全只读）。
+		homeSvc := service.NewHomeService(userRepo, petRepo, stepAccountRepo, chestRepo)
+		homeHandler := handler.NewHomeHandler(homeSvc)
+
 		api := r.Group("/api/v1")
 
 		// /auth 子组：RateLimitByIP（V1 §4.1 行 218）
 		authGroup := api.Group("/auth", middleware.RateLimit(deps.RateLimitCfg, middleware.RateLimitByIP))
 		authGroup.POST("/guest-login", authHandler.GuestLogin)
 
-		// 已认证子组占位：4.8 GET /home / future GET /me 等会挂在这里
-		// authedGroup := api.Group("",
-		//     middleware.Auth(deps.Signer),
-		//     middleware.RateLimit(deps.RateLimitCfg, middleware.RateLimitByUserID),
-		// )
+		// 已认证子组：先 Auth 校验 Bearer token + 注 userID 到 c.Keys；
+		// 再 RateLimit by userID（同 IP 多 user 互不影响 NAT 共享）。
+		// future GET /me / GET /pets 等同模块路由共享本子组配置。
+		authedGroup := api.Group("",
+			middleware.Auth(deps.Signer),
+			middleware.RateLimit(deps.RateLimitCfg, middleware.RateLimitByUserID),
+		)
+		authedGroup.GET("/home", homeHandler.LoadHome)
 	}
 
 	return r

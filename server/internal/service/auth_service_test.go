@@ -57,19 +57,39 @@ func (s *stubPetRepo) FindDefaultByUserID(ctx context.Context, userID uint64) (*
 }
 
 type stubStepAccountRepo struct {
-	createFn func(ctx context.Context, a *mysql.StepAccount) error
+	createFn       func(ctx context.Context, a *mysql.StepAccount) error
+	findByUserIDFn func(ctx context.Context, userID uint64) (*mysql.StepAccount, error)
 }
 
 func (s *stubStepAccountRepo) Create(ctx context.Context, a *mysql.StepAccount) error {
 	return s.createFn(ctx, a)
 }
 
+// FindByUserID 默认 panic（4.6 auth_service 不调本方法；4.8 起 home_service 用，
+// 但 home_service 有独立 stubHomeStepAccountRepo —— 本 stub 仅给 auth_service_test 用）。
+// 显式 panic 而非 nil-fn 让"误调"立刻可见。
+func (s *stubStepAccountRepo) FindByUserID(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+	if s.findByUserIDFn != nil {
+		return s.findByUserIDFn(ctx, userID)
+	}
+	panic("stubStepAccountRepo.FindByUserID not configured")
+}
+
 type stubChestRepo struct {
-	createFn func(ctx context.Context, c *mysql.UserChest) error
+	createFn       func(ctx context.Context, c *mysql.UserChest) error
+	findByUserIDFn func(ctx context.Context, userID uint64) (*mysql.UserChest, error)
 }
 
 func (s *stubChestRepo) Create(ctx context.Context, c *mysql.UserChest) error {
 	return s.createFn(ctx, c)
+}
+
+// FindByUserID 同上，4.6 auth_service 不调本方法。
+func (s *stubChestRepo) FindByUserID(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
+	if s.findByUserIDFn != nil {
+		return s.findByUserIDFn(ctx, userID)
+	}
+	panic("stubChestRepo.FindByUserID not configured")
 }
 
 // stubTxMgr.WithTx 直接调 fn —— mock 不真开事务（业务正确性靠 fn 内 repo 调用顺序断言；

@@ -44,6 +44,9 @@ import "errors"
 //     **独立哨兵** —— 用同一个会让 service 误以为冲突源是 binding 表）
 //   - ErrUserNotFound: FindByID 查不到（理论不应发生 —— binding 存在但 user 不存在 → 数据脏）
 //   - ErrPetNotFound: FindDefaultByUserID 查不到（理论不应发生 —— user 创建后必有默认 pet）
+//   - ErrStepAccountNotFound: StepAccountRepo.FindByUserID 查不到（Story 4.6 firstTimeLogin
+//     必建一行；查不到 → 数据脏，service 包成 1009）
+//   - ErrChestNotFound: ChestRepo.FindByUserID 查不到（同上，登录初始化必建）
 //
 // 其他 DB 异常（连接断 / SQL 语法错 / 死锁等）原样透传给 service，由 service 兜底
 // wrap 成 ErrServiceBusy(1009)。
@@ -53,4 +56,6 @@ var (
 	ErrUsersGuestUIDDuplicate = errors.New("mysql: users guest_uid duplicate (uk_guest_uid conflict)")
 	ErrUserNotFound           = errors.New("mysql: user not found")
 	ErrPetNotFound            = errors.New("mysql: default pet not found")
+	ErrStepAccountNotFound    = errors.New("mysql: step_account not found")
+	ErrChestNotFound          = errors.New("mysql: chest not found")
 )

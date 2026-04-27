@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	stderrors "errors"
 	"time"
 
 	"gorm.io/gorm"
@@ -34,8 +35,8 @@ type StepAccount struct {
 // TableName 显式声明 "user_step_accounts"。
 func (StepAccount) TableName() string { return "user_step_accounts" }
 
-// StepAccountRepo 是 user_step_accounts 表的访问接口（节点 2 阶段仅 Create；
-// 节点 3 步数 epic 才加 Find / UpdateBalance 等）。
+// StepAccountRepo 是 user_step_accounts 表的访问接口（节点 2 阶段 Create + FindByUserID；
+// 节点 3 步数 epic 才加 UpdateBalance 等）。
 type StepAccountRepo interface {
 	// Create 插入一行 step_accounts。
 	//
@@ -43,6 +44,12 @@ type StepAccountRepo interface {
 	// （PK 由调用方填）；调用方在 service.firstTimeLogin 已经先 INSERT users
 	// 拿到 user.ID 后再调本方法。
 	Create(ctx context.Context, a *StepAccount) error
+
+	// FindByUserID 查指定 user 的步数账户（PK = user_id 单行查询）。
+	//
+	// NotFound → ErrStepAccountNotFound 哨兵；其他 DB 异常透传给 service。
+	// 节点 2 阶段调用方仅 home_service.LoadHome（Story 4.8）；节点 3 步数 epic 起 step_service 也消费。
+	FindByUserID(ctx context.Context, userID uint64) (*StepAccount, error)
 }
 
 // stepAccountRepo 是 StepAccountRepo 的默认实装。
@@ -59,4 +66,24 @@ func NewStepAccountRepo(db *gorm.DB) StepAccountRepo {
 func (r *stepAccountRepo) Create(ctx context.Context, a *StepAccount) error {
 	db := tx.FromContext(ctx, r.db)
 	return db.WithContext(ctx).Create(a).Error
+}
+
+// FindByUserID 查 (user_id) 的步数账户行。
+//
+// 走 PK 单行查询；查不到返 ErrStepAccountNotFound 哨兵；其他 DB error 透传给
+// service 由 service 包成 1009（ADR-0006 三层映射）。
+//
+// 与 FindByID 命名风格一致：以"按什么字段查"作为后缀，便于 future 再加
+// FindByXxx 时保持惯例。
+func (r *stepAccountRepo) FindByUserID(ctx context.Context, userID uint64) (*StepAccount, error) {
+	db := tx.FromContext(ctx, r.db)
+	var a StepAccount
+	err := db.WithContext(ctx).Where("user_id = ?", userID).First(&a).Error
+	if err != nil {
+		if stderrors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrStepAccountNotFound
+		}
+		return nil, err
+	}
+	return &a, nil
 }
