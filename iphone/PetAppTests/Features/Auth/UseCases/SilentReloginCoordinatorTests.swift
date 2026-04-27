@@ -12,6 +12,9 @@
 //      → 应直接拿到 A 的 lastIssuedToken,不启第二次 useCase
 //      （fix-review round 3: codex P2 finding 回归测试）
 //   7. callerGeneration == 当前 generation → 仍然走正常重登路径（generation 路径只在"超过"时短路）
+//   8. **失败后 cached token 不再被 stale snapshot 短路**：A 成功 → generation=1 + cache=T1 → 后续一次
+//      refresh 失败 → cache 应被清空 → 旧 generation snapshot 的 caller 不再因 generation 短路拿到
+//      已被 invalidate 的 T1（fix-review round 4: codex P2 finding 回归测试）
 
 import XCTest
 @testable import PetApp
@@ -227,6 +230,78 @@ final class SilentReloginCoordinatorTests: XCTestCase {
             1,
             "B 的 callerGeneration(0) < 当前 generation(1) → 应短路返 lastIssuedToken,**不**启第二次 useCase"
         )
+    }
+
+    // MARK: - case#8 (regression / failure clears cache)：失败后 cached token 不再被 stale snapshot 短路
+    //
+    // 回归 codex review round 4 P2 finding：
+    //   旧实现下,失败的 finishInFlight 只清 inFlight,不清 lastIssuedToken. 时序：
+    //     - caller B 携 stale T0（snapshot gen=0）发请求,server 401 响应到达较晚
+    //     - 与此同时 caller A 完成成功 refresh → generation=1, lastIssuedToken=T1
+    //     - 又一次 refresh 尝试失败（比如 keychain miss / network 故障）→ 旧实现下 lastIssuedToken **仍然=T1**
+    //     - B 的 401 此时才进 relogin(callerGeneration=0) → generation(1) > 0 → 短路返 T1（已被 invalidate）
+    //     - AuthRetryingAPIClient 用 T1 重试 → 又 401 → surfaces .unauthorized,跳过本应启动的新 relogin
+    //
+    // 修复（round 4 fix）：finishInFlight(failure:) 同时清 lastIssuedToken —— B 进入时短路条件
+    // `let cached = lastIssuedToken` 自然失败 → 走正常路径启新 useCase.execute.
+    //
+    // 测试编排：
+    //   1. A 成功跑完 → generation=1, lastIssuedToken=T1
+    //   2. B 先 snapshot gen=1（"模拟另一个 caller 也用 T1 发了请求"）
+    //   3. 再让 useCase 转 stub 为 failure,触发一次 refresh 失败 → 此次 finishInFlight(failure:) 应清 cache
+    //   4. 让 useCase 转回 success（stub T2）
+    //   5. 现在 stale-401 的"老 caller B'"（用 callerGeneration=0,即 pre-A snapshot）进 relogin
+    //      → generation(2) > 0,但 lastIssuedToken=nil → 不应短路 → 启新 useCase → 拿 T2（不是已失效的 T1）
+    func testFailureClearsCachedTokenSoStaleCallerWontGetInvalidatedToken() async throws {
+        let mockUseCase = MockSilentReloginUseCase()
+        mockUseCase.executeStub = .success("token-1")
+        let coordinator = SilentReloginCoordinator(useCase: mockUseCase)
+
+        // 在 A 之前 snapshot gen=0（模拟 stale-401 caller B'）
+        let staleCallerGen = await coordinator.currentGeneration()
+        XCTAssertEqual(staleCallerGen, 0)
+
+        // step 1：A 成功跑完 → generation=1, lastIssuedToken=token-1
+        let tokenA = try await coordinator.relogin(callerGeneration: staleCallerGen)
+        XCTAssertEqual(tokenA, "token-1")
+        let genAfterA = await coordinator.currentGeneration()
+        XCTAssertEqual(genAfterA, 1)
+
+        // step 3：触发一次失败的 refresh —— 模拟 token-1 被 server invalidate 后下一次重登失败
+        mockUseCase.executeStub = .failure(APIError.network(underlying: URLError(.notConnectedToInternet)))
+        do {
+            _ = try await coordinator.relogin(callerGeneration: genAfterA)
+            XCTFail("应抛错")
+        } catch {
+            // ok
+        }
+        // 失败不推进 generation,但这里 finishInFlight(failure:) 已经清掉 lastIssuedToken
+        let genAfterFailure = await coordinator.currentGeneration()
+        XCTAssertEqual(genAfterFailure, 1, "失败的 task 完成不应推进 generation")
+
+        // step 4：useCase 恢复成功,下次会发 token-2
+        mockUseCase.executeStub = .success("token-2")
+
+        // step 5：stale-401 caller B' 此时才进 relogin（用 staleCallerGen=0,严格小于 generation=1）
+        // 旧实现下：generation(1) > 0 + lastIssuedToken=token-1 → 短路返 token-1（已 invalidate）→ ❌
+        // 新实现下：lastIssuedToken=nil → 短路 if-let 失败 → 启新 useCase → 拿 token-2 → ✅
+        let tokenStale = try await coordinator.relogin(callerGeneration: staleCallerGen)
+        XCTAssertEqual(
+            tokenStale,
+            "token-2",
+            "失败应清空 lastIssuedToken,stale-401 caller 不应再短路拿到已被 invalidate 的旧 token"
+        )
+
+        // 校验 useCase 共被调 3 次：A 成功 + 1 次失败 + B' 重新启动
+        XCTAssertEqual(
+            mockUseCase.callCount(of: "execute()"),
+            3,
+            "stale caller 进入时 cache 已清空 → 应启第三次 useCase（不是被短路）"
+        )
+
+        // 最后一次成功 → generation 应再 ++ 到 2
+        let genFinal = await coordinator.currentGeneration()
+        XCTAssertEqual(genFinal, 2, "stale caller 启动的成功 refresh 应推进 generation")
     }
 
     // MARK: - case#7 (edge)：callerGeneration == 当前 generation → 走正常重登路径

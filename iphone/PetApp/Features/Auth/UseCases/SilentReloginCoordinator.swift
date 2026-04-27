@@ -114,9 +114,25 @@ public actor SilentReloginCoordinator {
         lastIssuedToken = token
     }
 
-    /// 由 spawned Task 在自己**失败**完成时调用：清空 inFlight,但**不**推进 generation 也**不**写
-    /// lastIssuedToken —— 失败不算"已经帮你 refresh 过",后续 caller 仍需自己尝试.
+    /// 由 spawned Task 在自己**失败**完成时调用：清空 inFlight,但**不**推进 generation.
+    /// 关键：同时把 lastIssuedToken 清掉 —— 否则一个**之前 generation 的 stale-401 caller** 进入
+    /// relogin 时，generation 路径的短路条件 `generation > callerGeneration && let cached = lastIssuedToken`
+    /// 仍然命中，会返回**已经被 server 拒掉的旧 token**（最后一次成功 refresh 的那个），让 caller
+    /// 用一个明显已失效的 token 去重试一次然后失败，跳过本应启动的真正 relogin 路径.
+    ///
+    /// 时序示例（fix-review round 4 [P2] codex finding）：
+    ///   - caller B 携 stale token T0（snapshot gen=0）发请求,server 401 响应到达较晚
+    ///   - 与此同时 caller A 完成成功 refresh → generation=1, lastIssuedToken=T1
+    ///   - 之后又有一次 refresh 尝试失败 → 旧实现下 lastIssuedToken **仍然=T1**（已经
+    ///     被 server invalidate）
+    ///   - B 的 401 此时才进 relogin(callerGeneration=0) → generation(1) > 0 + lastIssuedToken!=nil
+    ///     → 短路返回 T1 → AuthRetryingAPIClient 重试一次 → server 又 401 → surfaces .unauthorized.
+    ///   - B 错失了"自己启动一次新 relogin"的机会.
+    ///
+    /// 修复：失败时把 lastIssuedToken 清掉.B 进入 relogin 时短路条件的 `let cached` 自然失败 →
+    /// 进入正常路径,启新 useCase.execute,得到真正的新 token.
     private func finishInFlight(failure: Void) {
         inFlight = nil
+        lastIssuedToken = nil
     }
 }
