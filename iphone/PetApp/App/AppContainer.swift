@@ -168,8 +168,15 @@ public final class AppContainer: ObservableObject {
     #if DEBUG
     /// Story 2.8 新增（仅 Debug build）：构造 ResetIdentityViewModel。
     /// Release build 该方法不存在；调用方（RootView）也必须 #if DEBUG 包裹调用 — fail-closed。
+    ///
+    /// Story 5.2 round 2 [P2] fix：注入 `sessionStore` —— 让 reset 成功后 in-memory session
+    /// 同步清空，HomeView SessionAwareUserInfoBar 立刻退回 fallback nickname，
+    /// 不再有"reset 后旧昵称/头像残留到杀进程"的 UI 不一致。
     public func makeResetIdentityViewModel() -> ResetIdentityViewModel {
-        ResetIdentityViewModel(useCase: makeResetKeychainUseCase())
+        ResetIdentityViewModel(
+            useCase: makeResetKeychainUseCase(),
+            sessionStore: sessionStore
+        )
     }
     #endif
 }

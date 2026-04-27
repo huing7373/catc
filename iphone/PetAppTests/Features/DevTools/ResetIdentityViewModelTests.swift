@@ -92,6 +92,52 @@ final class ResetIdentityViewModelTests: XCTestCase {
     func testInitialAlertContentIsNil() {
         XCTAssertNil(sut.alertContent)
     }
+
+    // MARK: - Story 5.2 round 2 [P2] fix：tap() 成功后必须清 sessionStore.session
+
+    /// happy: 注入 sessionStore + 预先 updateSession → tap() 成功后 session 必须为 nil。
+    /// 防止 "reset 后 HomeView SessionAwareUserInfoBar 仍渲染旧 nickname/avatar 直到 kill app" 回归。
+    func testTapHappyPathClearsSessionStore() async {
+        let sessionStore = SessionStore()
+        sessionStore.updateSession(SessionState(
+            user: UserProfile(id: "1001", nickname: "旧昵称", avatarUrl: "", hasBoundWechat: false),
+            pet: PetProfile(id: "2001", petType: 1, name: "默认小猫")
+        ))
+        XCTAssertNotNil(sessionStore.session, "前置：session 非 nil")
+
+        let sutWithSession = ResetIdentityViewModel(useCase: mockUseCase, sessionStore: sessionStore)
+        await sutWithSession.tap()
+
+        XCTAssertNil(sessionStore.session,
+                     "tap() 成功后 sessionStore.session 必须被清空（HomeView SessionAware bar 退回 fallback）")
+        XCTAssertEqual(sutWithSession.alertContent, .success)
+    }
+
+    /// edge: useCase 抛错时 sessionStore.session **不能**被清（fail-open，避免错误地清掉真实 session）。
+    func testTapErrorPathDoesNotClearSessionStore() async {
+        struct StubError: Error {}
+        mockUseCase.stubError = StubError()
+
+        let sessionStore = SessionStore()
+        let preExistingSession = SessionState(
+            user: UserProfile(id: "1001", nickname: "保留昵称", avatarUrl: "", hasBoundWechat: false),
+            pet: PetProfile(id: "2001", petType: 1, name: "默认小猫")
+        )
+        sessionStore.updateSession(preExistingSession)
+
+        let sutWithSession = ResetIdentityViewModel(useCase: mockUseCase, sessionStore: sessionStore)
+        await sutWithSession.tap()
+
+        XCTAssertEqual(sessionStore.session, preExistingSession,
+                       "useCase 抛错时 session 不应被清（reset 实际未发生，session 保留更安全）")
+    }
+
+    /// happy: sessionStore = nil（老调用方 / 老测试默认值）→ tap() 仍正常工作，无 crash。
+    func testTapWorksWithoutSessionStore() async {
+        // 默认 setUp 构造的 sut 即为 sessionStore=nil 路径
+        await sut.tap()
+        XCTAssertEqual(sut.alertContent, .success)
+    }
 }
 
 #endif

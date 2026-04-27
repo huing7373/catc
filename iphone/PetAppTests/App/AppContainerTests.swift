@@ -166,6 +166,41 @@ final class AppContainerTests: XCTestCase {
         XCTAssertNil(try container.keychainStore.get(forKey: "sessionToken"),
                      "reset 必须清 container.keychainStore；若失败说明 ViewModel 拿到的是别的 keychainStore instance")
     }
+
+    /// case#5b (Story 5.2 round 2 [P2])：container.makeResetIdentityViewModel() 必须把
+    /// container.sessionStore 同一 instance 注入 ViewModel —— 这样 reset 按下后 HomeView
+    /// SessionAwareUserInfoBar 立刻退回 fallback nickname，不再渲染旧身份。
+    ///
+    /// 验证策略：往 container.sessionStore 写入 session → 调 reset ViewModel.tap() 触发 useCase
+    /// → 断言 container.sessionStore.session 被清空（即"reset 影响 container 自己持有的 sessionStore"）。
+    /// 若 ViewModel 拿的是另一个 standalone SessionStore，container.sessionStore.session 不会被清。
+    /// 详见 docs/lessons/2026-04-27-reset-identity-must-clear-in-memory-session.md。
+    func testResetIdentityViewModelClearsContainerSessionStore() async throws {
+        let testService = "com.zhuming.pet.app.tests.\(UUID().uuidString)"
+        let isolatedKeychain = KeychainServicesStore(service: testService)
+        defer { try? isolatedKeychain.removeAll() }
+
+        let container = AppContainer(
+            apiClient: APIClient(baseURL: AppContainer.resolveDefaultBaseURL(from: Bundle.main)),
+            keychainStore: isolatedKeychain
+        )
+
+        // 1. 把 session 写入 container.sessionStore 模拟登录成功后状态
+        let preLoginSession = SessionState(
+            user: UserProfile(id: "1001", nickname: "登录后昵称", avatarUrl: "", hasBoundWechat: false),
+            pet: PetProfile(id: "2001", petType: 1, name: "默认小猫")
+        )
+        container.sessionStore.updateSession(preLoginSession)
+        XCTAssertNotNil(container.sessionStore.session, "前置：session 已写入 container.sessionStore")
+
+        // 2. 通过 container factory 拿 ViewModel，触发 reset
+        let viewModel = container.makeResetIdentityViewModel()
+        await viewModel.tap()
+
+        // 3. container.sessionStore.session 必须被清；若失败说明 ViewModel 拿到别的 SessionStore 实例。
+        XCTAssertNil(container.sessionStore.session,
+                     "reset 必须清 container.sessionStore.session；若失败说明 ViewModel 拿到的是别的 SessionStore instance")
+    }
     #endif
 
     /// case#5 (round 3)：PetApp 的 Info.plist 必须配置 NSAppTransportSecurity → NSAllowsLocalNetworking = true。
