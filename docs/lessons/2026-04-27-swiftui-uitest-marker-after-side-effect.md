@@ -2,7 +2,7 @@
 date: 2026-04-27
 source_review: codex review round 1 for Story 5-1-keychain-封装 (file: /tmp/epic-loop-review-5-1-r1.md)
 story: 5-1-keychain-封装
-commit: <pending>
+commit: 8695ec0
 lesson_count: 1
 ---
 
