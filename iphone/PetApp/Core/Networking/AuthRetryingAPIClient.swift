@@ -39,6 +39,14 @@
 // 的关系：那段说法**已废弃**。round 1 说法忽略了 dev-story 钦定的 scope 边界，导致本地态
 // 被错误归并到静默重登路径。本轮把"本地态"切成新 case `.missingCredentials`，让 catch
 // 的 case 模式机械保证不再误拦。
+//
+// Stale-401 dedup（fix-review round 3 [P2] codex finding）：
+//   inner.request 之**前** snapshot coordinator.currentGeneration() —— 把它当成"我这次请求基于
+//   哪一代 token"的标识. 收到 401 后调 relogin(callerGeneration: snapshot)：
+//   - 若 inFlight 路径触发（A 还在跑）→ B coalesce 到同一 task（这条路径靠 inFlight 字段）
+//   - 若 generation 路径触发（A 已完成,B 才进 relogin）→ coordinator 看 generation > snapshot →
+//     直接返回 lastIssuedToken,不再启第二次 useCase
+//   两条路径合起来才能保证 "concurrent 401s trigger one relogin" 的契约在所有时序下成立.
 
 import Foundation
 
@@ -52,13 +60,18 @@ public final class AuthRetryingAPIClient: APIClientProtocol {
     }
 
     public func request<T: Decodable>(_ endpoint: Endpoint) async throws -> T {
+        // 进入 inner.request **之前** snapshot generation —— 这就是"我这次请求所基于的 token 那一代".
+        // 必须放在 inner.request 之前；放在 catch 内会丢失"caller 的 401 是 stale 还是 fresh"的信息.
+        // 只在 requiresAuth=true 时需要这个 snapshot；不过提前做也无副作用（性能可忽略,纯 actor read）.
+        let preReloginGeneration = await coordinator.currentGeneration()
+
         do {
             return try await inner.request(endpoint)
         } catch APIError.unauthorized where endpoint.requiresAuth {
             // 仅 server 401 / envelope 1001 的 .unauthorized 走到这里（本地态走 .missingCredentials，
             // 由下方默认 propagate 行为透传）。
-            // 触发静默重登（多并发 coalesce）。失败直接抛上去 —— 业务层走自己的错误恢复.
-            _ = try await coordinator.relogin()
+            // 触发静默重登（多并发 coalesce + stale-401 dedup）。失败直接抛上去 —— 业务层走自己的错误恢复.
+            _ = try await coordinator.relogin(callerGeneration: preReloginGeneration)
 
             // 重试一次（**仅一次**；重试失败直接抛，不再二次重登）.
             // 重试时 inner.request → buildURLRequest → 读 keychain → 拿新 token → 注入 header → 发请求.
