@@ -2,7 +2,7 @@
 date: 2026-04-27
 source_review: codex /tmp/epic-loop-review-5-2-r1.md（Story 5.2 round 1）
 story: 5-2-启动自动登录-usecase
-commit: <pending>
+commit: f08878c
 lesson_count: 1
 ---
 
