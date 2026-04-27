@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-04-26 (story 4-5 done)
+# last_updated: 2026-04-27 (story 4-6 review)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,8 +35,8 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-04-26
-# story 4-5 review
+last_updated: 2026-04-27
+# story 4-6 review
 project: cat
 project_key: NOKEY
 tracking_system: file-system
@@ -78,7 +78,7 @@ development_status:
   4-3-五张表-migrations: done
   4-4-token-util: done
   4-5-auth-rate_limit-中间件: done
-  4-6-游客登录接口-首次初始化事务: backlog
+  4-6-游客登录接口-首次初始化事务: review
   4-8-get-home-聚合接口: backlog
   4-7-layer-2-集成测试-游客登录初始化事务全流程: backlog
   epic-4-retrospective: optional

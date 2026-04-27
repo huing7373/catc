@@ -10,7 +10,9 @@ import (
 	"github.com/huing/cat/server/internal/infra/config"
 	"github.com/huing/cat/server/internal/infra/metrics"
 	"github.com/huing/cat/server/internal/pkg/auth"
+	"github.com/huing/cat/server/internal/repo/mysql"
 	"github.com/huing/cat/server/internal/repo/tx"
+	"github.com/huing/cat/server/internal/service"
 )
 
 // Deps 是 bootstrap 期收集的依赖集合，由 main.go 构造后透传给 Run / NewRouter。
@@ -110,11 +112,50 @@ func NewRouter(deps Deps) *gin.Engine {
 	// dev 模式下挂 /dev/* 路由组；未启用时本调用完全透明。
 	devtools.Register(r)
 
-	// Story 4.5：deps 透传到 router 工厂，但本 story **不**挂任何 /api/v1
-	// 业务 handler；4.6 / 4.8 落地时往该 group 填 handler。
+	// Story 4.6 wire：仅当 deps 完整时挂业务路由。
 	//
-	// 参数现在通过 Deps 显式承接，避免未读触发 vet "declared and not used"。
-	_ = deps
+	// **deps 完整性 if-guard**（fail-fast 与 Deps{} 零值兼容）：
+	//   - 单元测试 Deps{} 零值 → 业务路由不挂 → 测试不需要构造 mock GormDB / Signer
+	//   - 生产 main.go 已 fail-fast（4.2 db.Open / 4.4 auth.New），所以 "deps 不完整"
+	//     在生产是不可达分支；测试场景需要保留 zero-deps 路径
+	//
+	// /auth 子组：rate_limit by IP（V1 §4.1 行 218 钦定 IP 维度），**不**挂 auth 中间件
+	// （登录前路径无 userID）。RateLimit 工厂在 NewRouter 调用期校验 cfg（PerKeyPerMin
+	// <= 0 → panic）；与 4.5 fail-fast 模式一致。
+	if deps.GormDB != nil && deps.TxMgr != nil && deps.Signer != nil {
+		// 5 个 mysql repo
+		userRepo := mysql.NewUserRepo(deps.GormDB)
+		authBindingRepo := mysql.NewAuthBindingRepo(deps.GormDB)
+		petRepo := mysql.NewPetRepo(deps.GormDB)
+		stepAccountRepo := mysql.NewStepAccountRepo(deps.GormDB)
+		chestRepo := mysql.NewChestRepo(deps.GormDB)
+
+		// auth service：5 repo + txMgr + signer
+		authSvc := service.NewAuthService(
+			deps.TxMgr,
+			deps.Signer,
+			userRepo,
+			authBindingRepo,
+			petRepo,
+			stepAccountRepo,
+			chestRepo,
+		)
+
+		// auth handler
+		authHandler := handler.NewAuthHandler(authSvc)
+
+		api := r.Group("/api/v1")
+
+		// /auth 子组：RateLimitByIP（V1 §4.1 行 218）
+		authGroup := api.Group("/auth", middleware.RateLimit(deps.RateLimitCfg, middleware.RateLimitByIP))
+		authGroup.POST("/guest-login", authHandler.GuestLogin)
+
+		// 已认证子组占位：4.8 GET /home / future GET /me 等会挂在这里
+		// authedGroup := api.Group("",
+		//     middleware.Auth(deps.Signer),
+		//     middleware.RateLimit(deps.RateLimitCfg, middleware.RateLimitByUserID),
+		// )
+	}
 
 	return r
 }

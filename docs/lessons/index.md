@@ -64,3 +64,4 @@
 | 2026-04-26 | [JWT 篡改测试必须改非末尾字节（base64url padding bits 共享导致末尾字符 flip 可能 decode 出相同字节）](2026-04-26-jwt-tamper-test-must-mutate-non-terminal-byte.md) | 1 | testing | `3344dee` |
 | 2026-04-26 | [IP 限频 key 必须用 RemoteIP + SetTrustedProxies 锁定 Gin / atomic + sync.Map 必须用 CAS 才真正 bounded](2026-04-26-rate-limit-xff-spoof-and-buckets-cas.md) | 2 | security, perf | `933c71b` |
 | 2026-04-26 | [YAML 配置默认值不能掩盖显式无效值（用 *int64 区分 nil 与 explicit 0）](2026-04-26-yaml-default-must-not-mask-explicit-invalid.md) | 1 | config | `b67cf45` |
+| 2026-04-26 | [多表事务必须穷举所有唯一约束的 race 路径（不同表的唯一约束需要独立 sentinel + 全部走 reuseLogin）](2026-04-26-multi-table-tx-must-cover-all-unique-constraint-races.md) | 1 | error-handling, architecture | `<pending>` |
