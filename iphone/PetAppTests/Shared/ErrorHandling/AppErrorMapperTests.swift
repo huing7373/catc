@@ -35,10 +35,14 @@ final class AppErrorMapperTests: XCTestCase {
         XCTAssertEqual(presentation, .alert(title: "提示", message: "操作失败，请稍后重试"))
     }
 
-    /// case#4：.unauthorized → Toast
-    func testUnauthorizedMapsToToast() {
+    /// case#4（Story 5.4 round 5 fix 修正）：.unauthorized → Alert（"请重启应用"）.
+    /// AuthRetryingAPIClient 上线后,业务层接到的 .unauthorized 必然是"已 exhaust 静默重登"的
+    /// 场景（relogin 失败 / retry-after-relogin 仍 401）。继续 toast "正在重新登录" 既误导
+    /// （没有 relogin 在跑）又非 recoverable（toast 自动消失,用户无 action point）。
+    /// 改成 blocking alert,让用户走 cold-start 路径,跟 .missingCredentials 对齐.
+    func testUnauthorizedMapsToAlertWithRestartHint() {
         let presentation = AppErrorMapper.presentation(for: APIError.unauthorized)
-        XCTAssertEqual(presentation, .toast(message: "登录已过期，正在重新登录..."))
+        XCTAssertEqual(presentation, .alert(title: "提示", message: "登录失败，请重新启动应用"))
     }
 
     /// case#4b（Story 5.4 round 2 fix 新增）：.missingCredentials → Alert（"请重启应用"）.

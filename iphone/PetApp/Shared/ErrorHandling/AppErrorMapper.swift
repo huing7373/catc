@@ -20,8 +20,13 @@ import Foundation
 ///
 /// - `.business(code, message, _)` → AlertOverlay；文案优先用本地 codeMessage 表（按 V1 错误码字典精挑短句），
 ///   未命中时退回 server 返回的 `message`（再为空就给通用兜底）。
-/// - `.unauthorized` → Toast；文案 "登录已过期，正在重新登录..."（实际重登逻辑归 Epic 5 Story 5.4，
-///   本 story 只负责 UI 提示）。
+/// - `.unauthorized` → AlertOverlay；文案 "登录失败，请重新启动应用"（Story 5.4 round 5 fix
+///   修正：Story 5.4 落地 `AuthRetryingAPIClient` 后,业务层接到 `.unauthorized` 的语义已经反转 ——
+///   不再是"server 第一次返 401"（那种已被 decorator 内部静默重登 + 重试一次吞掉），而是"已经
+///   exhaust 了那唯一一次静默重登尝试"（relogin 失败 / 重试后**仍**是 401）。继续 toast
+///   "正在重新登录..." 既误导（实际没有重登在跑）又非 recoverable（toast 2s 自动消失,用户无任何
+///   action point）。改成 blocking alert + "请重启应用" 让用户走 cold-start GuestLoginUseCase
+///   重新拿 token,跟 `.missingCredentials` 的处理一致。
 /// - `.missingCredentials` → AlertOverlay；文案 "登录信息丢失，请重启应用"（Story 5.4 round 2 fix
 ///   新增：本地态走"引导冷启动"路径，不该被 toast "正在重登"误导用户以为系统在自动恢复 —— 实际上
 ///   AuthRetryingAPIClient **不**会 catch 这个 case，需要 cold-start GuestLoginUseCase 接手）。
@@ -40,7 +45,13 @@ public enum AppErrorMapper {
             return ErrorPresentation.alert(title: "提示", message: userMessage)
 
         case .unauthorized:
-            return ErrorPresentation.toast(message: "登录已过期，正在重新登录...")
+            // Story 5.4 round 5 fix: AuthRetryingAPIClient 上线后,业务层能接到的 .unauthorized
+            // 必然是"已经 exhaust 一次静默重登尝试"的场景 —— 此时既没有 relogin 在跑（toast "正在
+            // 重新登录" 是谎言），也无法靠点击 retry 在装饰器层自愈（同 generation 的 401 会被
+            // dedup 短路返回旧 token，再失败仍走到这里形成 user-perceivable loop）。
+            // 改成 blocking alert + "请重启应用"：让用户走 cold-start 路径重新拿 token,与
+            // .missingCredentials 的处理对齐.
+            return ErrorPresentation.alert(title: "提示", message: "登录失败，请重新启动应用")
 
         case .missingCredentials:
             // Story 5.4 round 2 fix: 跟 .unauthorized 区分 —— 本地态需要冷启动接手，
