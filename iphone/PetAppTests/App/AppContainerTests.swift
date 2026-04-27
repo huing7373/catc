@@ -131,9 +131,25 @@ final class AppContainerTests: XCTestCase {
     /// 验证策略：往 container.keychainStore 写一个值 → 调 reset ViewModel.tap() 触发 useCase.execute()
     /// → 断言 container.keychainStore 里的值被清空。即"reset 影响 container 自己持有的 store"。
     /// 详见 docs/lessons/2026-04-26-stateobject-debug-instance-aliasing.md。
+    ///
+    /// 测试隔离强约束（codex round 3 [P2] finding 修复后的版本）：
+    /// **不**走默认 `AppContainer()`——那会绑生产 namespace `com.zhuming.pet.app` 的 KeychainServicesStore，
+    /// 测试中的 set / removeAll 会污染手动调试遗留的 `guestUid` / `authToken`，并与 PetAppUITests
+    /// 跨 launch 持久化测试 cross-talk。改走 `init(apiClient:keychainStore:)` 注入专属 namespace
+    /// （带 UUID 后缀的 `KeychainServicesStore`），与 KeychainServicesStoreTests 同模式。
+    /// 详见 docs/lessons/2026-04-27-appcontainertests-must-inject-isolated-keychain-namespace.md。
     #if DEBUG
     func testResetIdentityViewModelSharesContainerKeychainStore() async throws {
-        let container = AppContainer()
+        // 专属 namespace：UUID 保证跨 test method / 跨 bundle 都不会撞，
+        // tap() 触发的 removeAll() 只会清此隔离区，不影响生产 namespace。
+        let testService = "com.zhuming.pet.app.tests.\(UUID().uuidString)"
+        let isolatedKeychain = KeychainServicesStore(service: testService)
+        defer { try? isolatedKeychain.removeAll() }
+
+        let container = AppContainer(
+            apiClient: APIClient(baseURL: AppContainer.resolveDefaultBaseURL(from: Bundle.main)),
+            keychainStore: isolatedKeychain
+        )
 
         // 1. 写入一个值，模拟 App 后续真实写 keychain（如 sessionToken / userId）。
         try container.keychainStore.set("test-token", forKey: "sessionToken")

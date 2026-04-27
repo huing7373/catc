@@ -67,3 +67,4 @@
 | 2026-04-26 | [多表事务必须穷举所有唯一约束的 race 路径（不同表的唯一约束需要独立 sentinel + 全部走 reuseLogin）](2026-04-26-multi-table-tx-must-cover-all-unique-constraint-races.md) | 1 | error-handling, architecture | `be8c418` |
 | 2026-04-27 | [SwiftUI UITest a11y marker 必须 gate 在副作用 returned 之后才进入 view tree](2026-04-27-swiftui-uitest-marker-after-side-effect.md) | 1 | testing | `<pending>` |
 | 2026-04-27 | [Keychain service namespace 必须可注入，测试不得复用生产 namespace](2026-04-27-keychain-service-namespace-injectable.md) | 1 | testing, architecture | `<pending>` |
+| 2026-04-27 | [DI 容器 production 默认值切换后，所有触发外部存储副作用的容器测试都必须改走注入路径](2026-04-27-appcontainertests-must-inject-isolated-keychain-namespace.md) | 1 | testing | `<pending>` |
