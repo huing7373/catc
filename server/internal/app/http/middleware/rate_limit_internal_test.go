@@ -25,7 +25,7 @@ import (
 // → 共享一个 key → 第 PerKeyPerMin+1 次起被拒。
 func TestRateLimit_XFFSpoofing_DoesNotBypass(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	cfg := config.RateLimitConfig{PerKeyPerMin: 5, BurstSize: 5, BucketsLimit: 100}
+	cfg := config.RateLimitConfig{PerKeyPerMin: ptrInt64(5), BurstSize: ptrInt64(5), BucketsLimit: ptrInt64(100)}
 	r := gin.New()
 	r.Use(ErrorMappingMiddleware())
 	r.Use(RateLimit(cfg, RateLimitByIP))
@@ -80,7 +80,7 @@ func TestRateLimit_ConcurrentFlood_BucketsBounded(t *testing.T) {
 		bucketsLimit = 50
 		distinctKeys = 500 // 远超 limit，触发 overflow 路径
 	)
-	cfg := config.RateLimitConfig{PerKeyPerMin: 60, BurstSize: 1, BucketsLimit: bucketsLimit}
+	cfg := config.RateLimitConfig{PerKeyPerMin: ptrInt64(60), BurstSize: ptrInt64(1), BucketsLimit: ptrInt64(int64(bucketsLimit))}
 
 	// 用 newRateLimit（同包测试可见）拿到 count atomic 句柄
 	keyFromHeader := func(c *gin.Context) string {
@@ -141,6 +141,10 @@ func itoa(i int) string {
 	}
 	return string(buf[pos:])
 }
+
+// ptrInt64 把 int64 字面量包成 *int64，用于 RateLimitConfig 测试 fixture
+// （Story 4.5 round 2 [P2] 把字段改成 *int64 后，所有 caller 必须传 pointer）。
+func ptrInt64(v int64) *int64 { return &v }
 
 // contains 简单子串包含（避免引入 strings 包让本文件 import 列表更小）。
 func contains(s, sub string) bool {

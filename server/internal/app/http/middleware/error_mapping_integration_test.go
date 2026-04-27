@@ -215,7 +215,8 @@ func TestAuth_E2E_HappyAndUnauthorized(t *testing.T) {
 func TestRateLimit_E2E_61stReturns1005(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	cfg := config.RateLimitConfig{PerKeyPerMin: 60, BurstSize: 60, BucketsLimit: 100}
+	perKey, burst, buckets := int64(60), int64(60), int64(100)
+	cfg := config.RateLimitConfig{PerKeyPerMin: &perKey, BurstSize: &burst, BucketsLimit: &buckets}
 	r := bootstrap.NewRouter(bootstrap.Deps{RateLimitCfg: cfg})
 	// 模拟 4.6 落地后的 /auth 子组：挂 RateLimit by IP + 一条 handler
 	authGroup := r.Group("", middleware.RateLimit(cfg, middleware.RateLimitByIP))

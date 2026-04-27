@@ -48,7 +48,7 @@ func parseEnvCode(t *testing.T, body []byte) int {
 
 // AC5.6 rate_limit happy: 1 分钟内 60 次内 → 通过（epics.md 行 1047）
 func TestRateLimit_60RequestsIn1Minute_Pass(t *testing.T) {
-	cfg := config.RateLimitConfig{PerKeyPerMin: 60, BurstSize: 60, BucketsLimit: 100}
+	cfg := config.RateLimitConfig{PerKeyPerMin: ptrInt64(60), BurstSize: ptrInt64(60), BucketsLimit: ptrInt64(100)}
 	r := newRateLimitRouter(t, cfg, middleware.RateLimitByIP)
 
 	for i := 0; i < 60; i++ {
@@ -61,7 +61,7 @@ func TestRateLimit_60RequestsIn1Minute_Pass(t *testing.T) {
 
 // AC5.7 rate_limit edge: 1 分钟内第 61 次 → 1005（epics.md 行 1048）
 func TestRateLimit_61stRequestIn1Minute_Returns1005(t *testing.T) {
-	cfg := config.RateLimitConfig{PerKeyPerMin: 60, BurstSize: 60, BucketsLimit: 100}
+	cfg := config.RateLimitConfig{PerKeyPerMin: ptrInt64(60), BurstSize: ptrInt64(60), BucketsLimit: ptrInt64(100)}
 	r := newRateLimitRouter(t, cfg, middleware.RateLimitByIP)
 
 	for i := 0; i < 60; i++ {
@@ -87,7 +87,7 @@ func TestRateLimit_61stRequestIn1Minute_Returns1005(t *testing.T) {
 // reset"在外部观察上等价（"耗光后等待时间过去再次可用"）。
 func TestRateLimit_CrossMinuteBoundary_ResetsTokens(t *testing.T) {
 	t.Parallel()
-	cfg := config.RateLimitConfig{PerKeyPerMin: 60, BurstSize: 60, BucketsLimit: 100}
+	cfg := config.RateLimitConfig{PerKeyPerMin: ptrInt64(60), BurstSize: ptrInt64(60), BucketsLimit: ptrInt64(100)}
 	r := newRateLimitRouter(t, cfg, middleware.RateLimitByIP)
 
 	// burst 60 次耗光
@@ -118,7 +118,7 @@ func TestRateLimit_CrossMinuteBoundary_ResetsTokens(t *testing.T) {
 
 // AC5.9 rate_limit edge: 不同 key 隔离 → IP A 满了不影响 IP B
 func TestRateLimit_DifferentKeysIsolated(t *testing.T) {
-	cfg := config.RateLimitConfig{PerKeyPerMin: 60, BurstSize: 60, BucketsLimit: 100}
+	cfg := config.RateLimitConfig{PerKeyPerMin: ptrInt64(60), BurstSize: ptrInt64(60), BucketsLimit: ptrInt64(100)}
 	r := newRateLimitRouter(t, cfg, middleware.RateLimitByIP)
 
 	// IP A 60 次
@@ -151,7 +151,7 @@ func TestRateLimit_DifferentKeysIsolated(t *testing.T) {
 //   - IP3 触发降级（与 future 新 IP 共享 overflow limiter 同样 burst 2）
 //   - IP4 也走降级 bucket → 与 IP3 共享 bucket → 联合 burst 2 共享耗光后第 3 次拒
 func TestRateLimit_OverflowBuckets_FallsBackToSharedLimiter(t *testing.T) {
-	cfg := config.RateLimitConfig{PerKeyPerMin: 60, BurstSize: 2, BucketsLimit: 2}
+	cfg := config.RateLimitConfig{PerKeyPerMin: ptrInt64(60), BurstSize: ptrInt64(2), BucketsLimit: ptrInt64(2)}
 	r := newRateLimitRouter(t, cfg, middleware.RateLimitByIP)
 
 	// IP1 用 1 个 token（独立 bucket，剩 1）
@@ -190,7 +190,7 @@ func TestRateLimit_OverflowBuckets_FallsBackToSharedLimiter(t *testing.T) {
 
 // 防御性 fail-fast：extractor nil → panic（启动期暴露）
 func TestRateLimit_PanicsOnNilExtractor(t *testing.T) {
-	cfg := config.RateLimitConfig{PerKeyPerMin: 60, BurstSize: 60, BucketsLimit: 100}
+	cfg := config.RateLimitConfig{PerKeyPerMin: ptrInt64(60), BurstSize: ptrInt64(60), BucketsLimit: ptrInt64(100)}
 	defer func() {
 		if r := recover(); r == nil {
 			t.Errorf("expected panic on nil extractor")
@@ -201,7 +201,7 @@ func TestRateLimit_PanicsOnNilExtractor(t *testing.T) {
 
 // 防御性 fail-fast：PerKeyPerMin <= 0 → panic
 func TestRateLimit_PanicsOnInvalidPerKeyPerMin(t *testing.T) {
-	cfg := config.RateLimitConfig{PerKeyPerMin: 0, BurstSize: 60, BucketsLimit: 100}
+	cfg := config.RateLimitConfig{PerKeyPerMin: ptrInt64(0), BurstSize: ptrInt64(60), BucketsLimit: ptrInt64(100)}
 	defer func() {
 		if r := recover(); r == nil {
 			t.Errorf("expected panic on PerKeyPerMin = 0")
@@ -252,3 +252,7 @@ func TestRateLimitByUserID_FallbackToIP(t *testing.T) {
 		t.Errorf("RateLimitByUserID fallback = %q, want prefix 'ip:'", captured)
 	}
 }
+
+// ptrInt64 把 int64 字面量包成 *int64，用于 RateLimitConfig 测试 fixture
+// （Story 4.5 round 2 [P2] 把字段改成 *int64 后，所有 caller 必须传 pointer）。
+func ptrInt64(v int64) *int64 { return &v }

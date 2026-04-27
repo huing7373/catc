@@ -1,0 +1,14 @@
+server:
+  http_port: 8080
+  read_timeout_sec: 5
+  write_timeout_sec: 10
+
+# YAML 显式写 per_key_per_min: 0 —— 用于 4.5 round 2 [P2] 测试 loader **不**静默
+# 替换成默认 60（旧实现 `int + == 0 兜底` 反例）。
+# 配 `*int64` pointer 模式后：nil → 填默认；非 nil（含 *0）→ 透传给 middleware
+# fail-fast。详见 docs/lessons/2026-04-26-yaml-default-must-not-mask-explicit-invalid.md。
+ratelimit:
+  per_key_per_min: 0
+
+log:
+  level: info

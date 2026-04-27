@@ -104,14 +104,33 @@ type AuthConfig struct {
 // （与 docs/lessons/2026-04-26-checked-in-config-must-boot-default.md 钦定的
 // "非 secret 字段必须 fresh clone 直接跑" 一致）；**不**加 env override
 // （节点 2 阶段所有 env 都用 60，无差异化需求）。
+//
+// # 为什么字段是 `*int64` 而非 `int`
+//
+// 区分"YAML 缺字段"（nil）和"YAML 显式写 0"（&0）。round 2 codex review [P2]
+// 拦下的反向纠偏：旧实现用 `int + == 0 兜底默认值` 把 `per_key_per_min: 0`
+// 静默替换为 60 → 用户期望禁限频或拼写错被掩盖 → 启动正常但策略不符预期。
+//
+// 语义切分：
+//   - **loader.go**：nil（key omitted）→ 填默认值 `&60`；非 nil（含 *0 / *负数）
+//     → 透传不动
+//   - **middleware.RateLimit 工厂**：deref 后走原 fail-fast 路径：PerKeyPerMin
+//     nil 或 *≤0 → panic；BurstSize / BucketsLimit nil 或 *≤0 → 用默认兜底
+//
+// 这样 YAML 显式 `per_key_per_min: 0` 直达 middleware 工厂被 panic 拦截，
+// 与文档钦定的 fail-fast 契约一致。
+//
+// 详见 docs/lessons/2026-04-26-yaml-default-must-not-mask-explicit-invalid.md。
 type RateLimitConfig struct {
 	// PerKeyPerMin 是每 key（IP 或 userID）每分钟允许的请求数。
 	//
 	// 默认 60（epics.md 行 1039 + V1 §4.1 行 218 钦定）。可调小（如 30）保守
 	// 限频或调大（如 120）放宽（但 > 600 接近"无限频"，违反限频初衷）。
 	//
-	// 范围限制：(0, +∞)，由 middleware.RateLimit 工厂在启动期校验；≤ 0 → panic。
-	PerKeyPerMin int `yaml:"per_key_per_min"`
+	// 范围限制：(0, +∞)，由 middleware.RateLimit 工厂在启动期校验；nil 或 *≤0 → panic。
+	//
+	// 类型为 `*int64` 而非 `int`：见 RateLimitConfig 顶部"为什么字段是 *int64"。
+	PerKeyPerMin *int64 `yaml:"per_key_per_min"`
 
 	// BurstSize 是 token bucket 容量（瞬时突发上限）。
 	//
@@ -120,7 +139,13 @@ type RateLimitConfig struct {
 	// burst-friendly）。
 	//
 	// 调小（如 10）让 burst 更保守 —— 防 client bug 突发雪崩 server。
-	BurstSize int `yaml:"burst_size"`
+	//
+	// 类型为 `*int64` 而非 `int`：见 RateLimitConfig 顶部"为什么字段是 *int64"。
+	// 与 PerKeyPerMin 不同，BurstSize 的 nil / *≤0 走 middleware 工厂兜底（用
+	// PerKeyPerMin 默认），**不** panic —— BurstSize 显式 0 没有"用户想禁掉"的
+	// 真实场景（burst=0 等价于"完全限频"，即 PerKeyPerMin=0），落到 PerKeyPerMin
+	// 那一步 panic 已足够。
+	BurstSize *int64 `yaml:"burst_size"`
 
 	// BucketsLimit 是内存中保存的 bucket 数上限（防 IP 洪泛 OOM）。
 	//
@@ -129,7 +154,13 @@ type RateLimitConfig struct {
 	// 10000 远超实际负载。
 	//
 	// 节点 10+ 切 Redis 后本字段废弃（Redis 自身 eviction 处理）。
-	BucketsLimit int `yaml:"buckets_limit"`
+	//
+	// 类型为 `*int64` 而非 `int`：见 RateLimitConfig 顶部"为什么字段是 *int64"。
+	// 同 BurstSize，nil / *≤0 走 middleware 工厂兜底（10000），**不** panic ——
+	// BucketsLimit=0 没有真实业务语义（"不让任何 key 进 bucket map"等价于
+	// "全部走 overflow shared limiter"，与"完全限频"不同，但这种极端配置应该
+	// 被默认值兜底而非 fail-fast，与既有 ≤0 → 兜底 10000 行为一致）。
+	BucketsLimit *int64 `yaml:"buckets_limit"`
 }
 
 type LogConfig struct {

@@ -78,12 +78,17 @@ func RateLimitByUserID(c *gin.Context) string {
 // # 启动期 fail-fast
 //
 // extractor == nil → panic
-// cfg.PerKeyPerMin <= 0 → panic
+// cfg.PerKeyPerMin == nil 或 *cfg.PerKeyPerMin <= 0 → panic
+// cfg.BurstSize == nil 或 cfg.BucketsLimit == nil → panic（caller bug：未走 loader）
 // （MEMORY.md "No Backup Fallback" 钦定反对 silent fallback；启动期暴露问题，
 // 避免业务请求才发现限频策略无效。）
 //
-// 缺省：cfg.BurstSize <= 0 → 用 PerKeyPerMin 兜底；
-// cfg.BucketsLimit <= 0 → 兜底 10000。
+// 缺省：*cfg.BurstSize <= 0 → 用 PerKeyPerMin 兜底；
+// *cfg.BucketsLimit <= 0 → 兜底 10000。
+//
+// **指针类型说明**：cfg 字段为 *int64 而非 int —— 4.5 round 2 [P2] 引入，
+// 用于让 loader 区分"YAML 缺字段"（nil → 填默认）与"YAML 显式 0"（&0 → 透传 panic）。
+// 详见 config.RateLimitConfig 顶部说明。
 //
 // # 内存管理（防洪泛）
 //
@@ -130,23 +135,39 @@ func RateLimit(cfg config.RateLimitConfig, extractor KeyExtractor) gin.HandlerFu
 // 当前 key 数）给同包白盒测试断言"buckets size 不超过 BucketsLimit"用。
 //
 // 生产路径走 RateLimit 包装，丢弃 counter。
+//
+// **指针 deref 约定**（Story 4.5 round 2 [P2] 引入）：cfg 字段全部 *int64。
+// 调用方（loader.Load 或测试）必须保证非 nil；若任一字段 nil → panic（caller bug）。
+// 详见 config.RateLimitConfig 顶部 "为什么字段是 *int64"。
 func newRateLimit(cfg config.RateLimitConfig, extractor KeyExtractor) (gin.HandlerFunc, *atomic.Int64) {
 	if extractor == nil {
 		panic("middleware.RateLimit: extractor must not be nil")
 	}
-	if cfg.PerKeyPerMin <= 0 {
-		panic(fmt.Sprintf("middleware.RateLimit: PerKeyPerMin must be > 0, got %d", cfg.PerKeyPerMin))
+	if cfg.PerKeyPerMin == nil {
+		panic("middleware.RateLimit: PerKeyPerMin must not be nil (caller must populate via loader or struct literal)")
 	}
-	if cfg.BurstSize <= 0 {
-		cfg.BurstSize = cfg.PerKeyPerMin
+	if cfg.BurstSize == nil {
+		panic("middleware.RateLimit: BurstSize must not be nil (caller must populate via loader or struct literal)")
 	}
-	if cfg.BucketsLimit <= 0 {
-		cfg.BucketsLimit = 10000
+	if cfg.BucketsLimit == nil {
+		panic("middleware.RateLimit: BucketsLimit must not be nil (caller must populate via loader or struct literal)")
+	}
+	perKeyPerMin := *cfg.PerKeyPerMin
+	if perKeyPerMin <= 0 {
+		panic(fmt.Sprintf("middleware.RateLimit: PerKeyPerMin must be > 0, got %d", perKeyPerMin))
+	}
+	burstSize := *cfg.BurstSize
+	if burstSize <= 0 {
+		burstSize = perKeyPerMin
+	}
+	bucketsLimit := *cfg.BucketsLimit
+	if bucketsLimit <= 0 {
+		bucketsLimit = 10000
 	}
 	// 每秒速率 = 每分钟 / 60
-	perSec := rate.Limit(float64(cfg.PerKeyPerMin) / 60.0)
-	burst := cfg.BurstSize
-	limit := int64(cfg.BucketsLimit)
+	perSec := rate.Limit(float64(perKeyPerMin) / 60.0)
+	burst := int(burstSize)
+	limit := bucketsLimit
 
 	var (
 		buckets sync.Map // map[string]*rate.Limiter

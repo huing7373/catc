@@ -77,17 +77,28 @@ func Load(path string) (*Config, error) {
 	if cfg.Auth.TokenExpireSec == 0 {
 		cfg.Auth.TokenExpireSec = defaultTokenExpireSec
 	}
-	// RateLimit 默认值兜底（Story 4.5 引入）：缺失字段自动填默认；
-	// fail-fast 由 middleware.RateLimit 工厂承担（PerKeyPerMin ≤ 0 → panic），
-	// 这里只补空字段不做业务校验（与 MySQL / Auth 配置同模式）。
-	if cfg.RateLimit.PerKeyPerMin == 0 {
-		cfg.RateLimit.PerKeyPerMin = defaultRateLimitPerKeyPerMin
+	// RateLimit 默认值兜底（Story 4.5 引入；4.5 round 2 [P2] 改成 *int64 pointer 模式）：
+	// 仅当 YAML **未提供**字段（pointer == nil）时填默认；YAML **显式写了** 的值
+	// （含 *0 / *负数）原样透传 → middleware.RateLimit 工厂的 fail-fast 路径处理。
+	//
+	// 反例（旧 `int + == 0 兜底`）：YAML 显式 `per_key_per_min: 0` → loader 静默
+	// 替换成 60 → middleware 看不到 0 → 用户期望禁限频或拼写错被掩盖。
+	//
+	// 详见 docs/lessons/2026-04-26-yaml-default-must-not-mask-explicit-invalid.md
+	// + config.go RateLimitConfig 顶部"为什么字段是 *int64"。
+	if cfg.RateLimit.PerKeyPerMin == nil {
+		v := int64(defaultRateLimitPerKeyPerMin)
+		cfg.RateLimit.PerKeyPerMin = &v
 	}
-	if cfg.RateLimit.BurstSize == 0 {
-		cfg.RateLimit.BurstSize = cfg.RateLimit.PerKeyPerMin
+	if cfg.RateLimit.BurstSize == nil {
+		// BurstSize 默认 = PerKeyPerMin（已经填过默认或保持 YAML 显式值）；
+		// 注意：PerKeyPerMin 此处必非 nil（上一段已填默认）。
+		v := *cfg.RateLimit.PerKeyPerMin
+		cfg.RateLimit.BurstSize = &v
 	}
-	if cfg.RateLimit.BucketsLimit == 0 {
-		cfg.RateLimit.BucketsLimit = defaultRateLimitBucketsLimit
+	if cfg.RateLimit.BucketsLimit == nil {
+		v := int64(defaultRateLimitBucketsLimit)
+		cfg.RateLimit.BucketsLimit = &v
 	}
 
 	return &cfg, nil
