@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-04-26 (story 4-5 ready-for-dev)
+# last_updated: 2026-04-26 (story 4-5 done)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -77,7 +77,7 @@ development_status:
   4-2-mysql-接入: done
   4-3-五张表-migrations: done
   4-4-token-util: done
-  4-5-auth-rate_limit-中间件: review
+  4-5-auth-rate_limit-中间件: done
   4-6-游客登录接口-首次初始化事务: backlog
   4-8-get-home-聚合接口: backlog
   4-7-layer-2-集成测试-游客登录初始化事务全流程: backlog
