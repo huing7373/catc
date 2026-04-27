@@ -29,6 +29,9 @@ final class KeychainPersistenceUITests: XCTestCase {
         // 兜底清理：再 launch 一次，触发 reset 按钮把测试残留 keychain 清掉，
         // 避免下一轮测试 / dev 联调遇到脏数据。
         let app = XCUIApplication()
+        // Story 5.2 hook：tearDown 想到达 HomeView 才能点 reset 按钮；UITest 不依赖真实 server，
+        // 走 Story 2.9 默认 no-op closure → HomeView 直接渲染.
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app.launch()
         let resetButton = app.buttons[AccessibilityID.Home.btnResetIdentity]
         if resetButton.waitForExistence(timeout: 5) {
@@ -47,6 +50,10 @@ final class KeychainPersistenceUITests: XCTestCase {
         // Step 1-3: launch App + 种入 keychain
         let app1 = XCUIApplication()
         app1.launchEnvironment["KEYCHAIN_TEST_SEED"] = testGuestUid
+        // Story 5.2 hook：本测试只关注 keychain seed/readback 链路，不关心 launch state machine 是否能完成
+        // bootstrap（无 server 时 .needsAuth 也无所谓 —— hook view 在 ZStack 里独立渲染）；显式 skip
+        // 让测试时序不被 GuestLoginUseCase 网络超时耽搁，提速 + 减少 flake.
+        app1.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app1.launch()
 
         // 等待"种入完成"信号 element 出现
@@ -62,6 +69,8 @@ final class KeychainPersistenceUITests: XCTestCase {
         // Step 5: relaunch with readback env
         let app2 = XCUIApplication()
         app2.launchEnvironment["KEYCHAIN_TEST_READBACK"] = "1"
+        // Story 5.2 hook：同上 step 1，跳过 GuestLoginUseCase 让 readback 测试更稳更快.
+        app2.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app2.launch()
 
         // Step 6-7: 等待 readback element 出现，断言其 label == 种入值

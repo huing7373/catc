@@ -38,6 +38,14 @@ public final class AppContainer: ObservableObject {
     /// 协议 `KeychainStoreProtocol` 不变，所有 Story 2.8 UseCase / ViewModel / Mock 测试零回归。
     public let keychainStore: KeychainStoreProtocol
 
+    /// Story 5.2 新增：全 App 共享的会话状态。RootView bootstrapStep1 closure 在登录成功后
+    /// 调 sessionStore.updateSession(...) 写入；HomeView / 节点 2 之后的所有需要身份信息的视图通过
+    /// @ObservedObject / @EnvironmentObject 订阅 sessionStore.session.
+    ///
+    /// 与 errorPresenter 同模式 —— stable singleton within container，
+    /// 由 init 一次性构造，整个 App 生命周期共享同一 instance.
+    public let sessionStore: SessionStore
+
     /// Info.plist 中存放 baseURL 的 key（约定：`PetAppBaseURL`，避免与 Apple 系统 key 冲突）。
     /// 通过 build configuration / xcconfig 覆盖；缺省时回退到 `localhost` fallback。
     public static let baseURLInfoKey = "PetAppBaseURL"
@@ -69,6 +77,10 @@ public final class AppContainer: ObservableObject {
         self.apiClient = apiClient
         self.errorPresenter = ErrorPresenter()
         self.keychainStore = keychainStore
+        // Story 5.2 新增：sessionStore 在 init 一次性构造，与 errorPresenter 同模式（stable singleton）。
+        // 不预留 init(...sessionStore:) 注入式签名 —— 测试场景直接 new SessionStore() 即可（@MainActor 类，
+        // 跨 actor 注入需 @Sendable 约束麻烦；container.sessionStore 已暴露足以验证）。
+        self.sessionStore = SessionStore()
     }
 
     /// 解析默认 baseURL：从给定 bundle 的 Info.plist 读 `PetAppBaseURL`，否则回退到 fallback。
@@ -135,6 +147,22 @@ public final class AppContainer: ObservableObject {
     /// UseCase 是 value type，每次调用返回新实例；keychainStore 单例由 container 持有。
     public func makeResetKeychainUseCase() -> ResetKeychainUseCaseProtocol {
         DefaultResetKeychainUseCase(keychainStore: keychainStore)
+    }
+
+    /// Story 5.2 新增：构造 AuthRepository（DefaultAuthRepository）。
+    /// Repository 是 value type struct，每次调用返回新实例；apiClient 单例由 container 持有。
+    public func makeAuthRepository() -> AuthRepositoryProtocol {
+        DefaultAuthRepository(apiClient: apiClient)
+    }
+
+    /// Story 5.2 新增：构造 GuestLoginUseCase。
+    /// UseCase 是 value type struct；keychainStore 单例由 container 持有；
+    /// uuidGenerator / deviceProvider 走默认 closure（生产值）。测试场景直接 new DefaultGuestLoginUseCase 注入 mock。
+    public func makeGuestLoginUseCase() -> GuestLoginUseCaseProtocol {
+        DefaultGuestLoginUseCase(
+            keychainStore: keychainStore,
+            repository: makeAuthRepository()
+        )
     }
 
     #if DEBUG

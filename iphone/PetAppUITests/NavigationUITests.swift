@@ -18,6 +18,9 @@ final class NavigationUITests: XCTestCase {
 
     func testTapEnterRoomShowsRoomPlaceholder() throws {
         let app = XCUIApplication()
+        // Story 5.2 hook：UITest 不依赖真实 server / GuestLoginUseCase；
+        // 让 launch state machine 走 Story 2.9 默认 no-op closure → HomeView 直接渲染.
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app.launch()
 
         let btnRoom = app.buttons[AccessibilityID.Home.btnRoom]
@@ -42,6 +45,8 @@ final class NavigationUITests: XCTestCase {
 
     func testTapInventoryShowsInventoryPlaceholder() throws {
         let app = XCUIApplication()
+        // Story 5.2 hook：UITest 不依赖真实 server / GuestLoginUseCase（详见 testTapEnterRoomShowsRoomPlaceholder）.
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app.launch()
 
         let btnInventory = app.buttons[AccessibilityID.Home.btnInventory]
@@ -65,6 +70,8 @@ final class NavigationUITests: XCTestCase {
 
     func testTapComposeShowsComposePlaceholder() throws {
         let app = XCUIApplication()
+        // Story 5.2 hook：UITest 不依赖真实 server / GuestLoginUseCase（详见 testTapEnterRoomShowsRoomPlaceholder）.
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app.launch()
 
         let btnCompose = app.buttons[AccessibilityID.Home.btnCompose]

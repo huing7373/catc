@@ -68,3 +68,4 @@
 | 2026-04-27 | [SwiftUI UITest a11y marker 必须 gate 在副作用 returned 之后才进入 view tree](2026-04-27-swiftui-uitest-marker-after-side-effect.md) | 1 | testing | `8695ec0` |
 | 2026-04-27 | [Keychain service namespace 必须可注入，测试不得复用生产 namespace](2026-04-27-keychain-service-namespace-injectable.md) | 1 | testing, architecture | `686f53e` |
 | 2026-04-27 | [DI 容器 production 默认值切换后，所有触发外部存储副作用的容器测试都必须改走注入路径](2026-04-27-appcontainertests-must-inject-isolated-keychain-namespace.md) | 1 | testing | `4c08fc6` |
+| 2026-04-27 | [SessionStore 写入但视图未订阅会渲染陈旧身份](2026-04-27-sessionstore-home-nickname-source-of-truth.md) | 1 | architecture | `<pending>` |

@@ -13,6 +13,9 @@ final class HomeUITests: XCTestCase {
 
     func testHomeViewShowsAllSixPlaceholders() throws {
         let app = XCUIApplication()
+        // Story 5.2 hook：让 launch state machine 跳过真实 GuestLoginUseCase（无 server / 不依赖网络），
+        // 直接走 Story 2.9 默认 no-op closure → LaunchingView → HomeView 路径，与本 UITest 关注点对齐.
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app.launch()
 
         let timeout: TimeInterval = 5
@@ -51,6 +54,8 @@ final class HomeUITests: XCTestCase {
     /// 本 case 锁这条 a11y 契约：父级 a11y label 必须等于 viewModel.nickname。
     func testUserInfoBarRetainsNicknameAccessibilityLabel() throws {
         let app = XCUIApplication()
+        // Story 5.2 hook：UITest 不依赖真实 server / GuestLoginUseCase（详见 testHomeViewShowsAllSixPlaceholders）.
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app.launch()
 
         let timeout: TimeInterval = 5
@@ -72,6 +77,8 @@ final class HomeUITests: XCTestCase {
     /// SwiftUI .alert(item:) 在 XCUITest 中表现为 app.alerts 集合；通过 alert 内文字定位。
     func testResetIdentityButtonVisibleAndAlertOnTap() throws {
         let app = XCUIApplication()
+        // Story 5.2 hook：UITest 不依赖真实 server / GuestLoginUseCase（详见 testHomeViewShowsAllSixPlaceholders）.
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app.launch()
 
         let timeout: TimeInterval = 5
@@ -109,6 +116,8 @@ final class HomeUITests: XCTestCase {
     /// 一个**短** timeout（如 0.5s），让 fast machine 上 LaunchingView 已切走时不长时间挂起。
     func testLaunchingViewVisibleBeforeHomeView() throws {
         let app = XCUIApplication()
+        // Story 5.2 hook：UITest 不依赖真实 server / GuestLoginUseCase（详见 testHomeViewShowsAllSixPlaceholders）.
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app.launch()
 
         // 1. LaunchingView 文字应在很短 timeout 内可见（cold launch 通常几百毫秒已过半 minimumDuration）。

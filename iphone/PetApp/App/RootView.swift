@@ -41,9 +41,14 @@ struct RootView: View {
     @StateObject private var container = AppContainer()
     @StateObject private var homeViewModel = HomeViewModel()
 
-    /// Story 2.9 新增：启动状态机。本 story 不接 Epic 5 真实 UseCase，
-    /// 走默认占位 closure（立即成功）。Epic 5 接入时改为 bind 模式注入真实闭包。
-    @StateObject private var launchStateMachine = AppLaunchStateMachine()
+    /// Story 2.9 新增 / Story 5.2 升级：启动状态机。
+    ///
+    /// **Story 5.2 关键改动**：原 `@StateObject private var launchStateMachine = AppLaunchStateMachine()`
+    /// 改为 `@State Optional` + `.onAppear` lazy 注入。
+    /// 因为 bootstrapStep1 closure 需要捕获 `container.makeGuestLoginUseCase()` —— 但 container 本身
+    /// 是 `@StateObject`，init 阶段还没真正实体化（lesson 2026-04-26-stateobject-debug-instance-aliasing.md）。
+    /// 与 Story 2.8 `resetIdentityViewModel: ResetIdentityViewModel?` 走同一 lazy 注入模式。
+    @State private var launchStateMachine: AppLaunchStateMachine?
 
     #if DEBUG
     /// Story 2.8: dev "重置身份" 按钮 ViewModel。仅 Debug build 存在；Release build 字段不存在。
@@ -66,14 +71,21 @@ struct RootView: View {
         //   2. 每个分支 view 加 `.transition(.opacity)`
         // codex round 1 [P3] finding 指出"200ms 淡入淡出"实际不生效。
         // 详见 docs/lessons/2026-04-26-swiftui-switch-transition-explicit.md。
+        //
+        // Story 5.2 升级：launchStateMachine 是 Optional —— body 内三态 switch 包在 `if let` 内。
+        // launchStateMachine 在 .onAppear 时 lazy 注入（见 ensureLaunchStateMachineWired）。
         ZStack {
-            switch launchStateMachine.state {
-            case .launching:
-                LaunchingView()
-                    .transition(.opacity)
-            case .ready:
-                homeView
-                    .onAppear {
+            if let stateMachine = launchStateMachine {
+                // 关键：用 LaunchedContentView 子视图包裹三态 switch.
+                // 子视图 `@ObservedObject` 订阅 launchStateMachine 的 @Published state，
+                // 否则在 RootView 直接 `switch stateMachine.state` 不会触发 SwiftUI 重渲染
+                // —— 因为 @State Optional 仅监听 Optional 本身的 nil↔非 nil 变化，
+                // 不监听 wrapped class 的 objectWillChange（不像 @StateObject）。
+                LaunchedContentView(
+                    stateMachine: stateMachine,
+                    coordinator: coordinator,
+                    homeView: { homeView },
+                    onReadyAppear: {
                         wireHomeViewModelClosures()
                         #if DEBUG
                         // lazy 注入：第一次 .onAppear 时从已稳定的 container 拿 keychainStore，
@@ -83,19 +95,13 @@ struct RootView: View {
                             resetIdentityViewModel = container.makeResetIdentityViewModel()
                         }
                         #endif
-                    }
-                    .fullScreenCover(item: $coordinator.presentedSheet) { sheet in
-                        sheetContent(for: sheet)
-                    }
-                    .transition(.opacity)
-            case .needsAuth(let message):
-                RetryView(
-                    message: message,
-                    onRetry: {
-                        Task { await launchStateMachine.retry() }
-                    }
+                    },
+                    sheetContent: sheetContent(for:)
                 )
-                .transition(.opacity)
+            } else {
+                // launchStateMachine 还没注入 —— 显示 LaunchingView 兜底（理论上不应出现，
+                // 因为 .onAppear 立即注入；保留兜底防 .onAppear 调用前的极短窗口期）.
+                LaunchingView().transition(.opacity)
             }
 
             #if DEBUG
@@ -106,7 +112,12 @@ struct RootView: View {
             KeychainUITestHookView(container: container)
             #endif
         }
-        .animation(.easeInOut(duration: 0.2), value: launchStateMachine.state)
+        .onAppear {
+            // Story 5.2 新增：lazy 注入 launchStateMachine。
+            // 这一步必须比 .task 早跑：.onAppear 在 SwiftUI 生命周期中先于 .task 触发；
+            // 但 .task 内部仍调一次 ensure 兜底 race。
+            ensureLaunchStateMachineWired()
+        }
         .task {
             // Story 2.5 既有：bind PingUseCase + 触发 ping/version 拉取。
             // bind() 是单次生效（second call 会被 ViewModel guard 短路），start() 内部
@@ -115,22 +126,75 @@ struct RootView: View {
             await homeViewModel.start()
         }
         .task {
-            // Story 2.9 新增：跑启动状态机 bootstrap。独立 .task 让两个 await 并发跑（不互相阻塞）。
+            // Story 2.9 新增 / Story 5.2 升级：跑启动状态机 bootstrap。独立 .task 让两个 await 并发跑（不互相阻塞）。
             // bootstrap() 内部通过 hasBootstrapped flag 防 .task 重启时重复跑 step。
-            await launchStateMachine.bootstrap()
+            // 兜底：若 .onAppear 还没跑（理论上不应出现），先 ensure 注入再 bootstrap.
+            ensureLaunchStateMachineWired()
+            await launchStateMachine?.bootstrap()
         }
         .errorPresentationHost(presenter: container.errorPresenter)
+    }
+
+    /// Story 5.2 AC8 新增：lazy 注入 `launchStateMachine`，把 GuestLoginUseCase + SessionStore wire 到 bootstrapStep1.
+    ///
+    /// 为何 lazy：bootstrapStep1 closure 需要捕获 `container.makeGuestLoginUseCase()` 与 `container.sessionStore`，
+    /// 但 container 是 `@StateObject`，init 阶段还没真正实体化（lesson 2026-04-26-stateobject-debug-instance-aliasing.md
+    /// + 2026-04-26-stateobject-init-vs-bind-injection.md）。`.onAppear` 时 view 已显示，container 已稳定，
+    /// 此刻构造 closure 才能捕获到正确的实例。
+    ///
+    /// nil 守卫：防 .onAppear / .task 多次触发时重复构造覆盖既有 instance
+    /// （lesson 2026-04-26-swiftui-task-modifier-reentrancy.md）。
+    /// `bootstrap()` 内部还有 `hasBootstrapped` flag 短路，两层防御。
+    ///
+    /// **UITest hook（仅 #if DEBUG）**：当 launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] == "1" 时，
+    /// bootstrapStep1 退化为 no-op —— 保持 Story 2.9 既有 LaunchingView → HomeView 行为，
+    /// 让 HomeUITests / NavigationUITests 不依赖真实 server 即可继续工作.
+    /// 与 KeychainUITestHookView 同模式（launchEnvironment hook 仅 Debug 编译；release 路径零污染）.
+    private func ensureLaunchStateMachineWired() {
+        guard launchStateMachine == nil else { return }
+
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["UITEST_SKIP_GUEST_LOGIN"] == "1" {
+            // UITest 路径：bootstrap 立即成功，复用 Story 2.9 默认 closure 行为（让 HomeView 可渲染）
+            launchStateMachine = AppLaunchStateMachine()
+            return
+        }
+        #endif
+
+        let useCase = container.makeGuestLoginUseCase()
+        let sessionStore = container.sessionStore
+        launchStateMachine = AppLaunchStateMachine(
+            bootstrapStep1: { @Sendable in
+                let output = try await useCase.execute()
+                await MainActor.run {
+                    sessionStore.updateSession(SessionState(user: output.user, pet: output.pet))
+                }
+            }
+            // bootstrapStep2 走默认 { } no-op；Story 5.5 接 LoadHomeUseCase 时改这里
+        )
     }
 
     /// Debug build 走带 resetIdentityViewModel 的 init;Release build 走旧 init（按钮不存在）。
     /// resetIdentityViewModel 在 .onAppear 之前为 nil；HomeView 已支持 Optional（按钮在 nil 时不渲染），
     /// 短暂的 nil 期对 UX 无影响（dev 工具，非 release 关键路径）。
+    ///
+    /// Story 5.2 codex round 1 [P1] fix：两条 init 都传 `sessionStore`，让 HomeView 订阅
+    /// `SessionStore.@Published session`，bootstrapStep1 写入后 nickname 立刻刷新到真实身份.
+    /// 详见 docs/lessons/2026-04-27-sessionstore-home-nickname-source-of-truth.md.
     @ViewBuilder
     private var homeView: some View {
         #if DEBUG
-        HomeView(viewModel: homeViewModel, resetIdentityViewModel: resetIdentityViewModel)
+        HomeView(
+            viewModel: homeViewModel,
+            resetIdentityViewModel: resetIdentityViewModel,
+            sessionStore: container.sessionStore
+        )
         #else
-        HomeView(viewModel: homeViewModel)
+        HomeView(
+            viewModel: homeViewModel,
+            resetIdentityViewModel: nil,
+            sessionStore: container.sessionStore
+        )
         #endif
     }
 
@@ -168,5 +232,65 @@ struct RootView: View {
             }
         }
         .errorPresentationHost(presenter: container.errorPresenter)
+    }
+}
+
+/// Story 5.2 新增子视图：用 `@ObservedObject` 订阅 `AppLaunchStateMachine.state` 的变化.
+///
+/// 为何抽出来：RootView 的 `launchStateMachine` 字段是 `@State Optional<AppLaunchStateMachine>`
+/// （不是 `@StateObject`，因为 closure 必须 lazy 注入捕获 container 字段）.
+/// `@State` 仅监听 Optional 自身的 nil↔非 nil 变化，**不**会订阅 wrapped class 的 `objectWillChange`,
+/// 所以直接在 RootView body 内 `switch stateMachine.state` 不会随 @Published state 变化重渲染.
+/// 解法是把 stateMachine 作为参数传给子视图，子视图标 `@ObservedObject` 让 SwiftUI 重新接 publisher,
+/// state 变化时重渲染子视图，三态 switch 才能正常切换.
+///
+/// 参考精神：与 Story 2.8 `HomeView` 接收 `resetIdentityViewModel: ResetIdentityViewModel?` 然后
+/// 内部用 `@ObservedObject` 订阅同模式.
+private struct LaunchedContentView: View {
+    @ObservedObject var stateMachine: AppLaunchStateMachine
+    @ObservedObject var coordinator: AppCoordinator
+    let homeView: () -> AnyView
+    let onReadyAppear: () -> Void
+    let sheetContent: (SheetType) -> AnyView
+
+    init(
+        stateMachine: AppLaunchStateMachine,
+        coordinator: AppCoordinator,
+        @ViewBuilder homeView: @escaping () -> some View,
+        onReadyAppear: @escaping () -> Void,
+        @ViewBuilder sheetContent: @escaping (SheetType) -> some View
+    ) {
+        self.stateMachine = stateMachine
+        self.coordinator = coordinator
+        self.homeView = { AnyView(homeView()) }
+        self.onReadyAppear = onReadyAppear
+        self.sheetContent = { AnyView(sheetContent($0)) }
+    }
+
+    var body: some View {
+        // 三态 switch + 每分支显式 `.transition(.opacity)`（lesson 2026-04-26-swiftui-switch-transition-explicit.md）
+        ZStack {
+            switch stateMachine.state {
+            case .launching:
+                LaunchingView()
+                    .transition(.opacity)
+            case .ready:
+                homeView()
+                    .onAppear { onReadyAppear() }
+                    .fullScreenCover(item: $coordinator.presentedSheet) { sheet in
+                        sheetContent(sheet)
+                    }
+                    .transition(.opacity)
+            case .needsAuth(let message):
+                RetryView(
+                    message: message,
+                    onRetry: {
+                        Task { await stateMachine.retry() }
+                    }
+                )
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: stateMachine.state)
     }
 }
