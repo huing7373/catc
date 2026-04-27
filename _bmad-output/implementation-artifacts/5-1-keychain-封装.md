@@ -1,6 +1,6 @@
 # Story 5.1: Keychain 封装（guestUid + token 持久化）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 

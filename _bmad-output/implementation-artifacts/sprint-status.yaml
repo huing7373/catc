@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-04-26 (story 4-7 done)
+# last_updated: 2026-04-27 (story 5-1 done)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,8 +35,8 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-04-26
-# story 4-7 done
+last_updated: 2026-04-27
+# story 5-1 ready-for-dev
 project: cat
 project_key: NOKEY
 tracking_system: file-system
@@ -82,8 +82,8 @@ development_status:
   4-8-get-home-聚合接口: done
   4-7-layer-2-集成测试-游客登录初始化事务全流程: done
   epic-4-retrospective: optional
-  epic-5: backlog
-  5-1-keychain-封装: backlog
+  epic-5: in-progress
+  5-1-keychain-封装: done
   5-2-启动自动登录-usecase: backlog
   5-3-apiclient-interceptor-自动注入-bearer-token: backlog
   5-4-无效-token-静默重新登录: backlog
