@@ -1,6 +1,6 @@
 # Story 5.5: LoadHomeUseCase + 主界面用 GET /home 一次拉取全部数据
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
