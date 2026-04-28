@@ -3,7 +3,9 @@
 //
 // 职责：
 //   - 持有当前 launch state（@Published，RootView 订阅渲染）
-//   - bootstrap() 串行跑两个占位 step；任一抛错 → state = .needsAuth(message:)
+//   - bootstrap() 串行跑两个占位 step；任一抛错 → state = .needsAuth(presentation:)
+//     （Story 5.5 round 2 [P1] fix：原 .needsAuth(message:) 升级为携带 ErrorPresentation,
+//      让 RootView 三态分发 alert/retry/toast 而不是一律渲染 RetryView）
 //   - 全部 step 成功且经历至少 0.3 秒后 → state = .ready
 //   - retry() 重置 state = .launching 并重跑 bootstrap()
 //
@@ -38,6 +40,11 @@ public final class AppLaunchStateMachine: ObservableObject {
     /// 失败默认文案（不携带具体错误时使用）。
     public static let defaultFailureMessage = "登录失败，请重试"
 
+    /// 失败默认 presentation（fallback 路径）：unmapped error 时用 .retry —— 优先给用户重试入口
+    /// （比卡 alert 更宽容；已知非可重试错误必须由 caller 显式携带 .alert presentation 传入）.
+    /// Story 5.5 round 2 [P1] fix.
+    public static let defaultFailurePresentation: ErrorPresentation = .retry(message: defaultFailureMessage)
+
     /// Step 1：epics.md 内对应 GuestLoginUseCase（Epic 5 Story 5.2 接入）。
     /// 默认 `{ }`（立即成功），Epic 5 落地时由 RootView 注入真实闭包。
     private let bootstrapStep1: () async throws -> Void
@@ -68,7 +75,8 @@ public final class AppLaunchStateMachine: ObservableObject {
     }
 
     /// App 启动时由 RootView `.task` 调一次。串行跑两个 step；
-    /// 任一抛错 → state = .needsAuth(message:)，message 取错误描述（默认 fallback "登录失败，请重试"）；
+    /// 任一抛错 → state = .needsAuth(presentation:)，presentation 由 BootstrapMappedError 携带
+    /// 或 LocalizedError fallback 包成 .retry（默认 fallback `defaultFailurePresentation`）；
     /// 全成功 → 等"经过至少 0.3 秒"后 state = .ready。
     ///
     /// 防重入：跨 .task 边界用 hasBootstrapped flag 短路（与 HomeViewModel.start() 同模式）。
@@ -84,8 +92,11 @@ public final class AppLaunchStateMachine: ObservableObject {
             await ensureMinimumDuration(elapsedSince: startTime)
             state = .ready
         } catch {
-            // 失败路径**不**等 minimumDuration：进入 .needsAuth 越快越好（用户能立即看到 RetryView）。
-            state = .needsAuth(message: messageFor(error: error))
+            // 失败路径**不**等 minimumDuration：进入 .needsAuth 越快越好（用户能立即看到错误 UI）.
+            // presentation 由 BootstrapMappedError 显式携带（caller 在 closure catch block 内调
+            // AppErrorMapper.presentation(for:) 派出对应样式）；非 BootstrapMappedError 走
+            // defaultFailurePresentation = .retry —— Story 5.5 round 2 [P1] fix.
+            state = .needsAuth(presentation: presentationFor(error: error))
         }
     }
 
@@ -105,21 +116,31 @@ public final class AppLaunchStateMachine: ObservableObject {
         await bootstrap()
     }
 
-    /// 把任意 Error 转成 .needsAuth 的 message。
+    /// 把任意 Error 转成 `.needsAuth` 的 `ErrorPresentation`.
     ///
-    /// **关键**：必须用 `as? LocalizedError` 检查 + 自定义 fallback，**不**依赖 `error.localizedDescription`。
-    /// 因为 Swift `Error.localizedDescription` 对非 `LocalizedError` 类型返回 generic 系统串
-    /// （`"The operation couldn't be completed (PetApp.Foo error 1.)"`），而非空串 ——
-    /// 所以"raw.isEmpty 兜底" 永远不触发，用户看到的是实现细节而非设计文档钦定的"登录失败，请重试"
-    /// （codex round 1 [P2] finding）。
-    /// 详见 docs/lessons/2026-04-26-error-localizeddescription-system-fallback.md。
+    /// **优先级**（Story 5.5 round 2 [P1] fix）:
+    /// 1. `BootstrapMappedError`: caller 已经在 closure catch block 内调过
+    ///    `AppErrorMapper.presentation(for:)` 决定好样式 —— 直接用其 `presentation` 字段.
+    ///    这是 production 路径：让 mapper 单一决定 alert vs retry vs toast, 状态机不重做判断.
+    /// 2. 其他 LocalizedError: 用其 errorDescription 包成 `.retry(message:)` —— 兼容
+    ///    legacy 测试 case + Story 2.9 default closure 行为. `.retry` 是宽容兜底（用户至少
+    ///    能点重试触发 cold-start）.
+    /// 3. plain Error: 走 `defaultFailurePresentation` = `.retry(message: defaultFailureMessage)`.
+    ///    防 `error.localizedDescription` 漏 NSError 系统串到 UI（lesson
+    ///    2026-04-26-error-localizeddescription-system-fallback.md, codex round 1 [P2] finding）.
     ///
-    /// Epic 5 接入真实 APIError 时可让 APIError 实现 LocalizedError → errorDescription 直接走第一分支。
-    private func messageFor(error: Error) -> String {
-        if let localized = error as? LocalizedError, let desc = localized.errorDescription, !desc.isEmpty {
-            return desc
+    /// **不**直接调 `AppErrorMapper.presentation(for:)` 兜底：那会把任意 plain Error 都判成
+    /// `.alert("操作失败", "请稍后重试")` —— production 已用 BootstrapMappedError 走 mapper,
+    /// 落到本函数 fallback 的应是 default closure / 测试 case / Epic 5 之外的 plain Error,
+    /// 给 retry 比给 alert 更宽容.
+    private func presentationFor(error: Error) -> ErrorPresentation {
+        if let mapped = error as? BootstrapMappedError {
+            return mapped.presentation
         }
-        return AppLaunchStateMachine.defaultFailureMessage
+        if let localized = error as? LocalizedError, let desc = localized.errorDescription, !desc.isEmpty {
+            return .retry(message: desc)
+        }
+        return AppLaunchStateMachine.defaultFailurePresentation
     }
 
     /// 等待"自 startTime 起至少 minimumDuration 秒"已经流逝。已经超过则立即 return。

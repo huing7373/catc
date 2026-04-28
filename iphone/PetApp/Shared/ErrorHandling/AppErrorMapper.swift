@@ -67,18 +67,20 @@ public enum AppErrorMapper {
     }
 
     /// 抽出**纯文案**（不带 presentation 样式）的对外 helper.
-    /// 给非"调 ErrorPresenter"路径用,如启动状态机 bootstrap 的 step closure 失败时
-    /// 需要把错误转成 user-facing message 再 throw 出去，让 AppLaunchStateMachine
-    /// 的 .needsAuth(message:) 走 RetryView 而不是显示 developer 串.
+    /// 给非"调 ErrorPresenter"路径用 —— 早期 bootstrap closure 用过本 helper, Story 5.5 round 2
+    /// [P1] fix 后 bootstrap closure 改走 `presentation(for:)` 直接拿 ErrorPresentation
+    /// （让状态机决定 retry vs alert vs toast）, 本 helper 仍保留供其他可能场景用.
     ///
-    /// Story 5.5 codex round 1 [P2] fix: bootstrap loadHomeUseCase.execute() 失败时
+    /// 历史背景: Story 5.5 codex round 1 [P2] fix bootstrap loadHomeUseCase.execute() 失败时
     /// 原走 `messageFor(error:)` → `APIError.errorDescription`,产出 "Network error: ..."
-    /// 等 developer 文案. 改用本 helper 让 mapper 唯一定义点 production user copy.
-    /// 详见 docs/lessons/2026-04-27-bootstrap-error-must-route-via-mapper.md.
+    /// 等 developer 文案. round 1 fix 把 closure 改用本 helper. round 2 [P1] fix 进一步把
+    /// closure 改用 `presentation(for:)` 携带完整样式语义.
+    /// 详见 docs/lessons/2026-04-27-bootstrap-error-must-route-via-mapper.md
+    /// + docs/lessons/2026-04-27-launch-state-machine-must-carry-presentation.md.
     ///
     /// 实现：复用 `presentation(for:)` 然后从 ErrorPresentation 提取文案部分.
     /// 不直接重复 mapping switch —— 单一 source of truth,以后改 mapper 文案时
-    /// bootstrap 路径自动跟上.
+    /// 调用方自动跟上.
     public static func userFacingMessage(for error: Error) -> String {
         switch presentation(for: error) {
         case let .toast(message):

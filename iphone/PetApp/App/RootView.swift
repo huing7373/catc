@@ -10,7 +10,10 @@
 //   - body 改为 ZStack { switch launchStateMachine.state } 三分支路由 + 每分支 `.transition(.opacity)`：
 //     · .launching → LaunchingView
 //     · .ready → HomeView 子树（保留 .onAppear / .fullScreenCover / errorPresenter 既有 wire）
-//     · .needsAuth(message:) → RetryView 整页（onRetry → Task { await launchStateMachine.retry() }）
+//     · .needsAuth(presentation:) → 根据 presentation 三态分发（Story 5.5 round 2 [P1] fix）:
+//       - .retry → RetryView（onRetry → Task { await launchStateMachine.retry() }）
+//       - .alert → AlertOverlayView（onDismiss → retry()）
+//       - .toast → 兜底为 alert（bootstrap 阶段不该派 toast）
 //   - 新增独立 .task：await launchStateMachine.bootstrap()（与既有 ping/version .task 并发跑）
 //   - .animation(.easeInOut(duration: 0.2), value: state) 200ms 淡入淡出（epics.md AC 钦定）
 //   - codex round 1 [P3] fix：原 `Group { switch ... }` 不会让分支切换过渡 —— `.animation(_:value:)`
@@ -174,36 +177,50 @@ struct RootView: View {
         let loadHomeUseCase = container.makeLoadHomeUseCase()
         let sessionStore = container.sessionStore
         let homeViewModel = self.homeViewModel
+        // Story 5.5 round 2 [P2] fix: closure 内 actor flag 短路 guest-login 重跑.
+        // 原方案 retry() 重跑整个 closure → 已成功的 guest-login 也再发一次 /auth/guest-login,
+        // 多走一次往返 + 让 /home 的 transient 失败依赖 auth endpoint 也得 healthy.
+        // 用 actor 持有 flag（而非 closure 捕获 var）避免 Swift 6 strict concurrency 警告 +
+        // closure @Sendable 隔离要求.
+        let guestLoginGate = GuestLoginCompletionGate()
         launchStateMachine = AppLaunchStateMachine(
             bootstrapStep1: { @Sendable in
                 // Step 1a: 游客登录（既有）—— 写 keychain token + sessionStore.user/pet
-                let output = try await useCase.execute()
-                await MainActor.run {
-                    sessionStore.updateSession(SessionState(user: output.user, pet: output.pet))
+                //
+                // **round 2 [P2] fix**：guestLoginGate 已记下"上次成功"则跳过 useCase.execute()
+                // 不重发 /auth/guest-login. retry() 重跑 closure 时只重试真正失败的下半段（loadHome）.
+                // 不变量：guest-login 一旦成功（token 写入 keychain + sessionStore 写入 SessionState）
+                // 就视为该启动周期内有效, 不再重新协商.
+                let alreadyLoggedIn = await guestLoginGate.hasCompleted
+                if !alreadyLoggedIn {
+                    let output = try await useCase.execute()
+                    await MainActor.run {
+                        sessionStore.updateSession(SessionState(user: output.user, pet: output.pet))
+                    }
+                    await guestLoginGate.markCompleted()
                 }
                 // Story 5.5 AC6 Step 1b: 串行调 GET /home 拿首屏数据 → applyHomeData 同步注入
-                // 任一步抛错 → step1 整体失败 → 状态机走 .needsAuth(message:) → 显示 RetryView
+                // 任一步抛错 → step1 整体失败 → 状态机走 .needsAuth(presentation:) → 显示对应错误 UI
                 //
                 // 串行而非并行：LoadHome 需要 token（GuestLogin 写 keychain 完成后才有）；
                 // 并行会引发 LoadHome 先发 → 401 → 静默重登 → 复杂边界.
                 //
                 // 不用 bootstrapStep2 插槽：让 GuestLogin + LoadHome 是单次原子启动事务的失败语义；
-                // 用户 RetryView 重试 → 整个 step1 closure 重跑（GuestLogin + LoadHome 都重跑）.
+                // 用户重试 → 整个 step1 closure 重跑（但 guest-login 由 gate 短路, 实际只重跑 loadHome）.
                 // 详见 Story 5.5 Dev Note #2.
                 //
-                // **错误映射**（Story 5.5 codex round 1 [P2] fix）: LoadHome 失败时**先**经
-                // AppErrorMapper.userFacingMessage 转成 user-facing 文案,再用 LocalizedError
-                // 包装抛出 —— 确保 AppLaunchStateMachine.messageFor 拿到的是"网络异常,请检查后重试"
-                // 这种 user copy,而不是 APIError.errorDescription 的 "Network error: ..." 等
-                // developer 串. AppErrorMapper 是 ErrorPresenter / RetryView 已经在用的统一映射,
-                // bootstrap 路径必须共用同一套以保证 UI 文案一致.
-                // 详见 docs/lessons/2026-04-27-bootstrap-error-must-route-via-mapper.md.
+                // **错误映射**（Story 5.5 round 1 [P2] + round 2 [P1] fix）: LoadHome 失败时
+                // 调 AppErrorMapper.presentation(for:) 派出对应 ErrorPresentation（alert / retry / toast）,
+                // 再用 BootstrapMappedError 包装抛出 —— 状态机直接接 presentation 路由, 不再降级为
+                // 单一 retry. 防 .unauthorized / .missingCredentials / .decoding 等 mapper 钦定为
+                // .alert 的错误被错误降级为 RetryView, 让用户卡在 unrecoverable retry loop.
+                // 详见 docs/lessons/2026-04-27-launch-state-machine-must-carry-presentation.md.
                 let homeData: HomeData
                 do {
                     homeData = try await loadHomeUseCase.execute()
                 } catch {
                     throw BootstrapMappedError(
-                        userFacingMessage: AppErrorMapper.userFacingMessage(for: error),
+                        presentation: AppErrorMapper.presentation(for: error),
                         underlying: error
                     )
                 }
@@ -276,24 +293,56 @@ struct RootView: View {
     }
 }
 
-/// Story 5.5 codex round 1 [P2] fix: 把 bootstrap step closure 内的失败包装成
-/// LocalizedError, 并预先经 AppErrorMapper 映射为 user-facing 文案.
+/// Story 5.5 round 2 [P2] fix: bootstrap closure 内 actor flag, 短路 retry 时已成功 guest-login 的重发.
+///
+/// 为何 actor: closure 标 `@Sendable`, 不能直接捕获 closure-local `var`（Swift 6 strict concurrency
+/// 会拒绝 / Swift 5 给 escaping closure capture warning）. actor 是隔离 mutable state 的 first-class
+/// 工具, 内部 `hasCompleted` 仅由 actor 自身 isolated 方法读写.
+///
+/// 状态机运行期: bootstrap()/retry() 同 task-group serial 跑（AppLaunchStateMachine 是 @MainActor +
+/// isRetrying guard）, gate 不会被并发写; 但仍用 actor 维持类型安全的语义边界.
+actor GuestLoginCompletionGate {
+    private(set) var hasCompleted: Bool = false
+    func markCompleted() { hasCompleted = true }
+}
+
+/// Story 5.5 codex round 1 [P2] fix + round 2 [P1] fix: 把 bootstrap step closure 内的失败
+/// 包装成携带完整 ErrorPresentation 语义的 LocalizedError, 让状态机决定 retry vs alert vs toast.
 ///
 /// **为什么单独一个 wrapper 类型**:
-/// - AppLaunchStateMachine.messageFor 用 `as? LocalizedError + errorDescription` 提取文案,
-///   APIError 实现的 errorDescription 是面向 developer 的 ("Network error: timed out").
-/// - 直接修改 APIError.errorDescription 会污染所有调用点（log / 调试输出 / 业务上报）的
-///   reading,把 internal 错误变成 user copy 不可接受.
+/// - AppLaunchStateMachine.presentationFor 优先识别本类型 → 直接用其 presentation 字段（不重做判断）.
+/// - APIError 直接抛给状态机的话, 状态机只能取 errorDescription 做 fallback, 损失 alert/retry 区分.
 /// - 在 bootstrap 边界做一层 wrapper：内部 underlying 保留原 APIError 给 log / 上报,
-///   外层 errorDescription 走 AppErrorMapper.userFacingMessage —— RetryView 看到的是
-///   "网络异常, 请检查后重试" / "服务繁忙, 请稍后重试" 等 user copy.
+///   外层 presentation 由 AppErrorMapper 单一决定 → 状态机收到的就是"该弹 alert 还是 retry".
+///
+/// **round 2 [P1] fix**: 字段从 `userFacingMessage: String` 升级为 `presentation: ErrorPresentation`.
+/// 原方案只携带 message → 状态机只能塞进 .needsAuth(message:) → 渲染层只看 message,
+/// 永远走 RetryView, 把 .unauthorized / .missingCredentials / .decoding 这些 AppErrorMapper 钦定
+/// 为 .alert（带"请重启应用" guidance）的错误降级为 retry, 用户卡在 unrecoverable retry loop.
+/// 升级后 RootView LaunchedContentView 根据 presentation 三态分发：
+/// - .alert → AlertOverlayView（"请重启应用" 不给重试按钮的 blocking alert）
+/// - .retry → RetryView（用户点重试 → stateMachine.retry()）
+/// - .toast → AlertOverlayView 兜底（toast 是非 modal 的轻量提示, bootstrap 阶段不该用 → 兜底为 alert）
+///
+/// LocalizedError conformance 保留：让 errorDescription 仍可读（log / 调试），但状态机走 presentation 路径,
+/// 不再依赖 errorDescription 做 UI 决策.
 ///
 /// internal access：让 AppLaunchStateMachineTests / RootView 集成测试能直接构造断言.
 struct BootstrapMappedError: LocalizedError {
-    let userFacingMessage: String
+    let presentation: ErrorPresentation
     let underlying: Error
 
-    var errorDescription: String? { userFacingMessage }
+    /// 从 presentation 提取 message 给 LocalizedError conformance（log / 调试用，不影响 UI 决策）.
+    var errorDescription: String? {
+        switch presentation {
+        case let .toast(message):
+            return message
+        case let .alert(_, message):
+            return message
+        case let .retry(message):
+            return message
+        }
+    }
 }
 
 /// Story 5.2 新增子视图：用 `@ObservedObject` 订阅 `AppLaunchStateMachine.state` 的变化.
@@ -330,6 +379,7 @@ private struct LaunchedContentView: View {
 
     var body: some View {
         // 三态 switch + 每分支显式 `.transition(.opacity)`（lesson 2026-04-26-swiftui-switch-transition-explicit.md）
+        // .needsAuth 内部根据 presentation 类型再分三态（Story 5.5 round 2 [P1] fix）.
         ZStack {
             switch stateMachine.state {
             case .launching:
@@ -342,16 +392,43 @@ private struct LaunchedContentView: View {
                         sheetContent(sheet)
                     }
                     .transition(.opacity)
-            case .needsAuth(let message):
-                RetryView(
-                    message: message,
-                    onRetry: {
-                        Task { await stateMachine.retry() }
-                    }
-                )
-                .transition(.opacity)
+            case .needsAuth(let presentation):
+                needsAuthContent(for: presentation)
+                    .transition(.opacity)
             }
         }
         .animation(.easeInOut(duration: 0.2), value: stateMachine.state)
+    }
+
+    /// Story 5.5 round 2 [P1] fix: 根据 presentation 三态分发错误 UI.
+    ///
+    /// - `.retry`: 用户可点重试触发 stateMachine.retry()（继续走 GuestLogin + LoadHome 重试链路）.
+    /// - `.alert`: 用户必须重启 App（mapper 已钦定文案 "请重启应用" / "请重新启动应用"）.
+    ///   onDismiss 仍调 retry() —— 让用户在 alert 关闭后**也**有重试入口（不能让 alert 关闭就死锁
+    ///   在白屏；retry 内部 isRetrying guard 防重入）.
+    /// - `.toast`: bootstrap 阶段不应该派发 toast（toast 是非 modal 的轻量提示；启动失败必须 modal）.
+    ///   出现说明 mapper 配置异常 → 兜底渲染为 alert 而非 toast,避免 toast 自动消失后留白屏.
+    @ViewBuilder
+    private func needsAuthContent(for presentation: ErrorPresentation) -> some View {
+        switch presentation {
+        case let .retry(message):
+            RetryView(
+                message: message,
+                onRetry: { Task { await stateMachine.retry() } }
+            )
+        case let .alert(title, message):
+            AlertOverlayView(
+                title: title,
+                message: message,
+                onDismiss: { Task { await stateMachine.retry() } }
+            )
+        case let .toast(message):
+            // 兜底：bootstrap 阶段拿到 toast presentation 异常 —— 渲染为 alert 防白屏.
+            AlertOverlayView(
+                title: "提示",
+                message: message,
+                onDismiss: { Task { await stateMachine.retry() } }
+            )
+        }
     }
 }

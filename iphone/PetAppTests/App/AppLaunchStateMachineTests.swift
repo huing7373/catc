@@ -28,7 +28,8 @@ final class AppLaunchStateMachineTests: XCTestCase {
         XCTAssertEqual(sm.state, .ready)
     }
 
-    /// case#3 (edge)：step1 抛错 → state 是 .needsAuth(message:)
+    /// case#3 (edge)：step1 抛 LocalizedError → state 是 .needsAuth(presentation: .retry(message:))
+    /// LocalizedError fallback 路径：状态机用 errorDescription 包成 .retry —— 给用户重试入口的宽容兜底.
     /// （epics.md AC 第 4 条 "任一失败 → .needsAuth"，含 step1 抛错）。
     func testBootstrapWithStep1FailureReachesNeedsAuth() async {
         struct TestError: Error, LocalizedError {
@@ -39,10 +40,10 @@ final class AppLaunchStateMachineTests: XCTestCase {
             bootstrapStep2: { /* never called */ }
         )
         await sm.bootstrap()
-        XCTAssertEqual(sm.state, .needsAuth(message: "step1 失败"))
+        XCTAssertEqual(sm.state, .needsAuth(presentation: .retry(message: "step1 失败")))
     }
 
-    /// case#4 (edge)：step2 抛错 → state 是 .needsAuth(message:)
+    /// case#4 (edge)：step2 抛 LocalizedError → state 是 .needsAuth(presentation: .retry(message:))
     /// （epics.md AC 第 4 条 "LoadHomeUseCase 失败 → .needsAuth → RetryView"）。
     func testBootstrapWithStep2FailureReachesNeedsAuth() async {
         struct TestError: Error, LocalizedError {
@@ -53,7 +54,7 @@ final class AppLaunchStateMachineTests: XCTestCase {
             bootstrapStep2: { throw TestError() }
         )
         await sm.bootstrap()
-        XCTAssertEqual(sm.state, .needsAuth(message: "step2 失败"))
+        XCTAssertEqual(sm.state, .needsAuth(presentation: .retry(message: "step2 失败")))
     }
 
     /// case#5 (edge)：minimumDuration（0.3 秒）保护
@@ -89,10 +90,10 @@ final class AppLaunchStateMachineTests: XCTestCase {
         XCTAssertEqual(count, 1, "bootstrap() 第二次调用应短路；step1 应只跑 1 次")
     }
 
-    /// case#8 (edge)：非 LocalizedError 抛出 → message 用默认 fallback "登录失败，请重试"
+    /// case#8 (edge)：非 LocalizedError 抛出 → presentation 用默认 fallback `.retry(defaultFailureMessage)`
     /// 防 `error.localizedDescription` 对 plain Error 返回的系统串
-    /// （`"The operation couldn't be completed (PetApp.SomeError error 1.)"`）漏到 RetryView
-    /// （codex round 1 [P2] finding 修复）。
+    /// （`"The operation couldn't be completed (PetApp.SomeError error 1.)"`）漏到 UI
+    /// （codex round 1 [P2] finding 修复 + round 2 [P1] 升级为 presentation）。
     func testBootstrapWithPlainErrorUsesDefaultFallback() async {
         struct PlainError: Error {}  // 故意**不**实现 LocalizedError
         let sm = AppLaunchStateMachine(
@@ -102,8 +103,8 @@ final class AppLaunchStateMachineTests: XCTestCase {
         await sm.bootstrap()
         XCTAssertEqual(
             sm.state,
-            .needsAuth(message: AppLaunchStateMachine.defaultFailureMessage),
-            "非 LocalizedError 应回落到默认文案，不应展示 NSError 系统串"
+            .needsAuth(presentation: AppLaunchStateMachine.defaultFailurePresentation),
+            "非 LocalizedError 应回落到默认 presentation（.retry），不应展示 NSError 系统串"
         )
     }
 
@@ -139,18 +140,18 @@ final class AppLaunchStateMachineTests: XCTestCase {
         XCTAssertEqual(sm.state, .ready)
     }
 
-    /// case#10 (Story 5.5 codex round 1 [P2] fix)：bootstrap step closure 抛 BootstrapMappedError
-    /// → state.message 等于 mapper user-facing 文案（**不是** APIError developer 串）.
+    /// case#10 (Story 5.5 round 1 [P2] + round 2 [P1] fix)：bootstrap step closure 抛 BootstrapMappedError
+    /// → state.presentation 直接等于 mapper 派出的 ErrorPresentation（**不是** message 字符串）.
     ///
-    /// 防回退（regression guard）: fix 前 RootView bootstrap closure 把 APIError 直接抛给 messageFor,
-    /// messageFor 走 `as? LocalizedError + errorDescription` —— 但 APIError.errorDescription 是
-    /// developer copy ("Network error: timed out" / "Business error 1009: ..."), 用户看不懂.
-    /// fix 后 closure 用 BootstrapMappedError 包一层 LocalizedError, errorDescription 走
-    /// AppErrorMapper.userFacingMessage —— RetryView 才能展示 "网络异常, 请检查后重试" 等 user copy.
-    func testBootstrapWithMappedErrorPropagatesUserFacingMessage() async {
+    /// 防回退（regression guard）: round 1 fix 前 closure 把 APIError 直接抛给 messageFor → developer 串.
+    /// round 2 fix 前 closure 用 userFacingMessage 包成 BootstrapMappedError → 状态机塞进 .needsAuth(message:)
+    /// → RootView 永远渲染 RetryView, 把 mapper 钦定为 .alert 的错误（unauthorized / decoding 等）误降级.
+    /// round 2 fix 后状态机直接收 ErrorPresentation, RootView 三态分发 → alert/retry 各自渲染.
+    /// 本 case 验证 .network → mapper 派 .retry → 状态机透传.
+    func testBootstrapWithMappedNetworkErrorRoutesToRetryPresentation() async {
         let underlying = APIError.network(underlying: URLError(.timedOut))
         let wrapped = BootstrapMappedError(
-            userFacingMessage: AppErrorMapper.userFacingMessage(for: underlying),
+            presentation: AppErrorMapper.presentation(for: underlying),
             underlying: underlying
         )
         let sm = AppLaunchStateMachine(
@@ -160,16 +161,16 @@ final class AppLaunchStateMachineTests: XCTestCase {
         await sm.bootstrap()
         XCTAssertEqual(
             sm.state,
-            .needsAuth(message: "网络异常，请检查后重试"),
-            "bootstrap 失败必须经 AppErrorMapper 派出 user-facing 文案，不能漏 APIError developer 串到 RetryView"
+            .needsAuth(presentation: .retry(message: "网络异常，请检查后重试")),
+            "network 错误必须走 .retry 让用户重试; mapper 派出的 presentation 必须直达状态机"
         )
     }
 
-    /// case#11 (Story 5.5 codex round 1 [P2] fix): business code 1009 (服务繁忙) 走 mapper.
-    func testBootstrapWithMappedBusinessErrorPropagatesUserFacingMessage() async {
+    /// case#11 (Story 5.5 round 1 [P2] fix): business code 1009 (服务繁忙) 走 mapper → .alert.
+    func testBootstrapWithMappedBusinessErrorRoutesToAlertPresentation() async {
         let underlying = APIError.business(code: 1009, message: "server 原文", requestId: "req_x")
         let wrapped = BootstrapMappedError(
-            userFacingMessage: AppErrorMapper.userFacingMessage(for: underlying),
+            presentation: AppErrorMapper.presentation(for: underlying),
             underlying: underlying
         )
         let sm = AppLaunchStateMachine(
@@ -179,8 +180,72 @@ final class AppLaunchStateMachineTests: XCTestCase {
         await sm.bootstrap()
         XCTAssertEqual(
             sm.state,
-            .needsAuth(message: "服务繁忙，请稍后重试"),
-            "business 错误走 AppErrorMapper user copy, 不再展示 server 原文 / 'Business error 1009:...'"
+            .needsAuth(presentation: .alert(title: "提示", message: "服务繁忙，请稍后重试")),
+            "business 错误走 AppErrorMapper → .alert; 不再降级为 retry"
+        )
+    }
+
+    /// case#12 (Story 5.5 round 2 [P1] fix): `.unauthorized` 必须走 `.alert` 而非 `.retry`.
+    ///
+    /// **核心 regression guard**: 这是 round 2 [P1] finding 的精确复现 —— round 1 fix 的
+    /// userFacingMessage 包装让 RootView LaunchedContentView 永远走 RetryView, 即使 mapper 把
+    /// .unauthorized 钦定为 .alert("登录失败，请重新启动应用"). 用户卡在 retry 屏一直点重试,
+    /// AuthRetryingAPIClient 已 exhaust 重登, 每次重试仍 401 → unrecoverable retry loop.
+    /// 修复后状态机收到 .alert presentation, RootView 渲染 AlertOverlayView 引导用户冷启动.
+    func testBootstrapWithUnauthorizedRoutesToAlertPresentation() async {
+        let underlying = APIError.unauthorized
+        let wrapped = BootstrapMappedError(
+            presentation: AppErrorMapper.presentation(for: underlying),
+            underlying: underlying
+        )
+        let sm = AppLaunchStateMachine(
+            bootstrapStep1: { throw wrapped },
+            bootstrapStep2: { /* never called */ }
+        )
+        await sm.bootstrap()
+        XCTAssertEqual(
+            sm.state,
+            .needsAuth(presentation: .alert(title: "提示", message: "登录失败，请重新启动应用")),
+            ".unauthorized 必须走 .alert 引导冷启动; 走 .retry 会让用户卡 unrecoverable loop"
+        )
+    }
+
+    /// case#13 (Story 5.5 round 2 [P1] fix): `.decoding` 也走 `.alert`（mapper 钦定）.
+    func testBootstrapWithDecodingErrorRoutesToAlertPresentation() async {
+        struct StubDecodingError: Error {}
+        let underlying = APIError.decoding(underlying: StubDecodingError())
+        let wrapped = BootstrapMappedError(
+            presentation: AppErrorMapper.presentation(for: underlying),
+            underlying: underlying
+        )
+        let sm = AppLaunchStateMachine(
+            bootstrapStep1: { throw wrapped },
+            bootstrapStep2: { /* never called */ }
+        )
+        await sm.bootstrap()
+        XCTAssertEqual(
+            sm.state,
+            .needsAuth(presentation: .alert(title: "提示", message: "数据异常，请稍后重试")),
+            ".decoding 必须走 .alert; 走 .retry 同样会陷入 loop（再请求大概率仍 decoding 失败）"
+        )
+    }
+
+    /// case#14 (Story 5.5 round 2 [P1] fix): `.missingCredentials` 走 `.alert("登录信息丢失，请重启应用")`.
+    func testBootstrapWithMissingCredentialsRoutesToAlertPresentation() async {
+        let underlying = APIError.missingCredentials
+        let wrapped = BootstrapMappedError(
+            presentation: AppErrorMapper.presentation(for: underlying),
+            underlying: underlying
+        )
+        let sm = AppLaunchStateMachine(
+            bootstrapStep1: { throw wrapped },
+            bootstrapStep2: { /* never called */ }
+        )
+        await sm.bootstrap()
+        XCTAssertEqual(
+            sm.state,
+            .needsAuth(presentation: .alert(title: "提示", message: "登录信息丢失，请重启应用")),
+            ".missingCredentials 必须走 .alert 引导冷启动; 不能降级为 retry"
         )
     }
 
