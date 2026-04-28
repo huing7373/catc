@@ -50,23 +50,23 @@ final class ErrorComponentSnapshotTests: XCTestCase {
     /// 编译期就保证: TerminalErrorView.init 签名只有 title + message 两个参数,
     /// 未来若有人加 closure 字段,本 case 编译期 fail (init 多参数 / 类型不匹配).
     func testTerminalErrorViewHoldsTitleAndMessageOnly() {
-        let view = TerminalErrorView(title: "提示", message: "登录失败，请重新启动应用")
+        let view = TerminalErrorView(title: "提示", message: "登录信息丢失，请重启 App")
         XCTAssertEqual(view.title, "提示")
-        XCTAssertEqual(view.message, "登录失败，请重新启动应用")
+        XCTAssertEqual(view.message, "登录信息丢失，请重启 App")
         // 不调任何 closure —— TerminalErrorView 故意没有 closure 字段,
         // 这条契约本身就是 round 8 fix 的核心 (no dismiss = no loop).
     }
 
-    /// case#3b：TerminalErrorView 不同 title/message 组合 (covers .unauthorized / .missingCredentials / .decoding 文案).
+    /// case#3b：TerminalErrorView 不同 title/message 组合 (covers .missingCredentials / permanent business 文案).
+    /// Story 5.5 round 9 [P2] fix: .unauthorized / .decoding 改 .retry 后, 真 terminal-class 的
+    /// 代表 case 收窄为 .missingCredentials (本地 keychain 损坏) + .business permanent 码 (1004 / 4001 等).
+    /// 本 case 用 .missingCredentials + 1004 文案验证 TerminalErrorView 的渲染契约.
     func testTerminalErrorViewRendersVariousErrorCopy() {
-        let unauth = TerminalErrorView(title: "提示", message: "登录失败，请重新启动应用")
-        XCTAssertEqual(unauth.message, "登录失败，请重新启动应用")
-
         let missing = TerminalErrorView(title: "提示", message: "登录信息丢失，请重启 App")
         XCTAssertEqual(missing.message, "登录信息丢失，请重启 App")
 
-        let decoding = TerminalErrorView(title: "提示", message: "数据异常，请稍后重试")
-        XCTAssertEqual(decoding.message, "数据异常，请稍后重试")
+        let permanent = TerminalErrorView(title: "提示", message: "权限不足")
+        XCTAssertEqual(permanent.message, "权限不足")
     }
 
     /// case#4：ErrorPresentationHostModifier 订阅 presenter.current 变化（轻量行为校验）

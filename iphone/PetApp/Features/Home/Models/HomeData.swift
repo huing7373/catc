@@ -35,9 +35,11 @@ public struct HomeData: Equatable, Sendable {
     ///
     /// **Story 5.5 round 6 [P2] fix**：本 init 改 `throws`；未知 `pet.currentState` /
     /// `chest.status` 枚举值不再静默 coerce 到 `.rest` / `.counting`，改抛
-    /// `APIError.decoding` —— 让 server/client schema drift 立刻 fail-fast 触达 UI（bootstrap
-    /// 走 TerminalErrorView "数据异常，请稍后重试"，详见 AppErrorMapper `.decoding` 映射 +
-    /// docs/lessons/2026-04-27-bootstrap-terminal-error-static-fallback-page.md）.
+    /// `APIError.decoding` —— 让 server/client schema drift 立刻 fail-fast 触达 UI.
+    /// **round 9 [P2] 调整**: bootstrap 路径下 `.decoding` 现在渲染 RetryView "数据异常，请重试"
+    /// (mapper 把 .decoding 视为 transient, 给 user 自助恢复入口); dev 仍可从 underlying
+    /// `HomeDataDecodingError` 看到具体哪个 enum 字段拿到未知值.
+    /// 详见 AppErrorMapper `.decoding` 映射 + docs/lessons/2026-04-27-transient-vs-terminal-error-classification.md.
     ///
     /// 原方案 `?? .rest` / `?? .counting` 会在新增枚举值（如未来 `HomePetState.sleep`）时把
     /// 真实状态错误渲染成 rest/counting，dev 期间无任何 signal、生产期 silently 错；
@@ -208,8 +210,8 @@ public struct HomeRoom: Equatable, Sendable {
 /// 作为 `APIError.decoding(underlying:)` 的 underlying，让 log / 调试能看到具体哪个 enum 字段拿到了未知值.
 ///
 /// 不直接抛 `APIError.decoding`：把 underlying 单独命名 → 测试断言可以匹配具体子类型，
-/// 同时让 AppErrorMapper 仍走 `.decoding` 通用 alert 文案 ("数据异常，请稍后重试"，bootstrap 路径渲染为
-/// TerminalErrorView)，无需新错误码.
+/// 同时让 AppErrorMapper 仍走 `.decoding` 通用文案 ("数据异常，请重试"，round 9 [P2] fix 后
+/// bootstrap 路径渲染为 RetryView, 让 user 能自助重试)，无需新错误码.
 public enum HomeDataDecodingError: Error, Equatable {
     /// 后端返回了客户端未知的 `pet.currentState` 枚举值（V1 §4.1 frozen schema 之外）.
     case unknownPetCurrentState(Int)

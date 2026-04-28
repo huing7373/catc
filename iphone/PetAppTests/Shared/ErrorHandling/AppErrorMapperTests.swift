@@ -82,15 +82,14 @@ final class AppErrorMapperTests: XCTestCase {
         XCTAssertEqual(presentation, .alert(title: "提示", message: "权限不足"))
     }
 
-    /// case#4（Story 5.4 round 5 fix → Story 5.5 round 8 [P1] 调整）：.unauthorized → .alert (TerminalErrorView).
-    /// AuthRetryingAPIClient 上线后,业务层接到的 .unauthorized 必然是"已 exhaust 静默重登"的
-    /// 场景（relogin 失败 / retry-after-relogin 仍 401）。
-    /// round 8 fix: 文案回归 round 5 风格 ("登录失败，请重新启动应用"), 不带 "请重试" 前缀
-    /// —— RootView 把 .alert 渲染为 TerminalErrorView (无按钮 → 无重试入口),
-    /// 文案不该 promise 一个 UI 不提供的动作.
-    func testUnauthorizedMapsToAlertWithRestartHint() {
+    /// case#4（Story 5.4 round 5 fix → Story 5.5 round 8 [P1] → round 9 [P2] 调整）：.unauthorized → .retry.
+    /// Story 5.5 round 9 [P2] fix: 改成 .retry —— bootstrap 路径下重试整个 closure 会重新走
+    /// cold-start GuestLoginUseCase + LoadHome,如果 401 是 server transient (session 漂抽风) 可能恢复;
+    /// 即便最终仍 401, user 主动重试也只是多发一次请求, 比"必须杀进程"温柔. 与 .decoding 同精神
+    /// (transient 优先, terminal 留给真"重启救不了"的本地态错误如 .missingCredentials).
+    func testUnauthorizedMapsToRetry() {
         let presentation = AppErrorMapper.presentation(for: APIError.unauthorized)
-        XCTAssertEqual(presentation, .alert(title: "提示", message: "登录失败，请重新启动应用"))
+        XCTAssertEqual(presentation, .retry(message: "登录失败，请重试"))
     }
 
     /// case#4b（Story 5.4 round 2 fix 新增）：.missingCredentials → Alert（"请重启 App"）.
@@ -107,10 +106,12 @@ final class AppErrorMapperTests: XCTestCase {
         XCTAssertEqual(presentation, .retry(message: "网络异常，请检查后重试"))
     }
 
-    /// case#6：.decoding → .alert (round 8: 文案回归简洁; force-quit 指引在 TerminalErrorView 静态文本).
-    func testDecodingErrorMapsToAlert() {
+    /// case#6：.decoding → .retry (Story 5.5 round 9 [P2] fix).
+    /// .decoding 可能是 transient (server partial rollout / 一次性坏 payload),应该让 user
+    /// 能在 App 内重试自愈, 不必杀进程. 之前 round 8 钦定 .alert 渲染 TerminalErrorView 是过度悲观.
+    func testDecodingErrorMapsToRetry() {
         let presentation = AppErrorMapper.presentation(for: APIError.decoding(underlying: URLError(.cannotParseResponse)))
-        XCTAssertEqual(presentation, .alert(title: "提示", message: "数据异常，请稍后重试"))
+        XCTAssertEqual(presentation, .retry(message: "数据异常，请重试"))
     }
 
     /// case#7：非 APIError 的 generic Error → fallback Alert
@@ -163,10 +164,16 @@ final class AppErrorMapperTests: XCTestCase {
         XCTAssertEqual(msg, "步数不足，再走走吧")
     }
 
-    /// decoding 错误 → 走 .alert → 文案与 alert message 一致（round 8: 简洁形态）.
-    func testUserFacingMessageForDecodingErrorMatchesAlertCopy() {
+    /// decoding 错误 → 走 .retry (Story 5.5 round 9 [P2] fix) → 文案与 retry message 一致.
+    func testUserFacingMessageForDecodingErrorMatchesRetryCopy() {
         let msg = AppErrorMapper.userFacingMessage(for: APIError.decoding(underlying: URLError(.cannotParseResponse)))
-        XCTAssertEqual(msg, "数据异常，请稍后重试")
+        XCTAssertEqual(msg, "数据异常，请重试")
+    }
+
+    /// unauthorized 错误 → 走 .retry (Story 5.5 round 9 [P2] fix) → 文案与 retry message 一致.
+    func testUserFacingMessageForUnauthorizedMatchesRetryCopy() {
+        let msg = AppErrorMapper.userFacingMessage(for: APIError.unauthorized)
+        XCTAssertEqual(msg, "登录失败，请重试")
     }
 
     /// 非 APIError → 走 fallback alert → 文案与 fallback message 一致

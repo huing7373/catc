@@ -12,16 +12,19 @@
 // - presentation(for:) 接收 Error 而非 APIError：让 ViewModel catch block 不必 narrow
 // - 错误码字典放 switch case 而非 dictionary：let compiler 帮我们做穷举检查
 //
-// **transient vs terminal 业务码区分（Story 5.5 round 5 [P1] → round 7 [P1] → round 8 [P1] 调整）**：
-// .business 不再统一映射成 .alert。
-// - `.alert` 语义是 "terminal-class 错误,bootstrap 路径下 RootView 渲染 TerminalErrorView (静态
-//   全屏 page, 无按钮, user 必须主动 force-quit)". round 8 [P1] fix: 文案回归简洁形态 (round 5
-//   风格), 不再带 "持续失败时请杀进程重启 App" suffix —— 该指引文本已经移到 TerminalErrorView
-//   底部静态文本, 让 mapper 文案专注表达"什么错了" 而非"怎么办".
-//   详见 docs/lessons/2026-04-27-bootstrap-terminal-error-static-fallback-page.md.
-// - transient 业务码（1005 频繁 / 1007 冲突 / 1008 重复 / 1009 服务繁忙；网络/容量/限流类瞬时
-//   错误）走 .retry —— 让冷启动 bootstrap 路径下 1009 等可恢复错误进 RetryView.
-// 详见 docs/lessons/2026-04-27-business-error-transient-vs-terminal.md
+// **transient vs terminal 错误分类（Story 5.5 round 5 [P1] → round 7 [P1] → round 8 [P1] → round 9 [P2] 调整）**：
+// 不再按 APIError case (4 态) 一对一硬绑 presentation, 而是按 **transient vs terminal** 二分:
+// - **transient (.retry)**: .network / .decoding (server partial rollout / 一次性坏 payload)
+//   / .unauthorized (静默重登 exhausted 后仍可能 transient,如 server 401 抽风) /
+//   .business(1005/1007/1008/1009 限流冲突重复繁忙 等瞬时类码).
+// - **terminal (.alert)**: .missingCredentials (本地 keychain 损坏, retry 救不了, 真需要重启 App)
+//   / .business(其他 permanent 码: 1004 权限不足 / 2002 微信已绑定 / 4001 宝箱不存在 等).
+// - **fallback (.alert)**: 非 APIError 的 generic Error.
+//
+// 二分原则: **transient possible → retry**. user 主动点重试失败再次看到也只是多发一次请求,
+// 比"必须杀进程"温柔; 只有真 terminal (重启都救不了 / 本地配置永久损坏) 才走 .alert.
+// 详见 docs/lessons/2026-04-27-transient-vs-terminal-error-classification.md
+// + docs/lessons/2026-04-27-business-error-transient-vs-terminal.md
 // + docs/lessons/2026-04-27-bootstrap-alert-dismiss-must-be-user-driven-recovery.md
 // + docs/lessons/2026-04-27-bootstrap-terminal-error-static-fallback-page.md.
 
@@ -36,35 +39,43 @@ import Foundation
 ///   - **permanent**（其他 1xxx/2xxx/...）→ `.alert`,文案直接取本地表（round 8 [P1] fix: 不再带
 ///     "持续失败时请杀进程重启 App" suffix —— 该指引已 move 到 TerminalErrorView 底部静态文本,
 ///     mapper 文案专注表达"什么错了"; 详见文件头注释 + lesson 文档）.
-/// - `.unauthorized` → bootstrap 路径渲染 TerminalErrorView；文案 "登录失败，请重新启动应用"
-///   （Story 5.4 round 5 fix 修正：Story 5.4 落地 `AuthRetryingAPIClient` 后,业务层接到
-///   `.unauthorized` 的语义已经反转 —— 不再是"server 第一次返 401"（那种已被 decorator 内部
-///   静默重登 + 重试一次吞掉），而是"已经 exhaust 了那唯一一次静默重登尝试"（relogin 失败 /
-///   重试后**仍**是 401）。继续 toast "正在重新登录..." 既误导（实际没有重登在跑）又非
-///   recoverable（toast 2s 自动消失,用户无任何 action point）。
-///   round 8 [P1] fix: 文案回归 round 5 风格 ("登录失败，请重新启动应用"), 不带 "请重试" 前缀
-///   —— 因为 RootView 的 .alert 分支现在渲染 TerminalErrorView (无按钮 → 无重试入口),
-///   文案不该 promise 一个 UI 不提供的动作.
+/// - `.unauthorized` → RetryView；文案 "登录失败，请重试"
+///   （Story 5.5 round 9 [P2] fix: 改成 .retry —— bootstrap 路径下重试整个 closure 会重新走
+///   cold-start GuestLoginUseCase + LoadHome,如果 401 是 server transient 可能恢复; 即便最终
+///   仍 401, user 主动点重试也只是多发一次请求, 比"必须杀进程"温柔. 历史: round 5 fix 因
+///   "AuthRetryingAPIClient exhausted 后 .unauthorized 是 terminal" 钦定为 .alert; round 9 重新
+///   审视该判断 —— 把 user trapped 在 force-quit only 屏幕过于悲观,exhausted 不等于
+///   "重启都救不了", 应让 user 自决是否再尝试一次）。
 /// - `.missingCredentials` → TerminalErrorView；文案 "登录信息丢失，请重启 App"（Story 5.4 round 2 fix
 ///   新增：本地态走"引导冷启动"路径，不该被 toast "正在重登"误导用户以为系统在自动恢复 —— 实际上
 ///   AuthRetryingAPIClient **不**会 catch 这个 case，需要 cold-start GuestLoginUseCase 接手。
 ///   本 case 的特点：retry() 也救不回（keychain 真没 token, repo 仍抛同样错误））。
+///   round 9 [P2] 验证保留: 这是 transient/terminal 二分中**真 terminal** 的代表 case
+///   —— 本地 keychain 损坏, bootstrap closure 重跑同样读不到 token / 写不进去, retry 无意义.
 /// - `.network(_)` → RetryView；文案 "网络异常，请检查后重试"。
-/// - `.decoding(_)` → TerminalErrorView；文案 "数据异常，请稍后重试"
-///   （round 8 [P1] fix: 文案回归简洁形态; user 看到 TerminalErrorView 自然知道要 force-quit,
-///   mapper 文案不需重复 "持续失败时杀进程" 提示）.
+/// - `.decoding(_)` → RetryView；文案 "数据异常，请重试"
+///   （Story 5.5 round 9 [P2] fix: 改成 .retry —— 之前 round 8 钦定 .alert 渲染 TerminalErrorView
+///   是过度悲观, .decoding 可能是 transient (server partial rollout / 一次性坏 payload),应该
+///   让 user 能在 App 内重试自愈, 不必杀进程. 注: HomeData(from:) throws decoding error 的
+///   fail-fast 逻辑保持不变 (round 6 fix 让 dev 能立刻看到 schema drift); 改的只是 mapper
+///   把 decoding error 渲染成 retry 而非 terminal）.
 ///
-/// **`.alert` vs `.retry` 语义区分（Story 5.5 round 5 [P1+P2] → round 7 → round 8 [P1] 调整）**：
-/// - `.alert` = **terminal-class**：mapper 钦定的 alert 表示"client 认为这是 terminal 错误,
-///   重试无效". round 8 [P1] fix 后, bootstrap 路径下 RootView 把 `.alert` 渲染为 TerminalErrorView
-///   (静态全屏 page, 无按钮, user 必须主动 force-quit). round 5 用 exit(0) / round 7 让 OK 按钮
-///   调 retry 都被验证为 dismiss 行为不可调和的反模式 (详见 RootView dismiss 行为迭代史).
+/// **`.alert` vs `.retry` 语义区分（Story 5.5 round 5 [P1+P2] → round 7 → round 8 [P1] → round 9 [P2] 调整）**：
+/// - `.alert` = **terminal-class**：mapper 钦定的 alert 表示"client 认为这是真 terminal,
+///   重启 App 也未必能救" 的窄类 (round 9 [P2] fix 后只剩 .missingCredentials + .business permanent 码).
+///   bootstrap 路径下 RootView 把 `.alert` 渲染为 TerminalErrorView (静态全屏 page, 无按钮,
+///   user 必须主动 force-quit). round 5 用 exit(0) / round 7 让 OK 按钮调 retry 都被验证为
+///   dismiss 行为不可调和的反模式 (详见 RootView dismiss 行为迭代史).
 ///   非 bootstrap 路径仍用 AlertOverlayView (dismiss-able overlay 适合 transient business error).
-/// - `.retry` = **transient**：用户可在 App 内点重试自愈（network / business 1005/1007/1008/1009 等瞬时错误）.
+/// - `.retry` = **transient**：用户可在 App 内点重试自愈
+///   （network / decoding (round 9) / unauthorized (round 9) / business 1005/1007/1008/1009 等瞬时错误）.
 /// - `.toast` = **info-level**：非阻塞短提示（mapper 当前不派 toast,留给 ViewModel 自定义场景）.
 ///
+/// 二分原则: **transient possible → .retry**. 把 user trap 在 force-quit only 屏幕代价过高,
+/// 应优先给 user 自助恢复入口; 即便 retry 失败再次看到也只是多发一次请求, 比 "必须杀进程" 温柔.
 /// 这条二分让 bootstrap 路径可以无脑分发：`.alert` → TerminalErrorView (force-quit-only)；`.retry` → RetryView（重跑 closure）.
-/// 详见 docs/lessons/2026-04-27-business-error-transient-vs-terminal.md
+/// 详见 docs/lessons/2026-04-27-transient-vs-terminal-error-classification.md
+/// + docs/lessons/2026-04-27-business-error-transient-vs-terminal.md
 /// + docs/lessons/2026-04-27-bootstrap-alert-dismiss-must-be-user-driven-recovery.md
 /// + docs/lessons/2026-04-27-bootstrap-terminal-error-static-fallback-page.md.
 public enum AppErrorMapper {
@@ -107,23 +118,37 @@ public enum AppErrorMapper {
             // 重新登录" 是谎言），也无法靠点击 retry 在装饰器层自愈（同 generation 的 401 会被
             // dedup 短路返回旧 token，再失败仍走到这里形成 user-perceivable loop）。
             // Story 5.5 round 8 [P1] fix: 文案回归 round 5 风格 ("登录失败，请重新启动应用"),
-            // 不带 "请重试" 前缀 —— RootView 的 .alert 分支现在渲染 TerminalErrorView (无按钮 →
-            // 无重试入口), 文案不该 promise 一个 UI 不提供的动作.
-            return ErrorPresentation.alert(title: "提示", message: "登录失败，请重新启动应用")
+            // 不带 "请重试" 前缀.
+            // Story 5.5 round 9 [P2] fix: 改成 .retry —— bootstrap 路径下重试整个 closure 会
+            // 重新走 cold-start GuestLoginUseCase + LoadHome (RootView .retry 分支会 reset
+            // sessionStore 后重跑),如果 401 是 server transient (session 漂抽风) 可能恢复;
+            // 即便最终还是 401, user 主动点重试只是多发一次请求, 比"必须杀进程"温柔.
+            // 与 .decoding 同精神 (transient 优先, terminal 留给真"重启救不了"的本地态错误).
+            // 详见 docs/lessons/2026-04-27-transient-vs-terminal-error-classification.md.
+            return ErrorPresentation.retry(message: "登录失败，请重试")
 
         case .missingCredentials:
             // Story 5.4 round 2 fix: 跟 .unauthorized 区分 —— 本地态需要冷启动接手，
             // 不能 toast "正在重登" 误导用户以为后台在自动恢复（AuthRetryingAPIClient 不接管）。
             // 文案天然就明确告知 user 应该重启 App (retry 救不回, keychain 真的没 token).
+            // Story 5.5 round 9 [P2] 验证: 此 case 保留 .alert —— 真 terminal,本地配置/keychain
+            // 已损坏,bootstrap closure 重跑只会再次抛同样错误 (cold-start GuestLoginUseCase 仍
+            // 走同一份 KeychainTokenStore, 同样读不到 token / 写不进去).
             return ErrorPresentation.alert(title: "提示", message: "登录信息丢失，请重启 App")
 
         case .network:
             return ErrorPresentation.retry(message: "网络异常，请检查后重试")
 
         case .decoding:
-            // Story 5.5 round 8 [P1] fix: 文案回归简洁形态 ("数据异常，请稍后重试") —— RootView
-            // 把 .alert 渲染为 TerminalErrorView 自带 "请杀进程重启" 静态指引, mapper 不重复.
-            return ErrorPresentation.alert(title: "提示", message: "数据异常，请稍后重试")
+            // Story 5.5 round 9 [P2] fix: 改成 .retry —— 之前 round 8 改成 .alert 渲染
+            // TerminalErrorView 是过度悲观, .decoding 可能是 transient (server partial
+            // rollout / 一次性坏 payload),应该让 user 能在 App 内重试自愈, 不必杀进程.
+            // 文案 "数据异常，请重试" 适合 RetryView 场景 (前面有 "请检查" 等 retry 暗示).
+            // 注意: HomeData(from:) throws decoding error 的 fail-fast 逻辑保持不变 (Story 5.5
+            // round 6 fix) —— 让 dev 能立刻看到 schema drift; 改的只是 mapper 把 decoding error
+            // 渲染成 retry 而非 terminal, 给 user 一个自助恢复的入口.
+            // 详见 docs/lessons/2026-04-27-transient-vs-terminal-error-classification.md.
+            return ErrorPresentation.retry(message: "数据异常，请重试")
         }
     }
 

@@ -84,3 +84,4 @@
 | 2026-04-27 | [wire DTO → domain 转换：未知 enum 必须 fail-fast，禁止 silent fallback](2026-04-27-home-data-fail-fast-on-unknown-enum.md) | 1 | error-handling | `<pending>` |
 | 2026-04-27 | [Bootstrap alert dismiss 必须 user-driven recovery (禁 exit(0)) & alert 文案 4 轮迭代史防 regress](2026-04-27-bootstrap-alert-dismiss-must-be-user-driven-recovery.md) | 2 | error-handling, ui, architecture | `<pending>` |
 | 2026-04-27 | [Bootstrap terminal error 必须用静态全屏 fallback page (禁 dismiss-able overlay) & 5 轮 fix-review 元根因复盘 (跳出 framing 的元方法论)](2026-04-27-bootstrap-terminal-error-static-fallback-page.md) | 2 | error-handling, ui, architecture, process | `<pending>` |
+| 2026-04-28 | [`.decoding` / `.unauthorized` 必须按 transient 二分原则归 `.retry` & 9 轮 fix-review 累积出 transient/terminal 通用判则](2026-04-28-decoding-and-unauthorized-must-be-transient-retry.md) | 2 | error-handling, process | `<pending>` |
