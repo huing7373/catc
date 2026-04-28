@@ -12,6 +12,10 @@ import (
 const (
 	envHTTPPort = "CAT_HTTP_PORT"
 	envLogLevel = "CAT_LOG_LEVEL"
+	// envLogFile 是日志文件路径覆盖。空串视为"不覆盖"（保留 YAML 默认）；
+	// 非空时 logger.Init 会同时写 stdout + 该文件。dev / 单机部署便利路径，
+	// 生产仍推荐只写 stdout 让外部工具收集（12-Factor App）。
+	envLogFile = "CAT_LOG_FILE"
 	// envMySQLDSN 是 staging / prod 注入 DB secret 的标准入口。
 	// CLAUDE.md "配置格式：YAML，支持环境变量覆盖" 钦定；DSN 含密码 → 不写进
 	// 提交到仓库的 YAML，部署侧用环境变量或 K8s Secret 注入。Story 4.2 review
@@ -56,6 +60,9 @@ func Load(path string) (*Config, error) {
 	}
 	if v := os.Getenv(envLogLevel); v != "" {
 		cfg.Log.Level = v
+	}
+	if v := os.Getenv(envLogFile); v != "" {
+		cfg.Log.File = v
 	}
 	// MySQL DSN 含密码不入仓 → 部署侧通过 CAT_MYSQL_DSN 注入；空串视为
 	// "不覆盖"（保留 YAML 默认或留空让 db.Open fail-fast）。

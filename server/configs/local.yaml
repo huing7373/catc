@@ -62,3 +62,9 @@ ratelimit:
 
 log:
   level: info
+  # file: 日志同时写入的文件路径（追加模式 / O_APPEND，重启不覆盖）。
+  # 空串 / 字段省略 = 只写 stdout（默认；与历史行为一致）。
+  # 非空时 logger 同时写 stdout + 该文件；文件打开失败 fail-soft 退化只写 stdout。
+  # 也可通过环境变量 CAT_LOG_FILE 覆盖（无 rotation，长期跑配 logrotate）。
+  # 例：file: /tmp/catserver.log
+  file: ""

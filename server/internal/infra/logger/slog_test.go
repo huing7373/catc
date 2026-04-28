@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestInit_LevelWarn(t *testing.T) {
-	l := Init("warn")
+	l := Init("warn", "")
 	if l == nil {
 		t.Fatal("Init returned nil logger")
 	}
@@ -30,7 +32,7 @@ func TestInit_InvalidLevelFallsBackToInfo(t *testing.T) {
 	// Init 会把 fallback 通过 slog.Default().Warn 吐出；我们先把 default 换成 buffer handler 捕获。
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
-	l := Init("TRACE")
+	l := Init("TRACE", "")
 
 	if !l.Enabled(context.Background(), slog.LevelInfo) {
 		t.Errorf("Info should be enabled after fallback to info level")
@@ -43,6 +45,55 @@ func TestInit_InvalidLevelFallsBackToInfo(t *testing.T) {
 	if lvl != slog.LevelInfo {
 		t.Errorf("parseLevel(TRACE) level = %v, want Info", lvl)
 	}
+}
+
+// TestInit_FilePathWritesToFile 验证传入 filePath 时，logger 同时写 stdout + 文件。
+// 用 t.TempDir() 拿到隔离目录避免污染本机；测试结束 t.Cleanup 自动清理。
+func TestInit_FilePathWritesToFile(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "server.log")
+
+	l := Init("info", logPath)
+	l.Info("hello-from-file-test", slog.String("k", "v"))
+
+	// 关键：必须显式 close 文件让 buffered write flush 到磁盘
+	// （Init 内部把 file 留在 currentFile，下次 Init 才 close。这里我们用空 path 触发 close）
+	_ = Init("info", "")
+
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log file failed: %v", err)
+	}
+	if !bytes.Contains(raw, []byte("hello-from-file-test")) {
+		t.Errorf("log file does not contain expected message; raw=%q", raw)
+	}
+	// 确认是 JSON 格式
+	var m map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &m); err != nil {
+		t.Fatalf("log file content is not valid JSON: %v; raw=%s", err, raw)
+	}
+	if m["msg"] != "hello-from-file-test" {
+		t.Errorf("log file msg = %v, want hello-from-file-test", m["msg"])
+	}
+}
+
+// TestInit_FilePathOpenFailureFallsBackToStdout 验证文件路径无效（目录不存在）时
+// logger 退化为只写 stdout 不阻断启动。fail-soft 语义：日志落盘是辅助能力，
+// 路径错配不应让 server 起不来。
+func TestInit_FilePathOpenFailureFallsBackToStdout(t *testing.T) {
+	// 不存在的目录路径 → OpenFile 必失败
+	bogusPath := filepath.Join(t.TempDir(), "nonexistent-dir", "server.log")
+
+	l := Init("info", bogusPath)
+	if l == nil {
+		t.Fatal("Init returned nil logger on file open failure (should fall back to stdout-only)")
+	}
+	if !l.Enabled(context.Background(), slog.LevelInfo) {
+		t.Errorf("logger should still be functional at info level after file fallback")
+	}
+
+	// cleanup: 重置 currentFile 状态
+	_ = Init("info", "")
 }
 
 func TestNewContext_FromContext_Roundtrip(t *testing.T) {

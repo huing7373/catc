@@ -247,6 +247,35 @@ func TestLoad_RateLimitExplicitZero_PreservedNotDefaulted(t *testing.T) {
 	}
 }
 
+// TestLoad_LogFileEnvOverride 验证 CAT_LOG_FILE 环境变量覆盖 YAML 的 log.file。
+// 与 mysql.dsn / auth.token_secret 的 env override 同模式。
+func TestLoad_LogFileEnvOverride(t *testing.T) {
+	const overridePath = "/var/log/catserver-from-env.log"
+	t.Setenv(envLogFile, overridePath)
+
+	cfg, err := Load(fixturePath)
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.Log.File != overridePath {
+		t.Errorf("Log.File = %q, want %q (env override should win)", cfg.Log.File, overridePath)
+	}
+}
+
+// TestLoad_LogFileNoEnv_KeepsYAMLDefault 验证未设 CAT_LOG_FILE 时
+// loader 不动 cfg.Log.File（fixture 没 log.file → 空串，等价于"只写 stdout"）。
+func TestLoad_LogFileNoEnv_KeepsYAMLDefault(t *testing.T) {
+	t.Setenv(envLogFile, "")
+
+	cfg, err := Load(fixturePath)
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.Log.File != "" {
+		t.Errorf("Log.File = %q, want empty (fixture has no log.file + env empty)", cfg.Log.File)
+	}
+}
+
 // TestLoad_RateLimitOmitted_DefaultedTo60 验证 YAML 完全不写 ratelimit 段时，
 // loader 兜底 PerKeyPerMin = 60（pointer 非 nil 且 deref = 60）。
 //

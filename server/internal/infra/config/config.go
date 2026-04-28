@@ -165,4 +165,16 @@ type RateLimitConfig struct {
 
 type LogConfig struct {
 	Level string `yaml:"level"`
+
+	// File 是日志同时写入的文件路径。空串（默认）= 只写 stdout，与历史行为一致。
+	// 非空时 logger 同时写 stdout + 该文件（追加模式 / O_APPEND，重启不覆盖）。
+	// 文件打开失败 fail-soft（退化为只写 stdout 并 WARN）—— 日志落盘是辅助能力，
+	// 路径错配不应阻断 server 启动。
+	//
+	// 生产部署 12-Factor App 钦定做法仍是只写 stdout 让外部 systemd / docker /
+	// fluentd 收集；本字段是 dev / 单机部署的便利路径。无 rotation 能力，长期跑
+	// 需配合 logrotate 等外部工具。
+	//
+	// 通过环境变量 `CAT_LOG_FILE` 覆盖（与 mysql.dsn / auth.token_secret 同模式）。
+	File string `yaml:"file"`
 }

@@ -35,10 +35,11 @@ import (
 const dbOpenTimeout = 5 * time.Second
 
 func main() {
-	// Bootstrap logger 先拿 "info" level 的 JSON handler，确保 config 加载失败这类
-	// **早期启动错误**也走结构化 JSON 输出。config 加载成功后会用实际配置的 level 再 Init 一次。
+	// Bootstrap logger 先拿 "info" level 的 JSON handler（filePath 留空 → 只写 stdout），
+	// 确保 config 加载失败这类**早期启动错误**也走结构化 JSON 输出。config 加载成功后会用
+	// 实际配置的 level + file 再 Init 一次。
 	// 见 docs/lessons/2026-04-25-slog-init-before-startup-errors.md。
-	logger.Init("info")
+	logger.Init("info", "")
 
 	// Story 4.3 review fix：子命令路径必须**先**拆 args 再 flag.Parse。
 	//
@@ -80,7 +81,7 @@ func main() {
 				os.Exit(1)
 			}
 			preCfg = c
-			logger.Init(c.Log.Level)
+			logger.Init(c.Log.Level, c.Log.File)
 		}
 		if err := cli.RunMigrate(migrateCtx, preCfg, migrateArgs); err != nil {
 			slog.Error("migrate failed", slog.Any("error", err))
@@ -105,11 +106,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Init(cfg.Log.Level)
+	logger.Init(cfg.Log.Level, cfg.Log.File)
 	slog.Info("config loaded",
 		slog.String("path", configPath),
 		slog.Int("http_port", cfg.Server.HTTPPort),
 		slog.String("log_level", cfg.Log.Level),
+		slog.String("log_file", cfg.Log.File),
 	)
 
 	// Dev 模式（BUILD_DEV=true 或 build tag `devtools`）启用时在启动阶段打一条
