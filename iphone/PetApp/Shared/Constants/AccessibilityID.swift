@@ -51,6 +51,14 @@ public enum AccessibilityID {
         public static let retryView = "errorUI_retryView"
         public static let retryMessage = "errorUI_retryMessage"
         public static let retryButton = "errorUI_retryButton"
+        // Story 5.5 round 8 [P1] fix: terminal/unrecoverable error 的静态全屏 fallback page
+        // (TerminalErrorView). 用于 bootstrap 路径的 .unauthorized / .missingCredentials /
+        // .decoding / permanent business error —— 无任何按钮, user 必须主动杀进程退出.
+        // 详见 docs/lessons/2026-04-27-bootstrap-terminal-error-static-fallback-page.md.
+        public static let terminalView = "errorUI_terminalView"
+        public static let terminalTitle = "errorUI_terminalTitle"
+        public static let terminalMessage = "errorUI_terminalMessage"
+        public static let terminalHelp = "errorUI_terminalHelp"
     }
 
     /// Story 2.9 新增：LaunchingView 的 a11y 标识。

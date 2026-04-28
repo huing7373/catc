@@ -443,37 +443,44 @@ private struct LaunchedContentView: View {
     /// Story 5.5 round 4 [P2] fix: 拆 retry-able 和 alert-only 两类 dismiss 行为.
     /// Story 5.5 round 5 [P1+P2] fix: alert dismiss 调 exit(0) —— 但被 round 7 review 推翻.
     /// Story 5.5 round 7 [P1] fix: alert dismiss 改回调 stateMachine.retry() (user-driven recovery).
+    /// **Story 5.5 round 8 [P1] fix（终极方案）**: bootstrap 路径的 `.alert` / `.toast` 不再用
+    /// `AlertOverlayView` (dismiss-able overlay), 改用全新的 `TerminalErrorView` (静态全屏 fallback
+    /// page，无任何按钮，user 必须主动杀进程退出).
     ///
-    /// **dismiss 行为迭代史（必读 — 防再次 regress）**：
+    /// **dismiss 行为迭代史（必读 — 防再次 regress；本 story 死磕了 6 轮）**：
     /// - round 0 (dev-story): 默认 .needsAuth 自动 retry → P2 finding (隐式重试, 不可控).
     /// - round 3 fix: 用 ErrorPresentation 区分 alert/retry, 但 alert dismiss 仍 retry → P1 死循环
     ///   (alert 的 mapper 文案是 "请重启应用", dismiss 立即重试 → 仍失败 → 同 alert 弹回 → 死循环).
     /// - round 4 fix: alert dismiss 改 no-op → P2 卡死 (用户点 OK 后 state 不变 → AlertOverlayView 仍显示).
-    /// - round 5 fix: alert dismiss 改 exit(0) → P1 (本轮 round 7 review): iOS HIG 明确禁止 app
+    /// - round 5 fix: alert dismiss 改 exit(0) → P1 (round 7 review): iOS HIG 明确禁止 app
     ///   自己 exit(0), App Store 审核会拒, 用户感觉是 force-quit / crash 而不是 graceful error 处理.
-    /// - **round 7 fix (current)**: alert dismiss → stateMachine.retry(); mapper 文案补一句
-    ///   "持续失败时请杀进程重启 App" 让 user 主动决定 —— 把"是否死循环"的判断交给 user.
-    ///   user-driven recovery 是 iOS HIG 推荐的"non-terminating recovery"模式.
+    /// - round 7 fix: alert dismiss → stateMachine.retry() + mapper 文案补 "持续失败时请杀进程重启 App"
+    ///   → P1 (本轮 round 8 review): user 仍可被困 retry → fail → retry 循环, 文案提示也救不了
+    ///   `.missingCredentials` 这种 retry 根本无效的 case.
+    /// - **round 8 fix (current — 终极方案)**: 把 dismiss-able overlay (AlertOverlayView) 整个
+    ///   抽离 bootstrap 路径, 改用 TerminalErrorView 静态全屏 page (无按钮 → user 必须主动杀进程).
+    ///   **不再有 dismiss closure 可纠结**.
     ///
-    /// **为什么 round 7 不再死循环**:
-    /// - round 3 死循环的根因不是"dismiss 调 retry()", 而是"mapper 文案没告知 user 该 force-quit".
-    /// - 现在文案 "请重试。持续失败时请杀进程重启 App" 明确告知 user 多次失败时应自己关 App.
-    /// - 用户点 OK → retry → 成功就走出去；失败再看到同 alert, 知道该自己杀进程.
-    /// - 这跟 round 3 的区别: round 3 用户被自动 retry, **不知道**该杀进程; round 7 用户主动点 OK
-    ///   触发 retry, 文案明示 fallback 路径.
+    /// **为什么 round 8 是终极方案**:
+    /// 5 轮 fix-review 的根因复盘揭示: bootstrap terminal-class 错误的"dismiss 行为"本身就是个伪命题.
+    /// `AlertOverlayView` 设计是 "dismiss-able overlay" → 必须有 OK 按钮 → 必须有 dismiss closure →
+    /// closure 选什么动作（retry / no-op / exit / 提示）都会跟 terminal 错误的语义冲突
+    /// (terminal = 重试无效 = 任何 in-app 动作都救不回). 唯一可调和的方案: 不给 dismiss 入口.
+    /// iOS error boundary 模式: terminal error = full-screen static page = user 主动 force-quit.
     ///
     /// - `.retry`: 用户可点重试触发 stateMachine.retry()（继续走 GuestLogin + LoadHome 重试链路）.
     ///   transient 业务码（1005/1007/1008/1009 / network）会落到这里,bootstrap 失败 → RetryView → 用户重试 → 自愈.
     /// - `.alert`: terminal-class 错误 (.unauthorized / .missingCredentials / .decoding / 永久业务码).
-    ///   onDismiss 调 stateMachine.retry() —— mapper 文案告知 user 多次失败应 force-quit.
-    ///   注意: bootstrap 路径才需要这条 wire;非 bootstrap 路径（ErrorPresenter.present 的 alert）由
-    ///   ErrorPresenter 自己管理 dismiss,不会复用本 onDismiss 闭包.
+    ///   **round 8 改用 TerminalErrorView**: 静态全屏 page, 无按钮, user 必须 force-quit.
+    ///   注意: bootstrap 路径才用 TerminalErrorView; 非 bootstrap 路径（ErrorPresenter.present 的 alert）
+    ///   仍用 AlertOverlayView (dismiss-able 适合 transient business error 的非 modal 弹窗).
     /// - `.toast`: bootstrap 阶段不应该派发 toast（mapper 当前根本不派 toast；本分支是防御性兜底）.
-    ///   出现说明 mapper 配置异常 → 兜底渲染为 alert 而非 toast（toast 自动消失后留白屏更糟）.
-    ///   onDismiss 同 alert: 调 retry().
-    /// 详见 docs/lessons/2026-04-27-bootstrap-all-error-paths-route-via-mapper.md
-    /// + docs/lessons/2026-04-27-business-error-transient-vs-terminal.md
-    /// + docs/lessons/2026-04-27-bootstrap-alert-dismiss-must-be-user-driven-recovery.md.
+    ///   出现说明 mapper 配置异常 → 兜底渲染为 TerminalErrorView (toast 自动消失后留白屏更糟,
+    ///   按 alert 同样视作 terminal).
+    /// 详见 docs/lessons/2026-04-27-bootstrap-terminal-error-static-fallback-page.md
+    /// + docs/lessons/2026-04-27-bootstrap-alert-dismiss-must-be-user-driven-recovery.md
+    /// + docs/lessons/2026-04-27-bootstrap-all-error-paths-route-via-mapper.md
+    /// + docs/lessons/2026-04-27-business-error-transient-vs-terminal.md.
     @ViewBuilder
     private func needsAuthContent(for presentation: ErrorPresentation) -> some View {
         switch presentation {
@@ -483,25 +490,14 @@ private struct LaunchedContentView: View {
                 onRetry: { Task { await stateMachine.retry() } }
             )
         case let .alert(title, message):
-            AlertOverlayView(
-                title: title,
-                message: message,
-                // round 7 [P1] fix: alert OK 调 stateMachine.retry() (user-driven recovery).
-                // 不再是 exit(0) (round 5 iOS HIG 反模式: app 不该自己终止进程).
-                // 不再是 no-op (round 4 死锁: 用户点 OK 卡死).
-                // 不再是隐式 retry (round 3 死循环: 用户被动 retry, 不知道该杀进程).
-                // 配合 mapper 文案 "持续失败时请杀进程重启 App" 让 user 主动决定继续 / 退出.
-                // 详见 docs/lessons/2026-04-27-bootstrap-alert-dismiss-must-be-user-driven-recovery.md.
-                onDismiss: { Task { await stateMachine.retry() } }
-            )
+            // round 8 [P1] fix: 不再用 AlertOverlayView (dismiss-able overlay 必须有 OK 按钮 → 必须有
+            // dismiss closure → 5 轮迭代证明 closure 行为不可调和). 改用 TerminalErrorView 静态全屏
+            // page (无按钮 → user 必须 force-quit). 详见上方 dismiss 行为迭代史 + lesson 文档.
+            TerminalErrorView(title: title, message: message)
         case let .toast(message):
-            // 兜底：bootstrap 阶段拿到 toast presentation 异常 —— 渲染为 alert 防白屏.
-            // onDismiss 同 alert: 调 retry() (mapper 配置异常按 alert 同样语义处理).
-            AlertOverlayView(
-                title: "提示",
-                message: message,
-                onDismiss: { Task { await stateMachine.retry() } }
-            )
+            // 兜底：bootstrap 阶段拿到 toast presentation 异常 —— mapper 配置错（不该派 toast 给 bootstrap）.
+            // round 8 改用 TerminalErrorView 兜底 (与 .alert 同 treatment, toast 自动消失后留白屏更糟).
+            TerminalErrorView(title: "提示", message: message)
         }
     }
 }

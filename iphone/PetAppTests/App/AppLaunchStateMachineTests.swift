@@ -189,9 +189,11 @@ final class AppLaunchStateMachineTests: XCTestCase {
         )
     }
 
-    /// case#11b (Story 5.5 round 5 [P1] fix → round 7 [P1] 文案调整): permanent business code 仍走 .alert.
+    /// case#11b (Story 5.5 round 5 [P1] fix → round 8 [P1] 文案回归简洁): permanent business code 仍走 .alert.
     /// 用 5002 (道具不属于你) 作 permanent 类代表 —— 用户重试也不会改变结果.
-    /// round 7 [P1] fix: alert 文案末尾追加 "持续失败时请杀进程重启 App" 让 user 主动决定 force-quit.
+    /// round 8 [P1] fix: alert 文案回归 round 5 风格,不再带 "持续失败时请杀进程重启 App" suffix
+    /// —— 该指引已 move 到 TerminalErrorView 底部静态文本 (RootView 把 bootstrap .alert 渲染为
+    /// TerminalErrorView 全屏静态 page, mapper 文案专注表达"什么错了").
     func testBootstrapWithMappedPermanentBusinessErrorRoutesToAlertPresentation() async {
         let underlying = APIError.business(code: 5002, message: "server 原文", requestId: "req_x")
         let wrapped = BootstrapMappedError(
@@ -205,16 +207,16 @@ final class AppLaunchStateMachineTests: XCTestCase {
         await sm.bootstrap()
         XCTAssertEqual(
             sm.state,
-            .needsAuth(presentation: .alert(title: "提示", message: "道具不属于你。持续失败时请杀进程重启 App")),
-            "permanent business 仍走 .alert (terminal,文案带 force-quit suffix 让 user 主动决定)"
+            .needsAuth(presentation: .alert(title: "提示", message: "道具不属于你")),
+            "permanent business 仍走 .alert (terminal); round 8 文案回归简洁,force-quit 指引在 TerminalErrorView 静态文本中"
         )
     }
 
-    /// case#12 (Story 5.5 round 2 [P1] fix → round 7 [P1] 文案调整): `.unauthorized` 必须走 `.alert` 而非 `.retry`.
+    /// case#12 (Story 5.5 round 2 [P1] fix → round 8 [P1] 文案回归简洁): `.unauthorized` 必须走 `.alert` 而非 `.retry`.
     ///
     /// **核心 regression guard**: round 2 [P1] finding 的精确复现.
-    /// round 7 [P1] fix: 文案从 "请重新启动应用" 改成 "请重试。持续失败时请杀进程重启 App"
-    /// —— 配合 alert dismiss 调 retry() (user-driven recovery), 不再让 app exit(0) 替 user 决定.
+    /// round 8 [P1] fix: 文案回归 round 5 风格 ("登录失败，请重新启动应用"), 不带 "请重试" 前缀
+    /// —— RootView .alert 分支渲染 TerminalErrorView (无按钮 → 无重试入口), 文案不该 promise UI 不提供的动作.
     func testBootstrapWithUnauthorizedRoutesToAlertPresentation() async {
         let underlying = APIError.unauthorized
         let wrapped = BootstrapMappedError(
@@ -228,12 +230,12 @@ final class AppLaunchStateMachineTests: XCTestCase {
         await sm.bootstrap()
         XCTAssertEqual(
             sm.state,
-            .needsAuth(presentation: .alert(title: "提示", message: "登录失败，请重试。持续失败时请杀进程重启 App")),
-            ".unauthorized 必须走 .alert; 文案带 force-quit suffix 让 user 主动决定继续重试还是 force-quit"
+            .needsAuth(presentation: .alert(title: "提示", message: "登录失败，请重新启动应用")),
+            ".unauthorized 必须走 .alert; round 8 文案不 promise 重试 (TerminalErrorView 无按钮)"
         )
     }
 
-    /// case#13 (Story 5.5 round 2 [P1] fix → round 7 [P1] 文案调整): `.decoding` 也走 `.alert`（mapper 钦定）.
+    /// case#13 (Story 5.5 round 2 [P1] fix → round 8 [P1] 文案回归简洁): `.decoding` 也走 `.alert`（mapper 钦定）.
     func testBootstrapWithDecodingErrorRoutesToAlertPresentation() async {
         struct StubDecodingError: Error {}
         let underlying = APIError.decoding(underlying: StubDecodingError())
@@ -248,8 +250,8 @@ final class AppLaunchStateMachineTests: XCTestCase {
         await sm.bootstrap()
         XCTAssertEqual(
             sm.state,
-            .needsAuth(presentation: .alert(title: "提示", message: "数据异常，请重试。持续失败时请杀进程重启 App")),
-            ".decoding 必须走 .alert; round 7 文案与 .unauthorized 同模式 (重试入口 + 多次失败的 force-quit fallback)"
+            .needsAuth(presentation: .alert(title: "提示", message: "数据异常，请稍后重试")),
+            ".decoding 必须走 .alert; round 8 文案回归简洁 (force-quit 指引在 TerminalErrorView 静态文本)"
         )
     }
 
@@ -274,26 +276,32 @@ final class AppLaunchStateMachineTests: XCTestCase {
         )
     }
 
-    /// case#15 (Story 5.5 round 7 [P1] fix): alert dismiss 必须调 retry() (user-driven recovery).
+    /// case#15 (Story 5.5 round 8 [P1] fix - 终极方案): bootstrap 路径 `.alert` presentation
+    /// 不再有 dismiss closure — RootView 渲染 TerminalErrorView (静态全屏 page, 无任何按钮).
     ///
-    /// **dismiss 行为迭代史 (本 case 守的就是 round 7 契约, 防再次 regress)**:
+    /// **dismiss 行为迭代史 (本 case 守的就是 round 8 终极契约, 防 regress 回任何前轮模式)**:
     /// - round 0 (dev-story): 默认 .needsAuth → 自动 retry → P2 finding (隐式 retry, 不可控).
-    /// - round 3: 区分 alert/retry, 但 alert dismiss 仍 retry → P1 死循环 (mapper 文案 "请重启应用",
-    ///   dismiss 立即重试 → 仍失败 → 同 alert 弹回 → 死循环).
-    /// - round 4: alert dismiss 改 no-op → P2 卡死 (state 不变 → AlertOverlayView 永久显示).
-    /// - round 5: alert dismiss 改 exit(0) → P1 (round 7 review): iOS HIG 反模式 (App Store 审核拒,
-    ///   用户感觉是 force-quit / crash).
-    /// - **round 7 (current)**: alert dismiss → retry(); mapper 文案补 "持续失败时请杀进程重启 App".
-    ///   user-driven recovery 模式: 把"是否死循环"判断权交给 user (主动重试 = 选择继续; 杀进程 = 选择退出).
+    /// - round 3: 区分 alert/retry, 但 alert dismiss 仍 retry → P1 死循环.
+    /// - round 4: alert dismiss 改 no-op → P2 卡死.
+    /// - round 5: alert dismiss 改 exit(0) → P1: iOS HIG 反模式.
+    /// - round 7: alert dismiss → retry() + mapper 文案 "持续失败时请杀进程重启 App"
+    ///   → P1 (round 8 review): user 仍可被困 retry → fail → retry 循环.
+    /// - **round 8 (current — 终极方案)**: bootstrap 路径 `.alert` 不再用 dismiss-able overlay.
+    ///   改用 TerminalErrorView (静态全屏 page, **无任何按钮**, user 必须 force-quit).
+    ///   **不再有 dismiss closure 可纠结**.
     ///
-    /// **为什么 round 7 不再死循环**:
-    /// round 3 死循环的根因是文案没告知 user 多次失败时该 force-quit. 现在文案明确告知 ——
-    /// retry 成功 → 走出去; retry 失败 → user 看到同 alert + 文案, 知道该自己关 App.
-    /// 这与 round 3 的"自动隐式重试"区别: 现在 user 主动点 OK 触发 retry, 知道发生了什么.
+    /// **为什么 round 8 是终极方案**:
+    /// 5 轮 fix-review 揭示: bootstrap terminal 错误的"dismiss 行为"本身是伪命题. AlertOverlayView
+    /// 是 dismiss-able overlay → 必须有按钮 → 必须有 closure → closure 选什么动作都跟 terminal 语义冲突.
+    /// 唯一可调和: 不给 dismiss 入口. iOS error boundary 模式 = full-screen static page = user force-quit.
     ///
-    /// 本 case 验证: 调 retry() 后 state 切换到 .launching (重置流程), 然后又因 closure 持续抛错
-    /// 落回 .needsAuth(.alert) —— 形成可控的 user-driven loop, 文案告知 fallback 路径.
-    func testAlertDismissCallsRetryWhichResetsStateToLaunchingThenAlert() async {
+    /// **本 case 验证**: 状态机的 `.alert` presentation 路径仍正确 (mapper 派 .alert → state 落到
+    /// .needsAuth(.alert)). dismiss closure 不再由 RootView 提供 → 本 case 不再 simulate "user 点 OK"
+    /// 的行为 (因为 TerminalErrorView 没 OK 按钮, user 唯一行为是杀进程, 不在 in-app test scope).
+    /// 状态机本身的 retry() 仍可被外部调用 (e.g. 未来 SceneDelegate willEnterForeground 自动 retry),
+    /// 本 case 保留 retry 后回到 .alert 的 invariant 测试 —— 但语义改为"如果未来某条路径 (非 alert OK
+    /// 按钮) 调 retry(), 状态机仍能正确处理".
+    func testStateMachinePresentsAlertForTerminalErrorAndRetryStaysIdempotent() async {
         let underlying = APIError.unauthorized
         let wrapped = BootstrapMappedError(
             presentation: AppErrorMapper.presentation(for: underlying),
@@ -304,23 +312,25 @@ final class AppLaunchStateMachineTests: XCTestCase {
             bootstrapStep2: { /* never called */ }
         )
         await sm.bootstrap()
-        // 首次 bootstrap 失败 → 落到 .alert
+        // 首次 bootstrap 失败 → 落到 .alert.
+        // **round 8 [P1] regression guard**: state 必须是 .alert (mapper 钦定), 否则
+        // RootView 不会去渲染 TerminalErrorView, 又会回到前轮 (RetryView / AlertOverlay) 反模式.
         XCTAssertEqual(
             sm.state,
-            .needsAuth(presentation: .alert(title: "提示", message: "登录失败，请重试。持续失败时请杀进程重启 App"))
+            .needsAuth(presentation: .alert(title: "提示", message: "登录失败，请重新启动应用")),
+            "round 8 contract: terminal-class error 必须是 .alert presentation, RootView 才会渲染 TerminalErrorView (force-quit-only)"
         )
 
-        // 模拟 RootView round 7 修复后的 alert dismiss closure: 调 stateMachine.retry().
-        // user 主动点 OK → retry() → 重跑 bootstrap → closure 仍抛错 → 又落回 .alert.
-        // 这是 user-driven loop —— user 看到 alert 文案知道多次失败时该 force-quit.
+        // retry() 路径仍 invariant: 重跑闭包 → 仍抛同样错 → 同 .alert 再次 set.
+        // 注意: round 8 后 RootView 的 .alert 分支是 TerminalErrorView (无 dismiss button), 所以
+        // user 不会主动触发 retry. 但状态机 retry() API 仍 exposed —— 本 case 守 API 自身的 idempotency,
+        // 防未来某条路径 (e.g. SceneDelegate willEnterForeground 自动 retry / dev menu 触发) 调 retry()
+        // 时状态机崩溃.
         await sm.retry()
-
         XCTAssertEqual(
             sm.state,
-            .needsAuth(presentation: .alert(title: "提示", message: "登录失败，请重试。持续失败时请杀进程重启 App")),
-            "round 7 [P1] contract: alert dismiss 调 retry() → 重跑失败 closure → 同 alert 再次显示. " +
-            "user 看到文案 '持续失败时请杀进程重启 App' 知道该自己 force-quit. 这条 invariant 防再次 regress 回 " +
-            "round 3 (隐式自动 retry 死循环) / round 4 (no-op 卡死) / round 5 (exit(0) iOS HIG 反模式)."
+            .needsAuth(presentation: .alert(title: "提示", message: "登录失败，请重新启动应用")),
+            "retry() API 自身 idempotent: 重跑同失败 closure → 同 .alert presentation 再次 set"
         )
     }
 

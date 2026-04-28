@@ -37,6 +37,38 @@ final class ErrorComponentSnapshotTests: XCTestCase {
         XCTAssertTrue(retried)
     }
 
+    // MARK: - TerminalErrorView (Story 5.5 round 8 [P1] fix)
+    //
+    // TerminalErrorView 是 bootstrap 路径 terminal-class error 的静态全屏 fallback page.
+    // 跟 AlertOverlayView 的关键区别: **无任何按钮**, 故意不暴露 dismiss closure ——
+    // user 必须主动杀进程退出 (iOS error boundary 模式).
+    // 5 轮 fix-review 验证: bootstrap 路径上"dismiss-able overlay + 任何 closure 行为"都不可调和.
+    // 详见 docs/lessons/2026-04-27-bootstrap-terminal-error-static-fallback-page.md.
+
+    /// case#3a：TerminalErrorView 持有 title / message
+    /// **regression guard**: 必须不存在 onDismiss / onRetry closure (区别于 AlertOverlayView / RetryView).
+    /// 编译期就保证: TerminalErrorView.init 签名只有 title + message 两个参数,
+    /// 未来若有人加 closure 字段,本 case 编译期 fail (init 多参数 / 类型不匹配).
+    func testTerminalErrorViewHoldsTitleAndMessageOnly() {
+        let view = TerminalErrorView(title: "提示", message: "登录失败，请重新启动应用")
+        XCTAssertEqual(view.title, "提示")
+        XCTAssertEqual(view.message, "登录失败，请重新启动应用")
+        // 不调任何 closure —— TerminalErrorView 故意没有 closure 字段,
+        // 这条契约本身就是 round 8 fix 的核心 (no dismiss = no loop).
+    }
+
+    /// case#3b：TerminalErrorView 不同 title/message 组合 (covers .unauthorized / .missingCredentials / .decoding 文案).
+    func testTerminalErrorViewRendersVariousErrorCopy() {
+        let unauth = TerminalErrorView(title: "提示", message: "登录失败，请重新启动应用")
+        XCTAssertEqual(unauth.message, "登录失败，请重新启动应用")
+
+        let missing = TerminalErrorView(title: "提示", message: "登录信息丢失，请重启 App")
+        XCTAssertEqual(missing.message, "登录信息丢失，请重启 App")
+
+        let decoding = TerminalErrorView(title: "提示", message: "数据异常，请稍后重试")
+        XCTAssertEqual(decoding.message, "数据异常，请稍后重试")
+    }
+
     /// case#4：ErrorPresentationHostModifier 订阅 presenter.current 变化（轻量行为校验）
     /// 只验证 ViewModifier 能正确构造且 presenter 引用挂载成功；具体渲染走 ErrorPresenterTests。
     func testErrorPresentationHostModifierConstructible() {

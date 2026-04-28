@@ -15,8 +15,9 @@
 //   - APIError.decoding → server 返了不符合 schema 的数据（理论不应发生 —— V1 §4.1 行 16 schema 已冻结）
 //                         → 透传 → ViewModel 同上（让用户重试或提示"App 需要更新"）
 //   - APIError.decoding(HomeDataDecodingError) → 客户端解 wire DTO 时遇未知 enum 值（同 schema drift 信号）
-//                         → 透传 → AlertOverlay "数据异常，请重试。持续失败时请杀进程重启 App"（mapper 钦定）
+//                         → 透传 → bootstrap 路径 TerminalErrorView "数据异常，请稍后重试"（mapper 钦定 .alert）
 //                         详见 docs/lessons/2026-04-27-home-data-fail-fast-on-unknown-enum.md
+//                         + docs/lessons/2026-04-27-bootstrap-terminal-error-static-fallback-page.md
 //
 // 不在本 story 范围（设计选择）：
 //   - 不直接接 ErrorPresenter（让 UseCase 可被未来非 UI 场景 / 后台刷新复用）
