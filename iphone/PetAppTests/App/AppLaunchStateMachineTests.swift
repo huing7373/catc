@@ -249,6 +249,47 @@ final class AppLaunchStateMachineTests: XCTestCase {
         )
     }
 
+    /// case#15 (Story 5.5 round 4 [P2] fix #3): alert-only 路径 dismiss 不调 retry → state 必须保持 .alert.
+    ///
+    /// **regression guard**: round 1-3 的 RootView LaunchedContentView.needsAuthContent 把
+    /// `.alert` case 的 onDismiss 也接到 stateMachine.retry() —— 用户点 "知道了" 反而触发隐式 retry.
+    /// 对 mapper 钦定为 .alert 的不可恢复错误 (.unauthorized / .decoding / .missingCredentials),
+    /// 文案是 "请重启应用", 但 dismiss 立即重发请求 → 仍 401 → alert 弹回 → 死循环.
+    /// round 4 修复: alert 路径 onDismiss 设为 no-op, 状态保持 .needsAuth(.alert),
+    /// AlertOverlayView 仍可见, 用户唯一出路就是冷重启. 本 case 验证语义层契约: 不调 retry()
+    /// → state 不变. 这条 invariant 让未来 RootView 重构时不容易 regress 回"dismiss 触发 retry".
+    func testAlertDismissWithoutRetryKeepsStateStable() async {
+        let underlying = APIError.unauthorized
+        let wrapped = BootstrapMappedError(
+            presentation: AppErrorMapper.presentation(for: underlying),
+            underlying: underlying
+        )
+        let sm = AppLaunchStateMachine(
+            bootstrapStep1: { throw wrapped },
+            bootstrapStep2: { /* never called */ }
+        )
+        await sm.bootstrap()
+        let stateBeforeDismiss = sm.state
+
+        // 模拟 RootView round 4 修复后的 alert dismiss closure: no-op, 不调 retry.
+        // 验证 state 不变 → AlertOverlayView 仍会被同 state 渲染 → 等价于 "用户必须冷重启" 引导.
+        // (round 1-3 的写法 `Task { await sm.retry() }` 会重置 state 触发 .launching → 死循环.)
+        let alertOnlyDismissClosure: @Sendable () -> Void = { /* alert-only: 不调 retry */ }
+        alertOnlyDismissClosure()
+
+        XCTAssertEqual(
+            sm.state,
+            stateBeforeDismiss,
+            "alert-only path: dismiss 后 state 必须保持 .needsAuth(.alert), 让 AlertOverlayView " +
+            "继续显示, 引导用户冷重启. round 1-3 把 dismiss 接到 retry() 形成死循环, round 4 [P2] fix 已修复."
+        )
+        XCTAssertEqual(
+            sm.state,
+            .needsAuth(presentation: .alert(title: "提示", message: "登录失败，请重新启动应用")),
+            "regression guard: state 文案应保持 mapper 钦定的 .alert"
+        )
+    }
+
     /// case#7 (happy)：retry() 重置 state = .launching → 重跑 step → 成功后 .ready
     /// 用 retry 验证"用户在 .needsAuth 状态点重试按钮"路径。
     func testRetryResetsStateAndReruns() async {

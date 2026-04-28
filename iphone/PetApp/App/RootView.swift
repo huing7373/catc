@@ -99,6 +99,24 @@ struct RootView: View {
                         }
                         #endif
                     },
+                    onReadyTask: {
+                        // Story 5.5 round 4 [P2] fix: 把 ping 调用从启动 .task 挪到 .ready 进入后再异步触发.
+                        //
+                        // 背景: round 3 fix 把 `await homeViewModel.start()` 从 RootView 启动 .task 中删除,
+                        // 让冷启动 HTTP 预算保持在 ≤2 (`/auth/guest-login` + `/home`). 但删除得过死,
+                        // ping 永远没人调 → serverInfo 永远是 "----" placeholder, 版本 footer regress.
+                        //
+                        // 修复: 把 `start()` 调用挪到 .ready 分支的 onReadyTask, 此时:
+                        //   1. 冷启动链路 (`/auth/guest-login` + `/home`) 已成功完成进入 .ready
+                        //   2. ping 不阻塞首屏渲染 (是 .ready 后异步发起)
+                        //   3. 冷启动期间仍只有 2 个 HTTP, ping 是首屏渲染**之后**的第 3 个独立请求
+                        //   4. start() 内部第 4 层短路 (`hasLoadedHome=true`) 已被 round 3 移除, 现在
+                        //      ping 会真正发出来填充 serverInfo footer
+                        //
+                        // 详见 docs/lessons/2026-04-27-bootstrap-all-error-paths-route-via-mapper.md
+                        // (本轮 lesson 包含三条修复, 见 "ping 复活" 那条规则).
+                        await homeViewModel.start()
+                    },
                     sheetContent: sheetContent(for:)
                 )
             } else {
@@ -198,7 +216,22 @@ struct RootView: View {
             bootstrapStep1: { @Sendable in
                 // Step 1a: 游客登录 —— 写 keychain token + sessionStore.user/pet.
                 // 每次 bootstrap / retry 都跑一次, 保证坏掉的鉴权状态可被 retry 刷新.
-                let output = try await useCase.execute()
+                //
+                // **错误映射**（Story 5.5 round 4 [P2] fix）: guest-login 失败也必须经
+                // AppErrorMapper → BootstrapMappedError, 与 LoadHome 失败路径一致.
+                // 否则 raw APIError 抛给状态机时只能走 errorDescription fallback,
+                // 弹出 "Network error: ..." 等 developer-facing 串, 失去 mapper 的
+                // alert/retry 区分语义 (例如 .business(1009) 应是 .alert, .network 应是 .retry).
+                // 详见 docs/lessons/2026-04-27-bootstrap-all-error-paths-route-via-mapper.md.
+                let output: GuestLoginOutput
+                do {
+                    output = try await useCase.execute()
+                } catch {
+                    throw BootstrapMappedError(
+                        presentation: AppErrorMapper.presentation(for: error),
+                        underlying: error
+                    )
+                }
                 await MainActor.run {
                     sessionStore.updateSession(SessionState(user: output.user, pet: output.pet))
                 }
@@ -358,6 +391,7 @@ private struct LaunchedContentView: View {
     @ObservedObject var coordinator: AppCoordinator
     let homeView: () -> AnyView
     let onReadyAppear: () -> Void
+    let onReadyTask: () async -> Void
     let sheetContent: (SheetType) -> AnyView
 
     init(
@@ -365,12 +399,14 @@ private struct LaunchedContentView: View {
         coordinator: AppCoordinator,
         @ViewBuilder homeView: @escaping () -> some View,
         onReadyAppear: @escaping () -> Void,
+        onReadyTask: @escaping () async -> Void = { },
         @ViewBuilder sheetContent: @escaping (SheetType) -> some View
     ) {
         self.stateMachine = stateMachine
         self.coordinator = coordinator
         self.homeView = { AnyView(homeView()) }
         self.onReadyAppear = onReadyAppear
+        self.onReadyTask = onReadyTask
         self.sheetContent = { AnyView(sheetContent($0)) }
     }
 
@@ -385,6 +421,12 @@ private struct LaunchedContentView: View {
             case .ready:
                 homeView()
                     .onAppear { onReadyAppear() }
+                    .task {
+                        // Story 5.5 round 4 [P2] fix: ping 在 .ready 进入后异步触发,
+                        // 不阻塞首屏渲染, 也不计入冷启动 HTTP 预算 (≤2) —— 是首屏后悄悄填 footer.
+                        // 见 RootView ensureLaunchStateMachineWired 处的 onReadyTask 闭包注释.
+                        await onReadyTask()
+                    }
                     .fullScreenCover(item: $coordinator.presentedSheet) { sheet in
                         sheetContent(sheet)
                     }
@@ -398,13 +440,23 @@ private struct LaunchedContentView: View {
     }
 
     /// Story 5.5 round 2 [P1] fix: 根据 presentation 三态分发错误 UI.
+    /// Story 5.5 round 4 [P2] fix: 拆 retry-able 和 alert-only 两类 dismiss 行为.
     ///
     /// - `.retry`: 用户可点重试触发 stateMachine.retry()（继续走 GuestLogin + LoadHome 重试链路）.
     /// - `.alert`: 用户必须重启 App（mapper 已钦定文案 "请重启应用" / "请重新启动应用"）.
-    ///   onDismiss 仍调 retry() —— 让用户在 alert 关闭后**也**有重试入口（不能让 alert 关闭就死锁
-    ///   在白屏；retry 内部 isRetrying guard 防重入）.
+    ///   **onDismiss 不调 retry()** —— round 4 [P2] fix: 原方案 onDismiss 调 retry() 会把
+    ///   alert-only 错误（.unauthorized / .decoding / .missingCredentials 等 mapper 钦定为
+    ///   "用户必须重启" 的不可恢复错误）的 "知道了" 按钮变成隐式 retry 触发器, 与文案
+    ///   "请重启应用" 直接矛盾, 形成 alert → dismiss → 立即重发请求 → 仍失败 → 同 alert 弹回的死循环
+    ///   或反复请求. 现在 alert-only 路径 onDismiss 仅 dismiss 当前 view, 状态保持
+    ///   .needsAuth(presentation: .alert) —— 但因为 alert 是从同一份 state 渲染出来的,
+    ///   dismiss 后 state 没变, AlertOverlayView 仍会显示, 等价于 "用户必须重启 App" 语义.
+    ///   实际行为: 用户点 "知道了" → onDismiss no-op → state 仍 .needsAuth(.alert) → AlertOverlayView 仍显示
+    ///   → 用户唯一出路就是冷重启 (符合 mapper 钦定的 "请重启应用" 引导).
     /// - `.toast`: bootstrap 阶段不应该派发 toast（toast 是非 modal 的轻量提示；启动失败必须 modal）.
     ///   出现说明 mapper 配置异常 → 兜底渲染为 alert 而非 toast,避免 toast 自动消失后留白屏.
+    ///   onDismiss 同 alert-only 路径: 不调 retry, 等价于让用户冷重启.
+    /// 详见 docs/lessons/2026-04-27-bootstrap-all-error-paths-route-via-mapper.md.
     @ViewBuilder
     private func needsAuthContent(for presentation: ErrorPresentation) -> some View {
         switch presentation {
@@ -417,14 +469,15 @@ private struct LaunchedContentView: View {
             AlertOverlayView(
                 title: title,
                 message: message,
-                onDismiss: { Task { await stateMachine.retry() } }
+                onDismiss: { /* alert-only: 不调 retry, 让用户冷重启 (round 4 [P2] fix) */ }
             )
         case let .toast(message):
             // 兜底：bootstrap 阶段拿到 toast presentation 异常 —— 渲染为 alert 防白屏.
+            // onDismiss 同 alert-only 路径不调 retry.
             AlertOverlayView(
                 title: "提示",
                 message: message,
-                onDismiss: { Task { await stateMachine.retry() } }
+                onDismiss: { /* alert-only fallback: 不调 retry (round 4 [P2] fix) */ }
             )
         }
     }

@@ -136,17 +136,19 @@ final class HomeViewModelPingTests: XCTestCase {
         XCTAssertEqual(stub.executeCallCount, 1, "失败后再次 start() 也应短路（避免反复重试不可达 server）")
     }
 
-    /// case#12 (Story 5.5 round 3 [P1] fix): hasLoadedHome=true 时 start() 必须短路, 不发 ping.
+    /// case#12 (Story 5.5 round 4 [P2] fix): applyHomeData 之后 start() 必须发 ping 填 serverInfo footer.
     ///
-    /// **regression guard**: spec line 11 钦定"启动 → 主界面" 路径 ≤ 2 个 HTTP
-    /// (`/auth/guest-login` + `/home`). round 2 实现遗漏: ping 仍在启动 .task 触发, 共 3 个 HTTP.
-    /// round 3 修复: HomeViewModel.start() 内加第 4 层短路 `if hasLoadedHome { return }` —
-    /// `/home` 成功本身已证明 server reachable + token 有效, ping 是冗余探针.
-    /// 此测试: 先 applyHomeData (置 hasLoadedHome=true) → 调 start() → 断言 ping useCase 0 调用 +
-    /// hasFetched=true (顺带置为防 .task 重启再触发).
-    func testStartShortCircuitsWhenLoadHomeAlreadySucceeded() async {
-        let stub = StubPingUseCase(stubResult: PingResult(reachable: true, serverCommit: "should-not-fire"))
-        // 用 5.5 init 注入 ping + loadHome —— 让 viewModel 拿到 LoadHome 注入路径
+    /// **regression guard**: round 3 删除了 RootView 启动 `.task { homeViewModel.start() }` 调用,
+    /// 同时在 HomeViewModel.start() 加 `if hasLoadedHome { return }` 第 4 层短路 —— ping 永远不发,
+    /// serverInfo 永远是 "----" placeholder, 版本 footer regress (codex round 4 [P2] finding #2).
+    /// round 4 修复方案 A: 把 start() 调用挪到 RootView LaunchedContentView .ready 分支的
+    /// onReadyTask, 此时 hasLoadedHome=true (cold-start 已成功) — start() 必须真正发 ping
+    /// 填充 serverInfo, 不能再短路. cold-start HTTP 预算 (≤2) 仍保持: ping 在 .ready 之后
+    /// 才发, 不计入启动链路, 是用户已经看到主界面后才悄悄填的版本号.
+    ///
+    /// 此测试: 先 applyHomeData → 调 start() → 断言 ping useCase 调用 1 次 + serverInfo 被更新.
+    func testStartFiresPingAfterLoadHomeToPopulateServerInfoFooter() async {
+        let stub = StubPingUseCase(stubResult: PingResult(reachable: true, serverCommit: "abc1234"))
         let mockLoadHome = MockLoadHomeUseCase()
         let presenter = ErrorPresenter(toastDuration: 0.05)
         let viewModel = HomeViewModel(
@@ -155,7 +157,7 @@ final class HomeViewModelPingTests: XCTestCase {
             errorPresenter: presenter
         )
 
-        // 模拟 RootView bootstrapStep1 路径: applyHomeData 同步注入 → 置 hasLoadedHome=true
+        // 模拟 RootView bootstrapStep1 路径: applyHomeData 同步注入 → hasLoadedHome=true
         let injectedData = HomeData(
             user: HomeUser(id: "u", nickname: "n", avatarUrl: ""),
             pet: nil,
@@ -168,17 +170,16 @@ final class HomeViewModelPingTests: XCTestCase {
         )
         viewModel.applyHomeData(injectedData)
 
-        // 此时调 start() —— 必须短路, 不发 ping
+        // 此时调 start() —— 必须发 ping 填 serverInfo, **不能**短路
         await viewModel.start()
 
         XCTAssertEqual(
             stub.executeCallCount,
-            0,
-            "Story 5.5 spec 钦定启动 ≤ 2 HTTP. hasLoadedHome=true 时 start() 必须短路, " +
-            "不发 ping. 当前 \(stub.executeCallCount) 次违反契约."
+            1,
+            "Story 5.5 round 4 [P2] fix: ping 在 .ready 进入后必须发一次填 serverInfo footer. " +
+            "短路会让版本 footer 永远停在 '----' placeholder. 当前 \(stub.executeCallCount) 次违反契约."
         )
-        // serverInfo 仍是初始默认值 "----"（不是 stub 的 commit）—— 验证 applyPingResult 没被调用
-        XCTAssertEqual(viewModel.serverInfo, "----", "ping 未发, serverInfo 应保持初始值")
+        XCTAssertEqual(viewModel.serverInfo, "abc1234", "ping 成功后 serverInfo 应被更新为 commit 短哈希")
     }
 
     /// case#9 (review fix round 1)：bind() 注入时同步刷新 appVersion = readAppVersion()。

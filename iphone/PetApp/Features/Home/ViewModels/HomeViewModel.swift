@@ -186,26 +186,22 @@ public final class HomeViewModel: ObservableObject {
         self.appVersion = HomeViewModel.readAppVersion()
     }
 
-    /// 触发 ping。**四层**短路（Story 5.5 round 3 [P1] fix 追加第 4 条）：
+    /// 触发 ping。**三层**短路:
     ///   1. 已成功跑完一次（hasFetched=true）→ 直接 return（防 SwiftUI .task 在 view 重新出现时重跑）。
     ///   2. 进行中的任务（pingTask 非 nil）→ 直接 return（防并发触发同时调两次）。
     ///   3. 未注入 UseCase → no-op。
-    ///   4. **`hasLoadedHome=true` → 直接 return**（Story 5.5 round 3 [P1] fix）：
-    ///      `/home` 成功本身已经证明 server reachable + token 有效, ping 是冗余探针.
-    ///      Story 5.5 spec line 11 钦定"启动 → 主界面"路径只能 2 个 HTTP 请求
-    ///      (`/auth/guest-login` + `/home`), 把 ping 留在启动链路违反此契约 (3 个请求).
-    ///      也同时把 hasFetched 一并置 true → 后续 `.task` 重启永远不会再触发.
     ///
-    /// RootView 在 `.task { await viewModel.start() }` 中调用，App 启动时执行一次（成功/失败都只一次）。
-    /// 详见 docs/lessons/2026-04-27-cold-start-http-budget-ping-redundant.md.
+    /// **Story 5.5 round 4 [P2] fix**: 移除 round 3 引入的 "hasLoadedHome → 短路 ping" 第 4 层短路.
+    /// 原方案: round 3 把 ping 调用从启动 .task 删掉的同时, 在 start() 加 hasLoadedHome 保险,
+    /// 让 ping 即使被误调也短路. 但 round 4 codex 发现 round 3 删除得过死, ping 永远没人调,
+    /// serverInfo 永远是 "----" placeholder, footer regress. round 4 把 start() 调用挪到 RootView
+    /// LaunchedContentView .ready 分支的 onReadyTask, 此时 LoadHome 已成功 → 调 start() 必须真正发 ping
+    /// 来填充 serverInfo, 不能再短路. cold-start HTTP 预算 (≤2) 仍保持: ping 在首屏渲染**之后**才发,
+    /// 不计入启动链路, 是用户已经看到主界面后才悄悄填的版本号.
+    ///
+    /// RootView 在 LaunchedContentView .ready 分支的 .task 中调用，App 启动后异步执行一次（成功/失败都只一次）。
+    /// 详见 docs/lessons/2026-04-27-bootstrap-all-error-paths-route-via-mapper.md.
     public func start() async {
-        // Story 5.5 round 3 [P1] fix: 启动期 LoadHome 已成功 → ping 是冗余探针, 短路.
-        // 把 hasFetched 也置 true 确保未来 `.task` 重启永远不会再触发 ping.
-        if hasLoadedHome {
-            hasFetched = true
-            return
-        }
-
         // 取注入实例（init 路径优先，回退 bind 路径）。
         let useCase = pingUseCase ?? boundPingUseCase
         guard let useCase = useCase else { return }   // 未注入：no-op
