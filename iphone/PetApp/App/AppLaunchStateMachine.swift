@@ -129,10 +129,11 @@ public final class AppLaunchStateMachine: ObservableObject {
     ///    防 `error.localizedDescription` 漏 NSError 系统串到 UI（lesson
     ///    2026-04-26-error-localizeddescription-system-fallback.md, codex round 1 [P2] finding）.
     ///
-    /// **不**直接调 `AppErrorMapper.presentation(for:)` 兜底：那会把任意 plain Error 都判成
-    /// `.alert("操作失败", "请稍后重试")` —— production 已用 BootstrapMappedError 走 mapper,
-    /// 落到本函数 fallback 的应是 default closure / 测试 case / Epic 5 之外的 plain Error,
-    /// 给 retry 比给 alert 更宽容.
+    /// **不**直接调 `AppErrorMapper.presentation(for:)` 兜底：production 已用 BootstrapMappedError
+    /// 路径走 mapper, 落到本函数 fallback 的应是 default closure / 测试 case / Epic 5 之外的
+    /// plain Error. 本函数自己保留 LocalizedError-aware fallback (优先用 errorDescription)
+    /// 比直接走 mapper fallback 更友好 —— 哪怕 round 10 [P2] fix 后 mapper fallback 已经统一
+    /// 用 .retry, 本函数仍优先 LocalizedError 路径以保留 dev 上 errorDescription 的可读性.
     private func presentationFor(error: Error) -> ErrorPresentation {
         if let mapped = error as? BootstrapMappedError {
             return mapped.presentation

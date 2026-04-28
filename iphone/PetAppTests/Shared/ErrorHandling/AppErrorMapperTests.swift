@@ -114,11 +114,14 @@ final class AppErrorMapperTests: XCTestCase {
         XCTAssertEqual(presentation, .retry(message: "数据异常，请重试"))
     }
 
-    /// case#7：非 APIError 的 generic Error → fallback Alert
-    func testGenericErrorMapsToFallbackAlert() {
+    /// case#7：非 APIError 的 generic Error → fallback Retry
+    /// Story 5.5 round 10 [P2] fix: fallback 从 .alert 改 .retry —— 跟 round 9 二分判则一致,
+    /// 非 APIError (如 GuestLoginUseCase 抛出的 KeychainError, sandbox 临时不可用 / osStatus
+    /// -25300 等 transient 场景) 默认走 .retry 让 user 能在 App 内自助恢复, 不必 force-quit.
+    func testGenericErrorMapsToFallbackRetry() {
         struct CustomError: Error {}
         let presentation = AppErrorMapper.presentation(for: CustomError())
-        XCTAssertEqual(presentation, .alert(title: "操作失败", message: "请稍后重试"))
+        XCTAssertEqual(presentation, .retry(message: "操作失败，请重试"))
     }
 
     // MARK: - localizedMessage 错误码字典抽样
@@ -176,10 +179,10 @@ final class AppErrorMapperTests: XCTestCase {
         XCTAssertEqual(msg, "登录失败，请重试")
     }
 
-    /// 非 APIError → 走 fallback alert → 文案与 fallback message 一致
+    /// 非 APIError → 走 fallback retry (round 10 [P2] fix) → 文案与 retry message 一致
     func testUserFacingMessageForGenericErrorMatchesFallbackCopy() {
         struct CustomError: Error {}
         let msg = AppErrorMapper.userFacingMessage(for: CustomError())
-        XCTAssertEqual(msg, "请稍后重试", "非 APIError 应走 fallback 文案,与 presentation 对齐")
+        XCTAssertEqual(msg, "操作失败，请重试", "非 APIError 应走 fallback 文案 (round 10: .retry),与 presentation 对齐")
     }
 }

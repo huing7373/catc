@@ -12,17 +12,21 @@
 // - presentation(for:) 接收 Error 而非 APIError：让 ViewModel catch block 不必 narrow
 // - 错误码字典放 switch case 而非 dictionary：let compiler 帮我们做穷举检查
 //
-// **transient vs terminal 错误分类（Story 5.5 round 5 [P1] → round 7 [P1] → round 8 [P1] → round 9 [P2] 调整）**：
+// **transient vs terminal 错误分类（Story 5.5 round 5 [P1] → round 7 [P1] → round 8 [P1] → round 9 [P2] → round 10 [P2] 调整）**：
 // 不再按 APIError case (4 态) 一对一硬绑 presentation, 而是按 **transient vs terminal** 二分:
 // - **transient (.retry)**: .network / .decoding (server partial rollout / 一次性坏 payload)
 //   / .unauthorized (静默重登 exhausted 后仍可能 transient,如 server 401 抽风) /
 //   .business(1005/1007/1008/1009 限流冲突重复繁忙 等瞬时类码).
 // - **terminal (.alert)**: .missingCredentials (本地 keychain 损坏, retry 救不了, 真需要重启 App)
 //   / .business(其他 permanent 码: 1004 权限不足 / 2002 微信已绑定 / 4001 宝箱不存在 等).
-// - **fallback (.alert)**: 非 APIError 的 generic Error.
+// - **fallback (.retry)**: 非 APIError 的 generic Error (round 10 [P2] fix: 从 .alert 改 .retry).
+//   典型 case: GuestLoginUseCase 抛出的 KeychainError (sandbox 临时不可用 / osStatus -25300
+//   item 暂时找不到 等 transient 场景) —— 之前 fallback 走 .alert 让其卡 TerminalErrorView
+//   强制 force-quit 是过度悲观, 跟二分判则一致默认走 transient 分支.
 //
 // 二分原则: **transient possible → retry**. user 主动点重试失败再次看到也只是多发一次请求,
 // 比"必须杀进程"温柔; 只有真 terminal (重启都救不了 / 本地配置永久损坏) 才走 .alert.
+// fallback 无法判定具体子集时也按"默认 transient" 处理.
 // 详见 docs/lessons/2026-04-27-transient-vs-terminal-error-classification.md
 // + docs/lessons/2026-04-27-business-error-transient-vs-terminal.md
 // + docs/lessons/2026-04-27-bootstrap-alert-dismiss-must-be-user-driven-recovery.md
@@ -59,6 +63,14 @@ import Foundation
 ///   让 user 能在 App 内重试自愈, 不必杀进程. 注: HomeData(from:) throws decoding error 的
 ///   fail-fast 逻辑保持不变 (round 6 fix 让 dev 能立刻看到 schema drift); 改的只是 mapper
 ///   把 decoding error 渲染成 retry 而非 terminal）.
+/// - **非 APIError fallback** → RetryView；文案 "操作失败，请重试"
+///   （Story 5.5 round 10 [P2] fix: 改成 .retry —— 之前钦定 .alert 让 bootstrap 路径下
+///   非 APIError (典型代表: GuestLoginUseCase 抛出的 KeychainError, sandbox 临时不可用 /
+///   osStatus -25300 item 暂时找不到 等场景) 卡 TerminalErrorView, 强制 force-quit. 这类
+///   错误大多是 transient, 跟 round 9 钦定的二分判则一致 —— transient possible 走 .retry,
+///   permanent guaranteed 才走 .alert. fallback 无法判定具体子集时, 默认走 transient 分支,
+///   让 user 能在 App 内自助恢复; 即便重试再次失败,多发一次请求也比 force-quit 温柔.
+///   详见 docs/lessons/2026-04-28-non-api-error-fallback-must-be-transient-retry.md）.
 ///
 /// **`.alert` vs `.retry` 语义区分（Story 5.5 round 5 [P1+P2] → round 7 → round 8 [P1] → round 9 [P2] 调整）**：
 /// - `.alert` = **terminal-class**：mapper 钦定的 alert 表示"client 认为这是真 terminal,
@@ -92,10 +104,16 @@ public enum AppErrorMapper {
     ]
 
     /// 把任意 Error 映射成 ErrorPresentation（呈现样式 + 文案）。
-    /// 入参 error 必须是 APIError 才走具体分支；其它 Error 类型走 fallback `.alert("操作失败", "请稍后重试")`。
+    /// 入参 error 必须是 APIError 才走具体分支；其它 Error 类型走 fallback `.retry("操作失败，请重试")`.
+    /// Story 5.5 round 10 [P2] fix: fallback 从 .alert 改 .retry —— bootstrap 路径下
+    /// GuestLoginUseCase.execute() 抛出的 KeychainError (sandbox 临时不可用 / osStatus -25300
+    /// item 暂时找不到 等) 是 non-APIError 但大多 transient, 之前 fallback 走 .alert 让其卡
+    /// TerminalErrorView 强制 force-quit, 是过度悲观. 跟 round 9 transient/terminal 二分判则
+    /// 一致 —— fallback 无法判定具体子集时默认走 transient 分支.
+    /// 详见 docs/lessons/2026-04-28-non-api-error-fallback-must-be-transient-retry.md.
     public static func presentation(for error: Error) -> ErrorPresentation {
         guard let apiError = error as? APIError else {
-            return ErrorPresentation.alert(title: "操作失败", message: "请稍后重试")
+            return ErrorPresentation.retry(message: "操作失败，请重试")
         }
         switch apiError {
         case let .business(code, message, _):
