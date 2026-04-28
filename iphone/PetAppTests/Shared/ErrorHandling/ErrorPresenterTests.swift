@@ -18,10 +18,14 @@ final class ErrorPresenterTests: XCTestCase {
     // MARK: - present(_:onRetry:) 主入口
 
     /// case#1：.business → presenter.current = .alert
+    /// Story 5.5 round 7 [P1] fix: alert 文案末尾追加 "持续失败时请杀进程重启 App" suffix.
     func testPresentBusinessErrorSetsAlertPresentation() {
         let presenter = ErrorPresenter()
         presenter.present(APIError.business(code: 3002, message: "x", requestId: "y"))
-        XCTAssertEqual(presenter.current, .alert(title: "提示", message: "步数不足，再走走吧"))
+        XCTAssertEqual(
+            presenter.current,
+            .alert(title: "提示", message: "步数不足，再走走吧。持续失败时请杀进程重启 App")
+        )
     }
 
     /// case#2：.network → presenter.current = .retry；onRetry 闭包暂存
@@ -89,12 +93,13 @@ final class ErrorPresenterTests: XCTestCase {
     }
 
     /// case#4：第二次 present 时 current 仍非 nil → 入队；dismiss 后弹下一个
+    /// Story 5.5 round 7 [P1] fix: alert 文案末尾追加 force-quit suffix.
     func testSecondPresentEnqueuesAndDismissAdvancesQueue() {
         let presenter = ErrorPresenter()
 
         presenter.present(APIError.business(code: 3002, message: "", requestId: ""))
         let firstAlert = presenter.current
-        XCTAssertEqual(firstAlert, .alert(title: "提示", message: "步数不足，再走走吧"))
+        XCTAssertEqual(firstAlert, .alert(title: "提示", message: "步数不足，再走走吧。持续失败时请杀进程重启 App"))
 
         // 第二次 present：入队（current 不变）
         presenter.present(APIError.business(code: 4002, message: "", requestId: ""))
@@ -102,7 +107,7 @@ final class ErrorPresenterTests: XCTestCase {
 
         // dismiss 后弹出队列中的 4002
         presenter.dismiss()
-        XCTAssertEqual(presenter.current, .alert(title: "提示", message: "宝箱尚未解锁"))
+        XCTAssertEqual(presenter.current, .alert(title: "提示", message: "宝箱尚未解锁。持续失败时请杀进程重启 App"))
 
         // 再 dismiss 队列空了
         presenter.dismiss()

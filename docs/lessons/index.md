@@ -82,3 +82,4 @@
 | 2026-04-27 | [Business 错误必须区分 transient/terminal & alert OK 按钮必须有真实动作 & 4 轮 fix-review 单点 patch 反模式](2026-04-27-business-error-transient-vs-terminal.md) | 3 | error-handling, ui, architecture | `<pending>` |
 | 2026-04-27 | [SwiftUI 多 .task 之间无顺序保证：bind 与 start 必须在同一闭包](2026-04-27-swiftui-multi-task-no-ordering.md) | 1 | architecture | `<pending>` |
 | 2026-04-27 | [wire DTO → domain 转换：未知 enum 必须 fail-fast，禁止 silent fallback](2026-04-27-home-data-fail-fast-on-unknown-enum.md) | 1 | error-handling | `<pending>` |
+| 2026-04-27 | [Bootstrap alert dismiss 必须 user-driven recovery (禁 exit(0)) & alert 文案 4 轮迭代史防 regress](2026-04-27-bootstrap-alert-dismiss-must-be-user-driven-recovery.md) | 2 | error-handling, ui, architecture | `<pending>` |

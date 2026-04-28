@@ -195,7 +195,7 @@ final class LoadHomeUseCaseTests: XCTestCase {
     /// Story 5.5 round 6 [P2] fix: 原方案 fallback 到 .counting 会掩盖 server/client schema drift —— 比如 server
     /// 加了新 chest.status 枚举值但客户端没更新, 用户会看到错误的 first-screen state 而 dev 没有任何 signal.
     /// 改为 fail-fast: 未识别值抛 APIError.decoding(HomeDataDecodingError.unknownChestStatus(...)),
-    /// 由 AppErrorMapper 映射为 AlertOverlay "数据异常，请稍后重试" → 用户重启 / dev 立刻发现.
+    /// 由 AppErrorMapper 映射为 AlertOverlay "数据异常，请重试。持续失败时请杀进程重启 App" → 用户重启 / dev 立刻发现.
     /// V1 §4.1 行 16 钦定 /home schema frozen → 出现未知值就是真实异常.
     /// 详见 docs/lessons/2026-04-27-home-data-fail-fast-on-unknown-enum.md.
     func testExecuteUnknownChestStatusThrowsDecoding() async {

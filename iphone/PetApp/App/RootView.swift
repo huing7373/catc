@@ -441,27 +441,39 @@ private struct LaunchedContentView: View {
 
     /// Story 5.5 round 2 [P1] fix: 根据 presentation 三态分发错误 UI.
     /// Story 5.5 round 4 [P2] fix: 拆 retry-able 和 alert-only 两类 dismiss 行为.
-    /// Story 5.5 round 5 [P1+P2] fix: 综合修复 ——
+    /// Story 5.5 round 5 [P1+P2] fix: alert dismiss 调 exit(0) —— 但被 round 7 review 推翻.
+    /// Story 5.5 round 7 [P1] fix: alert dismiss 改回调 stateMachine.retry() (user-driven recovery).
     ///
-    ///   1. `.alert` 在 mapper 层已经收紧为"terminal,必须重启 App"语义（mapper round 5 fix:
-    ///      transient 业务码 1005/1007/1008/1009 改派 .retry,只有真正 unrecoverable 的才派 .alert）.
-    ///   2. AlertOverlayView 的 OK 按钮 ("知道了") 必须执行"重启" 实义动作 ——
-    ///      调 `exit(0)` 强制退出进程,让用户下次启动重新走 cold-start GuestLoginUseCase.
-    ///   3. 这条 onDismiss 闭包不能再是 no-op (round 4 引入的死锁: 用户点 OK → 闭包 no-op → state 不变 →
-    ///      AlertOverlayView 仍渲染 → 永远卡住,只能 force-quit). 用 exit(0) 既执行了 mapper 文案承诺
-    ///      ("请重启应用"),又给了 OK 按钮真实功能.
+    /// **dismiss 行为迭代史（必读 — 防再次 regress）**：
+    /// - round 0 (dev-story): 默认 .needsAuth 自动 retry → P2 finding (隐式重试, 不可控).
+    /// - round 3 fix: 用 ErrorPresentation 区分 alert/retry, 但 alert dismiss 仍 retry → P1 死循环
+    ///   (alert 的 mapper 文案是 "请重启应用", dismiss 立即重试 → 仍失败 → 同 alert 弹回 → 死循环).
+    /// - round 4 fix: alert dismiss 改 no-op → P2 卡死 (用户点 OK 后 state 不变 → AlertOverlayView 仍显示).
+    /// - round 5 fix: alert dismiss 改 exit(0) → P1 (本轮 round 7 review): iOS HIG 明确禁止 app
+    ///   自己 exit(0), App Store 审核会拒, 用户感觉是 force-quit / crash 而不是 graceful error 处理.
+    /// - **round 7 fix (current)**: alert dismiss → stateMachine.retry(); mapper 文案补一句
+    ///   "持续失败时请杀进程重启 App" 让 user 主动决定 —— 把"是否死循环"的判断交给 user.
+    ///   user-driven recovery 是 iOS HIG 推荐的"non-terminating recovery"模式.
+    ///
+    /// **为什么 round 7 不再死循环**:
+    /// - round 3 死循环的根因不是"dismiss 调 retry()", 而是"mapper 文案没告知 user 该 force-quit".
+    /// - 现在文案 "请重试。持续失败时请杀进程重启 App" 明确告知 user 多次失败时应自己关 App.
+    /// - 用户点 OK → retry → 成功就走出去；失败再看到同 alert, 知道该自己杀进程.
+    /// - 这跟 round 3 的区别: round 3 用户被自动 retry, **不知道**该杀进程; round 7 用户主动点 OK
+    ///   触发 retry, 文案明示 fallback 路径.
     ///
     /// - `.retry`: 用户可点重试触发 stateMachine.retry()（继续走 GuestLogin + LoadHome 重试链路）.
     ///   transient 业务码（1005/1007/1008/1009 / network）会落到这里,bootstrap 失败 → RetryView → 用户重试 → 自愈.
-    /// - `.alert`: terminal 错误（.unauthorized / .missingCredentials / .decoding / 永久业务码）.
-    ///   onDismiss 调 `exit(0)` —— 与 mapper 文案 "请重启应用" 对齐,把"重启"动作真实落地.
-    ///   注意: bootstrap 路径才需要 exit;非 bootstrap 路径（ErrorPresenter.present 的 alert）由
+    /// - `.alert`: terminal-class 错误 (.unauthorized / .missingCredentials / .decoding / 永久业务码).
+    ///   onDismiss 调 stateMachine.retry() —— mapper 文案告知 user 多次失败应 force-quit.
+    ///   注意: bootstrap 路径才需要这条 wire;非 bootstrap 路径（ErrorPresenter.present 的 alert）由
     ///   ErrorPresenter 自己管理 dismiss,不会复用本 onDismiss 闭包.
     /// - `.toast`: bootstrap 阶段不应该派发 toast（mapper 当前根本不派 toast；本分支是防御性兜底）.
     ///   出现说明 mapper 配置异常 → 兜底渲染为 alert 而非 toast（toast 自动消失后留白屏更糟）.
-    ///   onDismiss 同 alert: exit App 让用户重启.
+    ///   onDismiss 同 alert: 调 retry().
     /// 详见 docs/lessons/2026-04-27-bootstrap-all-error-paths-route-via-mapper.md
-    /// + docs/lessons/2026-04-27-business-error-transient-vs-terminal.md.
+    /// + docs/lessons/2026-04-27-business-error-transient-vs-terminal.md
+    /// + docs/lessons/2026-04-27-bootstrap-alert-dismiss-must-be-user-driven-recovery.md.
     @ViewBuilder
     private func needsAuthContent(for presentation: ErrorPresentation) -> some View {
         switch presentation {
@@ -474,19 +486,21 @@ private struct LaunchedContentView: View {
             AlertOverlayView(
                 title: title,
                 message: message,
-                // round 5 [P2] fix: terminal alert 的 OK 按钮调 exit(0),与 mapper 钦定的
-                // "请重启应用" 文案对齐,把"重启"动作真实落地. 不再是 no-op (round 4 死锁) 也不
-                // 隐式 retry (round 3 死循环). exit(0) 是 unrecoverable error 的合理 UX:
-                // 用户点 OK → 进程退出 → 下次启动重新走 cold-start GuestLoginUseCase.
-                onDismiss: { exit(0) }
+                // round 7 [P1] fix: alert OK 调 stateMachine.retry() (user-driven recovery).
+                // 不再是 exit(0) (round 5 iOS HIG 反模式: app 不该自己终止进程).
+                // 不再是 no-op (round 4 死锁: 用户点 OK 卡死).
+                // 不再是隐式 retry (round 3 死循环: 用户被动 retry, 不知道该杀进程).
+                // 配合 mapper 文案 "持续失败时请杀进程重启 App" 让 user 主动决定继续 / 退出.
+                // 详见 docs/lessons/2026-04-27-bootstrap-alert-dismiss-must-be-user-driven-recovery.md.
+                onDismiss: { Task { await stateMachine.retry() } }
             )
         case let .toast(message):
             // 兜底：bootstrap 阶段拿到 toast presentation 异常 —— 渲染为 alert 防白屏.
-            // onDismiss 同 alert: exit App 让用户重启 (mapper 配置异常算 unrecoverable).
+            // onDismiss 同 alert: 调 retry() (mapper 配置异常按 alert 同样语义处理).
             AlertOverlayView(
                 title: "提示",
                 message: message,
-                onDismiss: { exit(0) }
+                onDismiss: { Task { await stateMachine.retry() } }
             )
         }
     }

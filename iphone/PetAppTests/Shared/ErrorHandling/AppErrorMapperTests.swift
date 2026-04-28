@@ -14,26 +14,38 @@ final class AppErrorMapperTests: XCTestCase {
 
     // MARK: - APIError 四态映射
 
-    /// case#1：.business 业务错误（permanent 类）→ AlertOverlay + 错误码字典文案.
+    /// case#1：.business 业务错误（permanent 类）→ AlertOverlay + 错误码字典文案 + force-quit suffix.
     /// 3002 "步数不足" 是 permanent（用户操作上下文错,不是 server 瞬时容量问题）→ .alert.
+    /// Story 5.5 round 7 [P1] fix: alert message 文案末尾追加 "持续失败时请杀进程重启 App"
+    /// —— 配合 alert dismiss 调 retry()(user-driven recovery), 让 user 知道多次失败时该自己 force-quit.
     func testBusinessErrorMapsToAlertWithLocalizedMessage() {
         let error = APIError.business(code: 3002, message: "原文(server)", requestId: "req_1")
         let presentation = AppErrorMapper.presentation(for: error)
-        XCTAssertEqual(presentation, .alert(title: "提示", message: "步数不足，再走走吧"))
+        XCTAssertEqual(
+            presentation,
+            .alert(title: "提示", message: "步数不足，再走走吧。持续失败时请杀进程重启 App")
+        )
     }
 
     /// case#2：.business 但 code 不在字典内 → fallback 用 server message,默认 .alert（permanent）.
+    /// Story 5.5 round 7 [P1] fix: 同样追加 force-quit suffix.
     func testBusinessErrorWithUnknownCodeFallsBackToServerMessage() {
         let error = APIError.business(code: 9999, message: "未知错误描述", requestId: "req_x")
         let presentation = AppErrorMapper.presentation(for: error)
-        XCTAssertEqual(presentation, .alert(title: "提示", message: "未知错误描述"))
+        XCTAssertEqual(
+            presentation,
+            .alert(title: "提示", message: "未知错误描述。持续失败时请杀进程重启 App")
+        )
     }
 
-    /// case#3：.business 未知 code 且 server message 为空 → fallback 通用文案
+    /// case#3：.business 未知 code 且 server message 为空 → fallback 通用文案 + force-quit suffix.
     func testBusinessErrorWithUnknownCodeAndEmptyMessageUsesGenericFallback() {
         let error = APIError.business(code: 9999, message: "", requestId: "req_x")
         let presentation = AppErrorMapper.presentation(for: error)
-        XCTAssertEqual(presentation, .alert(title: "提示", message: "操作失败，请稍后重试"))
+        XCTAssertEqual(
+            presentation,
+            .alert(title: "提示", message: "操作失败，请稍后重试。持续失败时请杀进程重启 App")
+        )
     }
 
     // MARK: - transient 业务码（Story 5.5 round 5 [P1] fix）
@@ -71,27 +83,35 @@ final class AppErrorMapperTests: XCTestCase {
     }
 
     /// 反例：相邻的 1004 (权限不足) 是 permanent 类,必须走 .alert（用户行为不会因为 retry 自愈）.
+    /// Story 5.5 round 7 [P1] fix: 同样追加 force-quit suffix.
     func testBusinessCode1004StaysAlert() {
         let error = APIError.business(code: 1004, message: "原文", requestId: "req_x")
         let presentation = AppErrorMapper.presentation(for: error)
-        XCTAssertEqual(presentation, .alert(title: "提示", message: "权限不足"))
+        XCTAssertEqual(
+            presentation,
+            .alert(title: "提示", message: "权限不足。持续失败时请杀进程重启 App")
+        )
     }
 
-    /// case#4（Story 5.4 round 5 fix 修正）：.unauthorized → Alert（"请重启应用"）.
+    /// case#4（Story 5.4 round 5 fix → Story 5.5 round 7 [P1] 调整）：.unauthorized → Alert.
     /// AuthRetryingAPIClient 上线后,业务层接到的 .unauthorized 必然是"已 exhaust 静默重登"的
-    /// 场景（relogin 失败 / retry-after-relogin 仍 401）。继续 toast "正在重新登录" 既误导
-    /// （没有 relogin 在跑）又非 recoverable（toast 自动消失,用户无 action point）。
-    /// 改成 blocking alert,让用户走 cold-start 路径,跟 .missingCredentials 对齐.
-    func testUnauthorizedMapsToAlertWithRestartHint() {
+    /// 场景（relogin 失败 / retry-after-relogin 仍 401）。
+    /// round 7 fix: 文案从 "请重新启动应用" 改成 "请重试。持续失败时请杀进程重启 App" ——
+    /// 配合 alert dismiss 调 retry() (user-driven recovery), 不再让 app exit(0) 替 user 决定.
+    func testUnauthorizedMapsToAlertWithRetryHint() {
         let presentation = AppErrorMapper.presentation(for: APIError.unauthorized)
-        XCTAssertEqual(presentation, .alert(title: "提示", message: "登录失败，请重新启动应用"))
+        XCTAssertEqual(
+            presentation,
+            .alert(title: "提示", message: "登录失败，请重试。持续失败时请杀进程重启 App")
+        )
     }
 
-    /// case#4b（Story 5.4 round 2 fix 新增）：.missingCredentials → Alert（"请重启应用"）.
-    /// 跟 .unauthorized 区分：本地态需要 cold-start 接手，**不**该让用户以为系统在自动恢复.
+    /// case#4b（Story 5.4 round 2 fix 新增）：.missingCredentials → Alert（"请重启 App"）.
+    /// 跟 .unauthorized 区分：本地态需要 cold-start 接手，retry 救不回（keychain 真没 token）,
+    /// 文案直接钦定 "请重启 App", 不加 "请重试" 前缀.
     func testMissingCredentialsMapsToAlertWithRestartHint() {
         let presentation = AppErrorMapper.presentation(for: APIError.missingCredentials)
-        XCTAssertEqual(presentation, .alert(title: "提示", message: "登录信息丢失，请重启应用"))
+        XCTAssertEqual(presentation, .alert(title: "提示", message: "登录信息丢失，请重启 App"))
     }
 
     /// case#5：.network → RetryView
@@ -100,10 +120,13 @@ final class AppErrorMapperTests: XCTestCase {
         XCTAssertEqual(presentation, .retry(message: "网络异常，请检查后重试"))
     }
 
-    /// case#6：.decoding → Alert
+    /// case#6：.decoding → Alert with retry hint (Story 5.5 round 7 [P1] fix).
     func testDecodingErrorMapsToAlert() {
         let presentation = AppErrorMapper.presentation(for: APIError.decoding(underlying: URLError(.cannotParseResponse)))
-        XCTAssertEqual(presentation, .alert(title: "提示", message: "数据异常，请稍后重试"))
+        XCTAssertEqual(
+            presentation,
+            .alert(title: "提示", message: "数据异常，请重试。持续失败时请杀进程重启 App")
+        )
     }
 
     /// case#7：非 APIError 的 generic Error → fallback Alert
@@ -147,18 +170,19 @@ final class AppErrorMapperTests: XCTestCase {
         XCTAssertEqual(msg, "服务繁忙，请稍后重试")
     }
 
-    /// business 错误（permanent 3002）→ 走 .alert → 文案与 alert message 一致.
+    /// business 错误（permanent 3002）→ 走 .alert → 文案与 alert message 一致（带 force-quit suffix）.
+    /// Story 5.5 round 7 [P1] fix: alert 文案末尾追加 force-quit suffix, helper 透传完整 message.
     func testUserFacingMessageForPermanentBusinessErrorMatchesAlertCopy() {
         let msg = AppErrorMapper.userFacingMessage(
             for: APIError.business(code: 3002, message: "原文(server)", requestId: "req_x")
         )
-        XCTAssertEqual(msg, "步数不足，再走走吧")
+        XCTAssertEqual(msg, "步数不足，再走走吧。持续失败时请杀进程重启 App")
     }
 
-    /// decoding 错误 → 走 .alert → 文案与 alert message 一致
+    /// decoding 错误 → 走 .alert → 文案与 alert message 一致（Story 5.5 round 7 [P1] fix）.
     func testUserFacingMessageForDecodingErrorMatchesAlertCopy() {
         let msg = AppErrorMapper.userFacingMessage(for: APIError.decoding(underlying: URLError(.cannotParseResponse)))
-        XCTAssertEqual(msg, "数据异常，请稍后重试")
+        XCTAssertEqual(msg, "数据异常，请重试。持续失败时请杀进程重启 App")
     }
 
     /// 非 APIError → 走 fallback alert → 文案与 fallback message 一致
