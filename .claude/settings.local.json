@@ -55,7 +55,11 @@
       "Bash(docker version *)",
       "Bash(bash server/scripts/build.sh)",
       "Bash(bash /c/fork/cat/scripts/build.sh)",
-      "Bash(bash /c/fork/cat/scripts/build.sh --test)"
+      "Bash(bash /c/fork/cat/scripts/build.sh --test)",
+      "Bash(bash iphone/scripts/build.sh)",
+      "Bash(bash iphone/scripts/build.sh --test)",
+      "Bash(bash iphone/scripts/build.sh --uitest)",
+      "Bash(bash iphone/scripts/build.sh --test --uitest)"
     ],
     "deny": [
       "Bash(rm -rf:*)",
