@@ -122,9 +122,16 @@ struct RootView: View {
             ensureLaunchStateMachineWired()
         }
         .task {
-            // Story 2.5 既有：bind PingUseCase + 触发 ping/version 拉取。
-            // bind() 是单次生效（second call 会被 ViewModel guard 短路），start() 内部
-            // 也通过 pingTask != nil 防重复请求。两条防御 cover SwiftUI .task 多次触发场景。
+            // Story 2.5 既有：bind PingUseCase（仅注入；start() 不再在启动 .task 触发）.
+            // bind() 是单次生效（second call 会被 ViewModel guard 短路）.
+            //
+            // **Story 5.5 round 3 [P1] fix**: 移除原 `await homeViewModel.start()` 调用.
+            // 原方案: 启动期独立 .task 调 start() → ping 与 LoadHome 并发发起 → 启动链路 3 个 HTTP
+            // (`/auth/guest-login` + `/home` + `/ping`), 违反 Story 5.5 spec line 11 钦定的 "≤2 HTTP".
+            // ping 是冗余探针 —— `/home` 成功本身已证明 server reachable + token 有效.
+            // 新方案: start() 调用挪到 LaunchedContentView .ready case 内 .task 触发, 此时
+            // `homeViewModel.hasLoadedHome=true` → start() 第 4 层短路, 永远不发 ping.
+            // 详见 docs/lessons/2026-04-27-cold-start-http-budget-ping-redundant.md.
             homeViewModel.bind(pingUseCase: container.makePingUseCase())
             // Story 5.5 新增：bind LoadHomeUseCase + ErrorPresenter，让 ErrorPresenter onRetry 闭包
             // 能驱动 ViewModel 重试（resetLoadHomeForRetry → loadHome）.
@@ -135,7 +142,6 @@ struct RootView: View {
                 loadHomeUseCase: container.makeLoadHomeUseCase(),
                 errorPresenter: container.errorPresenter
             )
-            await homeViewModel.start()
         }
         .task {
             // Story 2.9 新增 / Story 5.2 升级：跑启动状态机 bootstrap。独立 .task 让两个 await 并发跑（不互相阻塞）。
@@ -177,27 +183,24 @@ struct RootView: View {
         let loadHomeUseCase = container.makeLoadHomeUseCase()
         let sessionStore = container.sessionStore
         let homeViewModel = self.homeViewModel
-        // Story 5.5 round 2 [P2] fix: closure 内 actor flag 短路 guest-login 重跑.
-        // 原方案 retry() 重跑整个 closure → 已成功的 guest-login 也再发一次 /auth/guest-login,
-        // 多走一次往返 + 让 /home 的 transient 失败依赖 auth endpoint 也得 healthy.
-        // 用 actor 持有 flag（而非 closure 捕获 var）避免 Swift 6 strict concurrency 警告 +
-        // closure @Sendable 隔离要求.
-        let guestLoginGate = GuestLoginCompletionGate()
+        // Story 5.5 round 3 [P1] fix: 移除 round 2 引入的 GuestLoginCompletionGate actor.
+        // 原方案: gate 永久记录 "guest-login 曾经成功" → retry() 重跑闭包时**永远**跳过 useCase.execute(),
+        // 让 /home 因 .unauthorized / .missingCredentials 失败时复用同一份坏掉的鉴权状态死循环重试,
+        // 用户只能看到同一失败结果直到重启 App. round 2 P2 试图省一次 /auth/guest-login 往返,
+        // 但代价是把"重试可恢复"语义变成"重试不可恢复"—— 不可接受的 trade-off.
+        //
+        // 新方案 (fail-safe): retry() 重跑闭包 = guest-login + load-home 都重跑一次.
+        // GuestLoginUseCase.execute() 本身幂等（每次产生新 token 写 keychain）, 重复调用无副作用,
+        // 反而能保证 retry 时一定有新鲜 token. round 2 P2 的"省一次往返"成本 (~50ms) 可接受,
+        // 换来"重试一定能自愈坏掉的鉴权状态"的语义保证.
+        // 详见 docs/lessons/2026-04-27-bootstrap-retry-must-not-skip-auth.md.
         launchStateMachine = AppLaunchStateMachine(
             bootstrapStep1: { @Sendable in
-                // Step 1a: 游客登录（既有）—— 写 keychain token + sessionStore.user/pet
-                //
-                // **round 2 [P2] fix**：guestLoginGate 已记下"上次成功"则跳过 useCase.execute()
-                // 不重发 /auth/guest-login. retry() 重跑 closure 时只重试真正失败的下半段（loadHome）.
-                // 不变量：guest-login 一旦成功（token 写入 keychain + sessionStore 写入 SessionState）
-                // 就视为该启动周期内有效, 不再重新协商.
-                let alreadyLoggedIn = await guestLoginGate.hasCompleted
-                if !alreadyLoggedIn {
-                    let output = try await useCase.execute()
-                    await MainActor.run {
-                        sessionStore.updateSession(SessionState(user: output.user, pet: output.pet))
-                    }
-                    await guestLoginGate.markCompleted()
+                // Step 1a: 游客登录 —— 写 keychain token + sessionStore.user/pet.
+                // 每次 bootstrap / retry 都跑一次, 保证坏掉的鉴权状态可被 retry 刷新.
+                let output = try await useCase.execute()
+                await MainActor.run {
+                    sessionStore.updateSession(SessionState(user: output.user, pet: output.pet))
                 }
                 // Story 5.5 AC6 Step 1b: 串行调 GET /home 拿首屏数据 → applyHomeData 同步注入
                 // 任一步抛错 → step1 整体失败 → 状态机走 .needsAuth(presentation:) → 显示对应错误 UI
@@ -293,18 +296,12 @@ struct RootView: View {
     }
 }
 
-/// Story 5.5 round 2 [P2] fix: bootstrap closure 内 actor flag, 短路 retry 时已成功 guest-login 的重发.
-///
-/// 为何 actor: closure 标 `@Sendable`, 不能直接捕获 closure-local `var`（Swift 6 strict concurrency
-/// 会拒绝 / Swift 5 给 escaping closure capture warning）. actor 是隔离 mutable state 的 first-class
-/// 工具, 内部 `hasCompleted` 仅由 actor 自身 isolated 方法读写.
-///
-/// 状态机运行期: bootstrap()/retry() 同 task-group serial 跑（AppLaunchStateMachine 是 @MainActor +
-/// isRetrying guard）, gate 不会被并发写; 但仍用 actor 维持类型安全的语义边界.
-actor GuestLoginCompletionGate {
-    private(set) var hasCompleted: Bool = false
-    func markCompleted() { hasCompleted = true }
-}
+// Story 5.5 round 3 [P1] fix: 移除原 GuestLoginCompletionGate actor.
+// round 2 [P2] 引入 gate 短路 guest-login 重跑, 但让 .unauthorized / .missingCredentials 失败死循环
+// (gate 永久记录 → retry 跳过 useCase.execute() → 复用同一份坏掉的鉴权状态). round 3 [P1] 改回
+// "retry 时 guest-login 也重跑" 的 fail-safe 路径; useCase.execute() 幂等, 重复调一次无副作用,
+// 多 ~50ms 一次往返的成本远小于"重试不可恢复"风险.
+// 详见 docs/lessons/2026-04-27-bootstrap-retry-must-not-skip-auth.md.
 
 /// Story 5.5 codex round 1 [P2] fix + round 2 [P1] fix: 把 bootstrap step closure 内的失败
 /// 包装成携带完整 ErrorPresentation 语义的 LocalizedError, 让状态机决定 retry vs alert vs toast.

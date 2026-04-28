@@ -136,6 +136,51 @@ final class HomeViewModelPingTests: XCTestCase {
         XCTAssertEqual(stub.executeCallCount, 1, "失败后再次 start() 也应短路（避免反复重试不可达 server）")
     }
 
+    /// case#12 (Story 5.5 round 3 [P1] fix): hasLoadedHome=true 时 start() 必须短路, 不发 ping.
+    ///
+    /// **regression guard**: spec line 11 钦定"启动 → 主界面" 路径 ≤ 2 个 HTTP
+    /// (`/auth/guest-login` + `/home`). round 2 实现遗漏: ping 仍在启动 .task 触发, 共 3 个 HTTP.
+    /// round 3 修复: HomeViewModel.start() 内加第 4 层短路 `if hasLoadedHome { return }` —
+    /// `/home` 成功本身已证明 server reachable + token 有效, ping 是冗余探针.
+    /// 此测试: 先 applyHomeData (置 hasLoadedHome=true) → 调 start() → 断言 ping useCase 0 调用 +
+    /// hasFetched=true (顺带置为防 .task 重启再触发).
+    func testStartShortCircuitsWhenLoadHomeAlreadySucceeded() async {
+        let stub = StubPingUseCase(stubResult: PingResult(reachable: true, serverCommit: "should-not-fire"))
+        // 用 5.5 init 注入 ping + loadHome —— 让 viewModel 拿到 LoadHome 注入路径
+        let mockLoadHome = MockLoadHomeUseCase()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let viewModel = HomeViewModel(
+            pingUseCase: stub,
+            loadHomeUseCase: mockLoadHome,
+            errorPresenter: presenter
+        )
+
+        // 模拟 RootView bootstrapStep1 路径: applyHomeData 同步注入 → 置 hasLoadedHome=true
+        let injectedData = HomeData(
+            user: HomeUser(id: "u", nickname: "n", avatarUrl: ""),
+            pet: nil,
+            stepAccount: HomeStepAccount(totalSteps: 0, availableSteps: 0, consumedSteps: 0),
+            chest: HomeChest(
+                id: "c", status: .counting, unlockAt: Date(timeIntervalSince1970: 0),
+                openCostSteps: 0, remainingSeconds: 0
+            ),
+            room: HomeRoom(currentRoomId: nil)
+        )
+        viewModel.applyHomeData(injectedData)
+
+        // 此时调 start() —— 必须短路, 不发 ping
+        await viewModel.start()
+
+        XCTAssertEqual(
+            stub.executeCallCount,
+            0,
+            "Story 5.5 spec 钦定启动 ≤ 2 HTTP. hasLoadedHome=true 时 start() 必须短路, " +
+            "不发 ping. 当前 \(stub.executeCallCount) 次违反契约."
+        )
+        // serverInfo 仍是初始默认值 "----"（不是 stub 的 commit）—— 验证 applyPingResult 没被调用
+        XCTAssertEqual(viewModel.serverInfo, "----", "ping 未发, serverInfo 应保持初始值")
+    }
+
     /// case#9 (review fix round 1)：bind() 注入时同步刷新 appVersion = readAppVersion()。
     /// 防止 RootView 走老 init 路径时 appVersion 永远停在 "0.0.0" hardcode 默认值。
     /// 测试 host bundle 的 CFBundleShortVersionString 不可控，所以只断言：

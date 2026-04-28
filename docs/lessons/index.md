@@ -77,3 +77,4 @@
 | 2026-04-27 | [Retry decorator 上线后，原 `.unauthorized` 文案的语义会反转 — 必须同步审计所有 user-visible mapping](2026-04-27-retry-decorator-changes-unauthorized-presentation-semantics.md) | 1 | error-handling | `8892a9a` |
 | 2026-04-27 | [bootstrap /home 失败必须经 AppErrorMapper + 可空 domain 字段必须区分 loading 与 server-null 两种 placeholder](2026-04-27-bootstrap-error-and-optional-pet-must-route-via-mapper.md) | 2 | architecture, error-handling | `<pending>` |
 | 2026-04-27 | [Launch state machine 必须携带完整 ErrorPresentation 语义 + bootstrap 重试不能重发已成功的 guest-login](2026-04-27-launch-state-machine-must-carry-presentation.md) | 2 | error-handling, architecture, perf | `<pending>` |
+| 2026-04-27 | [冷启动 HTTP 预算钦定 ≤2 时不能保留任何 nice-to-have 探针 + bootstrap retry 必须 fail-safe 重跑 auth](2026-04-27-cold-start-http-budget-and-bootstrap-retry-fail-safe.md) | 2 | architecture, error-handling | `<pending>` |

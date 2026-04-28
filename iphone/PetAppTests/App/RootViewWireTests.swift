@@ -8,9 +8,11 @@
 //
 // RootView 的视图渲染由 PetAppUITests/NavigationUITests 兜底（黑盒）。
 //
-// Story 5.5 round 2 [P2] fix 追加：bootstrap closure 内 `GuestLoginCompletionGate` actor 短路语义.
-// 复刻 RootView.ensureLaunchStateMachineWired 的 closure 模式（不依赖 SwiftUI lifecycle）,
-// 验证: guest-login 成功后, retry() 重跑 closure 时 guest-login 不再重发.
+// Story 5.5 round 3 [P1] fix 追加：bootstrap closure 在 retry 时**必须**重跑 guest-login.
+// 原 round 2 P2 引入 GuestLoginCompletionGate 短路 retry 重发, 但让 .unauthorized /
+// .missingCredentials 失败死循环 —— retry 复用同一份坏掉的鉴权状态. round 3 改回 fail-safe:
+// retry 时 guest-login 也重跑一次, 保证坏掉的鉴权可被刷新.
+// 详见 docs/lessons/2026-04-27-bootstrap-retry-must-not-skip-auth.md.
 
 import XCTest
 @testable import PetApp
@@ -60,28 +62,24 @@ final class RootViewWireTests: XCTestCase {
                        "onComposeTap 闭包未把 coordinator 路由到 .compose")
     }
 
-    // MARK: - Story 5.5 round 2 [P2] fix: bootstrap closure 短路 guest-login 重发
+    // MARK: - Story 5.5 round 3 [P1] fix: bootstrap closure retry 时**必须**重跑 guest-login
 
-    /// retry 路径下, 已经成功的 guest-login 不应再次发起 (复刻 ensureLaunchStateMachineWired 的 closure 模式).
+    /// retry 路径下, guest-login 必须重跑一次 (复刻 ensureLaunchStateMachineWired 的 closure 模式).
     ///
-    /// **regression guard**: round 2 [P2] finding 复现 —— 原 closure 没短路, 第二次跑 step1 closure
-    /// 时 guest-login useCase.execute() 又被调用一次, 多走一次 /auth/guest-login 往返,
-    /// 让本应只重试 /home 的 transient 失败也得 auth endpoint 健康才能恢复.
-    /// 修复后 GuestLoginCompletionGate actor 在第一次成功后置 hasCompleted=true, 第二次跑 closure
-    /// 时直接跳过 useCase.execute(), 只重跑 loadHome 失败的下半段.
-    func testBootstrapClosureSkipsGuestLoginAfterSuccessfulCompletion() async {
+    /// **round 3 regression guard**: round 2 [P2] 引入 `GuestLoginCompletionGate` 短路 retry 重发,
+    /// 但 gate 永久记录 → retry 复用同一份坏掉的鉴权状态死循环 (`.unauthorized` /
+    /// `.missingCredentials` 时永远恢复不了, 用户只能重启 App). round 3 改回 fail-safe:
+    /// retry 时 guest-login useCase.execute() 也再调一次, 保证坏掉的 token 可被刷新.
+    /// useCase.execute() 幂等, 重复一次无副作用; ~50ms 一次往返成本 << "重试可恢复" 的语义价值.
+    func testBootstrapClosureRerunsGuestLoginOnRetryToRecoverBadAuthState() async {
         let guestLoginCounter = CallCounter()
         let loadHomeCounter = CallCounter()
         let loadHomeShouldFail = ShouldFailHolder()
-        let gate = GuestLoginCompletionGate()
 
-        // closure 模仿 RootView.ensureLaunchStateMachineWired 的 step1 形态.
+        // closure 模仿 RootView.ensureLaunchStateMachineWired 的 step1 形态 (round 3 后).
+        // 关键: 每次 closure 跑都无条件调 guest-login, 不再有 gate 短路.
         let bootstrapStep1: @Sendable () async throws -> Void = {
-            let alreadyLoggedIn = await gate.hasCompleted
-            if !alreadyLoggedIn {
-                await guestLoginCounter.increment()
-                await gate.markCompleted()
-            }
+            await guestLoginCounter.increment()
             await loadHomeCounter.increment()
             if await loadHomeShouldFail.value {
                 struct LoadHomeFailure: Error {}
@@ -104,14 +102,15 @@ final class RootViewWireTests: XCTestCase {
         // 2) 让 load-home 第二次成功
         await loadHomeShouldFail.setValue(false)
 
-        // 3) retry: guest-login **不应**再被调用 + load-home 重试一次成功 → state .ready
+        // 3) retry: guest-login **必须**再被调用 (round 3 fail-safe) + load-home 重试一次成功 → state .ready
         await sm.retry()
         let guestCount2 = await guestLoginCounter.value
         let loadCount2 = await loadHomeCounter.value
         XCTAssertEqual(
             guestCount2,
-            1,
-            "retry 后 guest-login **仍**应是 1 次 —— gate 必须短路重发. 当前 \(guestCount2) 次违反 [P2] fix"
+            2,
+            "retry 后 guest-login **必须**变成 2 次 —— round 3 [P1] fix: retry 不能跳过 guest-login. " +
+            "当前 \(guestCount2) 次违反 fail-safe 原则: 跳过 guest-login 会让 .unauthorized 死循环不可恢复."
         )
         XCTAssertEqual(loadCount2, 2, "retry 应再跑 load-home 1 次（共 2 次）")
         XCTAssertEqual(sm.state, .ready, "load-home 第二次成功后, state 应进入 .ready")

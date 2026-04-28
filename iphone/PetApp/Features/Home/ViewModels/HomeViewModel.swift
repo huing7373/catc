@@ -186,12 +186,26 @@ public final class HomeViewModel: ObservableObject {
         self.appVersion = HomeViewModel.readAppVersion()
     }
 
-    /// 触发 ping。三层短路：
+    /// 触发 ping。**四层**短路（Story 5.5 round 3 [P1] fix 追加第 4 条）：
     ///   1. 已成功跑完一次（hasFetched=true）→ 直接 return（防 SwiftUI .task 在 view 重新出现时重跑）。
     ///   2. 进行中的任务（pingTask 非 nil）→ 直接 return（防并发触发同时调两次）。
     ///   3. 未注入 UseCase → no-op。
+    ///   4. **`hasLoadedHome=true` → 直接 return**（Story 5.5 round 3 [P1] fix）：
+    ///      `/home` 成功本身已经证明 server reachable + token 有效, ping 是冗余探针.
+    ///      Story 5.5 spec line 11 钦定"启动 → 主界面"路径只能 2 个 HTTP 请求
+    ///      (`/auth/guest-login` + `/home`), 把 ping 留在启动链路违反此契约 (3 个请求).
+    ///      也同时把 hasFetched 一并置 true → 后续 `.task` 重启永远不会再触发.
+    ///
     /// RootView 在 `.task { await viewModel.start() }` 中调用，App 启动时执行一次（成功/失败都只一次）。
+    /// 详见 docs/lessons/2026-04-27-cold-start-http-budget-ping-redundant.md.
     public func start() async {
+        // Story 5.5 round 3 [P1] fix: 启动期 LoadHome 已成功 → ping 是冗余探针, 短路.
+        // 把 hasFetched 也置 true 确保未来 `.task` 重启永远不会再触发 ping.
+        if hasLoadedHome {
+            hasFetched = true
+            return
+        }
+
         // 取注入实例（init 路径优先，回退 bind 路径）。
         let useCase = pingUseCase ?? boundPingUseCase
         guard let useCase = useCase else { return }   // 未注入：no-op
