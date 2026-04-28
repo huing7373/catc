@@ -14,6 +14,9 @@
 //   - APIError.network → 透传 → ViewModel 同上
 //   - APIError.decoding → server 返了不符合 schema 的数据（理论不应发生 —— V1 §4.1 行 16 schema 已冻结）
 //                         → 透传 → ViewModel 同上（让用户重试或提示"App 需要更新"）
+//   - APIError.decoding(HomeDataDecodingError) → 客户端解 wire DTO 时遇未知 enum 值（同 schema drift 信号）
+//                         → 透传 → AlertOverlay "数据异常，请稍后重试"（mapper 钦定）
+//                         详见 docs/lessons/2026-04-27-home-data-fail-fast-on-unknown-enum.md
 //
 // 不在本 story 范围（设计选择）：
 //   - 不直接接 ErrorPresenter（让 UseCase 可被未来非 UI 场景 / 后台刷新复用）
@@ -38,6 +41,9 @@ public struct DefaultLoadHomeUseCase: LoadHomeUseCaseProtocol {
 
     public func execute() async throws -> HomeData {
         let response = try await repository.loadHome()
-        return HomeData(from: response)
+        // round 6 [P2] fix: HomeData(from:) 改 throws —— 未知 enum 值会抛 APIError.decoding,
+        // 由本 UseCase 透传给 ViewModel / RootView bootstrapStep1, 触发 AlertOverlay fail-fast 而非
+        // 把未知 pet.currentState / chest.status silently coerce 成 .rest / .counting.
+        return try HomeData(from: response)
     }
 }

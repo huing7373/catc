@@ -32,18 +32,31 @@ public struct HomeData: Equatable, Sendable {
 
     /// 从 wire DTO 构造 domain 数据；当前节点 2 阶段是直白复制；
     /// 未来节点扩展加 derived 字段时，转换逻辑集中在此 init 内.
-    public init(from response: HomeResponse) {
+    ///
+    /// **Story 5.5 round 6 [P2] fix**：本 init 改 `throws`；未知 `pet.currentState` /
+    /// `chest.status` 枚举值不再静默 coerce 到 `.rest` / `.counting`，改抛
+    /// `APIError.decoding` —— 让 server/client schema drift 立刻 fail-fast 触达 UI（bootstrap
+    /// 走 AlertOverlay "数据异常，请稍后重试"，详见 AppErrorMapper `.decoding` 映射）.
+    ///
+    /// 原方案 `?? .rest` / `?? .counting` 会在新增枚举值（如未来 `HomePetState.sleep`）时把
+    /// 真实状态错误渲染成 rest/counting，dev 期间无任何 signal、生产期 silently 错；
+    /// V1 §4.1 行 16 钦定 `/home` schema 已 frozen → 出现未知值就是真实异常，必须 fail-fast.
+    /// 详见 docs/lessons/2026-04-27-home-data-fail-fast-on-unknown-enum.md.
+    public init(from response: HomeResponse) throws {
         self.user = HomeUser(
             id: response.user.id,
             nickname: response.user.nickname,
             avatarUrl: response.user.avatarUrl
         )
         if let pet = response.pet {
+            guard let petState = HomePetState(rawValue: pet.currentState) else {
+                throw APIError.decoding(underlying: HomeDataDecodingError.unknownPetCurrentState(pet.currentState))
+            }
             self.pet = HomePet(
                 id: pet.id,
                 petType: pet.petType,
                 name: pet.name,
-                currentState: HomePetState(rawValue: pet.currentState) ?? .rest,
+                currentState: petState,
                 equips: pet.equips.map { HomeEquip(from: $0) }
             )
         } else {
@@ -54,9 +67,12 @@ public struct HomeData: Equatable, Sendable {
             availableSteps: response.stepAccount.availableSteps,
             consumedSteps: response.stepAccount.consumedSteps
         )
+        guard let chestStatus = HomeChestStatus(rawValue: response.chest.status) else {
+            throw APIError.decoding(underlying: HomeDataDecodingError.unknownChestStatus(response.chest.status))
+        }
         self.chest = HomeChest(
             id: response.chest.id,
-            status: HomeChestStatus(rawValue: response.chest.status) ?? .counting,
+            status: chestStatus,
             unlockAt: response.chest.unlockAt,
             openCostSteps: response.chest.openCostSteps,
             remainingSeconds: response.chest.remainingSeconds
@@ -185,4 +201,17 @@ public struct HomeRoom: Equatable, Sendable {
     public init(currentRoomId: String?) {
         self.currentRoomId = currentRoomId
     }
+}
+
+/// Story 5.5 round 6 [P2] fix: 描述 `HomeData(from:)` 解 wire DTO 时的 schema drift 失败原因.
+/// 作为 `APIError.decoding(underlying:)` 的 underlying，让 log / 调试能看到具体哪个 enum 字段拿到了未知值.
+///
+/// 不直接抛 `APIError.decoding`：把 underlying 单独命名 → 测试断言可以匹配具体子类型，
+/// 同时让 AppErrorMapper 仍走 `.decoding` 通用 alert 文案 ("数据异常，请稍后重试")，无需新错误码.
+public enum HomeDataDecodingError: Error, Equatable {
+    /// 后端返回了客户端未知的 `pet.currentState` 枚举值（V1 §4.1 frozen schema 之外）.
+    case unknownPetCurrentState(Int)
+
+    /// 后端返回了客户端未知的 `chest.status` 枚举值.
+    case unknownChestStatus(Int)
 }

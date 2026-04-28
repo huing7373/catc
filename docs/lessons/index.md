@@ -80,3 +80,5 @@
 | 2026-04-27 | [冷启动 HTTP 预算钦定 ≤2 时不能保留任何 nice-to-have 探针 + bootstrap retry 必须 fail-safe 重跑 auth](2026-04-27-cold-start-http-budget-and-bootstrap-retry-fail-safe.md) | 2 | architecture, error-handling | `<pending>` |
 | 2026-04-27 | [bootstrap 全部错误路径必经 mapper / ping 复活回 .ready 分支 / alert-only dismiss 不能隐式 retry](2026-04-27-bootstrap-all-error-paths-route-via-mapper.md) | 3 | error-handling, architecture | `<pending>` |
 | 2026-04-27 | [Business 错误必须区分 transient/terminal & alert OK 按钮必须有真实动作 & 4 轮 fix-review 单点 patch 反模式](2026-04-27-business-error-transient-vs-terminal.md) | 3 | error-handling, ui, architecture | `<pending>` |
+| 2026-04-27 | [SwiftUI 多 .task 之间无顺序保证：bind 与 start 必须在同一闭包](2026-04-27-swiftui-multi-task-no-ordering.md) | 1 | architecture | `<pending>` |
+| 2026-04-27 | [wire DTO → domain 转换：未知 enum 必须 fail-fast，禁止 silent fallback](2026-04-27-home-data-fail-fast-on-unknown-enum.md) | 1 | error-handling | `<pending>` |

@@ -113,8 +113,13 @@ struct RootView: View {
                         //   4. start() 内部第 4 层短路 (`hasLoadedHome=true`) 已被 round 3 移除, 现在
                         //      ping 会真正发出来填充 serverInfo footer
                         //
-                        // 详见 docs/lessons/2026-04-27-bootstrap-all-error-paths-route-via-mapper.md
-                        // (本轮 lesson 包含三条修复, 见 "ping 复活" 那条规则).
+                        // **Story 5.5 round 6 [P2] fix**: ping bind 也挪到这里 —— 跟 start 走同一个
+                        // .ready 分支 .task, 杜绝原"bind 在外层 .task / start 在 .ready .task" 两个独立
+                        // .task 之间的 race（SwiftUI 不保证两 .task 顺序：fast bootstrap 路径会在 bind 跑
+                        // 完之前进 .ready → start() 看到 nil useCase silent return → footer 永远 "----"）.
+                        // 现在 bind 总在 start 同一闭包内先执行 → 不可能 race.
+                        // 详见 docs/lessons/2026-04-27-swiftui-multi-task-no-ordering.md.
+                        homeViewModel.bind(pingUseCase: container.makePingUseCase())
                         await homeViewModel.start()
                     },
                     sheetContent: sheetContent(for:)
@@ -140,22 +145,17 @@ struct RootView: View {
             ensureLaunchStateMachineWired()
         }
         .task {
-            // Story 2.5 既有：bind PingUseCase（仅注入；start() 不再在启动 .task 触发）.
-            // bind() 是单次生效（second call 会被 ViewModel guard 短路）.
-            //
-            // **Story 5.5 round 3 [P1] fix**: 移除原 `await homeViewModel.start()` 调用.
-            // 原方案: 启动期独立 .task 调 start() → ping 与 LoadHome 并发发起 → 启动链路 3 个 HTTP
-            // (`/auth/guest-login` + `/home` + `/ping`), 违反 Story 5.5 spec line 11 钦定的 "≤2 HTTP".
-            // ping 是冗余探针 —— `/home` 成功本身已证明 server reachable + token 有效.
-            // 新方案: start() 调用挪到 LaunchedContentView .ready case 内 .task 触发, 此时
-            // `homeViewModel.hasLoadedHome=true` → start() 第 4 层短路, 永远不发 ping.
-            // 详见 docs/lessons/2026-04-27-cold-start-http-budget-ping-redundant.md.
-            homeViewModel.bind(pingUseCase: container.makePingUseCase())
             // Story 5.5 新增：bind LoadHomeUseCase + ErrorPresenter，让 ErrorPresenter onRetry 闭包
             // 能驱动 ViewModel 重试（resetLoadHomeForRetry → loadHome）.
             // 启动期 LoadHome 已通过 bootstrapStep1 closure 调过一次（applyHomeData 同步注入数据 +
             // 置 hasLoadedHome=true），此处的 bind 仅为 onRetry 路径建立 wire；ViewModel.loadHome()
             // 在 hasLoadedHome=true 状态下被短路，不会双发请求.
+            //
+            // **Story 5.5 round 6 [P2] fix**: PingUseCase 的 bind 调用已挪到 LaunchedContentView 的
+            // .ready 分支 onReadyTask 闭包内（与 `await homeViewModel.start()` 同一个闭包，先 bind 后
+            // start，杜绝两个独立 .task 之间的 race —— 详见 onReadyTask 处的 fix 注释）.
+            // LoadHome bind 留在这里：onRetry wire 是启动早期就需要、非 ready 路径依赖的；
+            // 与 ping 不同（ping 只在 .ready 才有意义）.
             homeViewModel.bind(
                 loadHomeUseCase: container.makeLoadHomeUseCase(),
                 errorPresenter: container.errorPresenter

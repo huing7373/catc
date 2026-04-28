@@ -190,33 +190,59 @@ final class LoadHomeUseCaseTests: XCTestCase {
         }
     }
 
-    // MARK: - case#9 edge: 未识别 chest.status 走 fallback
+    // MARK: - case#9 edge: 未识别 chest.status fail-fast 抛 .decoding（round 6 [P2] fix 改向）
 
-    func testExecuteUnknownChestStatusFallsBackToCounting() async throws {
+    /// Story 5.5 round 6 [P2] fix: 原方案 fallback 到 .counting 会掩盖 server/client schema drift —— 比如 server
+    /// 加了新 chest.status 枚举值但客户端没更新, 用户会看到错误的 first-screen state 而 dev 没有任何 signal.
+    /// 改为 fail-fast: 未识别值抛 APIError.decoding(HomeDataDecodingError.unknownChestStatus(...)),
+    /// 由 AppErrorMapper 映射为 AlertOverlay "数据异常，请稍后重试" → 用户重启 / dev 立刻发现.
+    /// V1 §4.1 行 16 钦定 /home schema frozen → 出现未知值就是真实异常.
+    /// 详见 docs/lessons/2026-04-27-home-data-fail-fast-on-unknown-enum.md.
+    func testExecuteUnknownChestStatusThrowsDecoding() async {
         let mock = MockHomeRepository()
         mock.loadHomeStub = .success(makeFullResponse(
             chest: LoadHomeUseCaseTests.defaultChest(status: 99)
         ))
         let useCase = DefaultLoadHomeUseCase(repository: mock)
 
-        let data = try await useCase.execute()
-
-        XCTAssertEqual(data.chest.status, .counting,
-                       "未识别 chest.status 应 fallback 到 .counting，不抛 decoding error")
+        do {
+            _ = try await useCase.execute()
+            XCTFail("未识别 chest.status 应抛 APIError.decoding，不应静默 fallback")
+        } catch let APIError.decoding(underlying) {
+            guard let homeErr = underlying as? HomeDataDecodingError else {
+                XCTFail("underlying 应是 HomeDataDecodingError，实得 \(underlying)")
+                return
+            }
+            XCTAssertEqual(homeErr, .unknownChestStatus(99),
+                           "应携带未知 raw 值供 log / 调试")
+        } catch {
+            XCTFail("意外错误类型：\(error)")
+        }
     }
 
-    // MARK: - case#10 edge: 未识别 pet.currentState 走 fallback
+    // MARK: - case#10 edge: 未识别 pet.currentState fail-fast 抛 .decoding（round 6 [P2] fix 改向）
 
-    func testExecuteUnknownPetStateFallsBackToRest() async throws {
+    /// Story 5.5 round 6 [P2] fix: 同 case#9，pet.currentState 未识别值也走 fail-fast.
+    /// 详见 docs/lessons/2026-04-27-home-data-fail-fast-on-unknown-enum.md.
+    func testExecuteUnknownPetStateThrowsDecoding() async {
         let mock = MockHomeRepository()
         mock.loadHomeStub = .success(makeFullResponse(
             pet: LoadHomeUseCaseTests.defaultPet(currentState: 99)
         ))
         let useCase = DefaultLoadHomeUseCase(repository: mock)
 
-        let data = try await useCase.execute()
-
-        XCTAssertEqual(data.pet?.currentState, .rest,
-                       "未识别 pet.currentState 应 fallback 到 .rest")
+        do {
+            _ = try await useCase.execute()
+            XCTFail("未识别 pet.currentState 应抛 APIError.decoding，不应静默 fallback")
+        } catch let APIError.decoding(underlying) {
+            guard let homeErr = underlying as? HomeDataDecodingError else {
+                XCTFail("underlying 应是 HomeDataDecodingError，实得 \(underlying)")
+                return
+            }
+            XCTAssertEqual(homeErr, .unknownPetCurrentState(99),
+                           "应携带未知 raw 值供 log / 调试")
+        } catch {
+            XCTFail("意外错误类型：\(error)")
+        }
     }
 }
