@@ -2,7 +2,7 @@
 date: 2026-04-27
 source_review: codex round 4 review of Story 5.5 (file: /tmp/epic-loop-review-5-5-r4.md)
 story: 5-5-loadhomeusecase-主界面用-get-home-一次拉取全部数据
-commit: <pending>
+commit: 5dcfa4b
 lesson_count: 3
 ---
 
