@@ -16,7 +16,8 @@
 // case#2 happy：requiresAuth=false → header 无（即使 keychain 有 token 也不读）
 // case#3 edge：requiresAuth=true + token nil → missingCredentials + 不发请求
 // case#4 edge：requiresAuth=true + token 空串 → missingCredentials + 不发请求（防御性）
-// case#5 edge：requiresAuth=true + keychain.get 抛错 → missingCredentials + 不发请求（降级语义）
+// case#5 edge：requiresAuth=true + keychain.get 抛错 → localStoreFailure + 不发请求（transient；
+//   round 11 [P2] fix 从 missingCredentials 拆出 —— transient vs terminal 二分）
 // case#6 edge：requiresAuth=true + APIClient.init 未注 keychain → missingCredentials + 不发请求
 // case#7 edge：同一 APIClient 并发 100 请求 → 全部正确注入（验线程安全）
 
@@ -143,8 +144,12 @@ final class APIClientAuthInjectionTests: XCTestCase {
         XCTAssertEqual(session.invocations.count, 0)
     }
 
-    // MARK: - case#5 (edge)：requiresAuth=true 但 keychain.get 抛错 → 降级为"无 token" → 抛 missingCredentials
-    func testThrowsMissingCredentialsWhenKeychainGetFails() async {
+    // MARK: - case#5 (edge)：requiresAuth=true 但 keychain.get 抛错 → 抛 localStoreFailure（transient）
+    // Story 5.5 round 11 [P2] fix：从 .missingCredentials 改为 .localStoreFailure ——
+    // keychain 抛错是 transient (sandbox 抽风 / OSStatus -25291 临时不可用 等),
+    // 跟 "keychain 返 nil/空串" terminal 场景区分; mapper 会把本 case 归 .retry 让 user 自助恢复.
+    // 详见 docs/lessons/2026-04-28-local-store-transient-vs-terminal-must-distinguish.md.
+    func testThrowsLocalStoreFailureWhenKeychainGetFails() async {
         let session = MockURLSession()
         let keychain = MockKeychainStore()
         keychain.getStubResult = .failure(KeychainError.osStatus(-25300, operation: "get"))
@@ -154,11 +159,21 @@ final class APIClientAuthInjectionTests: XCTestCase {
 
         do {
             let _: EmptyDataMock = try await client.request(endpoint)
-            XCTFail("应抛 APIError.missingCredentials")
+            XCTFail("应抛 APIError.localStoreFailure")
         } catch let error as APIError {
-            XCTAssertEqual(error, .missingCredentials, "keychain 错误应降级为 missingCredentials，不透传 KeychainError")
+            // Equatable 只比 case 标签 (underlying Error 不是 Equatable), 这里能验证类别归属.
+            XCTAssertEqual(
+                error,
+                .localStoreFailure(underlying: KeychainError.osStatus(-25300, operation: "get")),
+                "keychain.get 抛错应映射为 localStoreFailure（transient），跟 missingCredentials（terminal）区分"
+            )
+            // 反向断言：必须**不**等于 .missingCredentials（防 regress 把两态再次合并）
+            XCTAssertNotEqual(
+                error, .missingCredentials,
+                "keychain 抛错的 transient 路径不能再 conflate 进 .missingCredentials terminal 通道"
+            )
         } catch {
-            XCTFail("应抛 APIError.missingCredentials，实际抛 \(error)")
+            XCTFail("应抛 APIError.localStoreFailure，实际抛 \(error)")
         }
 
         XCTAssertEqual(session.invocations.count, 0)

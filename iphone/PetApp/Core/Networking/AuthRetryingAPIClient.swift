@@ -17,14 +17,17 @@
 //   3. inner.request(endpoint) throw .unauthorized + endpoint.requiresAuth == false →
 //      直接抛上去（如 /auth/guest-login 自己 401 → 不能用自己救自己）
 //   4. inner.request(endpoint) throw .missingCredentials（任意 requiresAuth 值）→
-//      直接抛上去（**不**重登 —— 见下"为何不拦 missingCredentials"）
-//   5. inner.request(endpoint) throw 其它 APIError（.network / .business / .decoding）→
+//      直接抛上去（**不**重登 —— 见下"为何不拦 missingCredentials / .localStoreFailure"）
+//   5. inner.request(endpoint) throw .localStoreFailure（任意 requiresAuth 值）→
+//      直接抛上去（**不**重登 —— 同 .missingCredentials 理由；mapper 会归 .retry 让 user 自助恢复）
+//   6. inner.request(endpoint) throw 其它 APIError（.network / .business / .decoding）→
 //      直接抛上去（不在重登职责内）
 //
-// 为何**不**拦 .missingCredentials（Story 5.4 round 2 [P2] codex finding 修正）：
-//   .missingCredentials = APIClient.buildURLRequest 阶段抛的"本地无 token / keychain 配置错"，
-//   语义是"请求**未发出** + 本地端没有可用凭证"，跟 .unauthorized（"server 拒绝当前 token"）
-//   完全不同：
+// 为何**不**拦 .missingCredentials / .localStoreFailure（Story 5.4 round 2 [P2] codex finding
+// 修正 + Story 5.5 round 11 [P2] 拆出 .localStoreFailure 后同样 propagate）：
+//   .missingCredentials / .localStoreFailure = APIClient.buildURLRequest 阶段抛的"本地无 token /
+//   keychain 配置错 / 本地存储抽风", 语义是"请求**未发出** + 本地端没有可用凭证"，跟
+//   .unauthorized ("server 拒绝当前 token") 完全不同：
 //   - **dev-story 5-4 非范围 §3 钦定**：本 story 只处理 server 401，不接管"本地无 token"路径
 //     —— 后者归 cold-start GuestLoginUseCase 管（首次启动 / 卸载重装 / 用户 reset）
 //   - 配置错（DI 没注 keychain / key 拼错）→ 应当 fail-fast 让开发者立刻看到，**不**该被
@@ -34,6 +37,9 @@
 //   - 连本地 token 都没有时调 coordinator.relogin → SilentReloginUseCase 内部读 guestUid，
 //     如果同样缺失也会抛 .missingCredentials → 把"本来 1 次报错"放大成"重登 + 再报错"
 //     的 N+1 调用浪费
+//   - .localStoreFailure (round 11 新增): 同样 sandbox 抽风也会让 SilentReloginUseCase 内部
+//     read guestUid 失败 → 同上 N+1 放大. transient 路径让 mapper 归 .retry 由 user 自助恢复
+//     比悄悄触发 relogin 更可观测.
 //
 // 与 round 1 注释（"buildURLRequest 抛 .unauthorized 跟 server 返 401 都走同一恢复路径"）
 // 的关系：那段说法**已废弃**。round 1 说法忽略了 dev-story 钦定的 scope 边界，导致本地态
@@ -79,6 +85,8 @@ public final class AuthRetryingAPIClient: APIClientProtocol {
         }
         // catch APIError.unauthorized where !endpoint.requiresAuth: 不拦，let it propagate
         // catch APIError.missingCredentials: 不拦，let it propagate（见上"为何不拦"）
+        // catch APIError.localStoreFailure: 不拦，let it propagate（同 .missingCredentials 理由；
+        //   round 11 [P2] fix 新增，让 mapper 归 .retry 自助恢复路径不被 relogin 拦截）
         // 其它 APIError（.network / .business / .decoding）: 不拦，let it propagate（Swift do-catch 默认行为）
     }
 }

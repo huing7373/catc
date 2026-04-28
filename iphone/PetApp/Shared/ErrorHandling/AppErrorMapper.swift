@@ -12,17 +12,25 @@
 // - presentation(for:) 接收 Error 而非 APIError：让 ViewModel catch block 不必 narrow
 // - 错误码字典放 switch case 而非 dictionary：let compiler 帮我们做穷举检查
 //
-// **transient vs terminal 错误分类（Story 5.5 round 5 [P1] → round 7 [P1] → round 8 [P1] → round 9 [P2] → round 10 [P2] 调整）**：
-// 不再按 APIError case (4 态) 一对一硬绑 presentation, 而是按 **transient vs terminal** 二分:
+// **transient vs terminal 错误分类（Story 5.5 round 5 [P1] → round 7 [P1] → round 8 [P1] → round 9 [P2] → round 10 [P2] → round 11 [P2] 调整）**：
+// 不再按 APIError case 一对一硬绑 presentation, 而是按 **transient vs terminal** 二分:
 // - **transient (.retry)**: .network / .decoding (server partial rollout / 一次性坏 payload)
 //   / .unauthorized (静默重登 exhausted 后仍可能 transient,如 server 401 抽风) /
+//   .localStoreFailure (round 11 新增: keychain.get 抛错 = sandbox 抽风 / OSStatus 临时不可用) /
 //   .business(1005/1007/1008/1009 限流冲突重复繁忙 等瞬时类码).
-// - **terminal (.alert)**: .missingCredentials (本地 keychain 损坏, retry 救不了, 真需要重启 App)
+// - **terminal (.alert)**: .missingCredentials (本地 keychain **确认无 token**, retry 救不了, 真需要重启 App)
 //   / .business(其他 permanent 码: 1004 权限不足 / 2002 微信已绑定 / 4001 宝箱不存在 等).
 // - **fallback (.retry)**: 非 APIError 的 generic Error (round 10 [P2] fix: 从 .alert 改 .retry).
 //   典型 case: GuestLoginUseCase 抛出的 KeychainError (sandbox 临时不可用 / osStatus -25300
 //   item 暂时找不到 等 transient 场景) —— 之前 fallback 走 .alert 让其卡 TerminalErrorView
 //   强制 force-quit 是过度悲观, 跟二分判则一致默认走 transient 分支.
+//
+// **round 11 [P2] 关键修正**：之前 APIClient.buildURLRequest 把 keychain.get 抛错也 collapse
+// 进 .missingCredentials, 跟"keychain 返 nil/空串"两种语义不同的 case conflate 到同一 terminal
+// 通道. round 11 在 APIClient 层新增 .localStoreFailure(underlying:) 区分 transient (抛错) vs
+// terminal (返 nil/空串), mapper 把 .localStoreFailure → .retry 让 user 自助恢复.
+// 详见 docs/lessons/2026-04-27-transient-vs-terminal-error-classification.md
+// + docs/lessons/2026-04-28-local-store-transient-vs-terminal-must-distinguish.md.
 //
 // 二分原则: **transient possible → retry**. user 主动点重试失败再次看到也只是多发一次请求,
 // 比"必须杀进程"温柔; 只有真 terminal (重启都救不了 / 本地配置永久损坏) 才走 .alert.
@@ -56,6 +64,13 @@ import Foundation
 ///   本 case 的特点：retry() 也救不回（keychain 真没 token, repo 仍抛同样错误））。
 ///   round 9 [P2] 验证保留: 这是 transient/terminal 二分中**真 terminal** 的代表 case
 ///   —— 本地 keychain 损坏, bootstrap closure 重跑同样读不到 token / 写不进去, retry 无意义.
+///   round 11 [P2] 收窄: 本 case 现在**只**包含 keychain 读成功但返回 nil/空串的 terminal 场景；
+///   keychain.get 抛错的 transient 路径已拆出到 `.localStoreFailure` 单独走 .retry.
+/// - `.localStoreFailure(_)` → RetryView；文案 "登录信息读取异常，请重试" (Story 5.5 round 11 [P2] fix
+///   新增 case): keychain.get 抛错 (sandbox 抽风 / OSStatus -25291 errSecNotAvailable 等
+///   transient 场景), 请求未发出. bootstrap 路径下 RootView 把 .retry 渲染为 RetryView, user
+///   点重试会重跑整个 closure (cold-start GuestLoginUseCase + LoadHome), keychain transient
+///   错误大概率自愈. AuthRetryingAPIClient 不接管本 case (同 .missingCredentials 理由).
 /// - `.network(_)` → RetryView；文案 "网络异常，请检查后重试"。
 /// - `.decoding(_)` → RetryView；文案 "数据异常，请重试"
 ///   （Story 5.5 round 9 [P2] fix: 改成 .retry —— 之前 round 8 钦定 .alert 渲染 TerminalErrorView
@@ -152,7 +167,24 @@ public enum AppErrorMapper {
             // Story 5.5 round 9 [P2] 验证: 此 case 保留 .alert —— 真 terminal,本地配置/keychain
             // 已损坏,bootstrap closure 重跑只会再次抛同样错误 (cold-start GuestLoginUseCase 仍
             // 走同一份 KeychainTokenStore, 同样读不到 token / 写不进去).
+            // Story 5.5 round 11 [P2] 收窄: 本 case 现在**仅**包含 "keychain 读成功但返 nil/空串"
+            // 与 "DI 没配 keychain" 两种 terminal 场景; keychain.get 抛错的 transient 路径已拆出
+            // 到 .localStoreFailure (见下).
             return ErrorPresentation.alert(title: "提示", message: "登录信息丢失，请重启 App")
+
+        case .localStoreFailure:
+            // Story 5.5 round 11 [P2] fix: 新增 case —— 把 "keychain.get 抛错" 从
+            // .missingCredentials terminal 通道拆出到本 transient 通道.
+            // 之前 round 2 实现用 try? 把抛错也 collapse 进 .missingCredentials, conflate 了
+            // "确认无 token (terminal)" vs "本地存储抽风 (transient)" 两种语义不同的 case,
+            // 导致 mapper 把 sandbox 抽风渲染成 TerminalErrorView (force-quit-only) 是过度悲观.
+            // bootstrap 路径下 RootView 把 .retry 渲染为 RetryView, user 点重试重跑整个 closure
+            // (cold-start GuestLoginUseCase + LoadHome) → keychain transient 错误大概率自愈.
+            // 即便最终仍失败, user 多发一次请求也比 force-quit 温柔.
+            // 文案 "登录信息读取异常，请重试" 表达 "本地凭证暂时读不到, retry 可能恢复"; 与
+            // .missingCredentials 的 "丢失，请重启" 区分 (前者 transient 让 user 自助, 后者
+            // terminal 强制重启). 详见 docs/lessons/2026-04-28-local-store-transient-vs-terminal-must-distinguish.md.
+            return ErrorPresentation.retry(message: "登录信息读取异常，请重试")
 
         case .network:
             return ErrorPresentation.retry(message: "网络异常，请检查后重试")

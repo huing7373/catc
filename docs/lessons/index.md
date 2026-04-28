@@ -86,3 +86,4 @@
 | 2026-04-27 | [Bootstrap terminal error 必须用静态全屏 fallback page (禁 dismiss-able overlay) & 5 轮 fix-review 元根因复盘 (跳出 framing 的元方法论)](2026-04-27-bootstrap-terminal-error-static-fallback-page.md) | 2 | error-handling, ui, architecture, process | `<pending>` |
 | 2026-04-28 | [`.decoding` / `.unauthorized` 必须按 transient 二分原则归 `.retry` & 9 轮 fix-review 累积出 transient/terminal 通用判则](2026-04-28-decoding-and-unauthorized-must-be-transient-retry.md) | 2 | error-handling, process | `<pending>` |
 | 2026-04-28 | [`AppErrorMapper` 非 APIError fallback 必须按 transient 二分原则归 `.retry`，不是 `.alert`](2026-04-28-non-api-error-fallback-must-be-transient-retry.md) | 1 | error-handling | `<pending>` |
+| 2026-04-28 | [error case 不该 conflate transient (store 读失败) vs terminal (store 读成功但空) — 信息保真度必须从 case 设计层做对](2026-04-28-local-store-transient-vs-terminal-must-distinguish.md) | 1 | error-handling, architecture | `<pending>` |

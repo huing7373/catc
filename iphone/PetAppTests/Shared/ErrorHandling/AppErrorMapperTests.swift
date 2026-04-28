@@ -95,9 +95,31 @@ final class AppErrorMapperTests: XCTestCase {
     /// case#4b（Story 5.4 round 2 fix 新增）：.missingCredentials → Alert（"请重启 App"）.
     /// 跟 .unauthorized 区分：本地态需要 cold-start 接手，retry 救不回（keychain 真没 token）,
     /// 文案直接钦定 "请重启 App", 不加 "请重试" 前缀.
+    /// Story 5.5 round 11 [P2] 收窄: 此 case 现在**只**代表 "keychain 读成功但返 nil/空串" / DI
+    /// 没配 keychain 的 terminal 场景; keychain.get 抛错的 transient 路径已移到 case#4c.
     func testMissingCredentialsMapsToAlertWithRestartHint() {
         let presentation = AppErrorMapper.presentation(for: APIError.missingCredentials)
         XCTAssertEqual(presentation, .alert(title: "提示", message: "登录信息丢失，请重启 App"))
+    }
+
+    /// case#4c（Story 5.5 round 11 [P2] fix 新增）：.localStoreFailure → Retry（"读取异常，请重试"）.
+    /// 跟 .missingCredentials 区分：keychain.get 抛错是 transient (sandbox 抽风 / OSStatus 临时
+    /// 不可用), bootstrap 路径下重跑整个 closure 大概率自愈, 不需要 force-quit.
+    /// 详见 docs/lessons/2026-04-28-local-store-transient-vs-terminal-must-distinguish.md.
+    func testLocalStoreFailureMapsToRetry() {
+        let underlying = KeychainError.osStatus(-25300, operation: "get")
+        let presentation = AppErrorMapper.presentation(for: APIError.localStoreFailure(underlying: underlying))
+        XCTAssertEqual(
+            presentation,
+            .retry(message: "登录信息读取异常，请重试"),
+            ".localStoreFailure 必须归 .retry (transient); 不能跟 .missingCredentials 一样走 .alert (terminal)"
+        )
+        // 反向断言: 必须**不**等于 .missingCredentials 的 alert (防 regress 把两态再次合并)
+        XCTAssertNotEqual(
+            presentation,
+            .alert(title: "提示", message: "登录信息丢失，请重启 App"),
+            "transient 本地存储错误绝不能走 terminal force-quit 通道"
+        )
     }
 
     /// case#5：.network → RetryView
