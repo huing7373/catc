@@ -123,6 +123,15 @@ struct RootView: View {
             // bind() 是单次生效（second call 会被 ViewModel guard 短路），start() 内部
             // 也通过 pingTask != nil 防重复请求。两条防御 cover SwiftUI .task 多次触发场景。
             homeViewModel.bind(pingUseCase: container.makePingUseCase())
+            // Story 5.5 新增：bind LoadHomeUseCase + ErrorPresenter，让 ErrorPresenter onRetry 闭包
+            // 能驱动 ViewModel 重试（resetLoadHomeForRetry → loadHome）.
+            // 启动期 LoadHome 已通过 bootstrapStep1 closure 调过一次（applyHomeData 同步注入数据 +
+            // 置 hasLoadedHome=true），此处的 bind 仅为 onRetry 路径建立 wire；ViewModel.loadHome()
+            // 在 hasLoadedHome=true 状态下被短路，不会双发请求.
+            homeViewModel.bind(
+                loadHomeUseCase: container.makeLoadHomeUseCase(),
+                errorPresenter: container.errorPresenter
+            )
             await homeViewModel.start()
         }
         .task {
@@ -162,15 +171,47 @@ struct RootView: View {
         #endif
 
         let useCase = container.makeGuestLoginUseCase()
+        let loadHomeUseCase = container.makeLoadHomeUseCase()
         let sessionStore = container.sessionStore
+        let homeViewModel = self.homeViewModel
         launchStateMachine = AppLaunchStateMachine(
             bootstrapStep1: { @Sendable in
+                // Step 1a: 游客登录（既有）—— 写 keychain token + sessionStore.user/pet
                 let output = try await useCase.execute()
                 await MainActor.run {
                     sessionStore.updateSession(SessionState(user: output.user, pet: output.pet))
                 }
+                // Story 5.5 AC6 Step 1b: 串行调 GET /home 拿首屏数据 → applyHomeData 同步注入
+                // 任一步抛错 → step1 整体失败 → 状态机走 .needsAuth(message:) → 显示 RetryView
+                //
+                // 串行而非并行：LoadHome 需要 token（GuestLogin 写 keychain 完成后才有）；
+                // 并行会引发 LoadHome 先发 → 401 → 静默重登 → 复杂边界.
+                //
+                // 不用 bootstrapStep2 插槽：让 GuestLogin + LoadHome 是单次原子启动事务的失败语义；
+                // 用户 RetryView 重试 → 整个 step1 closure 重跑（GuestLogin + LoadHome 都重跑）.
+                // 详见 Story 5.5 Dev Note #2.
+                //
+                // **错误映射**（Story 5.5 codex round 1 [P2] fix）: LoadHome 失败时**先**经
+                // AppErrorMapper.userFacingMessage 转成 user-facing 文案,再用 LocalizedError
+                // 包装抛出 —— 确保 AppLaunchStateMachine.messageFor 拿到的是"网络异常,请检查后重试"
+                // 这种 user copy,而不是 APIError.errorDescription 的 "Network error: ..." 等
+                // developer 串. AppErrorMapper 是 ErrorPresenter / RetryView 已经在用的统一映射,
+                // bootstrap 路径必须共用同一套以保证 UI 文案一致.
+                // 详见 docs/lessons/2026-04-27-bootstrap-error-must-route-via-mapper.md.
+                let homeData: HomeData
+                do {
+                    homeData = try await loadHomeUseCase.execute()
+                } catch {
+                    throw BootstrapMappedError(
+                        userFacingMessage: AppErrorMapper.userFacingMessage(for: error),
+                        underlying: error
+                    )
+                }
+                await MainActor.run {
+                    homeViewModel.applyHomeData(homeData)
+                }
             }
-            // bootstrapStep2 走默认 { } no-op；Story 5.5 接 LoadHomeUseCase 时改这里
+            // bootstrapStep2 仍走默认 { } no-op；本 story 故意不用 step2 插槽（Dev Note #2）
         )
     }
 
@@ -233,6 +274,26 @@ struct RootView: View {
         }
         .errorPresentationHost(presenter: container.errorPresenter)
     }
+}
+
+/// Story 5.5 codex round 1 [P2] fix: 把 bootstrap step closure 内的失败包装成
+/// LocalizedError, 并预先经 AppErrorMapper 映射为 user-facing 文案.
+///
+/// **为什么单独一个 wrapper 类型**:
+/// - AppLaunchStateMachine.messageFor 用 `as? LocalizedError + errorDescription` 提取文案,
+///   APIError 实现的 errorDescription 是面向 developer 的 ("Network error: timed out").
+/// - 直接修改 APIError.errorDescription 会污染所有调用点（log / 调试输出 / 业务上报）的
+///   reading,把 internal 错误变成 user copy 不可接受.
+/// - 在 bootstrap 边界做一层 wrapper：内部 underlying 保留原 APIError 给 log / 上报,
+///   外层 errorDescription 走 AppErrorMapper.userFacingMessage —— RetryView 看到的是
+///   "网络异常, 请检查后重试" / "服务繁忙, 请稍后重试" 等 user copy.
+///
+/// internal access：让 AppLaunchStateMachineTests / RootView 集成测试能直接构造断言.
+struct BootstrapMappedError: LocalizedError {
+    let userFacingMessage: String
+    let underlying: Error
+
+    var errorDescription: String? { userFacingMessage }
 }
 
 /// Story 5.2 新增子视图：用 `@ObservedObject` 订阅 `AppLaunchStateMachine.state` 的变化.

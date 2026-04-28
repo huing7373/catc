@@ -35,8 +35,8 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-04-27
-# story 5-4 review
+last_updated: 2026-04-28
+# story 5-5 review
 project: cat
 project_key: NOKEY
 tracking_system: file-system
@@ -87,7 +87,7 @@ development_status:
   5-2-启动自动登录-usecase: done
   5-3-apiclient-interceptor-自动注入-bearer-token: done
   5-4-无效-token-静默重新登录: done
-  5-5-loadhomeusecase-主界面用-get-home-一次拉取全部数据: backlog
+  5-5-loadhomeusecase-主界面用-get-home-一次拉取全部数据: review
   epic-5-retrospective: optional
   epic-6: backlog
   6-1-跨端集成测试场景-自动登录-e2e: backlog

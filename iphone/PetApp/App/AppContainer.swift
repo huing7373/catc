@@ -195,6 +195,19 @@ public final class AppContainer: ObservableObject {
         )
     }
 
+    /// Story 5.5 新增：构造 HomeRepository（DefaultHomeRepository）.
+    /// Repository 是 value type struct；apiClient 单例由 container 持有（已被 Story 5.4 装饰器包装 ——
+    /// 业务请求 401 自动触发静默重登 + 重试一次）.
+    public func makeHomeRepository() -> HomeRepositoryProtocol {
+        DefaultHomeRepository(apiClient: apiClient)
+    }
+
+    /// Story 5.5 新增：构造 LoadHomeUseCase.
+    /// UseCase 是 value type struct；每次调用返回新实例；repository 也是新实例（廉价）.
+    public func makeLoadHomeUseCase() -> LoadHomeUseCaseProtocol {
+        DefaultLoadHomeUseCase(repository: makeHomeRepository())
+    }
+
     /// Story 5.4 新增：构造 SilentReloginUseCase（默认走 container 持有的 keychain + 新建 repository）.
     /// 让需要直接调 SilentRelogin 的场景（集成测试 / future 业务）走 container 入口.
     /// 注：此处的 repository 是 wrap 过的（来自 makeAuthRepository）—— 因 /auth/guest-login

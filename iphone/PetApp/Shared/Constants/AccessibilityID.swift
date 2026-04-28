@@ -21,6 +21,9 @@ public enum AccessibilityID {
         // Story 2.8: dev "重置身份" 按钮（仅 Debug build 渲染）+ alert reserved identifier。
         public static let btnResetIdentity = "home_btnResetIdentity"
         public static let resetIdentityAlert = "home_resetIdentityAlert"
+        // Story 5.5: petArea 下的 pet 名称 + chestArea 上的倒计时显示
+        public static let petName = "home_petName"
+        public static let chestRemaining = "home_chestRemaining"
     }
 
     // Story 2.3 新增：主界面跳转的全屏 Sheet placeholder a11y 标识。

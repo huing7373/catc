@@ -139,6 +139,51 @@ final class AppLaunchStateMachineTests: XCTestCase {
         XCTAssertEqual(sm.state, .ready)
     }
 
+    /// case#10 (Story 5.5 codex round 1 [P2] fix)：bootstrap step closure 抛 BootstrapMappedError
+    /// → state.message 等于 mapper user-facing 文案（**不是** APIError developer 串）.
+    ///
+    /// 防回退（regression guard）: fix 前 RootView bootstrap closure 把 APIError 直接抛给 messageFor,
+    /// messageFor 走 `as? LocalizedError + errorDescription` —— 但 APIError.errorDescription 是
+    /// developer copy ("Network error: timed out" / "Business error 1009: ..."), 用户看不懂.
+    /// fix 后 closure 用 BootstrapMappedError 包一层 LocalizedError, errorDescription 走
+    /// AppErrorMapper.userFacingMessage —— RetryView 才能展示 "网络异常, 请检查后重试" 等 user copy.
+    func testBootstrapWithMappedErrorPropagatesUserFacingMessage() async {
+        let underlying = APIError.network(underlying: URLError(.timedOut))
+        let wrapped = BootstrapMappedError(
+            userFacingMessage: AppErrorMapper.userFacingMessage(for: underlying),
+            underlying: underlying
+        )
+        let sm = AppLaunchStateMachine(
+            bootstrapStep1: { throw wrapped },
+            bootstrapStep2: { /* never called */ }
+        )
+        await sm.bootstrap()
+        XCTAssertEqual(
+            sm.state,
+            .needsAuth(message: "网络异常，请检查后重试"),
+            "bootstrap 失败必须经 AppErrorMapper 派出 user-facing 文案，不能漏 APIError developer 串到 RetryView"
+        )
+    }
+
+    /// case#11 (Story 5.5 codex round 1 [P2] fix): business code 1009 (服务繁忙) 走 mapper.
+    func testBootstrapWithMappedBusinessErrorPropagatesUserFacingMessage() async {
+        let underlying = APIError.business(code: 1009, message: "server 原文", requestId: "req_x")
+        let wrapped = BootstrapMappedError(
+            userFacingMessage: AppErrorMapper.userFacingMessage(for: underlying),
+            underlying: underlying
+        )
+        let sm = AppLaunchStateMachine(
+            bootstrapStep1: { throw wrapped },
+            bootstrapStep2: { /* never called */ }
+        )
+        await sm.bootstrap()
+        XCTAssertEqual(
+            sm.state,
+            .needsAuth(message: "服务繁忙，请稍后重试"),
+            "business 错误走 AppErrorMapper user copy, 不再展示 server 原文 / 'Business error 1009:...'"
+        )
+    }
+
     /// case#7 (happy)：retry() 重置 state = .launching → 重跑 step → 成功后 .ready
     /// 用 retry 验证"用户在 .needsAuth 状态点重试按钮"路径。
     func testRetryResetsStateAndReruns() async {

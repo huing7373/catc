@@ -95,7 +95,17 @@ public final class APIClient: APIClientProtocol {
     //   - 抹平歧义(不依赖任何 Apple 内部并发保证)
     //   - 构造开销可忽略(< 1µs，远小于一次网络 I/O)
     //   - 未来需要定制 keyDecodingStrategy / dateDecodingStrategy 时改一处即可
-    private func makeDecoder() -> JSONDecoder { JSONDecoder() }
+    //
+    // Story 5.5 改动：dateDecodingStrategy = .iso8601.
+    //   - server `homeResponseDTO.chest.unlockAt` 用 `time.RFC3339` 格式（V1 §5.1 钦定）
+    //   - Swift `Date` 类型字段（如 `ChestDTO.unlockAt`）依赖此策略才能从 ISO8601 字符串解码
+    //   - 此为全局策略：未来所有 wire DTO 的 `Date` 字段都必须由 server 以 RFC3339 字符串下发
+    //     （契约：所有 server endpoint 的时间字段统一 RFC3339；与 server `time.Time.Format(time.RFC3339)` 对齐）
+    private func makeDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
     private func makeEncoder() -> JSONEncoder { JSONEncoder() }
 
     public func request<T: Decodable>(_ endpoint: Endpoint) async throws -> T {

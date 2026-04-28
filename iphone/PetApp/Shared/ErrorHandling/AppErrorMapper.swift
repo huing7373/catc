@@ -66,6 +66,30 @@ public enum AppErrorMapper {
         }
     }
 
+    /// 抽出**纯文案**（不带 presentation 样式）的对外 helper.
+    /// 给非"调 ErrorPresenter"路径用,如启动状态机 bootstrap 的 step closure 失败时
+    /// 需要把错误转成 user-facing message 再 throw 出去，让 AppLaunchStateMachine
+    /// 的 .needsAuth(message:) 走 RetryView 而不是显示 developer 串.
+    ///
+    /// Story 5.5 codex round 1 [P2] fix: bootstrap loadHomeUseCase.execute() 失败时
+    /// 原走 `messageFor(error:)` → `APIError.errorDescription`,产出 "Network error: ..."
+    /// 等 developer 文案. 改用本 helper 让 mapper 唯一定义点 production user copy.
+    /// 详见 docs/lessons/2026-04-27-bootstrap-error-must-route-via-mapper.md.
+    ///
+    /// 实现：复用 `presentation(for:)` 然后从 ErrorPresentation 提取文案部分.
+    /// 不直接重复 mapping switch —— 单一 source of truth,以后改 mapper 文案时
+    /// bootstrap 路径自动跟上.
+    public static func userFacingMessage(for error: Error) -> String {
+        switch presentation(for: error) {
+        case let .toast(message):
+            return message
+        case let .alert(_, message):
+            return message
+        case let .retry(message):
+            return message
+        }
+    }
+
     /// 错误码 → 用户文案。覆盖 V1接口设计 §3 全部 32 码。未命中（业务方传未知 code）退回 server 返回的 message。
     /// 表里短句**一律不超过 12 字**，避免 alert 排版换行；超过 12 字的（如"操作过于频繁，请稍后再试"）单独 review。
     public static func localizedMessage(forBusinessCode code: Int, fallback: String) -> String {

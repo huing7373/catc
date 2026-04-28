@@ -82,4 +82,37 @@ final class AppErrorMapperTests: XCTestCase {
         XCTAssertEqual(AppErrorMapper.localizedMessage(forBusinessCode: 6002, fallback: ""), "房间已满")
         XCTAssertEqual(AppErrorMapper.localizedMessage(forBusinessCode: 7002, fallback: ""), "实时连接未就绪")
     }
+
+    // MARK: - userFacingMessage（Story 5.5 codex round 1 [P2] fix）
+
+    /// 给非"调 ErrorPresenter" 路径用：bootstrap step closure 失败需把 APIError 转成 user-facing
+    /// 文案抛回 AppLaunchStateMachine —— 此 helper 必须与 presentation(for:) 对齐 message 部分,
+    /// 不能各自独立维护一套文案表（否则 RetryView / Alert 与 bootstrap message 会漂移）.
+
+    /// network 错误 → 走 .retry → 文案与 retry message 一致
+    func testUserFacingMessageForNetworkErrorMatchesRetryCopy() {
+        let msg = AppErrorMapper.userFacingMessage(for: APIError.network(underlying: URLError(.timedOut)))
+        XCTAssertEqual(msg, "网络异常，请检查后重试", "bootstrap 路径必须复用 mapper user copy,不再展示 'Network error: ...'")
+    }
+
+    /// business 错误 → 走 .alert → 文案与 alert message 一致（错误码字典命中）
+    func testUserFacingMessageForBusinessErrorMatchesAlertCopy() {
+        let msg = AppErrorMapper.userFacingMessage(
+            for: APIError.business(code: 1009, message: "原文(server)", requestId: "req_x")
+        )
+        XCTAssertEqual(msg, "服务繁忙，请稍后重试")
+    }
+
+    /// decoding 错误 → 走 .alert → 文案与 alert message 一致
+    func testUserFacingMessageForDecodingErrorMatchesAlertCopy() {
+        let msg = AppErrorMapper.userFacingMessage(for: APIError.decoding(underlying: URLError(.cannotParseResponse)))
+        XCTAssertEqual(msg, "数据异常，请稍后重试")
+    }
+
+    /// 非 APIError → 走 fallback alert → 文案与 fallback message 一致
+    func testUserFacingMessageForGenericErrorMatchesFallbackCopy() {
+        struct CustomError: Error {}
+        let msg = AppErrorMapper.userFacingMessage(for: CustomError())
+        XCTAssertEqual(msg, "请稍后重试", "非 APIError 应走 fallback 文案,与 presentation 对齐")
+    }
 }
