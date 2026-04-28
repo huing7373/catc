@@ -74,9 +74,33 @@ final class HomeViewModelLoadHomeTests: XCTestCase {
         }
     }
 
-    /// case#2b: business error → loadingState=.failed + presenter 弹 alert（非 retry）.
+    /// case#2b: permanent business error → loadingState=.failed + presenter 弹 alert（非 retry）.
     /// 验证 ViewModel 透传错误给 mapper，由 mapper 决定呈现样式（不在 ViewModel 内做错误码翻译）.
+    /// **Story 5.5 round 5 [P1] fix**: 用 4002 (permanent) 而非 1009 (transient → .retry).
+    /// transient 业务码（1005/1007/1008/1009）改派 .retry 后,本测试改用 permanent 码做 .alert 验证;
+    /// 另增 case#2c 单测覆盖 transient 业务码 → .retry 路径.
     func testLoadHomeBusinessFailureUpdatesStateAndPresentsAlert() async {
+        let mock = MockLoadHomeUseCase()
+        mock.executeStub = .failure(APIError.business(code: 4002, message: "宝箱尚未解锁", requestId: "req_x"))
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let viewModel = HomeViewModel(loadHomeUseCase: mock, errorPresenter: presenter)
+
+        await viewModel.loadHome()
+
+        if case .failed = viewModel.loadingState {} else {
+            XCTFail("loadingState 应为 .failed，实际 \(viewModel.loadingState)")
+        }
+        if case .alert = presenter.current {
+            // pass —— permanent business 走 alert
+        } else {
+            XCTFail("permanent business 错误应弹 .alert，实际 \(String(describing: presenter.current))")
+        }
+    }
+
+    /// case#2c (Story 5.5 round 5 [P1] fix): transient business error → .retry.
+    /// 1009 (服务繁忙) 是 transient 类,mapper 改派 .retry —— ViewModel 仍透传给 mapper,
+    /// 让 ErrorPresenter 渲染 RetryView 让用户重试.
+    func testLoadHomeTransientBusinessFailurePresentsRetry() async {
         let mock = MockLoadHomeUseCase()
         mock.executeStub = .failure(APIError.business(code: 1009, message: "服务繁忙", requestId: "req_x"))
         let presenter = ErrorPresenter(toastDuration: 0.05)
@@ -87,10 +111,10 @@ final class HomeViewModelLoadHomeTests: XCTestCase {
         if case .failed = viewModel.loadingState {} else {
             XCTFail("loadingState 应为 .failed，实际 \(viewModel.loadingState)")
         }
-        if case .alert = presenter.current {
-            // pass —— business 走 alert（非 retry）
+        if case .retry = presenter.current {
+            // pass —— transient business (1009) 走 retry
         } else {
-            XCTFail("business 错误应弹 .alert，实际 \(String(describing: presenter.current))")
+            XCTFail("transient business 错误应弹 .retry，实际 \(String(describing: presenter.current))")
         }
     }
 

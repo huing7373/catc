@@ -131,9 +131,11 @@ final class RootViewWireTests: XCTestCase {
     /// 弹 "Network error: <URLError 系统串>" 等 developer-facing 文案, 而不是 mapper 钦定的
     /// "网络异常，请检查后重试" 等用户面文案. 这条 fix 保证两条失败路径走同一 mapping pipeline.
     ///
-    /// 用 .business(1009) 验证: mapper 派 .alert("提示", "服务繁忙，请稍后重试");
+    /// 用 .business(1009) 验证: mapper 派 .retry("服务繁忙，请稍后重试");
     /// raw APIError fallback 走的话只能拿 LocalizedError errorDescription "Business error 1009: ..."
-    /// 是 developer 串. 断言 state 是 .alert 才证明走了 mapper.
+    /// 是 developer 串. 断言 state 是 .retry(指定文案) 才证明走了 mapper.
+    /// **Story 5.5 round 5 [P1] fix**: 1009 是 transient 业务码,mapper 改派 .retry 而非 .alert
+    /// （之前 round 4 错把所有 business 一律映射成 .alert,导致 1009 进 AlertOverlayView 死锁）.
     func testBootstrapClosureWrapsGuestLoginFailureViaAppErrorMapper() async {
         // 复刻 RootView step1 closure 对 guest-login 失败的包装模式 (round 4 修复后):
         let guestLoginError: APIError = .business(code: 1009, message: "raw server原文 — should be hidden", requestId: "req_x")
@@ -154,9 +156,9 @@ final class RootViewWireTests: XCTestCase {
 
         XCTAssertEqual(
             sm.state,
-            .needsAuth(presentation: .alert(title: "提示", message: "服务繁忙，请稍后重试")),
-            "guest-login 失败必须经 mapper → .alert; round 4 [P2] fix 之前会 fallback 到 LocalizedError " +
-            "errorDescription, 弹 developer-facing 串. 当前 state: \(sm.state)"
+            .needsAuth(presentation: .retry(message: "服务繁忙，请稍后重试")),
+            "transient business 1009 必须经 mapper → .retry; 之前 round 4 fallback 会派 .alert 死锁. " +
+            "当前 state: \(sm.state)"
         )
     }
 

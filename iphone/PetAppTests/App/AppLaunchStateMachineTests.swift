@@ -166,8 +166,12 @@ final class AppLaunchStateMachineTests: XCTestCase {
         )
     }
 
-    /// case#11 (Story 5.5 round 1 [P2] fix): business code 1009 (服务繁忙) 走 mapper → .alert.
-    func testBootstrapWithMappedBusinessErrorRoutesToAlertPresentation() async {
+    /// case#11 (Story 5.5 round 5 [P1] fix): transient business code 1009 (服务繁忙) 走 mapper → .retry.
+    /// **regression guard**: round 4 fix 错误把所有 business code 一律映射成 .alert,导致
+    /// bootstrap 路径下 1009 进 AlertOverlayView ("知道了" 按钮 no-op) 死锁.
+    /// round 5 fix: mapper 把 transient 业务码（1005/1007/1008/1009）改派 .retry,
+    /// 让 bootstrap 失败 → RetryView → 用户重试 → 自愈.
+    func testBootstrapWithMappedBusinessErrorRoutesToRetryPresentation() async {
         let underlying = APIError.business(code: 1009, message: "server 原文", requestId: "req_x")
         let wrapped = BootstrapMappedError(
             presentation: AppErrorMapper.presentation(for: underlying),
@@ -180,8 +184,28 @@ final class AppLaunchStateMachineTests: XCTestCase {
         await sm.bootstrap()
         XCTAssertEqual(
             sm.state,
-            .needsAuth(presentation: .alert(title: "提示", message: "服务繁忙，请稍后重试")),
-            "business 错误走 AppErrorMapper → .alert; 不再降级为 retry"
+            .needsAuth(presentation: .retry(message: "服务繁忙，请稍后重试")),
+            "transient business 1009 必须走 .retry; round 5 [P1] regression guard"
+        )
+    }
+
+    /// case#11b (Story 5.5 round 5 [P1] fix): permanent business code 仍走 .alert.
+    /// 用 5002 (道具不属于你) 作 permanent 类代表 —— 用户重试也不会改变结果.
+    func testBootstrapWithMappedPermanentBusinessErrorRoutesToAlertPresentation() async {
+        let underlying = APIError.business(code: 5002, message: "server 原文", requestId: "req_x")
+        let wrapped = BootstrapMappedError(
+            presentation: AppErrorMapper.presentation(for: underlying),
+            underlying: underlying
+        )
+        let sm = AppLaunchStateMachine(
+            bootstrapStep1: { throw wrapped },
+            bootstrapStep2: { /* never called */ }
+        )
+        await sm.bootstrap()
+        XCTAssertEqual(
+            sm.state,
+            .needsAuth(presentation: .alert(title: "提示", message: "道具不属于你")),
+            "permanent business 仍走 .alert (terminal,需重启 App)"
         )
     }
 

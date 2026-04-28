@@ -14,14 +14,15 @@ final class AppErrorMapperTests: XCTestCase {
 
     // MARK: - APIError 四态映射
 
-    /// case#1：.business 业务错误 → AlertOverlay + 错误码字典文案
+    /// case#1：.business 业务错误（permanent 类）→ AlertOverlay + 错误码字典文案.
+    /// 3002 "步数不足" 是 permanent（用户操作上下文错,不是 server 瞬时容量问题）→ .alert.
     func testBusinessErrorMapsToAlertWithLocalizedMessage() {
         let error = APIError.business(code: 3002, message: "原文(server)", requestId: "req_1")
         let presentation = AppErrorMapper.presentation(for: error)
         XCTAssertEqual(presentation, .alert(title: "提示", message: "步数不足，再走走吧"))
     }
 
-    /// case#2：.business 但 code 不在字典内 → fallback 用 server message
+    /// case#2：.business 但 code 不在字典内 → fallback 用 server message,默认 .alert（permanent）.
     func testBusinessErrorWithUnknownCodeFallsBackToServerMessage() {
         let error = APIError.business(code: 9999, message: "未知错误描述", requestId: "req_x")
         let presentation = AppErrorMapper.presentation(for: error)
@@ -33,6 +34,47 @@ final class AppErrorMapperTests: XCTestCase {
         let error = APIError.business(code: 9999, message: "", requestId: "req_x")
         let presentation = AppErrorMapper.presentation(for: error)
         XCTAssertEqual(presentation, .alert(title: "提示", message: "操作失败，请稍后重试"))
+    }
+
+    // MARK: - transient 业务码（Story 5.5 round 5 [P1] fix）
+
+    /// transient 业务码（1005/1007/1008/1009）必须走 .retry 而非 .alert,
+    /// 让 bootstrap 路径下 1009 "服务繁忙" 等可恢复错误能进 RetryView 而非 exit App.
+
+    /// 1005 操作过于频繁 → .retry
+    func testBusinessCode1005MapsToRetry() {
+        let error = APIError.business(code: 1005, message: "原文", requestId: "req_x")
+        let presentation = AppErrorMapper.presentation(for: error)
+        XCTAssertEqual(presentation, .retry(message: "操作过于频繁，请稍后再试"))
+    }
+
+    /// 1007 数据冲突 → .retry
+    func testBusinessCode1007MapsToRetry() {
+        let error = APIError.business(code: 1007, message: "原文", requestId: "req_x")
+        let presentation = AppErrorMapper.presentation(for: error)
+        XCTAssertEqual(presentation, .retry(message: "数据冲突，请重试"))
+    }
+
+    /// 1008 操作重复 → .retry
+    func testBusinessCode1008MapsToRetry() {
+        let error = APIError.business(code: 1008, message: "原文", requestId: "req_x")
+        let presentation = AppErrorMapper.presentation(for: error)
+        XCTAssertEqual(presentation, .retry(message: "操作重复，请稍后再试"))
+    }
+
+    /// 1009 服务繁忙 → .retry —— round 5 [P1] regression fix:
+    /// bootstrap path 下此码必须保留重试入口（之前 round 4 错误改成 .alert → AlertOverlay 死锁）.
+    func testBusinessCode1009MapsToRetry() {
+        let error = APIError.business(code: 1009, message: "原文", requestId: "req_x")
+        let presentation = AppErrorMapper.presentation(for: error)
+        XCTAssertEqual(presentation, .retry(message: "服务繁忙，请稍后重试"))
+    }
+
+    /// 反例：相邻的 1004 (权限不足) 是 permanent 类,必须走 .alert（用户行为不会因为 retry 自愈）.
+    func testBusinessCode1004StaysAlert() {
+        let error = APIError.business(code: 1004, message: "原文", requestId: "req_x")
+        let presentation = AppErrorMapper.presentation(for: error)
+        XCTAssertEqual(presentation, .alert(title: "提示", message: "权限不足"))
     }
 
     /// case#4（Story 5.4 round 5 fix 修正）：.unauthorized → Alert（"请重启应用"）.
@@ -95,12 +137,22 @@ final class AppErrorMapperTests: XCTestCase {
         XCTAssertEqual(msg, "网络异常，请检查后重试", "bootstrap 路径必须复用 mapper user copy,不再展示 'Network error: ...'")
     }
 
-    /// business 错误 → 走 .alert → 文案与 alert message 一致（错误码字典命中）
-    func testUserFacingMessageForBusinessErrorMatchesAlertCopy() {
+    /// business 错误（transient 1009）→ 走 .retry → 文案与 retry message 一致（错误码字典命中）.
+    /// Story 5.5 round 5 [P1] fix: 1009 从 .alert 改 .retry 后,本测试仍验证 message 提取正确,
+    /// 因为 userFacingMessage 内部 switch 三态都 return message 字段.
+    func testUserFacingMessageForBusinessErrorMatchesRetryCopy() {
         let msg = AppErrorMapper.userFacingMessage(
             for: APIError.business(code: 1009, message: "原文(server)", requestId: "req_x")
         )
         XCTAssertEqual(msg, "服务繁忙，请稍后重试")
+    }
+
+    /// business 错误（permanent 3002）→ 走 .alert → 文案与 alert message 一致.
+    func testUserFacingMessageForPermanentBusinessErrorMatchesAlertCopy() {
+        let msg = AppErrorMapper.userFacingMessage(
+            for: APIError.business(code: 3002, message: "原文(server)", requestId: "req_x")
+        )
+        XCTAssertEqual(msg, "步数不足，再走走吧")
     }
 
     /// decoding 错误 → 走 .alert → 文案与 alert message 一致

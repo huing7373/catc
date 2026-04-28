@@ -11,6 +11,13 @@
 // - 用 enum + static func（与 AccessibilityID 风格一致）：本类是无状态查表器
 // - presentation(for:) 接收 Error 而非 APIError：让 ViewModel catch block 不必 narrow
 // - 错误码字典放 switch case 而非 dictionary：let compiler 帮我们做穷举检查
+//
+// **transient vs terminal 业务码区分（Story 5.5 round 5 [P1] fix）**：
+// .business 不再统一映射成 .alert。`.alert` 语义是 "终端错误,只能重启 App 恢复"
+// （配合 AlertOverlayView 的 OK 按钮调 exit(0)）；transient 业务码（1005 频繁 / 1007 冲突
+// / 1008 重复 / 1009 服务繁忙；网络/容量/限流类瞬时错误）改走 .retry —— 让冷启动 bootstrap
+// 路径下 1009 等可恢复错误能进 RetryView 而非"知道了 → exit App"的死路.
+// 详见 docs/lessons/2026-04-27-business-error-transient-vs-terminal.md.
 
 import Foundation
 
@@ -18,8 +25,9 @@ import Foundation
 ///
 /// 映射规则（与 总体架构 §V1错误码规范 + iOS 架构 §8.3 对齐）：
 ///
-/// - `.business(code, message, _)` → AlertOverlay；文案优先用本地 codeMessage 表（按 V1 错误码字典精挑短句），
-///   未命中时退回 server 返回的 `message`（再为空就给通用兜底）。
+/// - `.business(code, message, _)` → 取决于 code 的语义类:
+///   - **transient**（瞬时类:1005/1007/1008/1009）→ `.retry`,文案取本地表（"操作过于频繁/数据冲突/操作重复/服务繁忙"）.
+///   - **permanent**（其他 1xxx/2xxx/...）→ `.alert`,文案优先本地表,未命中退回 server message（再为空给通用兜底）.
 /// - `.unauthorized` → AlertOverlay；文案 "登录失败，请重新启动应用"（Story 5.4 round 5 fix
 ///   修正：Story 5.4 落地 `AuthRetryingAPIClient` 后,业务层接到 `.unauthorized` 的语义已经反转 ——
 ///   不再是"server 第一次返 401"（那种已被 decorator 内部静默重登 + 重试一次吞掉），而是"已经
@@ -32,7 +40,28 @@ import Foundation
 ///   AuthRetryingAPIClient **不**会 catch 这个 case，需要 cold-start GuestLoginUseCase 接手）。
 /// - `.network(_)` → RetryView；文案 "网络异常，请检查后重试"。
 /// - `.decoding(_)` → AlertOverlay；文案 "数据异常，请稍后重试"。
+///
+/// **`.alert` vs `.retry` 语义区分（Story 5.5 round 5 [P1+P2] fix）**：
+/// - `.alert` = **terminal**：用户必须重启 App（mapper 钦定的 alert 全部带"请重启应用" / "数据异常请稍后重试"等
+///   非 in-app-recoverable 文案；UI 层 AlertOverlayView 的"知道了"按钮调 `exit(0)` 落实"重启"语义）.
+/// - `.retry` = **transient**：用户可在 App 内点重试自愈（network / business 1005/1007/1008/1009 等瞬时错误）.
+/// - `.toast` = **info-level**：非阻塞短提示（mapper 当前不派 toast,留给 ViewModel 自定义场景）.
+///
+/// 这条二分让 bootstrap 路径可以无脑分发：`.alert` → AlertOverlayView（exit）；`.retry` → RetryView（重跑 closure）.
+/// 详见 docs/lessons/2026-04-27-business-error-transient-vs-terminal.md.
 public enum AppErrorMapper {
+
+    /// transient（可在 App 内重试自愈）类业务码集合.
+    /// 选取规则：V1 §3 字典里语义为"瞬时容量/限流/版本冲突/重复操作"的码 —— 这些码在 client 重试时大概率自愈.
+    /// 未列入此集合的码默认走 `.alert`（terminal,需重启 App）.
+    /// 详见 docs/lessons/2026-04-27-business-error-transient-vs-terminal.md.
+    public static let transientBusinessCodes: Set<Int> = [
+        1005, // 操作过于频繁,请稍后再试 —— 限流
+        1007, // 数据冲突,请重试 —— 乐观锁冲突
+        1008, // 操作重复,请稍后再试 —— 幂等键冲突
+        1009, // 服务繁忙,请稍后重试 —— server 容量过载
+    ]
+
     /// 把任意 Error 映射成 ErrorPresentation（呈现样式 + 文案）。
     /// 入参 error 必须是 APIError 才走具体分支；其它 Error 类型走 fallback `.alert("操作失败", "请稍后重试")`。
     public static func presentation(for error: Error) -> ErrorPresentation {
@@ -42,6 +71,13 @@ public enum AppErrorMapper {
         switch apiError {
         case let .business(code, message, _):
             let userMessage = localizedMessage(forBusinessCode: code, fallback: message)
+            // Story 5.5 round 5 [P1] fix: transient 业务码（1005/1007/1008/1009 等）走 .retry,
+            // 让 bootstrap 路径下 1009 "服务繁忙,请稍后重试" 等可恢复错误进 RetryView 而非
+            // "知道了 → exit App" 的死路. permanent 业务码（其他）保持 .alert（终端,引导重启）.
+            // 详见 docs/lessons/2026-04-27-business-error-transient-vs-terminal.md.
+            if transientBusinessCodes.contains(code) {
+                return ErrorPresentation.retry(message: userMessage)
+            }
             return ErrorPresentation.alert(title: "提示", message: userMessage)
 
         case .unauthorized:

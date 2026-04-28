@@ -441,22 +441,27 @@ private struct LaunchedContentView: View {
 
     /// Story 5.5 round 2 [P1] fix: 根据 presentation 三态分发错误 UI.
     /// Story 5.5 round 4 [P2] fix: 拆 retry-able 和 alert-only 两类 dismiss 行为.
+    /// Story 5.5 round 5 [P1+P2] fix: 综合修复 ——
+    ///
+    ///   1. `.alert` 在 mapper 层已经收紧为"terminal,必须重启 App"语义（mapper round 5 fix:
+    ///      transient 业务码 1005/1007/1008/1009 改派 .retry,只有真正 unrecoverable 的才派 .alert）.
+    ///   2. AlertOverlayView 的 OK 按钮 ("知道了") 必须执行"重启" 实义动作 ——
+    ///      调 `exit(0)` 强制退出进程,让用户下次启动重新走 cold-start GuestLoginUseCase.
+    ///   3. 这条 onDismiss 闭包不能再是 no-op (round 4 引入的死锁: 用户点 OK → 闭包 no-op → state 不变 →
+    ///      AlertOverlayView 仍渲染 → 永远卡住,只能 force-quit). 用 exit(0) 既执行了 mapper 文案承诺
+    ///      ("请重启应用"),又给了 OK 按钮真实功能.
     ///
     /// - `.retry`: 用户可点重试触发 stateMachine.retry()（继续走 GuestLogin + LoadHome 重试链路）.
-    /// - `.alert`: 用户必须重启 App（mapper 已钦定文案 "请重启应用" / "请重新启动应用"）.
-    ///   **onDismiss 不调 retry()** —— round 4 [P2] fix: 原方案 onDismiss 调 retry() 会把
-    ///   alert-only 错误（.unauthorized / .decoding / .missingCredentials 等 mapper 钦定为
-    ///   "用户必须重启" 的不可恢复错误）的 "知道了" 按钮变成隐式 retry 触发器, 与文案
-    ///   "请重启应用" 直接矛盾, 形成 alert → dismiss → 立即重发请求 → 仍失败 → 同 alert 弹回的死循环
-    ///   或反复请求. 现在 alert-only 路径 onDismiss 仅 dismiss 当前 view, 状态保持
-    ///   .needsAuth(presentation: .alert) —— 但因为 alert 是从同一份 state 渲染出来的,
-    ///   dismiss 后 state 没变, AlertOverlayView 仍会显示, 等价于 "用户必须重启 App" 语义.
-    ///   实际行为: 用户点 "知道了" → onDismiss no-op → state 仍 .needsAuth(.alert) → AlertOverlayView 仍显示
-    ///   → 用户唯一出路就是冷重启 (符合 mapper 钦定的 "请重启应用" 引导).
-    /// - `.toast`: bootstrap 阶段不应该派发 toast（toast 是非 modal 的轻量提示；启动失败必须 modal）.
-    ///   出现说明 mapper 配置异常 → 兜底渲染为 alert 而非 toast,避免 toast 自动消失后留白屏.
-    ///   onDismiss 同 alert-only 路径: 不调 retry, 等价于让用户冷重启.
-    /// 详见 docs/lessons/2026-04-27-bootstrap-all-error-paths-route-via-mapper.md.
+    ///   transient 业务码（1005/1007/1008/1009 / network）会落到这里,bootstrap 失败 → RetryView → 用户重试 → 自愈.
+    /// - `.alert`: terminal 错误（.unauthorized / .missingCredentials / .decoding / 永久业务码）.
+    ///   onDismiss 调 `exit(0)` —— 与 mapper 文案 "请重启应用" 对齐,把"重启"动作真实落地.
+    ///   注意: bootstrap 路径才需要 exit;非 bootstrap 路径（ErrorPresenter.present 的 alert）由
+    ///   ErrorPresenter 自己管理 dismiss,不会复用本 onDismiss 闭包.
+    /// - `.toast`: bootstrap 阶段不应该派发 toast（mapper 当前根本不派 toast；本分支是防御性兜底）.
+    ///   出现说明 mapper 配置异常 → 兜底渲染为 alert 而非 toast（toast 自动消失后留白屏更糟）.
+    ///   onDismiss 同 alert: exit App 让用户重启.
+    /// 详见 docs/lessons/2026-04-27-bootstrap-all-error-paths-route-via-mapper.md
+    /// + docs/lessons/2026-04-27-business-error-transient-vs-terminal.md.
     @ViewBuilder
     private func needsAuthContent(for presentation: ErrorPresentation) -> some View {
         switch presentation {
@@ -469,15 +474,19 @@ private struct LaunchedContentView: View {
             AlertOverlayView(
                 title: title,
                 message: message,
-                onDismiss: { /* alert-only: 不调 retry, 让用户冷重启 (round 4 [P2] fix) */ }
+                // round 5 [P2] fix: terminal alert 的 OK 按钮调 exit(0),与 mapper 钦定的
+                // "请重启应用" 文案对齐,把"重启"动作真实落地. 不再是 no-op (round 4 死锁) 也不
+                // 隐式 retry (round 3 死循环). exit(0) 是 unrecoverable error 的合理 UX:
+                // 用户点 OK → 进程退出 → 下次启动重新走 cold-start GuestLoginUseCase.
+                onDismiss: { exit(0) }
             )
         case let .toast(message):
             // 兜底：bootstrap 阶段拿到 toast presentation 异常 —— 渲染为 alert 防白屏.
-            // onDismiss 同 alert-only 路径不调 retry.
+            // onDismiss 同 alert: exit App 让用户重启 (mapper 配置异常算 unrecoverable).
             AlertOverlayView(
                 title: "提示",
                 message: message,
-                onDismiss: { /* alert-only fallback: 不调 retry (round 4 [P2] fix) */ }
+                onDismiss: { exit(0) }
             )
         }
     }

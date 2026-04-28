@@ -79,3 +79,4 @@
 | 2026-04-27 | [Launch state machine 必须携带完整 ErrorPresentation 语义 + bootstrap 重试不能重发已成功的 guest-login](2026-04-27-launch-state-machine-must-carry-presentation.md) | 2 | error-handling, architecture, perf | `<pending>` |
 | 2026-04-27 | [冷启动 HTTP 预算钦定 ≤2 时不能保留任何 nice-to-have 探针 + bootstrap retry 必须 fail-safe 重跑 auth](2026-04-27-cold-start-http-budget-and-bootstrap-retry-fail-safe.md) | 2 | architecture, error-handling | `<pending>` |
 | 2026-04-27 | [bootstrap 全部错误路径必经 mapper / ping 复活回 .ready 分支 / alert-only dismiss 不能隐式 retry](2026-04-27-bootstrap-all-error-paths-route-via-mapper.md) | 3 | error-handling, architecture | `<pending>` |
+| 2026-04-27 | [Business 错误必须区分 transient/terminal & alert OK 按钮必须有真实动作 & 4 轮 fix-review 单点 patch 反模式](2026-04-27-business-error-transient-vs-terminal.md) | 3 | error-handling, ui, architecture | `<pending>` |
