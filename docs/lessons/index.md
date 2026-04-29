@@ -4,6 +4,8 @@
 
 本目录收集每次 `/fix-review` 产出的经验沉淀，供后续 `/bmad-distillator` 蒸馏成紧凑 cheatsheet，指导未来 Claude 不再踩同类坑。
 
+**ADR 蒸馏状态**（2026-04-29）：以下 lesson 行末尾标 `**[ADR-0008]**` 表示已被 ADR-0008 v2 蒸馏；其中 silent relogin 相关 4 条因 silent relogin 整体退役而**完全 superseded**（lesson 教训仅保留作为未来 single-flight 协调器引用）；transient/terminal 系列 4 条**部分 superseded**（具体 case 分类已收录 ADR §4.2，但反模式 8.2/8.3/8.4 等元教训保留）。受影响 lesson 在 ADR-0008 §8 反模式登记 + §6 退役决策中有完整去向记录。详见 `_bmad-output/implementation-artifacts/decisions/0008-error-protocol.md`。
+
 | 日期 | 主题 | 条数 | 分类 | commit |
 |---|---|---|---|---|
 | 2026-04-24 | [配置路径 CWD 耦合 与 启动 banner 时序错位](2026-04-24-config-path-and-bind-banner.md) | 2 | config, error-handling | `8913fa7` |
@@ -70,11 +72,11 @@
 | 2026-04-27 | [DI 容器 production 默认值切换后，所有触发外部存储副作用的容器测试都必须改走注入路径](2026-04-27-appcontainertests-must-inject-isolated-keychain-namespace.md) | 1 | testing | `4c08fc6` |
 | 2026-04-27 | [SessionStore 写入但视图未订阅会渲染陈旧身份](2026-04-27-sessionstore-home-nickname-source-of-truth.md) | 1 | architecture | `f08878c` |
 | 2026-04-27 | [Reset 类操作必须同步清空 in-memory session 状态](2026-04-27-reset-identity-must-clear-in-memory-session.md) | 1 | architecture | `9ed4f97` |
-| 2026-04-27 | [actor coalesce 协调器的 inFlight 清理必须绑定 spawned task 生命周期，而不是 caller defer](2026-04-27-actor-coalesce-cleanup-must-bind-resource-not-caller.md) | 1 | architecture | `31c4fe7` |
-| 2026-04-27 | [静默重登必须区分"本地无凭证"vs"server 拒绝 token"，前者**不**走 relogin](2026-04-27-silent-relogin-must-distinguish-local-vs-server-unauthorized.md) | 1 | architecture, error-handling | `99e8afd` |
-| 2026-04-27 | [actor coalesce 仅靠 inFlight 字段不足以拦 stale-401，需要 generation snapshot](2026-04-27-silent-relogin-stale-401-needs-generation-dedup.md) | 1 | architecture | `1579c9c` |
-| 2026-04-27 | [actor coalesce 失败路径必须连带清空 cached result，否则 generation 短路会返回已被 invalidate 的旧 token](2026-04-27-actor-coalesce-failure-must-clear-cached-token.md) | 1 | error-handling | `83f8292` |
-| 2026-04-27 | [Retry decorator 上线后，原 `.unauthorized` 文案的语义会反转 — 必须同步审计所有 user-visible mapping](2026-04-27-retry-decorator-changes-unauthorized-presentation-semantics.md) | 1 | error-handling | `8892a9a` |
+| 2026-04-27 | [actor coalesce 协调器的 inFlight 清理必须绑定 spawned task 生命周期，而不是 caller defer](2026-04-27-actor-coalesce-cleanup-must-bind-resource-not-caller.md) | 1 | architecture | `31c4fe7` | **[ADR-0008 superseded]**
+| 2026-04-27 | [静默重登必须区分"本地无凭证"vs"server 拒绝 token"，前者**不**走 relogin](2026-04-27-silent-relogin-must-distinguish-local-vs-server-unauthorized.md) | 1 | architecture, error-handling | `99e8afd` | **[ADR-0008 partial-superseded]** （case 拆分保留 §6.5；relogin 路径退役）
+| 2026-04-27 | [actor coalesce 仅靠 inFlight 字段不足以拦 stale-401，需要 generation snapshot](2026-04-27-silent-relogin-stale-401-needs-generation-dedup.md) | 1 | architecture | `1579c9c` | **[ADR-0008 superseded]**
+| 2026-04-27 | [actor coalesce 失败路径必须连带清空 cached result，否则 generation 短路会返回已被 invalidate 的旧 token](2026-04-27-actor-coalesce-failure-must-clear-cached-token.md) | 1 | error-handling | `83f8292` | **[ADR-0008 superseded]**
+| 2026-04-27 | [Retry decorator 上线后，原 `.unauthorized` 文案的语义会反转 — 必须同步审计所有 user-visible mapping](2026-04-27-retry-decorator-changes-unauthorized-presentation-semantics.md) | 1 | error-handling | `8892a9a` | **[ADR-0008 partial-superseded]** （decorator 退役；元规则保留 §8.16）
 | 2026-04-27 | [bootstrap /home 失败必须经 AppErrorMapper + 可空 domain 字段必须区分 loading 与 server-null 两种 placeholder](2026-04-27-bootstrap-error-and-optional-pet-must-route-via-mapper.md) | 2 | architecture, error-handling | `ac03578` |
 | 2026-04-27 | [Launch state machine 必须携带完整 ErrorPresentation 语义 + bootstrap 重试不能重发已成功的 guest-login](2026-04-27-launch-state-machine-must-carry-presentation.md) | 2 | error-handling, architecture, perf | `b39e7a5` |
 | 2026-04-27 | [冷启动 HTTP 预算钦定 ≤2 时不能保留任何 nice-to-have 探针 + bootstrap retry 必须 fail-safe 重跑 auth](2026-04-27-cold-start-http-budget-and-bootstrap-retry-fail-safe.md) | 2 | architecture, error-handling | `e32184f` |
@@ -86,4 +88,4 @@
 | 2026-04-27 | [Bootstrap terminal error 必须用静态全屏 fallback page (禁 dismiss-able overlay) & 5 轮 fix-review 元根因复盘 (跳出 framing 的元方法论)](2026-04-27-bootstrap-terminal-error-static-fallback-page.md) | 2 | error-handling, ui, architecture, process | `ef1d866` |
 | 2026-04-28 | [`.decoding` / `.unauthorized` 必须按 transient 二分原则归 `.retry` & 9 轮 fix-review 累积出 transient/terminal 通用判则](2026-04-28-decoding-and-unauthorized-must-be-transient-retry.md) | 2 | error-handling, process | `2d89afe` |
 | 2026-04-28 | [`AppErrorMapper` 非 APIError fallback 必须按 transient 二分原则归 `.retry`，不是 `.alert`](2026-04-28-non-api-error-fallback-must-be-transient-retry.md) | 1 | error-handling | `9f4ad26` |
-| 2026-04-28 | [error case 不该 conflate transient (store 读失败) vs terminal (store 读成功但空) — 信息保真度必须从 case 设计层做对](2026-04-28-local-store-transient-vs-terminal-must-distinguish.md) | 1 | error-handling, architecture | `fb4bfb7` |
+| 2026-04-28 | [error case 不该 conflate transient (store 读失败) vs terminal (store 读成功但空) — 信息保真度必须从 case 设计层做对](2026-04-28-local-store-transient-vs-terminal-must-distinguish.md) | 1 | error-handling, architecture | `fb4bfb7` | **[ADR-0008]** （case 拆分保留 §6.5；反模式 8.5 保留）
