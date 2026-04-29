@@ -1,6 +1,6 @@
 # ADR-0008: 错误协议与 401 恢复路径 —— Bootstrap 三态分发 + Silent Relogin 退役
 
-- **Status**: **Draft v2（待拍板剩余 Open Questions）** —— v1 主旨"transient/terminal 是协议层概念" 经 codex 独立 review 反对后**降级**为 presentation heuristic；silent relogin 经用户拍板**砍掉**
+- **Status**: **Accepted（v2 实施完成，Mac build/test 全绿验证 236/236）** —— v1 主旨"transient/terminal 是协议层概念" 经 codex 独立 review 反对后**降级**为 presentation heuristic；silent relogin 经用户拍板**砍掉**；Story 0008-impl-1 实施 + Mac 验证收官
 - **Date**: 2026-04-29（v2 修订）
 - **Decider**: TBD（user + Claude）
 - **Supersedes**: 不取代 ADR-0006；本 ADR 是协议契约 + client 行为契约层
@@ -637,4 +637,5 @@ DevOnlyMiddleware 修复后 HTTP status 404 → 200，扫描器仍可识别 dev 
 | 2026-04-28 | 初稿 v1：从 22 条 lesson 蒸馏；钦定主旨"transient/terminal 是协议层概念" + Open Questions | Claude |
 | 2026-04-29 | v2 修订：codex 独立 review 反对主旨 → 降级为 presentation heuristic；用户拍板砍掉 silent relogin → 删 §6 actor 双字段 invariant + 新增 §6 cold-start 替代路径；采用 codex 5 层根因 / mapper 反思 / lesson 沉淀批判 | Claude（用户委托 + codex review） |
 | 2026-04-29 | §13.1 Resolved: A（AuthBoundaryAPIClient 装饰器层全局 catch） | Claude |
-| 2026-04-29 | Story 0008-impl-1 实施完成（Windows 静态检查通过）：新建 AuthBoundaryAPIClient.swift（92 行）+ UnauthorizedHandlerSink + AppLaunchStateMachine.triggerColdStart() + AuthBoundaryAPIClientTests（8 case）；删除 AuthRetryingAPIClient / SilentReloginCoordinator / SilentReloginUseCase 三件套 + 4 配套测试文件（净减 ~600 行）；AppContainer 装配重写；RootView wire late-bind handler；AppErrorMapper 286 → 170 行（砍 116 行迭代史 + 退役引用）。**Mac build/test 验证待用户跑** `bash iphone/scripts/build.sh --test`，全绿后 Status → Accepted | Claude（用户委托） |
+| 2026-04-29 | Story 0008-impl-1 实施完成（Windows 静态检查通过）：新建 AuthBoundaryAPIClient.swift（92 行）+ UnauthorizedHandlerSink + AppLaunchStateMachine.triggerColdStart() + AuthBoundaryAPIClientTests（8 case）；删除 AuthRetryingAPIClient / SilentReloginCoordinator / SilentReloginUseCase 三件套 + 4 配套测试文件（净减 ~600 行）；AppContainer 装配重写；RootView wire late-bind handler；AppErrorMapper 286 → 170 行（砍 116 行迭代史 + 退役引用） | Claude（用户委托） |
+| 2026-04-29 | Mac 验证修复：3 个测试漏改（AppErrorMapperTests / AppLaunchStateMachineTests 仍按旧 round 9 `.unauthorized → .retry` 预期，应改 `.alert` 兜底）+ xcodegen regenerate pbxproj 剔除退役文件引用；`bash iphone/scripts/build.sh --test` 236/236 全绿 → Status: **Accepted** | Claude（Mac 端用户验证） |

@@ -1,6 +1,6 @@
 # Story 0008-impl-1: 砍掉 Silent Relogin 改走 Cold-Start 重建（ADR-0008 v2 D3 实施）
 
-Status: draft
+Status: done
 
 ## Story
 
@@ -188,3 +188,4 @@ extension AppLaunchStateMachine {
 | Date | Change | By |
 |---|---|---|
 | 2026-04-29 | 初稿（draft）：ADR-0008 v2 §6 D3 实施 story | Claude（用户委托） |
+| 2026-04-29 | 实施 + Mac 验证完成：commit 2154daf 主体退役 / 565411b 测试断言修复；`bash iphone/scripts/build.sh --test` 236/236 全绿；Status → done | Claude（Mac 端用户验证） |
