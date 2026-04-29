@@ -212,14 +212,13 @@ final class AppLaunchStateMachineTests: XCTestCase {
         )
     }
 
-    /// case#12 (Story 5.5 round 2 [P1] → round 8 [P1] → round 9 [P2] 调整): `.unauthorized` → `.retry`.
+    /// case#12 (ADR-0008 v2 §6 钦定): `.unauthorized` → mapper 兜底 `.alert("登录已过期，请重启 App")`.
     ///
-    /// Story 5.5 round 9 [P2] fix: 之前 round 5/8 钦定 `.alert` 是过度悲观 —— "AuthRetryingAPIClient
-    /// exhausted 后 .unauthorized 是 terminal" 的判断把 user trap 在 force-quit only 屏幕,
-    /// 但 server 401 抽风 / session 漂等 transient 可能, user 主动重试整个 bootstrap closure
-    /// (重新走 cold-start GuestLoginUseCase + LoadHome) 仍可能恢复. 即便最终仍 401, 多发一次
-    /// 请求比"必须杀进程"温柔. 与 .decoding 同精神.
-    func testBootstrapWithUnauthorizedRoutesToRetryPresentation() async {
+    /// 生产路径下 401 由 AuthBoundaryAPIClient 全局 catch 触发 cold-start sink, 不会走到
+    /// bootstrap state machine 的 needsAuth 分发. 此 case 校验若 unauthorized 真漏到 mapper
+    /// (例如未走装饰器的非常规路径), state machine 仍能拿到 mapper 兜底的 .alert presentation,
+    /// 不会出现空 presentation. 文案与 .missingCredentials ("登录信息丢失，请重启 App") 区分.
+    func testBootstrapWithUnauthorizedRoutesToAlertFallbackPresentation() async {
         let underlying = APIError.unauthorized
         let wrapped = BootstrapMappedError(
             presentation: AppErrorMapper.presentation(for: underlying),
@@ -232,8 +231,8 @@ final class AppLaunchStateMachineTests: XCTestCase {
         await sm.bootstrap()
         XCTAssertEqual(
             sm.state,
-            .needsAuth(presentation: .retry(message: "登录失败，请重试")),
-            ".unauthorized 走 .retry (round 9 [P2] fix): transient possible → 给 user 自助恢复入口"
+            .needsAuth(presentation: .alert(title: "提示", message: "登录已过期，请重启 App")),
+            ".unauthorized 兜底 .alert (ADR-0008 v2 §6): 生产路径走 AuthBoundary cold-start, 此分支只服务非常规路径"
         )
     }
 

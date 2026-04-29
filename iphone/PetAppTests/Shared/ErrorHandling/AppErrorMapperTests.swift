@@ -82,14 +82,14 @@ final class AppErrorMapperTests: XCTestCase {
         XCTAssertEqual(presentation, .alert(title: "提示", message: "权限不足"))
     }
 
-    /// case#4（Story 5.4 round 5 fix → Story 5.5 round 8 [P1] → round 9 [P2] 调整）：.unauthorized → .retry.
-    /// Story 5.5 round 9 [P2] fix: 改成 .retry —— bootstrap 路径下重试整个 closure 会重新走
-    /// cold-start GuestLoginUseCase + LoadHome,如果 401 是 server transient (session 漂抽风) 可能恢复;
-    /// 即便最终仍 401, user 主动重试也只是多发一次请求, 比"必须杀进程"温柔. 与 .decoding 同精神
-    /// (transient 优先, terminal 留给真"重启救不了"的本地态错误如 .missingCredentials).
-    func testUnauthorizedMapsToRetry() {
+    /// case#4（ADR-0008 v2 §6 钦定）：.unauthorized → .alert 兜底文案.
+    /// 生产路径下 `.unauthorized` 由 AuthBoundaryAPIClient 全局 catch → 触发 cold-start sink,
+    /// **不进 mapper presentation**. mapper 仍保留兜底分支供测试 / 未走装饰器的非常规路径,
+    /// 文案 "登录已过期，请重启 App" 与 .missingCredentials ("登录信息丢失，请重启 App") 区分:
+    /// 前者 server 拒绝当前 token, 后者本地真无 token. 见 AppErrorMapper.swift §unauthorized 注释.
+    func testUnauthorizedMapsToAlertFallback() {
         let presentation = AppErrorMapper.presentation(for: APIError.unauthorized)
-        XCTAssertEqual(presentation, .retry(message: "登录失败，请重试"))
+        XCTAssertEqual(presentation, .alert(title: "提示", message: "登录已过期，请重启 App"))
     }
 
     /// case#4b（Story 5.4 round 2 fix 新增）：.missingCredentials → Alert（"请重启 App"）.
@@ -195,10 +195,11 @@ final class AppErrorMapperTests: XCTestCase {
         XCTAssertEqual(msg, "数据异常，请重试")
     }
 
-    /// unauthorized 错误 → 走 .retry (Story 5.5 round 9 [P2] fix) → 文案与 retry message 一致.
-    func testUserFacingMessageForUnauthorizedMatchesRetryCopy() {
+    /// unauthorized 错误 → 走 .alert 兜底 (ADR-0008 v2 §6) → 文案与 alert message 一致.
+    /// 生产路径走 AuthBoundary cold-start; 此 helper 校验 mapper 兜底分支文案对外保持一致.
+    func testUserFacingMessageForUnauthorizedMatchesAlertCopy() {
         let msg = AppErrorMapper.userFacingMessage(for: APIError.unauthorized)
-        XCTAssertEqual(msg, "登录失败，请重试")
+        XCTAssertEqual(msg, "登录已过期，请重启 App")
     }
 
     /// 非 APIError → 走 fallback retry (round 10 [P2] fix) → 文案与 retry message 一致
