@@ -25,14 +25,14 @@ public final class SessionStore: ObservableObject {
 
     public init() {}
 
-    /// 写入新会话（GuestLoginUseCase / SilentReloginUseCase 成功后调）。
+    /// 写入新会话（GuestLoginUseCase 成功后调）。
     /// `@MainActor` 保证调用方必须从 main thread 调（编译器强制）。
     public func updateSession(_ state: SessionState) {
         self.session = state
     }
 
-    /// 清空会话（dev 重置身份按钮 / Story 5.4 静默重登失败 兜底）。
-    /// **不**触发 keychain 删除 —— 那是 ResetKeychainUseCase / 5.4 SilentRelogin 的责任；
+    /// 清空会话（dev 重置身份按钮 / ADR-0008 v2 §6.2 全局 401 cold-start 触发前清空 兜底）。
+    /// **不**触发 keychain 删除 —— 那是 ResetKeychainUseCase 的责任；
     /// 本方法仅清内存表征，调用方负责协调 keychain.
     public func clear() {
         self.session = nil

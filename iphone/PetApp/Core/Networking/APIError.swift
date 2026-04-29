@@ -33,7 +33,7 @@ import Foundation
 ///   2. 用户可能只是丢了本地 token 但还有 guestUid → 不应当被隐式 relogin（违反 Story 5.4
 ///      "静默重登限定 server 401" 的 intended scope；也违反 dev-story 文档非范围 §3 钦定）
 ///   3. cold-start 路径（首次启动 / 卸载重装）应当走 `GuestLoginUseCase`，不该被
-///      AuthRetryingAPIClient 静默拦截掉真实的"无身份"信号
+///      AuthBoundaryAPIClient 静默拦截掉真实的"无身份"信号
 /// 不同点：mapper 把 `.missingCredentials` 映射到 `.alert`（terminal force-quit），
 /// 把 `.localStoreFailure` 映射到 `.retry`（transient 自助恢复）。
 public enum APIError: Error, Equatable {
@@ -48,7 +48,7 @@ public enum APIError: Error, Equatable {
     /// 注意：HTTP 401 与 envelope.code=1001 是"或"关系——两条路径都视为 unauthorized。
     /// APIClient 实装按"先看 HTTP status，再看 envelope.code"决策。
     ///
-    /// **AuthRetryingAPIClient 仅 catch 这个 case** 触发静默重登；本地态走 `.missingCredentials`。
+    /// **AuthBoundaryAPIClient 仅 catch 这个 case** 触发静默重登；本地态走 `.missingCredentials`。
     case unauthorized
 
     /// **本地端确认无凭证（terminal）**：请求被 APIClient 在 `buildURLRequest` 阶段直接拒掉，**未触达 server**。
@@ -60,7 +60,7 @@ public enum APIError: Error, Equatable {
     ///
     /// **不**包括 keychain.get 抛错的 transient 路径 —— 那条路径走 `.localStoreFailure`（见下一 case）。
     ///
-    /// **AuthRetryingAPIClient 不会 catch 这个 case** —— 让上层（如 RootView 冷启动门路 /
+    /// **AuthBoundaryAPIClient 不会 catch 这个 case** —— 让上层（如 RootView 冷启动门路 /
     /// ErrorPresenter）能看到真实的"本地无身份"信号，触发 cold-start GuestLoginUseCase
     /// 或显示配置错诊断，而**不是**被静默重登屏蔽掉。
     ///
@@ -83,7 +83,7 @@ public enum APIError: Error, Equatable {
     /// 内点重试自愈），而非 `.alert`（terminal force-quit）。bootstrap 路径下重跑整个 closure
     /// 会重新 cold-start GuestLoginUseCase + 读 keychain，transient 错误大概率自愈。
     ///
-    /// **AuthRetryingAPIClient 不会 catch 这个 case** —— 同 `.missingCredentials` 理由：
+    /// **AuthBoundaryAPIClient 不会 catch 这个 case** —— 同 `.missingCredentials` 理由：
     /// 1. 静默重登也要读 keychain（写新 token 之前先确认 guestUid），同样会被 transient 失败拦
     /// 2. 不该把"本地 IO 抽风"伪装成"server 401"误触 relogin
     ///

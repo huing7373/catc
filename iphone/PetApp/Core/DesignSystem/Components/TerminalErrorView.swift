@@ -11,7 +11,7 @@
 // bootstrap 阶段的 terminal class 错误（`.unauthorized` / `.missingCredentials` /
 // `.decoding` / permanent business error）—— retry **救不回**：
 //   - `.missingCredentials`: keychain 真没 token,重试 useCase.execute() 仍走同一条 path 抛同样错
-//   - `.unauthorized`: AuthRetryingAPIClient 已 exhaust 唯一一次静默重登,bootstrap retry 仍 401
+//   - `.unauthorized`: ADR-0008 v2 由 AuthBoundaryAPIClient 全局 catch 触发 cold-start (生产路径不进 mapper)
 //   - `.decoding`: server payload 与 client schema 不兼容,client 端 retry 改不了 schema
 //   - permanent business code (1004/2001/...): server 拒绝是基于持久状态,retry 拿同样回应
 // 把这些 case 路由到任何"dismiss-able overlay"（AlertOverlayView）都会出问题：

@@ -266,6 +266,20 @@ struct RootView: View {
             }
             // bootstrapStep2 仍走默认 { } no-op；本 story 故意不用 step2 插槽（Dev Note #2）
         )
+
+        // ADR-0008 v2 §6.3 / Story 0008-impl-1: wire 401 cold-start handler.
+        // launchStateMachine 已创建 → setHandler 注入真实闭包，闭包内：
+        //   1. sessionStore.clear() —— 让订阅 SessionStore 的 view 立即过渡到 fallback 态
+        //   2. stateMachine.triggerColdStart() —— 重置 hasBootstrapped + state=.launching + 重跑 bootstrap
+        // weak 引用防 retain cycle（容器 → sink → handler closure → 容器）.
+        if let stateMachine = launchStateMachine {
+            container.unauthorizedHandlerSink.setHandler { [weak stateMachine, weak sessionStore] in
+                await MainActor.run {
+                    sessionStore?.clear()
+                }
+                await stateMachine?.triggerColdStart()
+            }
+        }
     }
 
     /// Debug build 走带 resetIdentityViewModel 的 init;Release build 走旧 init（按钮不存在）。

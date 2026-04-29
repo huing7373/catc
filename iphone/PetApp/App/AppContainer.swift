@@ -55,6 +55,15 @@ public final class AppContainer: ObservableObject {
     /// 真机联调请通过 Info.plist `PetAppBaseURL` 覆盖（详见 lesson 2026-04-26-baseurl-from-info-plist）。
     public static let fallbackBaseURLString = "http://localhost:8080"
 
+    /// ADR-0008 v2 §6 / Story 0008-impl-1 新增：sink for late-bound 401 cold-start handler.
+    ///
+    /// AuthBoundaryAPIClient 在 401 时调 sink.trigger() —— RootView.ensureLaunchStateMachineWired()
+    /// 在创建 AppLaunchStateMachine 后调 sink.setHandler 注入真实闭包
+    /// （sessionStore.clear() + stateMachine.triggerColdStart()）.
+    ///
+    /// 解 chicken-and-egg：container init 时 stateMachine 还不存在；sink 让 handler 可 late-bind.
+    public let unauthorizedHandlerSink: UnauthorizedHandlerSink
+
     /// 默认 init：用 `APIClient(baseURL:, keychainStore:)` 构造默认 client。
     /// baseURL 来源优先级：Info.plist[`PetAppBaseURL`] → fallback `http://localhost:8080`。
     /// 不含 `/api/v1` 前缀（host-only baseURL 决策，见 Story 2.5 Dev Note #1）。
@@ -66,31 +75,25 @@ public final class AppContainer: ObservableObject {
     /// GuestLoginUseCase 写 token 后，下一次 APIClient 调 requiresAuth=true 接口
     /// 立刻从同一 keychain 读到（不会因 namespace 不一致或双 instance 而漏读）。
     ///
-    /// Story 5.4：`baseAPIClient` 之上包一层 `AuthRetryingAPIClient` 装饰器 ——
-    /// 业务层（makeAuthRepository / 未来 makeHomeRepository 等）拿到的 apiClient 自动具备
-    /// 静默重登能力（401 → 自动调 /auth/guest-login 拿新 token → 重试一次）.
-    /// 注：`baseRepository` 持 unwrapped `baseAPIClient`，**专给** SilentReloginUseCase 用 ——
-    /// 严格隔离循环依赖（即使 /auth/guest-login requiresAuth=false 不会被 wrap 拦，unwrapped
-    /// 也是更清晰的语义边界，防御未来 endpoint 改动时的诡异 bug）.
+    /// **ADR-0008 v2 / Story 0008-impl-1**（替代 Story 5.4 silent relogin 三件套）：
+    /// `baseAPIClient` 之上包一层 `AuthBoundaryAPIClient` 装饰器 —— 业务层拿到的 apiClient 在
+    /// server 401 时自动触发**全局 cold-start**（清 SessionStore + state machine 回 .launching → 重跑 bootstrap），
+    /// 不再做 in-app silent relogin（已退役）.
+    /// 用户感知：从主屏闪一下 LaunchingView < 1 秒 → 回主屏；keychain guestUid 持久化复用同一身份.
     public convenience init() {
         let baseURL = AppContainer.resolveDefaultBaseURL(from: Bundle.main)
         let keychainStore = KeychainServicesStore()
 
-        // Story 5.4: 先建 baseAPIClient + baseRepository（**只**给 SilentReloginUseCase 用）
+        // ADR-0008 v2: 先建 baseAPIClient + sink，再用 AuthBoundary 包装.
+        // sink 此时持空 handler；RootView 在 stateMachine 创建后注入真实 handler.
         let baseAPIClient = APIClient(baseURL: baseURL, keychainStore: keychainStore)
-        let baseRepository = DefaultAuthRepository(apiClient: baseAPIClient)
-        let reloginUseCase = DefaultSilentReloginUseCase(
-            keychainStore: keychainStore,
-            repository: baseRepository
-        )
-        let coordinator = SilentReloginCoordinator(useCase: reloginUseCase)
-
-        // 业务层用包装后的 wrappedAPIClient ——  401 自动恢复
-        let wrappedAPIClient = AuthRetryingAPIClient(inner: baseAPIClient, coordinator: coordinator)
+        let sink = UnauthorizedHandlerSink()
+        let wrappedAPIClient = AuthBoundaryAPIClient(inner: baseAPIClient, sink: sink)
 
         self.init(
             apiClient: wrappedAPIClient,
-            keychainStore: keychainStore
+            keychainStore: keychainStore,
+            unauthorizedHandlerSink: sink
         )
     }
 
@@ -102,7 +105,8 @@ public final class AppContainer: ObservableObject {
     /// `InMemoryKeychainStore` 作为测试便利 + 模板示范保留（仍由 InMemoryKeychainStoreTests 维护）。
     public init(
         apiClient: APIClientProtocol,
-        keychainStore: KeychainStoreProtocol = KeychainServicesStore()
+        keychainStore: KeychainStoreProtocol = KeychainServicesStore(),
+        unauthorizedHandlerSink: UnauthorizedHandlerSink = UnauthorizedHandlerSink()
     ) {
         self.apiClient = apiClient
         self.errorPresenter = ErrorPresenter()
@@ -111,6 +115,9 @@ public final class AppContainer: ObservableObject {
         // 不预留 init(...sessionStore:) 注入式签名 —— 测试场景直接 new SessionStore() 即可（@MainActor 类，
         // 跨 actor 注入需 @Sendable 约束麻烦；container.sessionStore 已暴露足以验证）。
         self.sessionStore = SessionStore()
+        // ADR-0008 v2 / Story 0008-impl-1: sink 默认值是空 handler 的实例 —— 测试中传 mock APIClient
+        // 时通常不会触发 401 cold-start 路径，sink 没人调；如需验证可 inject 自定义 sink.
+        self.unauthorizedHandlerSink = unauthorizedHandlerSink
     }
 
     /// 解析默认 baseURL：从给定 bundle 的 Info.plist 读 `PetAppBaseURL`，否则回退到 fallback。
@@ -196,8 +203,9 @@ public final class AppContainer: ObservableObject {
     }
 
     /// Story 5.5 新增：构造 HomeRepository（DefaultHomeRepository）.
-    /// Repository 是 value type struct；apiClient 单例由 container 持有（已被 Story 5.4 装饰器包装 ——
-    /// 业务请求 401 自动触发静默重登 + 重试一次）.
+    /// Repository 是 value type struct；apiClient 单例由 container 持有（已被 ADR-0008 v2 装饰器包装 ——
+    /// 业务请求 401 自动触发**全局 cold-start**：清 SessionStore + state machine 回 .launching → 重跑 bootstrap.
+    /// 替代 Story 5.4 silent relogin 三件套；用户感知 < 1 秒 LaunchingView 闪屏，无错误弹窗）.
     public func makeHomeRepository() -> HomeRepositoryProtocol {
         DefaultHomeRepository(apiClient: apiClient)
     }
@@ -206,18 +214,6 @@ public final class AppContainer: ObservableObject {
     /// UseCase 是 value type struct；每次调用返回新实例；repository 也是新实例（廉价）.
     public func makeLoadHomeUseCase() -> LoadHomeUseCaseProtocol {
         DefaultLoadHomeUseCase(repository: makeHomeRepository())
-    }
-
-    /// Story 5.4 新增：构造 SilentReloginUseCase（默认走 container 持有的 keychain + 新建 repository）.
-    /// 让需要直接调 SilentRelogin 的场景（集成测试 / future 业务）走 container 入口.
-    /// 注：此处的 repository 是 wrap 过的（来自 makeAuthRepository）—— 因 /auth/guest-login
-    /// requiresAuth=false，AuthRetryingAPIClient 不会拦截；与 convenience init 内 baseRepository
-    /// 不同（后者直接用 baseAPIClient，**有意为之** —— 见 init 注释）.
-    public func makeSilentReloginUseCase() -> SilentReloginUseCaseProtocol {
-        DefaultSilentReloginUseCase(
-            keychainStore: keychainStore,
-            repository: makeAuthRepository()
-        )
     }
 
     #if DEBUG

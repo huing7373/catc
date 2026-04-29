@@ -11,8 +11,8 @@ import Foundation
 
 public enum HomeEndpoints {
     /// GET /api/v1/home —— 首屏聚合数据（user + pet + stepAccount + chest + room）.
-    /// requiresAuth=true：自动经过 APIClient 的 token 注入（Story 5.3）+ AuthRetryingAPIClient
-    /// 装饰器（Story 5.4 → 401 自动静默重登 + 重试一次）.
+    /// requiresAuth=true：自动经过 APIClient 的 token 注入（Story 5.3）+ AuthBoundaryAPIClient
+    /// 装饰器（ADR-0008 v2 → 401 自动触发 cold-start 重跑 bootstrap）.
     public static func loadHome() -> Endpoint {
         Endpoint(path: "/api/v1/home", method: .get, body: nil, requiresAuth: true)
     }

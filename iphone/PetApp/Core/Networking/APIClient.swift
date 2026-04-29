@@ -3,7 +3,7 @@
 // Story 5.3：在 buildURLRequest(_:) 内激活 Authorization Bearer token 自动注入
 //   （按 endpoint.requiresAuth 决策，从注入的 KeychainStoreProtocol 读 token）.
 // Story 5.4 round 2 [P2] fix：把"本地无 token / keychain 配置错"路径从 `.unauthorized`
-//   分离到新的 `.missingCredentials` —— 让 AuthRetryingAPIClient 只对 server 401 静默重登,
+//   分离到新的 `.missingCredentials` —— 让 AuthBoundaryAPIClient 只对 server 401 静默重登,
 //   不再把本地配置错误隐式当成 token 过期处理. 详见 APIError.missingCredentials 注释.
 // Story 5.5 round 11 [P2] fix：把"keychain.get 抛错"路径从 `.missingCredentials` 进一步拆出到
 //   新的 `.localStoreFailure(underlying:)` —— transient 本地存储抽风不该跟"本地确认无 token"
@@ -53,7 +53,7 @@ public protocol APIClientProtocol: Sendable {
 ///    （token 从注入的 keychainStore 读；本地态错误分两类：
 ///    - keychain.get 抛错（transient）→ .localStoreFailure（Story 5.5 round 11 fix 新增 case）
 ///    - keychain 返 nil/空串 / DI 没配 keychainStore（terminal）→ .missingCredentials
-///    Story 5.4 round 2 fix：本地态从 .unauthorized 拆出，让 AuthRetryingAPIClient 不会误把
+///    Story 5.4 round 2 fix：本地态从 .unauthorized 拆出，让 AuthBoundaryAPIClient 不会误把
 ///    本地态当 server 401 触发静默重登。Story 5.5 round 11 fix：进一步把 transient 子态拆出
 ///    单独 case，让 mapper 能给 transient 路径一个 .retry 自助恢复入口而不是 .alert force-quit）
 ///
@@ -246,8 +246,8 @@ public final class APIClient: APIClientProtocol {
         //     请求未发出，重启 App 也救不了（cold-start 同样读不到）→ mapper 钦定 .alert（force-quit）。
         //   - .localStoreFailure (本地-transient)：keychain.get 抛错（sandbox 抽风 / OSStatus 临时不可用）。
         //     请求未发出，但下次再读可能就有 → mapper 钦定 .retry（让 user 自助恢复）。
-        //   - .unauthorized (server)：请求已发出 + server 拒绝 → AuthRetryingAPIClient 才静默重登。
-        // 三态都**不**触发 AuthRetryingAPIClient relogin（详见 APIError 各 case 注释 + lesson 文档）。
+        //   - .unauthorized (server)：请求已发出 + server 拒绝 → AuthBoundaryAPIClient 才静默重登。
+        // 三态都**不**触发 AuthBoundaryAPIClient relogin（详见 APIError 各 case 注释 + lesson 文档）。
         if endpoint.requiresAuth {
             guard let keychainStore else {
                 throw APIError.missingCredentials

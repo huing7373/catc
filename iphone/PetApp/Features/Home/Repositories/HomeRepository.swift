@@ -3,8 +3,8 @@
 //
 // 与 AuthRepository（Story 5.2）同模式：协议方法返回原始 wire DTO；APIError 原样透传.
 //
-// 注入的 APIClient 是 container.apiClient —— 已被 Story 5.4 AuthRetryingAPIClient 包装；
-// 业务请求 401 会自动触发静默重登 + 重试一次，HomeRepository 完全无感.
+// 注入的 APIClient 是 container.apiClient —— 已被 ADR-0008 v2 AuthBoundaryAPIClient 包装；
+// 业务请求 401 会自动触发全局 cold-start (清 SessionStore + 重跑 bootstrap)，HomeRepository 完全无感.
 //
 // `DefaultHomeRepository` 是 `struct`：value type，无内部状态，构造廉价；与 DefaultAuthRepository 同模式.
 

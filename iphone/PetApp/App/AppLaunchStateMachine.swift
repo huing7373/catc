@@ -116,6 +116,28 @@ public final class AppLaunchStateMachine: ObservableObject {
         await bootstrap()
     }
 
+    /// ADR-0008 v2 §6.3 / Story 0008-impl-1: 由 AuthBoundaryAPIClient 在 401 时调用 ——
+    /// 触发全局 cold-start 重建（与 retry() 几乎相同实现，区分语义）：
+    ///   - retry(): user 在 .needsAuth 状态下点 RetryView 重试按钮（user-initiated）
+    ///   - triggerColdStart(): network 层检测到 token 失效自动触发（system-initiated）
+    ///
+    /// **并发短路**：复用 isRetrying flag —— 多个并发业务请求同时拿到 401 时，
+    /// 只有第一个触发的会真正重跑 bootstrap，后续都被 short-circuit（与 retry() 同模式）。
+    /// 这正是 silent relogin 退役后**不需要**generation snapshot / inFlight 三件套的原因 ——
+    /// state machine 自身的 reentrancy guard 就够了。
+    ///
+    /// **不**与 retry() 合并为 private helper —— 两者语义不同（user-initiated vs system-initiated），
+    /// 强行合并属于 ADR §13.3 "RootView/AppLaunchStateMachine 知道太多" 重构范畴，留给后续 epic-cleanup.
+    public func triggerColdStart() async {
+        guard !isRetrying else { return }
+        isRetrying = true
+        defer { isRetrying = false }
+
+        state = .launching
+        hasBootstrapped = false
+        await bootstrap()
+    }
+
     /// 把任意 Error 转成 `.needsAuth` 的 `ErrorPresentation`.
     ///
     /// **优先级**（Story 5.5 round 2 [P1] fix）:

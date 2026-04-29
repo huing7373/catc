@@ -2,109 +2,52 @@
 // Story 2.6 AC1：把 APIError 映射到面向用户的呈现样式 + 文案。
 //
 // 职责：
-// - 接收任意 Error，先识别 APIError 四态（business/unauthorized/network/decoding），其余走 generic fallback
-// - 业务码 → 用户文案：覆盖 V1接口设计.md §3 全部 32 码（1xxx/2xxx/3xxx/4xxx/5xxx/6xxx/7xxx）
+// - 接收任意 Error，先识别 APIError 各 case，其余走 generic fallback
+// - 业务码 → 用户文案：覆盖 V1接口设计.md §3 全部 32 码
 // - 不调 logger（→ Story 2.7 落地后再加）
 // - 不做 i18n（MVP 阶段全中文 hardcode）
 //
 // 设计选择：
-// - 用 enum + static func（与 AccessibilityID 风格一致）：本类是无状态查表器
+// - 用 enum + static func：本类是无状态查表器
 // - presentation(for:) 接收 Error 而非 APIError：让 ViewModel catch block 不必 narrow
-// - 错误码字典放 switch case 而非 dictionary：let compiler 帮我们做穷举检查
+// - 错误码字典放 switch case 而非 dictionary：让 compiler 做穷举检查
 //
-// **transient vs terminal 错误分类（Story 5.5 round 5 [P1] → round 7 [P1] → round 8 [P1] → round 9 [P2] → round 10 [P2] → round 11 [P2] 调整）**：
-// 不再按 APIError case 一对一硬绑 presentation, 而是按 **transient vs terminal** 二分:
-// - **transient (.retry)**: .network / .decoding (server partial rollout / 一次性坏 payload)
-//   / .unauthorized (静默重登 exhausted 后仍可能 transient,如 server 401 抽风) /
-//   .localStoreFailure (round 11 新增: keychain.get 抛错 = sandbox 抽风 / OSStatus 临时不可用) /
-//   .business(1005/1007/1008/1009 限流冲突重复繁忙 等瞬时类码).
-// - **terminal (.alert)**: .missingCredentials (本地 keychain **确认无 token**, retry 救不了, 真需要重启 App)
-//   / .business(其他 permanent 码: 1004 权限不足 / 2002 微信已绑定 / 4001 宝箱不存在 等).
-// - **fallback (.retry)**: 非 APIError 的 generic Error (round 10 [P2] fix: 从 .alert 改 .retry).
-//   典型 case: GuestLoginUseCase 抛出的 KeychainError (sandbox 临时不可用 / osStatus -25300
-//   item 暂时找不到 等 transient 场景) —— 之前 fallback 走 .alert 让其卡 TerminalErrorView
-//   强制 force-quit 是过度悲观, 跟二分判则一致默认走 transient 分支.
+// **transient vs terminal 二分（ADR-0008 v2 §4.2 钦定为 client 端 presentation heuristic，
+//   不升级为协议层契约）**：
+// - **transient (.retry)**: .network / .decoding / .localStoreFailure / .business 瞬时码 (1005/1007/1008/1009).
+// - **terminal (.alert)**: .business 永久码 (1004/2002/4001 等).
+// - **fallback (.retry)**: 非 APIError → 默认走 transient 分支（fallback 无法判定具体子集时，
+//   transient possible → retry 比 force-quit 温柔）.
+// - **不进 mapper 的 case**: `.unauthorized` / `.missingCredentials` 由 ADR-0008 §6 全局 401
+//   catch (`AuthBoundaryAPIClient`) 接管 → 触发 cold-start sink，不走 ErrorPresentation 路径。
+//   mapper 仍保留这两个 case 的兜底分支供以下场景用：① 未走 AuthBoundary 装饰器的测试路径；
+//   ② 未来若直接显示这两个 error 的非常规路径。
 //
-// **round 11 [P2] 关键修正**：之前 APIClient.buildURLRequest 把 keychain.get 抛错也 collapse
-// 进 .missingCredentials, 跟"keychain 返 nil/空串"两种语义不同的 case conflate 到同一 terminal
-// 通道. round 11 在 APIClient 层新增 .localStoreFailure(underlying:) 区分 transient (抛错) vs
-// terminal (返 nil/空串), mapper 把 .localStoreFailure → .retry 让 user 自助恢复.
-// 详见 docs/lessons/2026-04-27-transient-vs-terminal-error-classification.md
-// + docs/lessons/2026-04-28-local-store-transient-vs-terminal-must-distinguish.md.
-//
-// 二分原则: **transient possible → retry**. user 主动点重试失败再次看到也只是多发一次请求,
-// 比"必须杀进程"温柔; 只有真 terminal (重启都救不了 / 本地配置永久损坏) 才走 .alert.
-// fallback 无法判定具体子集时也按"默认 transient" 处理.
-// 详见 docs/lessons/2026-04-27-transient-vs-terminal-error-classification.md
-// + docs/lessons/2026-04-27-business-error-transient-vs-terminal.md
-// + docs/lessons/2026-04-27-bootstrap-alert-dismiss-must-be-user-driven-recovery.md
-// + docs/lessons/2026-04-27-bootstrap-terminal-error-static-fallback-page.md.
+// 二分原则: **transient possible → .retry**. user 主动重试失败也只是多发一次请求，
+// 比 force-quit 温柔；只有真 terminal (重启都救不了 / 本地配置永久损坏) 才走 .alert。
+// 详见 _bmad-output/implementation-artifacts/decisions/0008-error-protocol.md §4.2.
 
 import Foundation
 
 /// `AppErrorMapper`：APIError → ErrorPresentation（呈现样式 + 文案）的映射器。
 ///
-/// 映射规则（与 总体架构 §V1错误码规范 + iOS 架构 §8.3 对齐）：
+/// 映射规则（ADR-0008 v2 §4.2 钦定的 presentation heuristic 表）：
 ///
-/// - `.business(code, message, _)` → 取决于 code 的语义类:
-///   - **transient**（瞬时类:1005/1007/1008/1009）→ `.retry`,文案取本地表（"操作过于频繁/数据冲突/操作重复/服务繁忙"）.
-///   - **permanent**（其他 1xxx/2xxx/...）→ `.alert`,文案直接取本地表（round 8 [P1] fix: 不再带
-///     "持续失败时请杀进程重启 App" suffix —— 该指引已 move 到 TerminalErrorView 底部静态文本,
-///     mapper 文案专注表达"什么错了"; 详见文件头注释 + lesson 文档）.
-/// - `.unauthorized` → RetryView；文案 "登录失败，请重试"
-///   （Story 5.5 round 9 [P2] fix: 改成 .retry —— bootstrap 路径下重试整个 closure 会重新走
-///   cold-start GuestLoginUseCase + LoadHome,如果 401 是 server transient 可能恢复; 即便最终
-///   仍 401, user 主动点重试也只是多发一次请求, 比"必须杀进程"温柔. 历史: round 5 fix 因
-///   "AuthRetryingAPIClient exhausted 后 .unauthorized 是 terminal" 钦定为 .alert; round 9 重新
-///   审视该判断 —— 把 user trapped 在 force-quit only 屏幕过于悲观,exhausted 不等于
-///   "重启都救不了", 应让 user 自决是否再尝试一次）。
-/// - `.missingCredentials` → TerminalErrorView；文案 "登录信息丢失，请重启 App"（Story 5.4 round 2 fix
-///   新增：本地态走"引导冷启动"路径，不该被 toast "正在重登"误导用户以为系统在自动恢复 —— 实际上
-///   AuthRetryingAPIClient **不**会 catch 这个 case，需要 cold-start GuestLoginUseCase 接手。
-///   本 case 的特点：retry() 也救不回（keychain 真没 token, repo 仍抛同样错误））。
-///   round 9 [P2] 验证保留: 这是 transient/terminal 二分中**真 terminal** 的代表 case
-///   —— 本地 keychain 损坏, bootstrap closure 重跑同样读不到 token / 写不进去, retry 无意义.
-///   round 11 [P2] 收窄: 本 case 现在**只**包含 keychain 读成功但返回 nil/空串的 terminal 场景；
-///   keychain.get 抛错的 transient 路径已拆出到 `.localStoreFailure` 单独走 .retry.
-/// - `.localStoreFailure(_)` → RetryView；文案 "登录信息读取异常，请重试" (Story 5.5 round 11 [P2] fix
-///   新增 case): keychain.get 抛错 (sandbox 抽风 / OSStatus -25291 errSecNotAvailable 等
-///   transient 场景), 请求未发出. bootstrap 路径下 RootView 把 .retry 渲染为 RetryView, user
-///   点重试会重跑整个 closure (cold-start GuestLoginUseCase + LoadHome), keychain transient
-///   错误大概率自愈. AuthRetryingAPIClient 不接管本 case (同 .missingCredentials 理由).
-/// - `.network(_)` → RetryView；文案 "网络异常，请检查后重试"。
-/// - `.decoding(_)` → RetryView；文案 "数据异常，请重试"
-///   （Story 5.5 round 9 [P2] fix: 改成 .retry —— 之前 round 8 钦定 .alert 渲染 TerminalErrorView
-///   是过度悲观, .decoding 可能是 transient (server partial rollout / 一次性坏 payload),应该
-///   让 user 能在 App 内重试自愈, 不必杀进程. 注: HomeData(from:) throws decoding error 的
-///   fail-fast 逻辑保持不变 (round 6 fix 让 dev 能立刻看到 schema drift); 改的只是 mapper
-///   把 decoding error 渲染成 retry 而非 terminal）.
-/// - **非 APIError fallback** → RetryView；文案 "操作失败，请重试"
-///   （Story 5.5 round 10 [P2] fix: 改成 .retry —— 之前钦定 .alert 让 bootstrap 路径下
-///   非 APIError (典型代表: GuestLoginUseCase 抛出的 KeychainError, sandbox 临时不可用 /
-///   osStatus -25300 item 暂时找不到 等场景) 卡 TerminalErrorView, 强制 force-quit. 这类
-///   错误大多是 transient, 跟 round 9 钦定的二分判则一致 —— transient possible 走 .retry,
-///   permanent guaranteed 才走 .alert. fallback 无法判定具体子集时, 默认走 transient 分支,
-///   让 user 能在 App 内自助恢复; 即便重试再次失败,多发一次请求也比 force-quit 温柔.
-///   详见 docs/lessons/2026-04-28-non-api-error-fallback-must-be-transient-retry.md）.
+/// - `.business(code, message, _)`:
+///   - **transient**（1005/1007/1008/1009 瞬时类）→ `.retry`
+///   - **permanent**（其他业务码）→ `.alert`
+/// - `.network(_)` → `.retry`
+/// - `.decoding(_)` → `.retry`
+/// - `.localStoreFailure(_)` → `.retry`（keychain 抛错 = transient sandbox/OSStatus 抽风）
+/// - `.unauthorized` → `.alert` 兜底文案（生产路径由 AuthBoundary 接管不进 mapper；保留供测试 / 非常规路径）
+/// - `.missingCredentials` → `.alert`（本地 keychain 确认无 token，retry 救不了；保留供测试 / 非常规路径）
+/// - **非 APIError fallback** → `.retry`（fallback 无法判定具体子集时默认走 transient）
 ///
-/// **`.alert` vs `.retry` 语义区分（Story 5.5 round 5 [P1+P2] → round 7 → round 8 [P1] → round 9 [P2] 调整）**：
-/// - `.alert` = **terminal-class**：mapper 钦定的 alert 表示"client 认为这是真 terminal,
-///   重启 App 也未必能救" 的窄类 (round 9 [P2] fix 后只剩 .missingCredentials + .business permanent 码).
-///   bootstrap 路径下 RootView 把 `.alert` 渲染为 TerminalErrorView (静态全屏 page, 无按钮,
-///   user 必须主动 force-quit). round 5 用 exit(0) / round 7 让 OK 按钮调 retry 都被验证为
-///   dismiss 行为不可调和的反模式 (详见 RootView dismiss 行为迭代史).
-///   非 bootstrap 路径仍用 AlertOverlayView (dismiss-able overlay 适合 transient business error).
-/// - `.retry` = **transient**：用户可在 App 内点重试自愈
-///   （network / decoding (round 9) / unauthorized (round 9) / business 1005/1007/1008/1009 等瞬时错误）.
-/// - `.toast` = **info-level**：非阻塞短提示（mapper 当前不派 toast,留给 ViewModel 自定义场景）.
-///
-/// 二分原则: **transient possible → .retry**. 把 user trap 在 force-quit only 屏幕代价过高,
-/// 应优先给 user 自助恢复入口; 即便 retry 失败再次看到也只是多发一次请求, 比 "必须杀进程" 温柔.
-/// 这条二分让 bootstrap 路径可以无脑分发：`.alert` → TerminalErrorView (force-quit-only)；`.retry` → RetryView（重跑 closure）.
-/// 详见 docs/lessons/2026-04-27-transient-vs-terminal-error-classification.md
-/// + docs/lessons/2026-04-27-business-error-transient-vs-terminal.md
-/// + docs/lessons/2026-04-27-bootstrap-alert-dismiss-must-be-user-driven-recovery.md
-/// + docs/lessons/2026-04-27-bootstrap-terminal-error-static-fallback-page.md.
+/// **`.alert` vs `.retry` 语义**：
+/// - `.alert` = terminal-class：bootstrap 路径渲染 `TerminalErrorView`（无按钮静态全屏，user force-quit）；
+///   非 bootstrap 路径走 `AlertOverlayView`（dismiss-able overlay）.
+/// - `.retry` = transient：用户可在 App 内点重试自愈.
+/// - `.toast` = info-level：mapper 当前不派 toast，留给 ViewModel 自定义.
 public enum AppErrorMapper {
 
     /// transient（可在 App 内重试自愈）类业务码集合.
@@ -119,13 +62,7 @@ public enum AppErrorMapper {
     ]
 
     /// 把任意 Error 映射成 ErrorPresentation（呈现样式 + 文案）。
-    /// 入参 error 必须是 APIError 才走具体分支；其它 Error 类型走 fallback `.retry("操作失败，请重试")`.
-    /// Story 5.5 round 10 [P2] fix: fallback 从 .alert 改 .retry —— bootstrap 路径下
-    /// GuestLoginUseCase.execute() 抛出的 KeychainError (sandbox 临时不可用 / osStatus -25300
-    /// item 暂时找不到 等) 是 non-APIError 但大多 transient, 之前 fallback 走 .alert 让其卡
-    /// TerminalErrorView 强制 force-quit, 是过度悲观. 跟 round 9 transient/terminal 二分判则
-    /// 一致 —— fallback 无法判定具体子集时默认走 transient 分支.
-    /// 详见 docs/lessons/2026-04-28-non-api-error-fallback-must-be-transient-retry.md.
+    /// APIError 走具体分支；其它 Error 走 fallback `.retry`（fallback 无法判定具体子集 → 默认 transient）。
     public static func presentation(for error: Error) -> ErrorPresentation {
         guard let apiError = error as? APIError else {
             return ErrorPresentation.retry(message: "操作失败，请重试")
@@ -133,90 +70,37 @@ public enum AppErrorMapper {
         switch apiError {
         case let .business(code, message, _):
             let userMessage = localizedMessage(forBusinessCode: code, fallback: message)
-            // Story 5.5 round 5 [P1] fix: transient 业务码（1005/1007/1008/1009 等）走 .retry,
-            // 让 bootstrap 路径下 1009 "服务繁忙,请稍后重试" 等可恢复错误进 RetryView.
-            // Story 5.5 round 8 [P1] fix: permanent 业务码走 .alert, 文案回归简洁形态 (round 5 风格),
-            // 不再带 "持续失败时请杀进程重启 App" suffix —— 该指引已 move 到 TerminalErrorView 底部
-            // 静态文本 (RootView 把 bootstrap .alert 渲染为 TerminalErrorView, 无按钮 force-quit only).
-            // 详见 docs/lessons/2026-04-27-business-error-transient-vs-terminal.md
-            // + docs/lessons/2026-04-27-bootstrap-terminal-error-static-fallback-page.md.
             if transientBusinessCodes.contains(code) {
                 return ErrorPresentation.retry(message: userMessage)
             }
             return ErrorPresentation.alert(title: "提示", message: userMessage)
 
         case .unauthorized:
-            // Story 5.4 round 5 fix: AuthRetryingAPIClient 上线后,业务层能接到的 .unauthorized
-            // 必然是"已经 exhaust 一次静默重登尝试"的场景 —— 此时既没有 relogin 在跑（toast "正在
-            // 重新登录" 是谎言），也无法靠点击 retry 在装饰器层自愈（同 generation 的 401 会被
-            // dedup 短路返回旧 token，再失败仍走到这里形成 user-perceivable loop）。
-            // Story 5.5 round 8 [P1] fix: 文案回归 round 5 风格 ("登录失败，请重新启动应用"),
-            // 不带 "请重试" 前缀.
-            // Story 5.5 round 9 [P2] fix: 改成 .retry —— bootstrap 路径下重试整个 closure 会
-            // 重新走 cold-start GuestLoginUseCase + LoadHome (RootView .retry 分支会 reset
-            // sessionStore 后重跑),如果 401 是 server transient (session 漂抽风) 可能恢复;
-            // 即便最终还是 401, user 主动点重试只是多发一次请求, 比"必须杀进程"温柔.
-            // 与 .decoding 同精神 (transient 优先, terminal 留给真"重启救不了"的本地态错误).
-            // 详见 docs/lessons/2026-04-27-transient-vs-terminal-error-classification.md.
-            return ErrorPresentation.retry(message: "登录失败，请重试")
+            // ADR-0008 v2 §6: 生产路径下 .unauthorized 由 AuthBoundaryAPIClient 全局 catch
+            // 触发 cold-start，不进 mapper presentation。本分支保留作为兜底（测试 / 未走装饰器的
+            // 非常规路径）。文案与 .missingCredentials 区分：前者 server 拒绝 token，重启可能恢复；
+            // 后者本地真无凭证，必须重启走 cold-start。
+            return ErrorPresentation.alert(title: "提示", message: "登录已过期，请重启 App")
 
         case .missingCredentials:
-            // Story 5.4 round 2 fix: 跟 .unauthorized 区分 —— 本地态需要冷启动接手，
-            // 不能 toast "正在重登" 误导用户以为后台在自动恢复（AuthRetryingAPIClient 不接管）。
-            // 文案天然就明确告知 user 应该重启 App (retry 救不回, keychain 真的没 token).
-            // Story 5.5 round 9 [P2] 验证: 此 case 保留 .alert —— 真 terminal,本地配置/keychain
-            // 已损坏,bootstrap closure 重跑只会再次抛同样错误 (cold-start GuestLoginUseCase 仍
-            // 走同一份 KeychainTokenStore, 同样读不到 token / 写不进去).
-            // Story 5.5 round 11 [P2] 收窄: 本 case 现在**仅**包含 "keychain 读成功但返 nil/空串"
-            // 与 "DI 没配 keychain" 两种 terminal 场景; keychain.get 抛错的 transient 路径已拆出
-            // 到 .localStoreFailure (见下).
+            // 本地 keychain 确认无 token（DI 没配 / 读 nil/空串）—— 真 terminal，
+            // 重启 App cold-start 走同一份 KeychainTokenStore 仍读不到，retry 无意义。
             return ErrorPresentation.alert(title: "提示", message: "登录信息丢失，请重启 App")
 
         case .localStoreFailure:
-            // Story 5.5 round 11 [P2] fix: 新增 case —— 把 "keychain.get 抛错" 从
-            // .missingCredentials terminal 通道拆出到本 transient 通道.
-            // 之前 round 2 实现用 try? 把抛错也 collapse 进 .missingCredentials, conflate 了
-            // "确认无 token (terminal)" vs "本地存储抽风 (transient)" 两种语义不同的 case,
-            // 导致 mapper 把 sandbox 抽风渲染成 TerminalErrorView (force-quit-only) 是过度悲观.
-            // bootstrap 路径下 RootView 把 .retry 渲染为 RetryView, user 点重试重跑整个 closure
-            // (cold-start GuestLoginUseCase + LoadHome) → keychain transient 错误大概率自愈.
-            // 即便最终仍失败, user 多发一次请求也比 force-quit 温柔.
-            // 文案 "登录信息读取异常，请重试" 表达 "本地凭证暂时读不到, retry 可能恢复"; 与
-            // .missingCredentials 的 "丢失，请重启" 区分 (前者 transient 让 user 自助, 后者
-            // terminal 强制重启). 详见 docs/lessons/2026-04-28-local-store-transient-vs-terminal-must-distinguish.md.
+            // keychain.get 抛错（sandbox 抽风 / OSStatus -25291 等 transient 场景）
+            // —— 与 .missingCredentials 区分：前者临时不可用，retry 可能恢复；后者确认无 token。
             return ErrorPresentation.retry(message: "登录信息读取异常，请重试")
 
         case .network:
             return ErrorPresentation.retry(message: "网络异常，请检查后重试")
 
         case .decoding:
-            // Story 5.5 round 9 [P2] fix: 改成 .retry —— 之前 round 8 改成 .alert 渲染
-            // TerminalErrorView 是过度悲观, .decoding 可能是 transient (server partial
-            // rollout / 一次性坏 payload),应该让 user 能在 App 内重试自愈, 不必杀进程.
-            // 文案 "数据异常，请重试" 适合 RetryView 场景 (前面有 "请检查" 等 retry 暗示).
-            // 注意: HomeData(from:) throws decoding error 的 fail-fast 逻辑保持不变 (Story 5.5
-            // round 6 fix) —— 让 dev 能立刻看到 schema drift; 改的只是 mapper 把 decoding error
-            // 渲染成 retry 而非 terminal, 给 user 一个自助恢复的入口.
-            // 详见 docs/lessons/2026-04-27-transient-vs-terminal-error-classification.md.
             return ErrorPresentation.retry(message: "数据异常，请重试")
         }
     }
 
-    /// 抽出**纯文案**（不带 presentation 样式）的对外 helper.
-    /// 给非"调 ErrorPresenter"路径用 —— 早期 bootstrap closure 用过本 helper, Story 5.5 round 2
-    /// [P1] fix 后 bootstrap closure 改走 `presentation(for:)` 直接拿 ErrorPresentation
-    /// （让状态机决定 retry vs alert vs toast）, 本 helper 仍保留供其他可能场景用.
-    ///
-    /// 历史背景: Story 5.5 codex round 1 [P2] fix bootstrap loadHomeUseCase.execute() 失败时
-    /// 原走 `messageFor(error:)` → `APIError.errorDescription`,产出 "Network error: ..."
-    /// 等 developer 文案. round 1 fix 把 closure 改用本 helper. round 2 [P1] fix 进一步把
-    /// closure 改用 `presentation(for:)` 携带完整样式语义.
-    /// 详见 docs/lessons/2026-04-27-bootstrap-error-must-route-via-mapper.md
-    /// + docs/lessons/2026-04-27-launch-state-machine-must-carry-presentation.md.
-    ///
-    /// 实现：复用 `presentation(for:)` 然后从 ErrorPresentation 提取文案部分.
-    /// 不直接重复 mapping switch —— 单一 source of truth,以后改 mapper 文案时
-    /// 调用方自动跟上.
+    /// 抽出**纯文案**（不带 presentation 样式）的对外 helper. 复用 presentation(for:) 防 drift.
     public static func userFacingMessage(for error: Error) -> String {
         switch presentation(for: error) {
         case let .toast(message):
