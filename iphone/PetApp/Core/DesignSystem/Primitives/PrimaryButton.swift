@@ -53,8 +53,13 @@ public struct PrimaryButton: View {
             .font(theme.typography.mediumTitle.font)
             .foregroundColor(foregroundColor)
             .frame(height: 52)
-            .frame(maxWidth: fullWidth ? .infinity : nil)
+            // ⚠️ Modifier order matters: padding 必须在 .frame(maxWidth:) **之前**.
+            // 对齐 ui_design primitives.jsx:151-158 — CSS 里 `width: 100%` 默认 box-sizing
+            // 等价于 padding 计入 width 内；SwiftUI 里要还原此语义就是先 padding 再扩展 maxWidth.
+            // 反过来（先 .frame(maxWidth: .infinity) 再 padding）会让 padded pill 比父容器多
+            // 44pt（22 × 2），在 modal card / list row 等约束布局里溢出或被裁剪.
             .padding(.horizontal, theme.spacing.s22)
+            .frame(maxWidth: fullWidth ? .infinity : nil)
             .background(
                 RoundedRectangle(cornerRadius: theme.radius.pill)
                     .fill(backgroundColor)
