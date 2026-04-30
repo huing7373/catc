@@ -1,0 +1,157 @@
+// PrimaryButton.swift
+// Story 37.6: 圆药丸主按钮，对齐 ui_design primitives.jsx `PrimaryButton` 函数.
+//
+// 三 variant: primary / secondary / ghost; 高度 52pt; 圆角走 theme.radius.pill 圆药丸; 硬阴影
+// 立体感（按下 translateY(2)）;支持 disabled 态.
+
+import SwiftUI
+
+/// PrimaryButton variant: 三档样式（来自 ui_design primitives.jsx `PrimaryButton` 函数）.
+public enum PrimaryButtonVariant: String, CaseIterable {
+    case primary
+    case secondary
+    case ghost
+}
+
+/// PrimaryButton: 圆药丸主按钮.
+public struct PrimaryButton: View {
+    @Environment(\.theme) private var theme
+
+    private let title: String
+    private let variant: PrimaryButtonVariant
+    private let icon: String?       // SF Symbol 名（来自 Icons.symbol(for:)）；nil 时无 icon
+    private let fullWidth: Bool
+    private let isEnabled: Bool
+    private let action: () -> Void
+
+    @State private var isPressed: Bool = false
+
+    public init(
+        title: String,
+        variant: PrimaryButtonVariant = .primary,
+        icon: String? = nil,
+        fullWidth: Bool = false,
+        isEnabled: Bool = true,
+        action: @escaping () -> Void
+    ) {
+        self.title = title
+        self.variant = variant
+        self.icon = icon
+        self.fullWidth = fullWidth
+        self.isEnabled = isEnabled
+        self.action = action
+    }
+
+    public var body: some View {
+        Button(action: action) {
+            HStack(spacing: theme.spacing.s8) {
+                if let icon {
+                    Image(systemName: icon)
+                }
+                Text(title)
+            }
+            .font(theme.typography.mediumTitle.font)
+            .foregroundColor(foregroundColor)
+            .frame(height: 52)
+            .frame(maxWidth: fullWidth ? .infinity : nil)
+            .padding(.horizontal, theme.spacing.s22)
+            .background(
+                RoundedRectangle(cornerRadius: theme.radius.pill)
+                    .fill(backgroundColor)
+            )
+            .overlay(
+                Group {
+                    if let borderColor {
+                        RoundedRectangle(cornerRadius: theme.radius.pill)
+                            .stroke(borderColor, lineWidth: 1.5)
+                    }
+                }
+            )
+            .shadow(color: shadowColor, radius: 0, x: 0, y: shadowY)
+            .offset(y: isPressed ? 2 : 0)
+            .opacity(isEnabled ? 1.0 : 0.5)
+            .animation(.easeOut(duration: 0.1), value: isPressed)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = isEnabled }
+                .onEnded { _ in isPressed = false }
+        )
+    }
+
+    private var backgroundColor: Color {
+        switch variant {
+        case .primary:   return theme.colors.accent
+        case .secondary: return theme.colors.surface
+        case .ghost:     return theme.colors.accentSoft
+        }
+    }
+
+    private var foregroundColor: Color {
+        switch variant {
+        case .primary:   return Color.white
+        case .secondary: return theme.colors.ink
+        case .ghost:     return theme.colors.accentDeep
+        }
+    }
+
+    private var borderColor: Color? {
+        switch variant {
+        case .secondary: return theme.colors.border
+        default:         return nil
+        }
+    }
+
+    private var shadowColor: Color {
+        switch variant {
+        case .primary:   return theme.colors.accentDeep
+        case .secondary: return Color.black.opacity(0.08)
+        case .ghost:     return Color.black.opacity(0.06)
+        }
+    }
+
+    private var shadowY: CGFloat {
+        switch variant {
+        case .ghost: return 3
+        default:     return 4
+        }
+    }
+}
+
+// MARK: - Preview (AC8: 双主题视觉抽样 + 4 状态)
+
+#if DEBUG
+private struct PrimaryButtonPreview_Sample: View {
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(spacing: 16) {
+            PrimaryButton(title: "主按钮 primary", variant: .primary) {}
+            PrimaryButton(title: "次要 secondary", variant: .secondary) {}
+            PrimaryButton(title: "幽灵 ghost", variant: .ghost) {}
+            PrimaryButton(title: "禁用 disabled", variant: .primary, isEnabled: false) {}
+            PrimaryButton(
+                title: "带图标 enter",
+                variant: .primary,
+                icon: Icons.symbol(for: "enter"),
+                fullWidth: true
+            ) {}
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.colors.pageBg)
+    }
+}
+
+#Preview("PrimaryButton — candy") {
+    PrimaryButtonPreview_Sample()
+        .environment(\.theme, ThemeName.candy.theme)
+}
+
+#Preview("PrimaryButton — dark") {
+    PrimaryButtonPreview_Sample()
+        .environment(\.theme, ThemeName.dark.theme)
+}
+#endif
