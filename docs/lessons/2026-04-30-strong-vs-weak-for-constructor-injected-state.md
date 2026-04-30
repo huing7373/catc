@@ -2,7 +2,7 @@
 date: 2026-04-30
 source_review: codex review --uncommitted (epic-loop round 1) → /tmp/epic-loop-review-37-4-r1.md
 story: 37-4-appstate-实装-loadhome-迁移
-commit: <pending>
+commit: 8c9d991
 lesson_count: 1
 ---
 
