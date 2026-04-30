@@ -1,6 +1,6 @@
 # Story 37.3: RootView 主入口重新实装（按 ADR-0009 完全 supersedes Story 2.3 主入口部分）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
@@ -777,6 +777,7 @@ Claude Opus 4.7 (1M context) — `claude-opus-4-7[1m]`
    - **UI 测试 10 case 全通过**：4 HomeUITests + 1 KeychainPersistenceUITests + 5 NavigationUITests（testFourTabsAreLocatable / testSwitchToWardrobeTab / testSwitchToFriendsTab / testSwitchToProfileTab / testTabSwitchBackToHomeRecoversHomeView）.
    - **release build** 通过（先 build 验证再跑 test；无 #if DEBUG 路径泄漏）.
 7. **未发现 ADR-0009 偏差**：实装期严格按 §3.5 步骤 1–8 落地；ADR 修订 patch + 改 v2 Accepted 路径**未触发**.
+8. **codex r2 [P3] 留档**：`iphone/PetApp/App/MainTabView.swift:110` 的 `MainTabView_Previews` 缺 `HomeViewModel()` environment 注入；DEBUG 预览会崩（非生产路径）。已 flag，可后续单 PR 一行修复（不阻塞本 story 收官）.
 
 ### File List
 
@@ -817,3 +818,4 @@ Claude Opus 4.7 (1M context) — `claude-opus-4-7[1m]`
 |---|---|---|
 | 2026-04-30 | ready-for-dev → in-progress | dev-story workflow 启动 |
 | 2026-04-30 | in-progress → review | Story 37.3 实装完成（ADR-0009 §3.5 步骤 1–8 全部落地）；235 unit + 10 UI test 全通过；release build 通过 |
+| 2026-04-30 | review → done | codex r1 fix（commit 5bb6ed5）+ lesson backfill（docs/lessons/2026-04-30-coordinator-must-mirror-loaded-home-room-state.md `<pending>` → `5bb6ed5`）；codex r2 留 1 个 [P3]（MainTabView preview 缺 HomeViewModel 注入，已 flag 见 Completion Notes #8） |
