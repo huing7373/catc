@@ -54,7 +54,8 @@ public struct MainTabView: View {
 }
 
 /// 浮动自绘 TabBar：高 72pt + 距底 14pt + 距左右 12pt + 圆角 20.
-/// Story 37.5 落地后 Color 改用 theme.colors / shadow 改用 theme.shadow.
+/// Story 37.7 HomeView Scaffold 落地时同步把 Color 改用 theme.colors / shadow 改用 theme.shadow
+/// （Story 37.5 已落地 Theme 类型契约，可直接消费；本 story 不强制收口该硬编码占位）.
 private struct FloatingTabBar: View {
     @Binding var selection: AppTab
 

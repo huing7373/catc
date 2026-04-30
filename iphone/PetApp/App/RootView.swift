@@ -38,6 +38,12 @@ struct RootView: View {
     /// 形成 weak 反向引用，让 applyHomeData(_:) 写入 AppState（不再写自身 homeData 字段）.
     @StateObject private var appState = AppState()
 
+    /// Story 37.5 AC8: Theme 注入 source-of-truth.
+    /// 当前固定 .candy（Story 37.14 白名单：本期不做 UI 切换面板）.
+    /// 用 @State 而非 let 是为了未来主题切换 UI（mini-epic）落地时能直接改 @Binding 不破坏
+    /// RootView 类型契约.Theme 是 value type → 用 @State (而非 @StateObject) 即可.
+    @State private var currentTheme: ThemeName = .candy
+
     /// Story 2.9 新增 / Story 5.2 升级：启动状态机.
     @State private var launchStateMachine: AppLaunchStateMachine?
 
@@ -54,6 +60,7 @@ struct RootView: View {
                     coordinator: coordinator,
                     homeViewModel: homeViewModel,
                     appState: appState,
+                    currentTheme: currentTheme,
                     sessionStore: container.sessionStore,
                     resetIdentityViewModel: currentResetIdentityViewModel(),
                     onReadyAppear: {
@@ -220,6 +227,8 @@ private struct LaunchedContentView: View {
     let homeViewModel: HomeViewModel
     /// Story 37.4 AC3：接收 RootView 的 AppState，注入到 .ready 子树 environmentObject.
     let appState: AppState
+    /// Story 37.5 AC8: 接收 RootView 的 ThemeName，转 Theme 实例后注入 .ready 子树 environment(\.theme).
+    let currentTheme: ThemeName
     let sessionStore: SessionStore?
     let resetIdentityViewModel: ResetIdentityViewModel?
     let onReadyAppear: () -> Void
@@ -230,6 +239,7 @@ private struct LaunchedContentView: View {
         coordinator: AppCoordinator,
         homeViewModel: HomeViewModel,
         appState: AppState,
+        currentTheme: ThemeName,
         sessionStore: SessionStore?,
         resetIdentityViewModel: ResetIdentityViewModel?,
         onReadyAppear: @escaping () -> Void,
@@ -239,6 +249,7 @@ private struct LaunchedContentView: View {
         self.coordinator = coordinator
         self.homeViewModel = homeViewModel
         self.appState = appState
+        self.currentTheme = currentTheme
         self.sessionStore = sessionStore
         self.resetIdentityViewModel = resetIdentityViewModel
         self.onReadyAppear = onReadyAppear
@@ -256,6 +267,7 @@ private struct LaunchedContentView: View {
                     .environmentObject(coordinator)
                     .environmentObject(homeViewModel)
                     .environmentObject(appState)
+                    .environment(\.theme, currentTheme.theme)
                     .environment(\.sessionStore, sessionStore)
                     .environment(\.resetIdentityViewModel, resetIdentityViewModel)
                     .onAppear { onReadyAppear() }
