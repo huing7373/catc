@@ -1,6 +1,6 @@
 # ADR-0009: iPhone 导航架构改用 TabView（**完全 supersede** Story 2.3 主入口部分）
 
-- **Status**: Proposed（待用户终审 + Story 37.1 落地后改 Accepted）
+- **Status**: Accepted（2026-04-30 Story 37.1 落地）
 - **Date**: 2026-04-29 / 2026-04-30 v2 (X1+X2 修订：partial revert → completely supersedes)
 - **Decider**: Developer
 - **Supersedes**: Story 2.3 已 done 决策的「主入口 NavigationStack + 全屏 Sheet」**主入口部分**（**完全 supersede 而非修订**——该部分 acceptance 不再 active；次级 sheet 场景仍保留作为 ADR 内独立决策延续）；ADR-0002 §3.3 不变
@@ -217,6 +217,6 @@ Story 2.3「导航架构搭建」已 done，钦定的主入口模式是：
 
 ## 6. 验收（本 ADR 改 Accepted 的标准）
 
-- [ ] 用户终审通过 Sprint Change Proposal v2
-- [ ] Story 37.3 落地后跑 `bash iphone/scripts/build.sh --test` 通过
-- [ ] codex 对 Sprint Change Proposal v2 verdict ≥ Accept with revisions
+- [x] 用户终审通过 Sprint Change Proposal v2
+- [x] Story 37.3 落地后跑 `bash iphone/scripts/build.sh --test` 通过
+- [x] codex 对 Sprint Change Proposal v2 verdict ≥ Accept with revisions
