@@ -1,6 +1,6 @@
 # Story 37.4: AppState 重新实装 + HomeViewModel.homeData 删除（按 ADR-0010 完全 supersedes Story 5.5 数据持有部分）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
