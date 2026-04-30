@@ -124,3 +124,13 @@ codex 隐含的假设是「ADR §6 = 物理验证 checklist，必须实装完才
 - §6 verification checkbox：如果 story 选路径 B，可以勾（契约级签字）；但下游实装 story codex review 是兜底物理验证，不能跳
 
 这次 codex review 帮助暴露了「README 引用 anchor 段在路径 B 模式下需要时态校准」这个工作流盲点——以前路径 B 只在 ADR 文档自身用过，没在 README 上下文用过；本 story 是首次把路径 B 的影响传播到 README 引用 anchor，需要建立配套的「README pending implementation 标注规范」。
+
+---
+
+## Round 2 outcome（2026-04-30 后续追加）
+
+codex review round 2 重申了本文 Lesson 2 的同一 finding（ADR-0010 §6 第 2-4 条 checkbox），论点更加强："README 已正确改未来时 + sprint-status 仍标 backlog → §6 全勾形成 internally inconsistent state → false-success signal 让 Story 37.4 跳过验证"。
+
+round 2 fix-review 没有反转路径 B 决策，而是采用 **option C**：保留 §6 checkbox 全勾不动（路径 B 钦定 + 与 Story 37.1 先例对齐），在 §6 段顶加 inline blockquote annotation 把本 lesson Lesson 2 的核心论证（契约级签字 = 验证等价物 + 下游 codex review 兜底 + ADR-0008 v2 修订路径）就地 forward 到 ADR 现场。详见后续 lesson 文件 `docs/lessons/2026-04-30-adr-section-6-path-b-inline-semantics.md`。
+
+**对本 lesson Lesson 2「预防规则」的修订**：判 wontfix 时**不应仅靠 lesson sink** —— codex review 上下文只看 baseline..HEAD diff，看不到 lesson 文件。路径 B 类 wontfix 应当**同时**做两件事：（i）lesson 归档（未来 Claude 学习材料）；（ii）ADR / 文档现场 inline annotation（当前 + 未来 reviewer 就地语义说明）。round 1 漏了 (ii) 导致 round 2 复发；未来路径 B 类 wontfix 一开始就该同时落地这两份产物，不等 round 2 复发再补。

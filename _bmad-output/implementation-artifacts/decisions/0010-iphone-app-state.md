@@ -309,6 +309,8 @@ ResetIdentityViewModel.resetTapped() (Story 2.8 dev 按钮)
 
 ## 6. 验收（本 ADR 改 Accepted 的标准）
 
+> **路径 B 验证模型说明**：本节 checkbox 在 ADR Accepted 时勾选，记录 Sprint Change Proposal v2.5 终审时的 architect/PM **契约级签字** = checkbox 验证语义的等价物。下表第 2-4 项的"Story 37.4 落地后…"等措辞描述的是**契约级前置依赖已确认**（架构决策已 freeze、解锁下游开工），**不是**已物理验证。物理验证（build + test 通过、AppStateTests / LoadHomeUseCase 集成测试存在）由 Story 37.4 实装期 codex review 兜底；若届时发现 ADR-0010 §3 决策有偏差，走"ADR 修订 patch + 改 v2 Accepted"路径（参考 ADR-0008 v2 commit `ec5beb3` 先例）。本说明系 fix-review round 2 codex 担忧"future reviewer 把 ADR §6 当成 false-success signal、Story 37.4 跳过验证"的就地 forward reference；详见 `docs/lessons/2026-04-30-doc-tense-vs-path-b-adr-acceptance.md` 与本 lesson 文件 `docs/lessons/2026-04-30-adr-section-6-path-b-inline-semantics.md`。
+
 - [x] 用户终审通过 Sprint Change Proposal v2
 - [x] Story 37.4 落地后跑 `bash iphone/scripts/build.sh --test` 通过
 - [x] AppStateTests.swift 含 ≥6 case（hydrate / reset / 各 update mutation）
