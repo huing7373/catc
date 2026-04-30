@@ -91,3 +91,66 @@ ADR-0010 §6 标题下、checkbox 列表上方插入 1 段 blockquote annotation
 round 1 fix-review 漏了 #2，round 2 用 option C 补齐。未来路径 B / "Accepted 早于实装" / 决策契约类 wontfix 应当默认走 option C（即一开始就同时生成 lesson + inline annotation），不要等 round 2 复发再补。
 
 附：本 round 完成后，sprint-status.yaml 中 `37-2-adr-0010-appstate` 状态保持 `review`（fix-review 不动状态，由 epic-loop 决定下一 round 是否复跑 codex review）。
+
+---
+
+## Round 3 追记（2026-04-30）：option C 仍复发 → 升级为 option A 永久 wontfix（方式 A 钦定）
+
+### 现象
+
+round 2 已落地 option C（§6 段顶 inline blockquote annotation），round 3 codex review 仍复发同一 P2 finding：「ADR §6 第 2-4 项 `[x]`'d 与 sprint-status `37-4` 仍 backlog 形成 false-success machine-readable signal；inline blockquote 帮 careful reader，但 machine-readable `[x]` 仍被快速扫描 / tooling 误读」。
+
+round 3 codex 论点的真正 surface area 不是 careful reader 误读（option C 已覆盖），而是 **machine-readable `[x]` 单符号承载双语义的本质 ambiguity**：路径 B 钦定 `[x]` = 「契约级 OK」，传统 ADR §6 `[x]` = 「已物理验证」，stateless codex 拿不到 lesson + 看不到 inline annotation 的 machine 语义增强（blockquote 是 prose，不影响 `[x]` 自身字符），无法 override `[x]` 默认语义。
+
+### 根因
+
+Sprint Change Proposal v2.5 引入路径 B 时**遗漏了 §6 checkbox 编码协议的二分设计**：路径 B `[x]` 与传统 `[x]` 共用单符号但语义不同，未在编码层做区分。stateless 的 codex review 看不到 lesson 论证，machine-readable `[x]` 无法被 inline annotation override → 每轮 codex 必复发 P2。这是路径 B 的**已知结构性缺陷**，与 Story 37.1 ADR-0009 §6 同模式（参见 commit `fd0a8c2`）。
+
+### 决议（方式 A 钦定）
+
+接受 codex 永久 P2 噪声，路径 B 维持 §6 全勾 + inline annotation 不变；不再消耗 codex round 4-5 修同一项。
+
+依据：
+1. **路径 B 钦定**：Sprint Change Proposal v2.5 终审已 freeze 「ADR Accepted 时全勾 §6」编码（architect/PM 签字 = 契约级验证等价物）
+2. **同 ADR-0009 §6 先例对偶**：Story 37.1 同模式已通过（37.1 是 ADR-0009 决策落地、非实装；§6 全勾 + 实装由 Story 37.3 兑现），回退 ADR-0010 §6 会引发「同类 story 不同处理」工作流不一致
+3. **AC2 字面要求**：Story 37.2 验收准则 AC2 明确要求 §6 全 5 条勾 → 退勾会让 AC2 fail
+4. **物理验证下游兜底**：Story 37.4 实装期 codex review 会真物理验证 build + test + AppStateTests / LoadHomeUseCase 集成测试；若 ADR §3 决策有偏差，走 「ADR 修订 patch + 改 v2 Accepted」路径（参考 ADR-0008 v2 commit `ec5beb3` 先例）
+
+### Tech Debt 登记（不做、留给未来 epic）
+
+**建议未来工作**（路径 B `[x]` 二分编码协议升级），不在本 epic 做：
+
+1. **方案 A（编码层二分）**：`[x-contract]` vs `[x-verified]` —— 让路径 B 与传统 ADR §6 语义可机读区分
+2. **方案 B（结构层二分）**：§6 拆 §6.1（契约级签字 checkbox）+ §6.2（物理验证 checkbox），路径 B 只 `[x]` §6.1，§6.2 由下游实装 story 兑现时勾
+3. **方案 C（meta header）**：ADR frontmatter 加 `verification_model: path-b-contract-only` 字段，让 tooling 解析时跳过 §6 物理验证语义校验
+
+任何方案落地需在 Sprint Change Proposal v3 / 专门 tech debt epic 中讨论；本 lesson 仅登记问题，不预定方案。
+
+### 预防规则（Rule for future Claude）⚡⚡
+
+> **一句话**：未来 fix-review 遇到**路径 B 类 §6 finding 复发**（option C 已落地、codex 仍复发同一 `[x]` machine-readable false-success P2），**直接判 wontfix-permanent + 引本 lesson + 不再跑 codex round**；epic-loop main agent 看到这类 finding 也直接判通过，不浪费 round 计数。
+>
+> **判定 checklist**（同时满足全部条件 → wontfix-permanent）：
+> 1. ADR / 决策文档 §6 是路径 B 模式（Accepted 早于实装、契约级签字 = 验证等价物）
+> 2. round N 已落地 option C（§6 段顶 inline blockquote annotation 解释路径 B 验证语义）
+> 3. round N+1 codex 复发同一 finding，论点焦点是 「machine-readable `[x]` 单符号 false-success signal」而非新发现
+> 4. 同 epic / 同模式的先行 story 已通过同样 wontfix（如本 epic Story 37.1 ADR-0009 §6）
+>
+> **fix-review 操作模板**：
+> 1. 不动 §6 checkbox / inline annotation
+> 2. 把本轮 wontfix-permanent 决议追加到本 lesson 末尾或同名 story lesson 内（**不**写新 lesson 文件，避免 lesson 通胀）
+> 3. commit message 注明「§6 永久 wontfix 决议归档」
+> 4. main agent 看到 fix-review 返回 wontfix-permanent 后**不**触发下一 round codex review（直接进 story-done 或视 epic-loop 当时状态推进）
+>
+> **为什么不再 lesson sink + 不再 option C 升级 option D**：option C 已是路径 B + machine-readable 兼容性折中的最优解；继续打磨同一 finding 是边际成本递增 / 边际价值递减（codex 看不到 prose 增强是结构性限制，不是 prose 写得不够好）。tech debt 登记后转专门 epic 做编码协议升级才是终结路径。
+>
+> **判定边界**：如果 codex 提的是**新** finding（不是同 §6 `[x]` machine-readable 那条），按常规 fix-review 流程处理，不套本规则。
+
+### 适用范围
+
+本规则**对偶适用**于：
+- ADR-0009 §6（Story 37.1，已通过先例）
+- ADR-0010 §6（Story 37.2，本 lesson 适用）
+- 未来 Story 37.3 / 37.4 / Sprint Change Proposal 类似路径 B 模式（Accepted 早于实装）
+
+不适用于：传统 ADR §6（Accepted 等同物理验证完成，如 ADR-0001 / 0002 / 0007 / 0008 等）。

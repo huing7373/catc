@@ -77,13 +77,13 @@ open iphone/PetApp.xcodeproj
 
 > ⚠️ **目标态文档（pending implementation）**：本节描述的 `HomeContainerView` / 4 Tab 主入口为 [ADR-0009](../_bmad-output/implementation-artifacts/decisions/0009-iphone-navigation-tabview.md) 钦定的目标态，**实装由 Story 37.3 完成**（当前 sprint-status.yaml 中 `37-3-rootview-maintabview-改造` 仍为 backlog）。在 37.3 落地前，仓库内并不存在 `HomeContainerView`，请勿据本节字面引用类型 / 数据流。
 
-iPhone 主入口**将**为 4 Tab + Home Tab 互斥状态机（HomeContainerView 根据 `appState.currentRoomId` 在 HomeView ↔ RoomView 间切换）。详见 [ADR-0009](../_bmad-output/implementation-artifacts/decisions/0009-iphone-navigation-tabview.md)（Status: Accepted）。Story 2.3 主入口部分**将**在 Story 37.3 落地后 supersede（届时 sprint-status.yaml 内 `2-3-...` 状态会改为 superseded），新实装见 Story 37.3。
+iPhone 主入口**将**为 4 Tab + Home Tab 互斥状态机（HomeContainerView 根据 `appState.currentRoomId` 在 HomeView ↔ RoomView 间切换）。详见 [ADR-0009](../_bmad-output/implementation-artifacts/decisions/0009-iphone-navigation-tabview.md)（Status: Accepted）。Story 2.3 主入口部分**已**在 sprint-status.yaml 内标记为 superseded（2026-04-30，由 ADR-0009 acceptance 触发；物理实装由 Story 37.3 兑现），新实装见 Story 37.3。
 
 ### 全局状态
 
 > ⚠️ **目标态文档（pending implementation）**：本节描述的全局 `AppState` 为 [ADR-0010](../_bmad-output/implementation-artifacts/decisions/0010-iphone-app-state.md) 钦定的目标态，**实装 + LoadHomeUseCase 迁移由 Story 37.4 完成**（当前 sprint-status.yaml 中 `37-4-appstate-实装-loadhome-迁移` 仍为 backlog）。在 37.4 落地前，仓库内并不存在 `AppState` 类型；现网代码仍走 Story 5.5 钦定的 `HomeViewModel.homeData` 路径。
 
-App 内所有 domain state（user / pet / stepAccount / chest / currentRoomId / inventory / equips / emojiCatalog）**将**由全局 `AppState: ObservableObject` 单实例持有；ViewModel 仅允许**构造注入** AppState（**禁止** ViewModel 内部用 `@EnvironmentObject`）。详见 [ADR-0010](../_bmad-output/implementation-artifacts/decisions/0010-iphone-app-state.md)（Status: Accepted）。Story 5.5 数据持有部分（`HomeViewModel.homeData` 字段）**将**在 Story 37.4 落地后 supersede（届时 sprint-status.yaml 内 `5-5-...` 状态会改为 superseded），新实装见 Story 37.4。
+App 内所有 domain state（user / pet / stepAccount / chest / currentRoomId / inventory / equips / emojiCatalog）**将**由全局 `AppState: ObservableObject` 单实例持有；ViewModel 仅允许**构造注入** AppState（**禁止** ViewModel 内部用 `@EnvironmentObject`）。详见 [ADR-0010](../_bmad-output/implementation-artifacts/decisions/0010-iphone-app-state.md)（Status: Accepted）。Story 5.5 数据持有部分（`HomeViewModel.homeData` 字段）**已**在 sprint-status.yaml 内标记为 superseded（2026-04-30，由 ADR-0010 acceptance 触发；物理实装由 Story 37.4 兑现），新实装见 Story 37.4。
 
 ---
 
