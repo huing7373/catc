@@ -35,8 +35,9 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-04-28
-# story 5-5 review
+last_updated: 2026-04-30
+# Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
+# 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
 project_key: NOKEY
 tracking_system: file-system
@@ -89,6 +90,25 @@ development_status:
   5-4-无效-token-静默重新登录: done
   5-5-loadhomeusecase-主界面用-get-home-一次拉取全部数据: done
   epic-5-retrospective: optional
+  # ===== Epic 37 中段插入（sprint-change-proposal-2026-04-29-v2.md 落地 2026-04-30）=====
+  # 实际执行顺序：epic-5 done 后立即开始；epic-6（节点 2 demo 验收）等本 epic 全部 done 才启动
+  epic-37: backlog
+  37-1-adr-0009-导航架构: backlog
+  37-2-adr-0010-appstate: backlog
+  37-3-rootview-maintabview-改造: backlog
+  37-4-appstate-实装-loadhome-迁移: backlog
+  37-5-theme-design-tokens: backlog
+  37-6-shared-primitives: backlog
+  37-7-homeview-scaffold: backlog
+  37-8-roomview-scaffold: backlog
+  37-9-wardrobeview-scaffold: backlog
+  37-10-friendsview-scaffold: backlog
+  37-11-profileview-scaffold: backlog
+  37-12-joinroommodal-跨屏跳转: backlog
+  37-13-accessibility-identifier-总表: backlog
+  37-14-design-package-白名单: backlog
+  epic-37-retrospective: required
+  # ===== Epic 37 ends =====
   epic-6: backlog
   6-1-跨端集成测试场景-自动登录-e2e: backlog
   6-2-节点-2-demo-验收: backlog
@@ -218,7 +238,7 @@ development_status:
   24-1-仓库页-swiftui-骨架: backlog
   24-2-loadinventoryusecase-get-cosmetics-inventory-调用: backlog
   24-3-基础筛选交互: backlog
-  24-4-主界面-仓库-按钮入口完善: backlog
+  24-4-主界面-仓库-按钮入口完善: deleted  # 2026-04-30 ADR-0009 推翻 Sheet 主入口 → Wardrobe Tab 直接路由 → 本 story 作废
   24-5-穿戴入口按钮位置预留: backlog
   epic-24-retrospective: optional
   epic-25: backlog
@@ -278,7 +298,7 @@ development_status:
   33-3-手动选-10-实例交互-数量-品质校验: backlog
   33-4-composeupgradeusecase-post-compose-upgrade: backlog
   33-5-成功-popup-失败错误处理: backlog
-  33-6-主界面-合成-按钮入口完善: backlog
+  33-6-主界面-合成-按钮入口完善: deleted  # 2026-04-30 ADR-0009 推翻 Sheet 主入口 → 合成入口改 Wardrobe Tab 内 push（Story 33.1）→ 本 story 作废
   epic-33-retrospective: optional
   epic-34: backlog
   34-1-跨端集成测试场景-合成链路-e2e: backlog
