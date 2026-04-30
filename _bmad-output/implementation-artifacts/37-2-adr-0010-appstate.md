@@ -1,6 +1,6 @@
 # Story 37.2: ADR-0010 撰写（全局 AppState 单 source of truth）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
