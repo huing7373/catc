@@ -36,6 +36,15 @@
 //
 // 失败也置 hasLoadedHome=true（与 hasFetched 同模式）：避免 server 不可达时反复重试；
 // 用户主动重试通过 resetLoadHomeForRetry() 显式重置 + 再调 loadHome()。
+//
+// Story 37.4 改造（ADR-0010 §3.5 + AC2）：
+// - 删除 `@Published homeData: HomeData?` 字段（domain state 单 source of truth 改为 AppState）.
+// - 新增 `private weak var appState: AppState?` + `bind(appState:)` 构造注入入口；applyHomeData(_:) 内部
+//   把 `self.homeData = data` 改为 `self.appState?.applyHomeData(data)`（写入 AppState 而非自身字段）.
+// - `loadingState` / `hasLoadedHome` / `hasFetched` 等 transient flag 仍归 HomeViewModel
+//   （ADR-0010 §3.2 表格"Loading / error toast → ViewModel @Published"钦定）.
+// - 三个 init 追加 `appState: AppState? = nil` 默认参数（不删除老接口；测试 / Preview 仍走老路径）.
+// - applyHomeData(_:) 承担**双重职责**：写 AppState（驱动 UI）+ 设 hasLoadedHome=true（驱动 ViewModel 短路 flag）.
 
 import Foundation
 import Combine
@@ -55,10 +64,9 @@ public final class HomeViewModel: ObservableObject {
     @Published public var appVersion: String
     @Published public var serverInfo: String
 
-    /// Story 5.5 AC5: 首屏数据；启动期 / 重试期间为 nil，加载完成后由 applyHomeData(_:) / loadHome() 写入.
-    @Published public var homeData: HomeData?
-
     /// Story 5.5 AC5: 加载状态（idle/loading/loaded/failed）。Equatable 让测试可断言.
+    /// Story 37.4 AC2 / ADR-0010 §3.2 表格：loading / error toast 仍归 HomeViewModel transient state；
+    /// domain state（user/pet/stepAccount/chest）改由 AppState 持有（不再有 self.homeData 字段）.
     @Published public var loadingState: HomeLoadingState = .idle
 
     // Story 37.3 删除（ADR-0009 §3.5 步骤 4）：
@@ -107,12 +115,27 @@ public final class HomeViewModel: ObservableObject {
     /// 当前 loadHome 任务句柄；同 task 边界内并发触发短路.
     private var loadHomeTask: Task<Void, Never>?
 
+    /// Story 37.4：通过 `bind(appState:)` 注入或 init 注入的 AppState 引用.
+    ///
+    /// **strong** 持有（Story 37.4 codex round 1 [P2] fix）：原方案 weak 与 init 参数注入路径不兼容 ——
+    /// 若 caller 用 `HomeViewModel(appState: AppState())` 这种 fresh instance 而无外部 strong owner,
+    /// weak 会立刻释放,`applyHomeData` / `loadHome` 静默 fail. 改 strong 后:
+    /// - 生产路径（RootView @StateObject 同时 strong 持 AppState 与 HomeViewModel）：HomeViewModel 再
+    ///   strong 持 AppState **不会形成循环** —— AppState 不反向持 HomeViewModel（已在
+    ///   `iphone/PetApp/State/` 下全局 grep 确认）.
+    /// - 测试 / Preview / 其他 caller 路径：strong 让 `HomeViewModel(appState: AppState())`
+    ///   也能正常工作,符合构造注入语义（ADR-0010 §3.1 "ViewModel 仅允许构造注入 AppState"）.
+    /// 详见 docs/lessons/2026-04-30-strong-vs-weak-for-constructor-injected-state.md.
+    private var appState: AppState?
+
     /// 老 init（Story 2.2 / 2.3 路径）：保留 hardcode 默认值，pingUseCase = nil；不破坏老调用方 / Preview。
     /// Story 37.3 删除 onRoomTap / onInventoryTap / onComposeTap 三个 closure 参数（ADR-0009 §3.5 步骤 4）.
+    /// Story 37.4 追加 `appState: AppState? = nil` 默认参数（保留老接口；测试 / Preview 不传走 nil 路径）.
     public init(
         nickname: String = "用户1001",
         appVersion: String = "0.0.0",
-        serverInfo: String = "----"
+        serverInfo: String = "----",
+        appState: AppState? = nil
     ) {
         self.nickname = nickname
         self.appVersion = appVersion
@@ -120,16 +143,19 @@ public final class HomeViewModel: ObservableObject {
         self.pingUseCase = nil
         self.loadHomeUseCase = nil
         self.errorPresenter = nil
+        self.appState = appState
     }
 
     /// Story 2.5 新增 init：注入 PingUseCaseProtocol；appVersion 默认从 Bundle 读取。
     /// 在 AppContainer wire 时调用此 init；测试也用此 init 注入 mock UseCase。
     /// Story 37.3 删除 onRoomTap / onInventoryTap / onComposeTap 三个 closure 参数（ADR-0009 §3.5 步骤 4）.
+    /// Story 37.4 追加 `appState: AppState? = nil` 默认参数.
     public init(
         nickname: String = "用户1001",
         pingUseCase: PingUseCaseProtocol,
         appVersion: String = HomeViewModel.readAppVersion(),
-        serverInfo: String = "----"
+        serverInfo: String = "----",
+        appState: AppState? = nil
     ) {
         self.nickname = nickname
         self.appVersion = appVersion
@@ -137,18 +163,21 @@ public final class HomeViewModel: ObservableObject {
         self.pingUseCase = pingUseCase
         self.loadHomeUseCase = nil
         self.errorPresenter = nil
+        self.appState = appState
     }
 
     /// Story 5.5 新增 init：注入 LoadHomeUseCase + ErrorPresenter（与 Story 2.5 init 并存）。
     /// 测试场景用此 init 直接注入 mock UseCase + 真 ErrorPresenter；生产路径走 bind() 注入.
     /// Story 37.3 删除 onRoomTap / onInventoryTap / onComposeTap 三个 closure 参数（ADR-0009 §3.5 步骤 4）.
+    /// Story 37.4 追加 `appState: AppState? = nil` 默认参数.
     public init(
         nickname: String = "用户1001",
         pingUseCase: PingUseCaseProtocol? = nil,
         loadHomeUseCase: LoadHomeUseCaseProtocol,
         errorPresenter: ErrorPresenter,
         appVersion: String = HomeViewModel.readAppVersion(),
-        serverInfo: String = "----"
+        serverInfo: String = "----",
+        appState: AppState? = nil
     ) {
         self.nickname = nickname
         self.appVersion = appVersion
@@ -156,6 +185,7 @@ public final class HomeViewModel: ObservableObject {
         self.pingUseCase = pingUseCase
         self.loadHomeUseCase = loadHomeUseCase
         self.errorPresenter = errorPresenter
+        self.appState = appState
     }
 
     /// 单次绑定 PingUseCase。多次调用时仅第一次生效（后续静默 noop）。
@@ -236,6 +266,16 @@ public final class HomeViewModel: ObservableObject {
         self.boundErrorPresenter = errorPresenter
     }
 
+    /// Story 37.4: 单次绑定 AppState（构造注入路径），由 RootView .task 内调用.
+    /// 多次调用时仅第一次生效（防 SwiftUI .task 多次触发覆盖 first 注入）.
+    /// 与 bind(pingUseCase:) lesson 同精神：跨 task 边界注入 AppState 引用，
+    /// 让 applyHomeData(_:) 能 propagate 到 AppState（不再写 self.homeData 字段）.
+    /// 详见 docs/lessons/2026-04-26-stateobject-init-vs-bind-injection.md.
+    public func bind(appState: AppState) {
+        guard self.appState == nil else { return }
+        self.appState = appState
+    }
+
     /// Story 5.5: LoadHome 入口（启动时由 RootView bootstrapStep1 注入路径调；
     /// 用户重试时由 ErrorPresenter onRetry 闭包调）.
     ///
@@ -269,8 +309,17 @@ public final class HomeViewModel: ObservableObject {
     /// Story 5.5: 同步注入已经拿到的 HomeData（让 RootView bootstrapStep1 closure 可直接喂数据，
     /// 避免 ViewModel 自己再调一次 execute() 引发双发请求）.
     /// 同步置 hasLoadedHome=true → 后续 ViewModel.loadHome() 路径走短路.
+    ///
+    /// Story 37.4 改造（ADR-0010 §3.5）：
+    /// - domain state（user/pet/stepAccount/chest/currentRoomId）写入 AppState，由 SwiftUI View 通过
+    ///   @EnvironmentObject 订阅；不再持自身 homeData 字段.
+    /// - 仍保留 `loadingState = .loaded` + `hasLoadedHome = true` —— 这两个 transient flag 归
+    ///   HomeViewModel 自己管（ADR-0010 §3.2 表格钦定 loading state 不进 AppState）.
+    /// - 双写模式（RootView bootstrap closure 同时调 appState.applyHomeData + homeViewModel.applyHomeData）
+    ///   不是反模式：内层这里写的是同一个 AppState 实例 + idempotent 赋值（同值），
+    ///   同时让 hasLoadedHome 短路 flag 准确生效.
     public func applyHomeData(_ data: HomeData) {
-        self.homeData = data
+        self.appState?.applyHomeData(data)
         self.loadingState = .loaded
         self.hasLoadedHome = true
     }

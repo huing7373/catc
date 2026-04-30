@@ -1,9 +1,9 @@
 // HomeContainerView.swift
 // Story 37.3：Home Tab 互斥状态机容器（ADR-0009 §3.5 步骤 3）.
+// Story 37.4 改造（AC4）：currentRoomId 数据源从 AppCoordinator 临时占位字段切换为 AppState.
 //
 // 职责：
-//   - 根据 `currentRoomId` (来自 AppCoordinator 临时占位字段；Story 37.4 后改 AppState)
-//     在 HomeView ↔ RoomViewPlaceholder 互斥切换（淡入淡出 0.3s）.
+//   - 根据 `appState.currentRoomId` 在 HomeView ↔ RoomViewPlaceholder 互斥切换（淡入淡出 0.3s）.
 //   - 不持有真实数据：HomeView 仍由 RootView 注入 `homeViewModel` / `resetIdentityViewModel`
 //     / `sessionStore` 三参数（Story 5.5 / 2.5 / 2.3 钦定的 wire 模式不动）.
 //
@@ -14,19 +14,18 @@
 //     与 HomePetNameResolver / HomeNicknameResolver 同精神）.
 //   - 用 ZStack + .transition(.opacity) + .animation 实现互斥切换淡入淡出
 //     （与 RootView 三态机同 lesson：2026-04-26-swiftui-switch-transition-explicit.md）.
-//   - 临时占位字段 `coordinator.currentRoomId`：Story 37.4 ↔ 37.3 并行方案的协调；
-//     Story 37.4 落地 AppState 后由 dev 把所有引用改为 `appState.currentRoomId` + 删占位字段.
 
 import SwiftUI
 
 public struct HomeContainerView: View {
-    @EnvironmentObject var coordinator: AppCoordinator
+    /// Story 37.4 AC4：currentRoomId 数据源从 AppCoordinator 临时占位字段切换为 AppState.
+    @EnvironmentObject var appState: AppState
 
     public init() {}
 
     public var body: some View {
         ZStack {
-            if HomeRoomDispatcher.shouldShowRoom(currentRoomId: coordinator.currentRoomId) {
+            if HomeRoomDispatcher.shouldShowRoom(currentRoomId: appState.currentRoomId) {
                 // inRoom 态：显示 RoomView 占位 stub（Story 37.8 实装真实内容）.
                 RoomViewPlaceholder()
                     .transition(.opacity)
@@ -39,7 +38,7 @@ public struct HomeContainerView: View {
                 .transition(.opacity)
             }
         }
-        .animation(.easeInOut(duration: 0.3), value: coordinator.currentRoomId)
+        .animation(.easeInOut(duration: 0.3), value: appState.currentRoomId)
     }
 }
 

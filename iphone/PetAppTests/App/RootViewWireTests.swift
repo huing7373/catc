@@ -124,23 +124,28 @@ final class RootViewWireTests: XCTestCase {
         throw error
     }
 
-    // MARK: - Story 37.3 codex round 1 [P1] fix: bootstrap 必须把 /home 的 room.currentRoomId 传播进 coordinator
+    // MARK: - Story 37.4 AC5 + AC8: bootstrap 必须把 /home 的 room.currentRoomId 传播进 AppState
+    //
+    // 旧 (Story 37.3) 测试 testBootstrapPropagates...ToCoordinator 直接断言 coordinator.currentRoomId,
+    // Story 37.4 落地 AppState 后改为断言 appState.currentRoomId（数据源切换；intent 完全保留：
+    // bootstrap 完成后 currentRoomId 必须传播；不传播就会让"已在房间"用户被错误落到 idle home screen）.
+    // 详见 docs/lessons/2026-04-30-coordinator-must-mirror-loaded-home-room-state.md（lesson 仍有效，
+    // 仅 source of truth 从 coordinator 切换到 AppState）.
 
     /// 已在房间用户 (`/home` 返回 `room.currentRoomId != nil`) 在 bootstrap 完成后,
-    /// `coordinator.currentRoomId` 必须等于 server 返回值 —— HomeContainerView 互斥状态机
+    /// `appState.currentRoomId` 必须等于 server 返回值 —— HomeContainerView 互斥状态机
     /// 以此为决策入参；不写就会让用户被错误落到 idle home screen.
-    /// 详见 docs/lessons/2026-04-30-coordinator-must-mirror-loaded-home-room-state.md.
-    func testBootstrapPropagatesLoadedHomeRoomIdToCoordinator() async {
-        let coordinator = AppCoordinator()
-        XCTAssertNil(coordinator.currentRoomId, "前置：coordinator.currentRoomId 默认 nil")
+    func testBootstrapPropagatesLoadedHomeRoomIdToAppState() async {
+        let appState = AppState()
+        XCTAssertNil(appState.currentRoomId, "前置：appState.currentRoomId 默认 nil")
 
         let inRoomData = makeHomeData(currentRoomId: "room_abc123")
 
         // 复刻 RootView.ensureLaunchStateMachineWired step1 closure 的 await MainActor.run 内
-        // 双写模式 (applyHomeData + coordinator.currentRoomId = homeData.room.currentRoomId).
+        // 单写模式 (appState.applyHomeData(homeData) —— Story 37.4 收口后取代 coordinator.currentRoomId 双写).
         let bootstrapStep1: @Sendable () async throws -> Void = {
             await MainActor.run {
-                coordinator.currentRoomId = inRoomData.room.currentRoomId
+                appState.applyHomeData(inRoomData)
             }
         }
 
@@ -149,26 +154,26 @@ final class RootViewWireTests: XCTestCase {
 
         XCTAssertEqual(sm.state, .ready, "bootstrap 成功 → state 进入 .ready")
         XCTAssertEqual(
-            coordinator.currentRoomId,
+            appState.currentRoomId,
             "room_abc123",
-            "bootstrap 完成后 coordinator.currentRoomId 必须 = homeData.room.currentRoomId; " +
-            "否则 HomeContainerView 会把已在房间用户错误渲染成 idle home screen (codex round 1 [P1] fix)."
+            "bootstrap 完成后 appState.currentRoomId 必须 = homeData.room.currentRoomId; " +
+            "否则 HomeContainerView 会把已在房间用户错误渲染成 idle home screen."
         )
         XCTAssertTrue(
-            HomeRoomDispatcher.shouldShowRoom(currentRoomId: coordinator.currentRoomId),
+            HomeRoomDispatcher.shouldShowRoom(currentRoomId: appState.currentRoomId),
             "已在房间用户 bootstrap 完后, HomeContainerView 必须切到 RoomViewPlaceholder 态."
         )
     }
 
-    /// 镜像用例: `/home` 返回 `room.currentRoomId == nil` 时, coordinator.currentRoomId 仍为 nil
+    /// 镜像用例: `/home` 返回 `room.currentRoomId == nil` 时, appState.currentRoomId 仍为 nil
     /// (HomeContainerView 渲染 idle home screen).
-    func testBootstrapKeepsCoordinatorCurrentRoomIdNilWhenHomeRoomIsEmpty() async {
-        let coordinator = AppCoordinator()
+    func testBootstrapKeepsAppStateCurrentRoomIdNilWhenHomeRoomIsEmpty() async {
+        let appState = AppState()
         let idleData = makeHomeData(currentRoomId: nil)
 
         let bootstrapStep1: @Sendable () async throws -> Void = {
             await MainActor.run {
-                coordinator.currentRoomId = idleData.room.currentRoomId
+                appState.applyHomeData(idleData)
             }
         }
 
@@ -176,9 +181,9 @@ final class RootViewWireTests: XCTestCase {
         await sm.bootstrap()
 
         XCTAssertEqual(sm.state, .ready)
-        XCTAssertNil(coordinator.currentRoomId, "/home 返回 currentRoomId=nil → coordinator 应保持 nil.")
+        XCTAssertNil(appState.currentRoomId, "/home 返回 currentRoomId=nil → appState 应保持 nil.")
         XCTAssertFalse(
-            HomeRoomDispatcher.shouldShowRoom(currentRoomId: coordinator.currentRoomId),
+            HomeRoomDispatcher.shouldShowRoom(currentRoomId: appState.currentRoomId),
             "未在房间 → HomeContainerView 应渲染 HomeView 而非 RoomViewPlaceholder."
         )
     }

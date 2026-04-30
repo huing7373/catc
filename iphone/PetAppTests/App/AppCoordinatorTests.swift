@@ -96,22 +96,7 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.currentTab, .wardrobe)
     }
 
-    // MARK: - Story 37.3：currentRoomId 临时占位字段（Story 37.4 落地后删除）
-
-    /// happy: currentRoomId 默认值 nil.
-    func testCurrentRoomIdDefaultsToNil() throws {
-        let coordinator = AppCoordinator()
-        XCTAssertNil(coordinator.currentRoomId, "currentRoomId 默认应为 nil")
-    }
-
-    /// happy: 写入 currentRoomId 后可读出（驱动 HomeContainerView 互斥状态机切换）.
-    func testCurrentRoomIdCanBeAssigned() throws {
-        let coordinator = AppCoordinator()
-
-        coordinator.currentRoomId = "room_1234567"
-        XCTAssertEqual(coordinator.currentRoomId, "room_1234567")
-
-        coordinator.currentRoomId = nil
-        XCTAssertNil(coordinator.currentRoomId)
-    }
+    // Story 37.4 删除（AC5）：原 testCurrentRoomIdDefaultsToNil / testCurrentRoomIdCanBeAssigned
+    // 两 case 已删除 —— `AppCoordinator.currentRoomId` 临时占位字段已被 AppState.currentRoomId 取代
+    // （ADR-0010 §3.2 钦定 currentRoomId 归 AppState；详见 AppStateTests.testSetCurrentRoomId... 等）.
 }

@@ -33,6 +33,11 @@ struct RootView: View {
     @StateObject private var container = AppContainer()
     @StateObject private var homeViewModel = HomeViewModel()
 
+    /// Story 37.4 AC3：全局 AppState 单 source of truth；通过 `.environmentObject(appState)` 注入子树.
+    /// 与 coordinator / homeViewModel 同级 @StateObject 持有；HomeViewModel.bind(appState:) 在 .task 内调
+    /// 形成 weak 反向引用，让 applyHomeData(_:) 写入 AppState（不再写自身 homeData 字段）.
+    @StateObject private var appState = AppState()
+
     /// Story 2.9 新增 / Story 5.2 升级：启动状态机.
     @State private var launchStateMachine: AppLaunchStateMachine?
 
@@ -48,6 +53,7 @@ struct RootView: View {
                     stateMachine: stateMachine,
                     coordinator: coordinator,
                     homeViewModel: homeViewModel,
+                    appState: appState,
                     sessionStore: container.sessionStore,
                     resetIdentityViewModel: currentResetIdentityViewModel(),
                     onReadyAppear: {
@@ -55,8 +61,9 @@ struct RootView: View {
                         // lazy 注入：第一次 .onAppear 时从已稳定的 container 拿 keychainStore，
                         // 保证 reset 按钮调的 removeAll() 清的是 container.keychainStore 这同一份.
                         // nil 守卫让 RootView 重建（如旋转 / 离开返回）时不会重新构造覆盖既有 instance.
+                        // Story 37.4：注入 appState 让 reset 按钮成功后清 AppState（reset 流程 ADR-0010 §3.7）.
                         if resetIdentityViewModel == nil {
-                            resetIdentityViewModel = container.makeResetIdentityViewModel()
+                            resetIdentityViewModel = container.makeResetIdentityViewModel(appState: appState)
                         }
                         #endif
                     },
@@ -87,6 +94,9 @@ struct RootView: View {
                 loadHomeUseCase: container.makeLoadHomeUseCase(),
                 errorPresenter: container.errorPresenter
             )
+            // Story 37.4 AC3：注入 AppState，让 HomeViewModel.applyHomeData(_:) 内部写 AppState
+            // （不再写自身 homeData 字段；ADR-0010 §3.5 钦定）.
+            homeViewModel.bind(appState: appState)
         }
         .task {
             ensureLaunchStateMachineWired()
@@ -120,7 +130,7 @@ struct RootView: View {
         let loadHomeUseCase = container.makeLoadHomeUseCase()
         let sessionStore = container.sessionStore
         let homeViewModel = self.homeViewModel
-        let coordinator = self.coordinator
+        let appState = self.appState
         launchStateMachine = AppLaunchStateMachine(
             bootstrapStep1: { @Sendable in
                 let output: GuestLoginOutput
@@ -145,13 +155,19 @@ struct RootView: View {
                     )
                 }
                 await MainActor.run {
+                    // Story 37.4 AC3：直接写 AppState（而非通过 coordinator.currentRoomId 双写）.
+                    // 设计决议：保留 homeViewModel.applyHomeData(homeData) 调用 ——
+                    // HomeViewModel 内 loadingState / hasLoadedHome 短路 flag 仍归 HomeViewModel
+                    // 自己管（ADR-0010 §3.2 钦定 loading 状态归 ViewModel transient，不进 AppState）；
+                    // HomeViewModel.applyHomeData 内部既调 self.appState?.applyHomeData(data) 写
+                    // AppState，又设 loadingState=.loaded 与 hasLoadedHome=true.
+                    // RootView 这里也直接调 appState.applyHomeData(homeData) 是为了：
+                    // 让 AppState hydrate 不依赖 HomeViewModel 实例存在（如未来 LaunchingViewModel
+                    // 直接调 LoadHomeUseCase 也能写 AppState）；双写**不**是 anti-pattern：内层
+                    // HomeViewModel.applyHomeData 写 AppState 会重复，但因为是同一个 AppState
+                    // 实例 + idempotent 赋值（同值），测试可断言 currentUser 与 hasLoadedHome 两套语义并存.
+                    appState.applyHomeData(homeData)
                     homeViewModel.applyHomeData(homeData)
-                    // Story 37.3 codex round 1 [P1] fix: 把 /home 返回的 room.currentRoomId
-                    // 传播进 coordinator —— HomeContainerView 互斥状态机以
-                    // coordinator.currentRoomId 为决策入参；不写就会让"已在房间"用户在
-                    // bootstrap/retry 后被错误落到 idle home screen.
-                    // 详见 docs/lessons/2026-04-30-coordinator-must-mirror-loaded-home-room-state.md.
-                    coordinator.currentRoomId = homeData.room.currentRoomId
                 }
             }
         )
@@ -202,6 +218,8 @@ private struct LaunchedContentView: View {
     @ObservedObject var stateMachine: AppLaunchStateMachine
     @ObservedObject var coordinator: AppCoordinator
     let homeViewModel: HomeViewModel
+    /// Story 37.4 AC3：接收 RootView 的 AppState，注入到 .ready 子树 environmentObject.
+    let appState: AppState
     let sessionStore: SessionStore?
     let resetIdentityViewModel: ResetIdentityViewModel?
     let onReadyAppear: () -> Void
@@ -211,6 +229,7 @@ private struct LaunchedContentView: View {
         stateMachine: AppLaunchStateMachine,
         coordinator: AppCoordinator,
         homeViewModel: HomeViewModel,
+        appState: AppState,
         sessionStore: SessionStore?,
         resetIdentityViewModel: ResetIdentityViewModel?,
         onReadyAppear: @escaping () -> Void,
@@ -219,6 +238,7 @@ private struct LaunchedContentView: View {
         self.stateMachine = stateMachine
         self.coordinator = coordinator
         self.homeViewModel = homeViewModel
+        self.appState = appState
         self.sessionStore = sessionStore
         self.resetIdentityViewModel = resetIdentityViewModel
         self.onReadyAppear = onReadyAppear
@@ -235,6 +255,7 @@ private struct LaunchedContentView: View {
                 MainTabView()
                     .environmentObject(coordinator)
                     .environmentObject(homeViewModel)
+                    .environmentObject(appState)
                     .environment(\.sessionStore, sessionStore)
                     .environment(\.resetIdentityViewModel, resetIdentityViewModel)
                     .onAppear { onReadyAppear() }

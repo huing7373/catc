@@ -92,3 +92,4 @@
 | 2026-04-30 | [文档时态精确性 vs 路径 B ADR Accepted 语义（与 codex review 的天然张力）](2026-04-30-doc-tense-vs-path-b-adr-acceptance.md) | 2 | docs, architecture | `55ae68c` |
 | 2026-04-30 | [路径 B ADR §6 验证语义的 inline forward annotation（codex round 2 协调）](2026-04-30-adr-section-6-path-b-inline-semantics.md) | 1 | architecture, docs, process | `8a11f52` |
 | 2026-04-30 | [Coordinator 必须镜像 server 加载的房间态 & 路由白名单缩窄时不能丢 presenter](2026-04-30-coordinator-must-mirror-loaded-home-room-state.md) | 2 | architecture | `5bb6ed5` |
+| 2026-04-30 | [构造注入参数 + weak 存储字段在 fresh-instance 调用路径下的语义陷阱（init 注入字段必须 strong）](2026-04-30-strong-vs-weak-for-constructor-injected-state.md) | 1 | architecture | `<pending>` |

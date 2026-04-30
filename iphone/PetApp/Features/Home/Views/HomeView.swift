@@ -19,11 +19,23 @@
 // 修复方案：HomeView 接受 optional sessionStore，nickname 在 session 非 nil 时优先取 session.user.nickname
 // （fallback 到 viewModel.nickname 保持 Preview / 老测试 / UITest skip-guest-login 路径零回归）。
 // 不动 HomeViewModel 内部状态：避免把 SessionStore 耦合进 ViewModel 触发 Story 5.5 LoadHomeUseCase 重构。
+//
+// Story 37.4 改造（ADR-0010 §3.1 例外条款 + AC7）：
+// - HomeView 是纯展示 SwiftUI View（非 ViewModel），适用 ADR-0010 §3.1 View 层例外条款 → 直接
+//   用 `@EnvironmentObject var appState: AppState` 读 domain state.
+// - 三处原 `viewModel.homeData?.X` 改读 `appState.X` 投影（pet name / chest remaining / step balance）.
+// - HomePetNameResolver 签名 `resolve(homeData:)` 改为 `resolve(pet:hasHydrated:)`,
+//   语义保持（loading / no-pet / has-pet 三态）.
 
 import SwiftUI
 
 public struct HomeView: View {
     @ObservedObject public var viewModel: HomeViewModel
+
+    /// Story 37.4：通过 `.environmentObject(appState)` 由 RootView 注入 → 子视图（HomeView）订阅 AppState.
+    /// ADR-0010 §3.1 例外条款：纯展示 SwiftUI View 可直接用 @EnvironmentObject AppState
+    /// （ViewModel 层禁用 @EnvironmentObject，但 View 层不属于 ViewModel）.
+    @EnvironmentObject var appState: AppState
 
     // Story 2.8: optional dev "重置身份" 按钮的 ViewModel（仅在 Debug build 由 RootView 注入）。
     // 用 plain `let` 持有 — `@ObservedObject` 不接受 Optional；ResetIdentityButton 自己内部
@@ -138,15 +150,18 @@ public struct HomeView: View {
 
     /// pet 名称显示决策（与 `HomeNicknameResolver` 同精神：抽纯函数 helper 让单测可独立锁住语义）.
     /// 三态分支对应 petColumn 文案语义注释.
+    /// Story 37.4：从 viewModel.homeData 改读 appState 投影；hasHydrated 用 appState.currentUser != nil 派生
+    /// （hydrate 完成后 currentUser 必非 nil；与原 homeData != nil 等价）.
     private var petNameDisplay: String {
-        HomePetNameResolver.resolve(homeData: viewModel.homeData)
+        HomePetNameResolver.resolve(pet: appState.currentPet, hasHydrated: appState.currentUser != nil)
     }
 
-    /// Story 5.5 AC7: chestArea 上方追加倒计时 Text（占位 "--:--" 当 homeData 为 nil）.
+    /// Story 5.5 AC7: chestArea 上方追加倒计时 Text（占位 "--:--" 当 chest 为 nil）.
     /// 静态显示 server 返回的 remainingSeconds，不起本地 timer 动态倒计时（节点 7 / Story 21.2 才接）.
+    /// Story 37.4：从 viewModel.homeData?.chestRemainingDisplay 改读 appState.currentChest?.remainingDisplay.
     private var chestColumn: some View {
         VStack(spacing: 8) {
-            Text(viewModel.homeData?.chestRemainingDisplay ?? "--:--")
+            Text(appState.currentChest?.remainingDisplay ?? "--:--")
                 .font(.caption)
                 .accessibilityIdentifier(AccessibilityID.Home.chestRemaining)
             chestArea
@@ -173,10 +188,11 @@ public struct HomeView: View {
 
     // MARK: - ③ 步数显示位
 
-    /// Story 5.5 AC7: 步数显示从 hardcode "0 步" 升级为读 viewModel.homeData?.stepAccount.availableSteps.
-    /// homeData 为 nil 时显示 "0 步"（保 Preview / UITest skip-guest-login 路径）.
+    /// Story 5.5 AC7: 步数显示从 hardcode "0 步" 升级为读 stepAccount.availableSteps.
+    /// stepAccount 为 nil 时显示 "0 步"（保 Preview / UITest skip-guest-login 路径）.
+    /// Story 37.4：从 viewModel.homeData?.stepAccount 改读 appState.currentStepAccount.
     private var stepBalanceLabel: some View {
-        Text("\(viewModel.homeData?.stepAccount.availableSteps ?? 0) 步")
+        Text("\(appState.currentStepAccount?.availableSteps ?? 0) 步")
             .accessibilityIdentifier(AccessibilityID.Home.stepBalance)
     }
 
@@ -289,34 +305,37 @@ public enum HomeNicknameResolver {
     }
 }
 
-/// pet 名称显示决策（Story 5.5 codex round 1 [P2] fix）.
+/// pet 名称显示决策（Story 5.5 codex round 1 [P2] fix；Story 37.4 签名改造）.
 ///
 /// 区分"未加载完"与"已加载但 server 返回 pet=null"两种语义,前者是占位 placeholder,
 /// 后者是 V1 §5.1 schema 明确允许的"账号无宠物"状态(首次注册 / Reset 后).
 ///
 /// 抽纯函数 helper 同 `HomeNicknameResolver` 的精神：把决策逻辑抽出来后用纯输入/输出 case
 /// 锁住"loading vs no-pet vs has-pet"三态语义,fileprivate 子视图 body 难直接断言.
+///
+/// Story 37.4 改造（AC7）：原签名 `resolve(homeData: HomeData?)` 改为 `resolve(pet:hasHydrated:)`,
+/// 三态分支语义保持完全一致（loading / no-pet / has-pet），仅入参形式改为 AppState 投影.
+/// 为何不直接读 appState.currentPet/currentUser 在 Resolver 内：保持纯函数语义（输入纯 value 类型 +
+/// 输出 String），不让 helper 依赖 AppState 类型；测试入参更直观.
 public enum HomePetNameResolver {
-    /// loading 期占位文案（homeData == nil）.
+    /// loading 期占位文案（hasHydrated == false）.
     public static let loadingPlaceholder = "默认小猫"
 
-    /// server 明确返回 pet=null 时的文案（homeData != nil && pet == nil）.
+    /// server 明确返回 pet=null 时的文案（hasHydrated == true && pet == nil）.
     /// V1 §5.1 schema 允许 pet: null —— 首次注册或 Reset 后的合法状态.
     public static let noPetPlaceholder = "暂无宠物"
 
     /// 决定 petColumn 应显示哪个名称.
-    /// - Parameter homeData: 当前 ViewModel.homeData（nil 表示首屏未加载完）.
+    /// - Parameter pet: 来自 `appState.currentPet`.
+    /// - Parameter hasHydrated: 用 `appState.currentUser != nil` 派生（hydrate 完成后 user 必非 nil）；
+    ///   语义对齐原方案 `homeData != nil`.
     /// - Returns:
-    ///   - homeData == nil → loadingPlaceholder（"默认小猫"）
-    ///   - homeData != nil && pet == nil → noPetPlaceholder（"暂无宠物"）
+    ///   - hasHydrated == false → loadingPlaceholder（"默认小猫"）
+    ///   - hasHydrated == true && pet == nil → noPetPlaceholder（"暂无宠物"）
     ///   - pet != nil → pet.name
-    public static func resolve(homeData: HomeData?) -> String {
-        guard let homeData = homeData else {
-            return loadingPlaceholder
-        }
-        guard let pet = homeData.pet else {
-            return noPetPlaceholder
-        }
+    public static func resolve(pet: HomePet?, hasHydrated: Bool) -> String {
+        guard hasHydrated else { return loadingPlaceholder }
+        guard let pet = pet else { return noPetPlaceholder }
         return pet.name
     }
 }
@@ -324,7 +343,10 @@ public enum HomePetNameResolver {
 #if DEBUG
 struct HomeView_Previews: PreviewProvider {
     static var previews: some View {
+        // Story 37.4: HomeView 现在依赖 @EnvironmentObject AppState，Preview 也必须注入；
+        // Preview 默认走未 hydrate 路径（loading placeholder）.
         HomeView(viewModel: HomeViewModel())
+            .environmentObject(AppState())
     }
 }
 #endif

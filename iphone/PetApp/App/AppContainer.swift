@@ -223,10 +223,16 @@ public final class AppContainer: ObservableObject {
     /// Story 5.2 round 2 [P2] fix：注入 `sessionStore` —— 让 reset 成功后 in-memory session
     /// 同步清空，HomeView SessionAwareUserInfoBar 立刻退回 fallback nickname，
     /// 不再有"reset 后旧昵称/头像残留到杀进程"的 UI 不一致。
-    public func makeResetIdentityViewModel() -> ResetIdentityViewModel {
+    ///
+    /// Story 37.4 AC6：可选透传 `appState` —— 让 reset 成功后 AppState domain state 同步清空
+    /// （ADR-0010 §3.7 Reset 流程）.appState 由 RootView 持有，通过参数透传过来；
+    /// container 不持 appState 引用（避免 stable singleton 与 @StateObject lifecycle 耦合）.
+    /// 默认参数 nil：保留 Release build 不需要 appState 的兼容路径（Release 无 reset 按钮）.
+    public func makeResetIdentityViewModel(appState: AppState? = nil) -> ResetIdentityViewModel {
         ResetIdentityViewModel(
             useCase: makeResetKeychainUseCase(),
-            sessionStore: sessionStore
+            sessionStore: sessionStore,
+            appState: appState
         )
     }
     #endif

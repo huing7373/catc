@@ -107,8 +107,12 @@ private struct FloatingTabBar: View {
 #if DEBUG
 struct MainTabView_Previews: PreviewProvider {
     static var previews: some View {
+        // Story 37.4: HomeContainerView 改读 @EnvironmentObject AppState；
+        // Preview 也必须注入空态 AppState 让子树渲染不 crash.
         MainTabView()
             .environmentObject(AppCoordinator())
+            .environmentObject(AppState())
+            .environmentObject(HomeViewModel())
     }
 }
 #endif

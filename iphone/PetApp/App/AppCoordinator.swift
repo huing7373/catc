@@ -6,19 +6,22 @@
 //     互斥状态机，Sheet 路由仅保留次级 sheet（`.compose`）.
 //   - 加 `@Published currentTab: AppTab = .home` —— TabView selection 的 single source of truth.
 //   - 加 `switchTab(_:)` 方法 —— 程式化切 Tab 入口（深 link / 跨 ViewModel 跳转用）.
-//   - 加 `@Published currentRoomId: String?` 临时占位字段（Story 37.4 ↔ 37.3 并行方案；
-//     Story 37.4 落地 AppState 后 dev 把所有 `coordinator.currentRoomId` 引用改为
-//     `appState.currentRoomId` + 删除本字段；详见 Story 37.3 §AC8 与 Dev Notes
-//     "HomeContainerView 互斥状态机：appState 注入路径选择"）.
+//
+// Story 37.4 修改（ADR-0010 §3.2 + AC5）：
+//   - **删除** Story 37.3 临时占位字段 `@Published currentRoomId: String?` —— AppState 落地后
+//     该字段已迁移到 `appState.currentRoomId`（domain state 单 source of truth；ADR-0010 §3.2
+//     白名单字段钦定 currentRoomId 归 AppState 而非 AppCoordinator）.
+//   - HomeContainerView 互斥状态机改读 `@EnvironmentObject var appState: AppState` →
+//     `appState.currentRoomId`；RootView bootstrap closure 直接调 `appState.applyHomeData(homeData)`
+//     而不再写 coordinator.currentRoomId.
 //
 // 路由模式（Story 37.3 后）：
 //   - 主入口 = MainTabView 4 Tab；用户点 Tab → coordinator.currentTab 改 → TabView 切.
-//   - HomeView 主入口的"加入队伍" / "创建队伍"按钮（Story 37.7 落地）写 currentRoomId →
+//   - HomeView 主入口的"加入队伍" / "创建队伍"按钮（Story 37.7 落地）写 appState.currentRoomId →
 //     HomeContainerView 切到 RoomViewPlaceholder 互斥态.
 //   - 次级 Sheet（`.compose`，Story 33.1 决定具体形式）通过 coordinator.present(.compose) 弹出.
 //
-// 后续扩展：Story 37.4 落地 AppState.currentRoomId 后删除本类的 currentRoomId 占位字段；
-// Story 33.1 决定是否保留 .compose case 还是改路由模式.
+// 后续扩展：Story 33.1 决定是否保留 .compose case 还是改路由模式.
 //
 // 重要约束：
 //   - 顶部显式 import Combine（Story 2.2 review lesson learned：
@@ -45,32 +48,24 @@ public enum SheetType: Identifiable, Equatable {
     }
 }
 
-/// AppCoordinator 角色变化（ADR-0009 §3.4）：
+/// AppCoordinator 角色变化（ADR-0009 §3.4 + ADR-0010 §3.2）：
 /// - 旧职责：主入口 sheet 路由（.room / .inventory / .compose）.
-/// - 新职责：
+/// - 新职责（Story 37.3 + 37.4 落地后）：
 ///   1. presentedSheet 仅含次级 sheet（.compose）.
 ///   2. currentTab @Published：TabView selection 的 single source of truth.
 ///   3. switchTab 方法：程式化切 Tab 入口.
-///   4. currentRoomId @Published（**临时占位**）：Story 37.4 落地 AppState 后由 dev 删除.
+///   4. 不再持 currentRoomId（已迁移到 AppState；Story 37.4 删除占位字段）.
 @MainActor
 public final class AppCoordinator: ObservableObject {
     @Published public var presentedSheet: SheetType?
     @Published public var currentTab: AppTab = .home
 
-    /// Story 37.3 临时占位字段（Story 37.4 ↔ 37.3 并行方案）：
-    /// HomeContainerView 用 `coordinator.currentRoomId` 作为互斥状态机决策入参；
-    /// Story 37.4 落地真实 AppState 后 dev 把所有引用改为 `appState.currentRoomId` + 删除本字段.
-    /// 详见 Story 37.3 §AC8 + Dev Notes "HomeContainerView 互斥状态机：appState 注入路径选择".
-    @Published public var currentRoomId: String?
-
     public init(
         presentedSheet: SheetType? = nil,
-        currentTab: AppTab = .home,
-        currentRoomId: String? = nil
+        currentTab: AppTab = .home
     ) {
         self.presentedSheet = presentedSheet
         self.currentTab = currentTab
-        self.currentRoomId = currentRoomId
     }
 
     /// 弹出指定类型的 Sheet.

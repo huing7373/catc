@@ -3,6 +3,10 @@
 // Story 5.2 round 2 [P2] fix：tap() 成功路径同步清 SessionStore.session，避免 reset 后
 // HomeView SessionAwareUserInfoBar 仍渲染旧 nickname/avatar 直到 kill app。
 //
+// Story 37.4 改造（AC6 / ADR-0010 §3.7 Reset 流程）：tap() 成功路径在 sessionStore?.clear() 之后
+// 追加 appState?.reset()，让 AppState domain state（user/pet/stepAccount/chest/currentRoomId）
+// 同步清空；HomeView / HomeContainerView 通过 @EnvironmentObject 订阅 → reset 后立即退回空态.
+//
 // 设计：@MainActor + ObservableObject + @Published alertContent；按钮点击触发
 // useCase.execute()，结果（成功 / 失败）转写为 alertContent 让 SwiftUI .alert(item:) 弹出。
 //
@@ -35,21 +39,34 @@ public final class ResetIdentityViewModel: ObservableObject {
     /// Optional：保留 Story 2.8 老测试 init(useCase:) 兼容（在 SessionStore 还不存在的语境下）。
     private let sessionStore: SessionStore?
 
-    public init(useCase: ResetKeychainUseCaseProtocol, sessionStore: SessionStore? = nil) {
+    /// Story 37.4 AC6：tap() 成功后调 appState.reset()，让 domain state 同步清空.
+    /// Optional：保留老测试 init(useCase:) / init(useCase:sessionStore:) 兼容.
+    private let appState: AppState?
+
+    public init(
+        useCase: ResetKeychainUseCaseProtocol,
+        sessionStore: SessionStore? = nil,
+        appState: AppState? = nil
+    ) {
         self.useCase = useCase
         self.sessionStore = sessionStore
+        self.appState = appState
     }
 
     /// 用户点击按钮时调用：触发 useCase；任一结果设 alertContent 非 nil 触发 SwiftUI alert 弹出。
     /// 成功文案："已重置，请杀进程后重新启动 App 模拟首次安装"
     /// 失败文案："重置失败：<error description>"
     ///
-    /// 成功路径**额外**调 `sessionStore?.clear()` —— 顺序：先 keychain 清完再清 in-memory session，
-    /// 保证万一 keychain 抛错时 session 不会被错误地置 nil（fail-open 原则）。
+    /// 成功路径**额外**调 `sessionStore?.clear()` + `appState?.reset()` —— 顺序：先 keychain 清完
+    /// 再清 in-memory session 再清 domain state（fail-open 原则：keychain 抛错时 session/state
+    /// 不会被错误地置 nil/empty）.
+    /// Story 37.4 AC6 / ADR-0010 §3.7：appState.reset() 与 sessionStore.clear() 双调,
+    /// 边界各自独立（SessionStore 持认证态 / AppState 持 domain state）.
     public func tap() async {
         do {
             try await useCase.execute()
             sessionStore?.clear()
+            appState?.reset()
             alertContent = .success
         } catch {
             alertContent = .failure(message: "重置失败：\(error.localizedDescription)")

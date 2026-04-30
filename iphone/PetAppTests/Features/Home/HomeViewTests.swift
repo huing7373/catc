@@ -63,11 +63,17 @@ final class HomeViewTests: XCTestCase {
     }
 
     // MARK: - case#2（edge）：不同尺寸下渲染不 crash
+    //
+    // Story 37.4 改造：HomeView 现在依赖 @EnvironmentObject AppState；测试用 .environmentObject(_:)
+    // 注入空态 AppState（hasHydrated == false → 渲染 loading placeholder，与 UITest skip-guest-login 路径一致）.
 
     func testHomeViewRendersOnSmallScreenWithoutCrash() {
         // iPhone SE (3rd gen) ≈ 375 x 667
         let viewModel = HomeViewModel()
-        let controller = UIHostingController(rootView: HomeView(viewModel: viewModel))
+        let appState = AppState()
+        let controller = UIHostingController(
+            rootView: HomeView(viewModel: viewModel).environmentObject(appState)
+        )
         controller.view.bounds = CGRect(x: 0, y: 0, width: 375, height: 667)
         controller.view.layoutIfNeeded()
         XCTAssertGreaterThan(controller.view.bounds.width, 0)
@@ -76,7 +82,10 @@ final class HomeViewTests: XCTestCase {
     func testHomeViewRendersOnLargeScreenWithoutCrash() {
         // iPhone 15 Pro Max ≈ 430 x 932
         let viewModel = HomeViewModel()
-        let controller = UIHostingController(rootView: HomeView(viewModel: viewModel))
+        let appState = AppState()
+        let controller = UIHostingController(
+            rootView: HomeView(viewModel: viewModel).environmentObject(appState)
+        )
         controller.view.bounds = CGRect(x: 0, y: 0, width: 430, height: 932)
         controller.view.layoutIfNeeded()
         XCTAssertGreaterThan(controller.view.bounds.width, 0)
