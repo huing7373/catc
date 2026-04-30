@@ -24,8 +24,6 @@ public struct PrimaryButton: View {
     private let isEnabled: Bool
     private let action: () -> Void
 
-    @State private var isPressed: Bool = false
-
     public init(
         title: String,
         variant: PrimaryButtonVariant = .primary,
@@ -73,17 +71,17 @@ public struct PrimaryButton: View {
                 }
             )
             .shadow(color: shadowColor, radius: 0, x: 0, y: shadowY)
-            .offset(y: isPressed ? 2 : 0)
             .opacity(isEnabled ? 1.0 : 0.5)
-            .animation(.easeOut(duration: 0.1), value: isPressed)
         }
-        .buttonStyle(.plain)
+        // 用 SwiftUI 钦定的 ButtonStyle / configuration.isPressed 路径处理按下视觉，
+        // 而非自定义 simultaneousGesture(DragGesture) + @State isPressed.
+        // 关键差异：DragGesture.onEnded 在用户按住按钮再**拖出按钮范围**时不触发，
+        // 会导致 isPressed 卡在 true → 按钮 stuck 在 offset(y: 2) → 取消的 tap 看起来卡死.
+        // configuration.isPressed 由 SwiftUI 框架管理，自动覆盖 cancellation / drag-out
+        // 边界 case，是 SwiftUI 设计的标准路径.
+        // 守护：fix-review round 3 / [P2-B].
+        .buttonStyle(PressedOffsetButtonStyle())
         .disabled(!isEnabled)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in isPressed = isEnabled }
-                .onEnded { _ in isPressed = false }
-        )
     }
 
     private var backgroundColor: Color {
@@ -122,6 +120,22 @@ public struct PrimaryButton: View {
         case .ghost: return 3
         default:     return 4
         }
+    }
+}
+
+// MARK: - PressedOffsetButtonStyle
+
+/// 按下时整体 offset(y: 2) 的 ButtonStyle，用于 PrimaryButton 立体硬阴影按下手感.
+/// 走 SwiftUI 钦定的 configuration.isPressed 路径，由框架管理 cancellation / drag-out
+/// 等手势取消语义，避免自定义 DragGesture 的 onEnded-only 清空导致的"按下拖出 → 卡在
+/// pressed 视觉"bug.
+public struct PressedOffsetButtonStyle: ButtonStyle {
+    public init() {}
+
+    public func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .offset(y: configuration.isPressed ? 2 : 0)
+            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }
 }
 

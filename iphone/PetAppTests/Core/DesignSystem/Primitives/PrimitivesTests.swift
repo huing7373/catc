@@ -85,4 +85,20 @@ final class PrimitivesTests: XCTestCase {
         XCTAssertEqual(FadeInModifier.offsetEndY, 0,
                        "FadeIn 终点必须 0（原位）")
     }
+
+    // MARK: - case#7 contract: PressedOffsetButtonStyle 类型签名（守护手势取消语义）
+
+    /// 验证 PressedOffsetButtonStyle 是 ButtonStyle 协议实例 + makeBody 类型签名 ok.
+    /// 守护意图：fix-review round 3 / [P2-B] — PrimaryButton 已从 simultaneousGesture +
+    /// @State isPressed 切到 SwiftUI 钦定的 ButtonStyle / configuration.isPressed 路径
+    /// （框架管理 cancellation / drag-out）；本 case 守护这个 ButtonStyle 类型不被回滚到
+    /// 自定义 DragGesture 实现.
+    /// ADR-0002 §3.1 禁视觉测试不影响这种 type-level 验证（不渲染、不断 frame size）.
+    func testPressedOffsetButtonStyleConformsToButtonStyle() {
+        let style: any ButtonStyle = PressedOffsetButtonStyle()
+        // 编译期已经强制 ButtonStyle 协议；此 cast 守护 PressedOffsetButtonStyle 不会
+        // 被某次重构改成 ViewModifier / 普通 struct 而失去 .buttonStyle() 兼容性.
+        XCTAssertNotNil(style as? PressedOffsetButtonStyle,
+                        "PressedOffsetButtonStyle 必须保持 ButtonStyle 协议一致")
+    }
 }

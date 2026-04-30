@@ -52,10 +52,16 @@ public struct Avatar: View {
             Circle()
                 .fill(bg)
             if ring {
+                // 用 .stroke() 而非 .strokeBorder()：strokeBorder 是**内绘**（在 circle
+                // 边界**内侧**画线），会让 colored face area 缩小约 5pt；ui_design
+                // primitives.jsx Avatar 用的是 box-shadow（**外绘**，halo 在 avatar
+                // 外部）。.stroke() 在 circle 边界**中心线**绘制（一半在内一半在外），
+                // 视觉上更接近 web box-shadow 语义，face area 不被侵占.
+                // 守护：fix-review round 3 / [P2-A].
                 Circle()
-                    .strokeBorder(theme.colors.surface, lineWidth: 3)
+                    .stroke(theme.colors.surface, lineWidth: 3)
                 Circle()
-                    .strokeBorder(theme.colors.accent, lineWidth: 2)
+                    .stroke(theme.colors.accent, lineWidth: 2)
                     .padding(-2)
             } else {
                 // ui_design `primitives.jsx:196` 非 ring 分支：

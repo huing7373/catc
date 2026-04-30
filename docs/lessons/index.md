@@ -96,3 +96,4 @@
 | 2026-04-30 | [spec 钦定 SF Symbol 字符串前必须物理验证可用性](2026-04-30-spec-must-physically-verify-sf-symbol-strings.md) | 1 | spec-design, process | <pending> |
 | 2026-04-30 | [codex `os_log CVarArg` 误报 + ui_design FadeIn 方向反转 + Avatar inset shadow 漏实现](2026-04-30-codex-os-log-cvararg-misdetect-and-ui-design-fidelity-drift.md) | 3 | process, style, ui-fidelity | `<pending>` |
 | 2026-04-30 | [SwiftUI `.frame(maxWidth: .infinity)` 与 `.padding` 顺序对齐 CSS box-sizing（fullWidth 按钮溢出修复）](2026-04-30-swiftui-modifier-order-frame-vs-padding.md) | 1 | ui-fidelity | `<pending>` |
+| 2026-04-30 | [SwiftUI strokeBorder vs stroke 内外绘语义 & ButtonStyle vs 自定义 DragGesture 取消语义](2026-04-30-swiftui-strokeborder-vs-stroke-and-buttonstyle-vs-draggesture.md) | 2 | style, architecture | `<pending>` |
