@@ -62,16 +62,20 @@ public struct HomeView: View {
     }
 
     public var body: some View {
-        // 单一 VStack：所有 6 区块都参与同一纵向布局，避免 ZStack overlay 在小屏上覆盖底部 CTA。
-        // 版本号 (⑥) 作为最后一个子视图占据 footer 行，靠右对齐；它与 bottomButtonRow (⑤) 在
-        // 垂直方向严格分隔，不会再遮挡或截获"合成"按钮的点击。
+        // Story 37.3 修改（ADR-0009 §3.5 步骤 4）：
+        //   - 删除 `bottomButtonRow` 子视图（3 CTA 按钮：进入房间 / 仓库 / 合成）.
+        //     对应跳转 IA 已迁移到 4 Tab + HomeContainerView 互斥状态机 + JoinRoomModal sheet
+        //     （Story 37.7 落地"加入队伍" / "创建队伍"按钮的 TeamIdleCard）.
+        //   - 保留 versionFooter + ping/version 角落显示（关键 UITest 验收项；Story 37.3 §AC7 第 4 条）.
+        //
+        // Story 37.12 will mount JoinRoomModal sheet here via HomeViewModel.showJoinModal
+        // .sheet(isPresented: $viewModel.showJoinModal) { JoinRoomModalPlaceholder() }
         VStack(spacing: 16) {
             userInfoBar
             Spacer()
             petAndChestRow
             stepBalanceLabel
             Spacer()
-            bottomButtonRow
             versionFooter
         }
         .padding(.horizontal, 16)
@@ -176,26 +180,11 @@ public struct HomeView: View {
             .accessibilityIdentifier(AccessibilityID.Home.stepBalance)
     }
 
-    // MARK: - ⑤ 三个主按钮
-
-    private var bottomButtonRow: some View {
-        HStack(spacing: 16) {
-            Button("进入房间") {
-                viewModel.onRoomTap()
-            }
-            .accessibilityIdentifier(AccessibilityID.Home.btnRoom)
-
-            Button("仓库") {
-                viewModel.onInventoryTap()
-            }
-            .accessibilityIdentifier(AccessibilityID.Home.btnInventory)
-
-            Button("合成") {
-                viewModel.onComposeTap()
-            }
-            .accessibilityIdentifier(AccessibilityID.Home.btnCompose)
-        }
-    }
+    // MARK: - ⑤ 三个主按钮（Story 37.3 删除）
+    //
+    // Story 37.3（ADR-0009 §3.5 步骤 4）：删除 bottomButtonRow（"进入房间" / "仓库" / "合成"
+    // 三按钮）.对应跳转 IA 已迁移到 4 Tab + HomeContainerView 互斥状态机 + JoinRoomModal sheet
+    // （Story 37.7 落地 TeamIdleCard 真实"加入队伍" / "创建队伍"按钮）.
 
     // MARK: - ⑥ 版本号小字（footer 行，靠右）
 

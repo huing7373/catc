@@ -1,8 +1,17 @@
 // NavigationUITests.swift
-// Story 2.3 AC7：从主界面点击三个按钮分别弹 Sheet + 关闭按钮回到主界面。
+// Story 2.3 AC7：从主界面点击三个按钮分别弹 Sheet（已删除）.
 //
-// AccessibilityID.swift 通过 project.yml 直接作为 UITest target 的 source 引入（Story 2.2 已落地），
-// 不需要 @testable import PetApp（UI 测试以黑盒方式跑被测 App）。
+// Story 37.3 改写（ADR-0009 §3.5 步骤 1 + AC7）：
+//   - 删除 testTapEnterRoomShowsRoomPlaceholder / testTapInventoryShowsInventoryPlaceholder /
+//     testTapComposeShowsComposePlaceholder 三个旧用例（SheetType .room/.inventory case 已删；
+//     主入口 IA 改 4 Tab + HomeContainerView 互斥状态机 + JoinRoomModal sheet）.
+//   - 加 testFourTabsAreLocatable 用例：启动 → 4 Tab a11y identifier 全可定位.
+//   - 加 testSwitchToWardrobeTab / testSwitchToFriendsTab / testSwitchToProfileTab 三用例：
+//     tap Tab → 验证对应 placeholder view 出现.
+//
+// AccessibilityID.swift 通过 project.yml 直接作为 UITest target 的 source 引入（Story 2.2 已落地）;
+// 4 Tab a11y identifier 本 story 走 inline 字符串路径（不加 AccessibilityID.Tab；Story 37.13 a11y
+// 总表归并时一并建立常量并替换）.
 
 import XCTest
 
@@ -14,80 +23,99 @@ final class NavigationUITests: XCTestCase {
 
     private let timeout: TimeInterval = 5
 
-    // MARK: - testTapEnterRoomShowsRoomPlaceholder
+    // MARK: - 4 Tab 可定位（AC7 第 2 条）
 
-    func testTapEnterRoomShowsRoomPlaceholder() throws {
+    /// 启动后 4 个 Tab a11y identifier (`tab_home` / `tab_wardrobe` / `tab_friends` / `tab_profile`) 全在.
+    func testFourTabsAreLocatable() throws {
         let app = XCUIApplication()
-        // Story 5.2 hook：UITest 不依赖真实 server / GuestLoginUseCase；
-        // 让 launch state machine 走 Story 2.9 默认 no-op closure → HomeView 直接渲染.
+        // Story 5.2 hook：UITest 不依赖真实 server / GuestLoginUseCase.
         app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app.launch()
 
-        let btnRoom = app.buttons[AccessibilityID.Home.btnRoom]
-        XCTAssertTrue(btnRoom.waitForExistence(timeout: timeout), "进入房间按钮未找到")
-        btnRoom.tap()
+        // FloatingTabBar 自绘 button → app.buttons 集合可定位.
+        let homeTab = app.buttons["tab_home"]
+        XCTAssertTrue(homeTab.waitForExistence(timeout: timeout), "tab_home 未找到")
 
-        let roomTitle = app.descendants(matching: .any)[AccessibilityID.SheetPlaceholder.roomTitle]
-        XCTAssertTrue(roomTitle.waitForExistence(timeout: timeout), "Room placeholder 标题未出现")
+        let wardrobeTab = app.buttons["tab_wardrobe"]
+        XCTAssertTrue(wardrobeTab.waitForExistence(timeout: timeout), "tab_wardrobe 未找到")
 
-        XCTAssertTrue(app.staticTexts["Room Placeholder"].exists, "Room Placeholder 文案应可见")
+        let friendsTab = app.buttons["tab_friends"]
+        XCTAssertTrue(friendsTab.waitForExistence(timeout: timeout), "tab_friends 未找到")
 
-        let btnClose = app.buttons[AccessibilityID.SheetPlaceholder.btnClose]
-        XCTAssertTrue(btnClose.waitForExistence(timeout: timeout), "关闭按钮未找到")
-        btnClose.tap()
-
-        // 等待主界面 userInfo 重新可见（间接证明 sheet 已 dismiss）
-        let userInfo = app.descendants(matching: .any)[AccessibilityID.Home.userInfo]
-        XCTAssertTrue(userInfo.waitForExistence(timeout: timeout), "关闭后主界面 userInfo 未恢复")
+        let profileTab = app.buttons["tab_profile"]
+        XCTAssertTrue(profileTab.waitForExistence(timeout: timeout), "tab_profile 未找到")
     }
 
-    // MARK: - testTapInventoryShowsInventoryPlaceholder
+    // MARK: - 切到 Wardrobe Tab 验证 WardrobeView 出现（AC7 第 3 条）
 
-    func testTapInventoryShowsInventoryPlaceholder() throws {
+    func testSwitchToWardrobeTabShowsWardrobeView() throws {
         let app = XCUIApplication()
-        // Story 5.2 hook：UITest 不依赖真实 server / GuestLoginUseCase（详见 testTapEnterRoomShowsRoomPlaceholder）.
         app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app.launch()
 
-        let btnInventory = app.buttons[AccessibilityID.Home.btnInventory]
-        XCTAssertTrue(btnInventory.waitForExistence(timeout: timeout), "仓库按钮未找到")
-        btnInventory.tap()
+        let wardrobeTab = app.buttons["tab_wardrobe"]
+        XCTAssertTrue(wardrobeTab.waitForExistence(timeout: timeout), "tab_wardrobe 未找到")
+        wardrobeTab.tap()
 
-        let inventoryTitle = app.descendants(matching: .any)[AccessibilityID.SheetPlaceholder.inventoryTitle]
-        XCTAssertTrue(inventoryTitle.waitForExistence(timeout: timeout), "Inventory placeholder 标题未出现")
-
-        XCTAssertTrue(app.staticTexts["Inventory Placeholder"].exists, "Inventory Placeholder 文案应可见")
-
-        let btnClose = app.buttons[AccessibilityID.SheetPlaceholder.btnClose]
-        XCTAssertTrue(btnClose.waitForExistence(timeout: timeout), "关闭按钮未找到")
-        btnClose.tap()
-
-        let userInfo = app.descendants(matching: .any)[AccessibilityID.Home.userInfo]
-        XCTAssertTrue(userInfo.waitForExistence(timeout: timeout), "关闭后主界面 userInfo 未恢复")
+        let wardrobeView = app.descendants(matching: .any)["wardrobeView"]
+        XCTAssertTrue(wardrobeView.waitForExistence(timeout: timeout), "切到 Wardrobe Tab 后 wardrobeView 未出现")
     }
 
-    // MARK: - testTapComposeShowsComposePlaceholder
+    // MARK: - 切到 Friends Tab 验证 FriendsView 出现
 
-    func testTapComposeShowsComposePlaceholder() throws {
+    func testSwitchToFriendsTabShowsFriendsView() throws {
         let app = XCUIApplication()
-        // Story 5.2 hook：UITest 不依赖真实 server / GuestLoginUseCase（详见 testTapEnterRoomShowsRoomPlaceholder）.
         app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app.launch()
 
-        let btnCompose = app.buttons[AccessibilityID.Home.btnCompose]
-        XCTAssertTrue(btnCompose.waitForExistence(timeout: timeout), "合成按钮未找到")
-        btnCompose.tap()
+        let friendsTab = app.buttons["tab_friends"]
+        XCTAssertTrue(friendsTab.waitForExistence(timeout: timeout), "tab_friends 未找到")
+        friendsTab.tap()
 
-        let composeTitle = app.descendants(matching: .any)[AccessibilityID.SheetPlaceholder.composeTitle]
-        XCTAssertTrue(composeTitle.waitForExistence(timeout: timeout), "Compose placeholder 标题未出现")
+        let friendsView = app.descendants(matching: .any)["friendsView"]
+        XCTAssertTrue(friendsView.waitForExistence(timeout: timeout), "切到 Friends Tab 后 friendsView 未出现")
+    }
 
-        XCTAssertTrue(app.staticTexts["Compose Placeholder"].exists, "Compose Placeholder 文案应可见")
+    // MARK: - 切到 Profile Tab 验证 ProfileView 出现
 
-        let btnClose = app.buttons[AccessibilityID.SheetPlaceholder.btnClose]
-        XCTAssertTrue(btnClose.waitForExistence(timeout: timeout), "关闭按钮未找到")
-        btnClose.tap()
+    func testSwitchToProfileTabShowsProfileView() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
+        app.launch()
 
+        let profileTab = app.buttons["tab_profile"]
+        XCTAssertTrue(profileTab.waitForExistence(timeout: timeout), "tab_profile 未找到")
+        profileTab.tap()
+
+        let profileView = app.descendants(matching: .any)["profileView"]
+        XCTAssertTrue(profileView.waitForExistence(timeout: timeout), "切到 Profile Tab 后 profileView 未出现")
+    }
+
+    // MARK: - Tab 切换可逆：home → wardrobe → home
+
+    /// 验证从 wardrobe Tab 切回 home Tab 后 home_userInfo 仍可定位（HomeView 重新可见）.
+    func testTabSwitchBackToHomeRecoversHomeView() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
+        app.launch()
+
+        // 1. 初始应在 home Tab —— home_userInfo 可见
         let userInfo = app.descendants(matching: .any)[AccessibilityID.Home.userInfo]
-        XCTAssertTrue(userInfo.waitForExistence(timeout: timeout), "关闭后主界面 userInfo 未恢复")
+        XCTAssertTrue(userInfo.waitForExistence(timeout: timeout), "初始 home_userInfo 未找到")
+
+        // 2. 切到 wardrobe Tab → wardrobeView 出现
+        let wardrobeTab = app.buttons["tab_wardrobe"]
+        XCTAssertTrue(wardrobeTab.waitForExistence(timeout: timeout), "tab_wardrobe 未找到")
+        wardrobeTab.tap()
+
+        let wardrobeView = app.descendants(matching: .any)["wardrobeView"]
+        XCTAssertTrue(wardrobeView.waitForExistence(timeout: timeout), "wardrobeView 未出现")
+
+        // 3. 切回 home Tab → home_userInfo 仍可定位
+        let homeTab = app.buttons["tab_home"]
+        XCTAssertTrue(homeTab.waitForExistence(timeout: timeout), "tab_home 未找到")
+        homeTab.tap()
+
+        XCTAssertTrue(userInfo.waitForExistence(timeout: timeout), "切回 home Tab 后 home_userInfo 未恢复")
     }
 }

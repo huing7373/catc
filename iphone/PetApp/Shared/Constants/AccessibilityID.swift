@@ -14,6 +14,8 @@ public enum AccessibilityID {
         public static let petArea = "home_petArea"
         public static let stepBalance = "home_stepBalance"
         public static let chestArea = "home_chestArea"
+        // Story 37.3 deprecated: 3 CTA 按钮已删除（ADR-0009 §3.5 步骤 4 / 主入口改 4 Tab IA）;
+        // 常量保留避免触发其它 import 站点漂移; Story 37.13 a11y 总表归并时一并清理.
         public static let btnRoom = "home_btnRoom"
         public static let btnInventory = "home_btnInventory"
         public static let btnCompose = "home_btnCompose"
@@ -26,17 +28,11 @@ public enum AccessibilityID {
         public static let chestRemaining = "home_chestRemaining"
     }
 
-    // Story 2.3 新增：主界面跳转的全屏 Sheet placeholder a11y 标识。
-    // 后续 Epic 12 / 24 / 33 实装真实 Room/Inventory/Compose View 时整体下线。
-    public enum SheetPlaceholder {
-        public static let roomContainer = "sheetPlaceholder_room"
-        public static let roomTitle = "sheetPlaceholder_roomTitle"
-        public static let inventoryContainer = "sheetPlaceholder_inventory"
-        public static let inventoryTitle = "sheetPlaceholder_inventoryTitle"
-        public static let composeContainer = "sheetPlaceholder_compose"
-        public static let composeTitle = "sheetPlaceholder_composeTitle"
-        public static let btnClose = "sheetPlaceholder_btnClose"
-    }
+    // Story 37.3：原 SheetPlaceholder enum 整段删除（关联文件 SheetPlaceholders/ 已删除,常量无任何引用）.
+    // 4 Tab a11y identifier (`tab_home` / `tab_wardrobe` / `tab_friends` / `tab_profile`) 与
+    // 占位 view a11y identifier (`wardrobeView` / `friendsView` / `profileView` / `roomViewPlaceholder`
+    // / `joinRoomModalPlaceholder`) 本 story 走 inline 字符串路径; Story 37.13 a11y 总表归并时
+    // 一次性建立 AccessibilityID.Tab / AccessibilityID.Wardrobe 等 enum 并替换为常量.
 
     /// Story 2.6 新增：错误 UI 组件的 a11y 标识。
     /// Toast / Alert / Retry 三组件 + 容器 / 内容 / 按钮的细分标识，便于未来 UITest 定位。

@@ -11,7 +11,11 @@ final class HomeUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    func testHomeViewShowsAllSixPlaceholders() throws {
+    /// Story 37.3 修改（ADR-0009 §3.5 步骤 4）：
+    ///   - 删除 btnRoom / btnInventory / btnCompose 三按钮断言（HomeView 已删除 bottomButtonRow）.
+    ///   - 保留 userInfo / petArea / stepBalance / chestArea / versionLabel / petName / chestRemaining
+    ///     等其它断言.
+    func testHomeViewShowsAllPlaceholders() throws {
         let app = XCUIApplication()
         // Story 5.2 hook：让 launch state machine 跳过真实 GuestLoginUseCase（无 server / 不依赖网络），
         // 直接走 Story 2.9 默认 no-op closure → LaunchingView → HomeView 路径，与本 UITest 关注点对齐.
@@ -21,7 +25,7 @@ final class HomeUITests: XCTestCase {
         let timeout: TimeInterval = 5
 
         // 用 descendants(matching: .any) 兜底跨 element type 定位（Rectangle / Circle / Text 等
-        // SwiftUI 渲染产物在 XCUITest 中可能体现为 otherElement / staticText / button 等不同类型）。
+        // SwiftUI 渲染产物在 XCUITest 中可能体现为 otherElement / staticText / button 等不同类型）.
 
         let userInfo = app.descendants(matching: .any)[AccessibilityID.Home.userInfo]
         XCTAssertTrue(userInfo.waitForExistence(timeout: timeout), "userInfo 区块未找到")
@@ -34,15 +38,6 @@ final class HomeUITests: XCTestCase {
 
         let chestArea = app.descendants(matching: .any)[AccessibilityID.Home.chestArea]
         XCTAssertTrue(chestArea.waitForExistence(timeout: timeout), "chestArea 区块未找到")
-
-        let btnRoom = app.buttons[AccessibilityID.Home.btnRoom]
-        XCTAssertTrue(btnRoom.waitForExistence(timeout: timeout), "进入房间按钮未找到")
-
-        let btnInventory = app.buttons[AccessibilityID.Home.btnInventory]
-        XCTAssertTrue(btnInventory.waitForExistence(timeout: timeout), "仓库按钮未找到")
-
-        let btnCompose = app.buttons[AccessibilityID.Home.btnCompose]
-        XCTAssertTrue(btnCompose.waitForExistence(timeout: timeout), "合成按钮未找到")
 
         let versionLabel = app.descendants(matching: .any)[AccessibilityID.Home.versionLabel]
         XCTAssertTrue(versionLabel.waitForExistence(timeout: timeout), "版本号区块未找到")

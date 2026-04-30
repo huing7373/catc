@@ -1,10 +1,14 @@
 // AppCoordinatorTests.swift
-// Story 2.3 AC5：AppCoordinator 状态切换覆盖（≥5 case）。
+// Story 2.3 AC5：AppCoordinator 状态切换覆盖.
+//
+// Story 37.3 修改（ADR-0009 §3.5 步骤 5 + AC6）：
+//   - 删除 `.room` / `.inventory` 用例（SheetType 已删这两个 case；主入口改 4 Tab IA）.
+//   - 加 currentTab / switchTab 测试（≥2 case）.
 //
 // 测试基础设施约束（与 Story 2.7 衔接）：
-// - 仅依赖 stdlib（XCTest + @testable import PetApp），不引入 helper 文件。
-// - 全部测试方法签名用 throws（同步状态切换，不涉及 await）。
-// - @MainActor 标在 class 上（AppCoordinator 是 @MainActor）。
+// - 仅依赖 stdlib（XCTest + @testable import PetApp），不引入 helper 文件.
+// - 全部测试方法签名用 throws（同步状态切换，不涉及 await）.
+// - @MainActor 标在 class 上（AppCoordinator 是 @MainActor）.
 
 import XCTest
 @testable import PetApp
@@ -12,53 +16,26 @@ import XCTest
 @MainActor
 final class AppCoordinatorTests: XCTestCase {
 
-    // MARK: - happy: present(.room) 后 presentedSheet == .room
+    // MARK: - happy: present(.compose) 后 presentedSheet == .compose
 
-    func testPresentRoomSetsPresentedSheetToRoom() throws {
+    func testPresentComposeSetsPresentedSheetToCompose() throws {
         let coordinator = AppCoordinator()
         XCTAssertNil(coordinator.presentedSheet, "默认应为 nil")
-
-        coordinator.present(.room)
-
-        XCTAssertEqual(coordinator.presentedSheet, .room)
-    }
-
-    // MARK: - happy: dismiss() 后 presentedSheet == nil
-
-    func testDismissResetsPresentedSheetToNil() throws {
-        let coordinator = AppCoordinator(presentedSheet: .room)
-        XCTAssertEqual(coordinator.presentedSheet, .room, "前置：构造为 .room")
-
-        coordinator.dismiss()
-
-        XCTAssertNil(coordinator.presentedSheet)
-    }
-
-    // MARK: - edge: 已 present 一个 sheet，再 present 另一个 → 后者覆盖前者
-
-    func testPresentNewSheetOverridesExistingSheet() throws {
-        let coordinator = AppCoordinator(presentedSheet: .inventory)
-        XCTAssertEqual(coordinator.presentedSheet, .inventory, "前置：构造为 .inventory")
 
         coordinator.present(.compose)
 
         XCTAssertEqual(coordinator.presentedSheet, .compose)
     }
 
-    // MARK: - happy: 三种 SheetType 全 case 覆盖（防 future 加新 case 漏测）
+    // MARK: - happy: dismiss() 后 presentedSheet == nil
 
-    func testEachSheetTypeCanBePresentedAndDismissed() throws {
-        let coordinator = AppCoordinator()
+    func testDismissResetsPresentedSheetToNil() throws {
+        let coordinator = AppCoordinator(presentedSheet: .compose)
+        XCTAssertEqual(coordinator.presentedSheet, .compose, "前置：构造为 .compose")
 
-        for sheetType in [SheetType.room, .inventory, .compose] {
-            coordinator.present(sheetType)
-            XCTAssertEqual(coordinator.presentedSheet, sheetType,
-                           "present(\(sheetType)) 后 presentedSheet 应等于该值")
+        coordinator.dismiss()
 
-            coordinator.dismiss()
-            XCTAssertNil(coordinator.presentedSheet,
-                         "dismiss() 后 presentedSheet 应回到 nil（after \(sheetType)）")
-        }
+        XCTAssertNil(coordinator.presentedSheet)
     }
 
     // MARK: - edge: 连续 dismiss 多次（state 已是 nil）→ 不抛异常 / 仍为 nil
@@ -79,5 +56,62 @@ final class AppCoordinatorTests: XCTestCase {
     func testInitDefaultsToNilPresentedSheet() throws {
         let coordinator = AppCoordinator()
         XCTAssertNil(coordinator.presentedSheet)
+    }
+
+    // MARK: - Story 37.3：currentTab / switchTab 测试
+
+    /// happy: coordinator.currentTab 默认值 .home.
+    func testCurrentTabDefaultsToHome() throws {
+        let coordinator = AppCoordinator()
+        XCTAssertEqual(coordinator.currentTab, .home, "currentTab 默认应为 .home")
+    }
+
+    /// happy: coordinator.switchTab(.wardrobe) → coordinator.currentTab == .wardrobe.
+    func testSwitchTabUpdatesCurrentTab() throws {
+        let coordinator = AppCoordinator()
+        XCTAssertEqual(coordinator.currentTab, .home, "前置：default .home")
+
+        coordinator.switchTab(.wardrobe)
+        XCTAssertEqual(coordinator.currentTab, .wardrobe)
+
+        coordinator.switchTab(.profile)
+        XCTAssertEqual(coordinator.currentTab, .profile)
+
+        coordinator.switchTab(.friends)
+        XCTAssertEqual(coordinator.currentTab, .friends)
+
+        coordinator.switchTab(.home)
+        XCTAssertEqual(coordinator.currentTab, .home)
+    }
+
+    /// happy: 程式化切 Tab 不影响 presentedSheet（次级 sheet 与 Tab 互不干扰）.
+    func testSwitchTabDoesNotAffectPresentedSheet() throws {
+        let coordinator = AppCoordinator()
+        coordinator.present(.compose)
+        XCTAssertEqual(coordinator.presentedSheet, .compose)
+
+        coordinator.switchTab(.wardrobe)
+
+        XCTAssertEqual(coordinator.presentedSheet, .compose, "切 Tab 不应改变 presentedSheet")
+        XCTAssertEqual(coordinator.currentTab, .wardrobe)
+    }
+
+    // MARK: - Story 37.3：currentRoomId 临时占位字段（Story 37.4 落地后删除）
+
+    /// happy: currentRoomId 默认值 nil.
+    func testCurrentRoomIdDefaultsToNil() throws {
+        let coordinator = AppCoordinator()
+        XCTAssertNil(coordinator.currentRoomId, "currentRoomId 默认应为 nil")
+    }
+
+    /// happy: 写入 currentRoomId 后可读出（驱动 HomeContainerView 互斥状态机切换）.
+    func testCurrentRoomIdCanBeAssigned() throws {
+        let coordinator = AppCoordinator()
+
+        coordinator.currentRoomId = "room_1234567"
+        XCTAssertEqual(coordinator.currentRoomId, "room_1234567")
+
+        coordinator.currentRoomId = nil
+        XCTAssertNil(coordinator.currentRoomId)
     }
 }

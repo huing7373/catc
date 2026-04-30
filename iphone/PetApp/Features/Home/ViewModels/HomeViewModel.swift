@@ -1,9 +1,11 @@
 // HomeViewModel.swift
 // Story 2.2 占位 ViewModel：
 // - 暴露 nickname / appVersion / serverInfo 三个 @Published（hardcode）
-// - 暴露 onRoomTap / onInventoryTap / onComposeTap 三个 closure（init 默认空函数）
 //
-// Story 2.3 把三个 closure 替换为 coordinator.present(...) 路由跳转（已落地）。
+// Story 2.3 把三个主 CTA closure 替换为 coordinator.present(...) 路由跳转（已落地）.
+// Story 37.3 删除（ADR-0009 §3.5 步骤 4）：
+//   - 删 onRoomTap / onInventoryTap / onComposeTap 三个 closure 字段 + 三条 init 内的默认参数.
+//     主入口 IA 已改 4 Tab + HomeContainerView 互斥状态机 → 这三个 closure 不再有 caller.
 //
 // Story 2.5 扩展（**追加，不删除老接口**）：
 // - 新增 init(pingUseCase:) 重载，按需注入 PingUseCaseProtocol
@@ -59,9 +61,9 @@ public final class HomeViewModel: ObservableObject {
     /// Story 5.5 AC5: 加载状态（idle/loading/loaded/failed）。Equatable 让测试可断言.
     @Published public var loadingState: HomeLoadingState = .idle
 
-    public var onRoomTap: () -> Void
-    public var onInventoryTap: () -> Void
-    public var onComposeTap: () -> Void
+    // Story 37.3 删除（ADR-0009 §3.5 步骤 4）：
+    //   onRoomTap / onInventoryTap / onComposeTap 三个 closure 字段已删除.
+    //   主入口 IA 改 4 Tab + HomeContainerView 互斥状态机后,这三个 closure 不再有 caller.
 
     /// 注入的 PingUseCase（init 路径）；新 init 设非 nil，老 init 设 nil。
     private let pingUseCase: PingUseCaseProtocol?
@@ -106,20 +108,15 @@ public final class HomeViewModel: ObservableObject {
     private var loadHomeTask: Task<Void, Never>?
 
     /// 老 init（Story 2.2 / 2.3 路径）：保留 hardcode 默认值，pingUseCase = nil；不破坏老调用方 / Preview。
+    /// Story 37.3 删除 onRoomTap / onInventoryTap / onComposeTap 三个 closure 参数（ADR-0009 §3.5 步骤 4）.
     public init(
         nickname: String = "用户1001",
         appVersion: String = "0.0.0",
-        serverInfo: String = "----",
-        onRoomTap: @escaping () -> Void = {},
-        onInventoryTap: @escaping () -> Void = {},
-        onComposeTap: @escaping () -> Void = {}
+        serverInfo: String = "----"
     ) {
         self.nickname = nickname
         self.appVersion = appVersion
         self.serverInfo = serverInfo
-        self.onRoomTap = onRoomTap
-        self.onInventoryTap = onInventoryTap
-        self.onComposeTap = onComposeTap
         self.pingUseCase = nil
         self.loadHomeUseCase = nil
         self.errorPresenter = nil
@@ -127,21 +124,16 @@ public final class HomeViewModel: ObservableObject {
 
     /// Story 2.5 新增 init：注入 PingUseCaseProtocol；appVersion 默认从 Bundle 读取。
     /// 在 AppContainer wire 时调用此 init；测试也用此 init 注入 mock UseCase。
+    /// Story 37.3 删除 onRoomTap / onInventoryTap / onComposeTap 三个 closure 参数（ADR-0009 §3.5 步骤 4）.
     public init(
         nickname: String = "用户1001",
         pingUseCase: PingUseCaseProtocol,
         appVersion: String = HomeViewModel.readAppVersion(),
-        serverInfo: String = "----",
-        onRoomTap: @escaping () -> Void = {},
-        onInventoryTap: @escaping () -> Void = {},
-        onComposeTap: @escaping () -> Void = {}
+        serverInfo: String = "----"
     ) {
         self.nickname = nickname
         self.appVersion = appVersion
         self.serverInfo = serverInfo
-        self.onRoomTap = onRoomTap
-        self.onInventoryTap = onInventoryTap
-        self.onComposeTap = onComposeTap
         self.pingUseCase = pingUseCase
         self.loadHomeUseCase = nil
         self.errorPresenter = nil
@@ -149,23 +141,18 @@ public final class HomeViewModel: ObservableObject {
 
     /// Story 5.5 新增 init：注入 LoadHomeUseCase + ErrorPresenter（与 Story 2.5 init 并存）。
     /// 测试场景用此 init 直接注入 mock UseCase + 真 ErrorPresenter；生产路径走 bind() 注入.
+    /// Story 37.3 删除 onRoomTap / onInventoryTap / onComposeTap 三个 closure 参数（ADR-0009 §3.5 步骤 4）.
     public init(
         nickname: String = "用户1001",
         pingUseCase: PingUseCaseProtocol? = nil,
         loadHomeUseCase: LoadHomeUseCaseProtocol,
         errorPresenter: ErrorPresenter,
         appVersion: String = HomeViewModel.readAppVersion(),
-        serverInfo: String = "----",
-        onRoomTap: @escaping () -> Void = {},
-        onInventoryTap: @escaping () -> Void = {},
-        onComposeTap: @escaping () -> Void = {}
+        serverInfo: String = "----"
     ) {
         self.nickname = nickname
         self.appVersion = appVersion
         self.serverInfo = serverInfo
-        self.onRoomTap = onRoomTap
-        self.onInventoryTap = onInventoryTap
-        self.onComposeTap = onComposeTap
         self.pingUseCase = pingUseCase
         self.loadHomeUseCase = loadHomeUseCase
         self.errorPresenter = errorPresenter

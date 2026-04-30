@@ -1,7 +1,7 @@
 // RootView.swift
-// Story 2.2 起占位 RootView：渲染 HomeView。
+// Story 2.2 起占位 RootView：渲染 HomeView.
 // Story 2.3 起：注入 AppCoordinator，把 HomeView 三个 CTA 闭包连到 coordinator.present(...)，
-// 并通过 .fullScreenCover(item:) 弹出对应 Sheet placeholder。
+// 并通过 .fullScreenCover(item:) 弹出对应 Sheet placeholder.
 // Story 2.5 起（追加）：
 //   - 新增 @StateObject private var container = AppContainer()
 //   - 新增 .task：bind PingUseCase 后触发 start() 拉 /ping + /version
@@ -10,32 +10,21 @@
 //   - body 改为 ZStack { switch launchStateMachine.state } 三分支路由 + 每分支 `.transition(.opacity)`：
 //     · .launching → LaunchingView
 //     · .ready → HomeView 子树（保留 .onAppear / .fullScreenCover / errorPresenter 既有 wire）
-//     · .needsAuth(presentation:) → 根据 presentation 三态分发（Story 5.5 round 2 [P1] fix）:
-//       - .retry → RetryView（onRetry → Task { await launchStateMachine.retry() }）
-//       - .alert → AlertOverlayView（onDismiss → retry()）
-//       - .toast → 兜底为 alert（bootstrap 阶段不该派 toast）
-//   - 新增独立 .task：await launchStateMachine.bootstrap()（与既有 ping/version .task 并发跑）
-//   - .animation(.easeInOut(duration: 0.2), value: state) 200ms 淡入淡出（epics.md AC 钦定）
-//   - codex round 1 [P3] fix：原 `Group { switch ... }` 不会让分支切换过渡 —— `.animation(_:value:)`
-//     仅动画属性变化；要让分支淡入淡出必须 ZStack 容器 + 每分支 `.transition(.opacity)`。
-//     详见 docs/lessons/2026-04-26-swiftui-switch-transition-explicit.md。
+//     · .needsAuth(presentation:) → 根据 presentation 三态分发（Story 5.5 round 2 [P1] fix）.
 //
-// 设计选择：
-//   - 四个 @StateObject（coordinator + container + homeViewModel + launchStateMachine），都在 RootView 持有生命周期。
-//   - homeViewModel 仍走老 init（hardcode 默认）：避免 SwiftUI @StateObject init 注入陷阱
-//     （详见 Story 2.5 Dev Note #3）；运行时通过 .task 调 bind(pingUseCase:) 注入真实 UseCase。
-//   - launchStateMachine 走默认 closure init（占位 `{ }`）—— 本 story 不接 Epic 5 真实 UseCase；
-//     Epic 5（Story 5.2 / 5.5）落地时改 wire 模式（参考 RootView.task 内 bind 调用 / @State Optional + .onAppear）。
-//   - closure wire 放 .onAppear 而非 init：@StateObject 在 init 阶段未真正初始化，
-//     init 写会捕获到错误的实例；.onAppear 时 view 已显示，coordinator 已稳定。
-//   - capture list `[coordinator]` 显式声明（防强引用 self；闭包都是值类型，重复赋值仅覆盖）。
-//   - resetIdentityViewModel（仅 Debug）走 @State Optional + .onAppear 注入路径，
-//     与 container 共享同一 keychainStore instance（codex round 1 [P1] 修复）。
-//     详见 docs/lessons/2026-04-26-stateobject-debug-instance-aliasing.md。
-//   - .fullScreenCover 挪到 .ready case：launching / needsAuth 状态下 sheet 路由不可用
-//     （避免 LaunchingView 显示时用户莫名弹 sheet）。
-//   - errorPresentationHost 仍挂在最外层 Group：sheet 子树内 sheetContent(for:) 已重复 attach
-//     （lesson 2026-04-26-fullscreencover-isolated-environment.md），本 story 不动该既有方案。
+// Story 37.3 改造（ADR-0009 §3.5 步骤 1 + 8）：
+//   - 删除 RootView.wireHomeViewModelClosures() 方法（HomeView 不再有 onRoomTap / onInventoryTap /
+//     onComposeTap closure 字段；主入口 IA 改 4 Tab + HomeContainerView 互斥状态机）.
+//   - `.ready` 分支不再渲染 homeView，改渲染 `MainTabView()` + `.environmentObject(coordinator)`
+//     + `.environmentObject(homeViewModel)` + `.environment(\.resetIdentityViewModel, ...)`
+//     + `.environment(\.sessionStore, container.sessionStore)`（HomeContainerView 通过 environment
+//     读取 HomeView 三参数）.
+//   - **保留** `.fullScreenCover(item: $coordinator.presentedSheet)` modifier 仅服务 `.compose`
+//     次级路由（ADR-0009 §3.4 钦定 SheetType 白名单仅留 .compose；.room/.inventory 已 supersede
+//     为 4 Tab + HomeContainer 互斥状态机）. codex round 1 [P2] fix: 不挂会让 present(.compose)
+//     变 silent no-op.
+//   - 保留：launching / needsAuth 三态机不变；onReadyTask 内 ping bind / start + 外层 .task 内
+//     loadHome bind + errorPresentationHost 全部既有 wire.
 
 import SwiftUI
 
@@ -44,148 +33,78 @@ struct RootView: View {
     @StateObject private var container = AppContainer()
     @StateObject private var homeViewModel = HomeViewModel()
 
-    /// Story 2.9 新增 / Story 5.2 升级：启动状态机。
-    ///
-    /// **Story 5.2 关键改动**：原 `@StateObject private var launchStateMachine = AppLaunchStateMachine()`
-    /// 改为 `@State Optional` + `.onAppear` lazy 注入。
-    /// 因为 bootstrapStep1 closure 需要捕获 `container.makeGuestLoginUseCase()` —— 但 container 本身
-    /// 是 `@StateObject`，init 阶段还没真正实体化（lesson 2026-04-26-stateobject-debug-instance-aliasing.md）。
-    /// 与 Story 2.8 `resetIdentityViewModel: ResetIdentityViewModel?` 走同一 lazy 注入模式。
+    /// Story 2.9 新增 / Story 5.2 升级：启动状态机.
     @State private var launchStateMachine: AppLaunchStateMachine?
 
     #if DEBUG
-    /// Story 2.8: dev "重置身份" 按钮 ViewModel。仅 Debug build 存在；Release build 字段不存在。
-    ///
-    /// **注入路径**：用 `@State Optional` + `.onAppear` lazy 注入，**不**用 `@StateObject` + init 阶段构造。
-    /// 因为 `@StateObject` 必须在 init 阶段给值，但 RootView 的 `container` 同样是 `@StateObject`、
-    /// init 期间还**没**真正实体化，无法 `_resetIdentityViewModel = StateObject(...container.make...())`。
-    /// 早期实装走 standalone `AppContainer()` bootstrap 喂初值——但那会构造一个**新的** `InMemoryKeychainStore`
-    /// 实例，与 `container.keychainStore` 是两个不同的字典，重置按钮调的 `removeAll()` 清的是 bootstrap 那个，
-    /// container 实际持有的 keychain 仍残留——UI 显示成功但功能失效（codex round 1 [P1] finding）。
-    /// 详见 docs/lessons/2026-04-26-stateobject-debug-instance-aliasing.md。
+    /// Story 2.8: dev "重置身份" 按钮 ViewModel.仅 Debug build 存在；Release build 字段不存在.
     @State private var resetIdentityViewModel: ResetIdentityViewModel?
     #endif
 
     var body: some View {
-        // 关键：用 ZStack 而非 Group 包裹 switch 分支，并给每个分支显式 `.transition(.opacity)`。
-        // 因为 `.animation(_:value:)` **不**会让 switch 不同分支的插入/删除产生过渡（SwiftUI 文档：
-        // 该 modifier 只动画现有 view 的属性变化）；要让分支切换淡入淡出，必须满足两个条件：
-        //   1. 容器支持 transition（Group 不支持；ZStack / overlay / 等条件容器才行）
-        //   2. 每个分支 view 加 `.transition(.opacity)`
-        // codex round 1 [P3] finding 指出"200ms 淡入淡出"实际不生效。
-        // 详见 docs/lessons/2026-04-26-swiftui-switch-transition-explicit.md。
-        //
-        // Story 5.2 升级：launchStateMachine 是 Optional —— body 内三态 switch 包在 `if let` 内。
-        // launchStateMachine 在 .onAppear 时 lazy 注入（见 ensureLaunchStateMachineWired）。
         ZStack {
             if let stateMachine = launchStateMachine {
-                // 关键：用 LaunchedContentView 子视图包裹三态 switch.
-                // 子视图 `@ObservedObject` 订阅 launchStateMachine 的 @Published state，
-                // 否则在 RootView 直接 `switch stateMachine.state` 不会触发 SwiftUI 重渲染
-                // —— 因为 @State Optional 仅监听 Optional 本身的 nil↔非 nil 变化，
-                // 不监听 wrapped class 的 objectWillChange（不像 @StateObject）。
                 LaunchedContentView(
                     stateMachine: stateMachine,
                     coordinator: coordinator,
-                    homeView: { homeView },
+                    homeViewModel: homeViewModel,
+                    sessionStore: container.sessionStore,
+                    resetIdentityViewModel: currentResetIdentityViewModel(),
                     onReadyAppear: {
-                        wireHomeViewModelClosures()
                         #if DEBUG
                         // lazy 注入：第一次 .onAppear 时从已稳定的 container 拿 keychainStore，
-                        // 保证 reset 按钮调的 removeAll() 清的是 container.keychainStore 这同一份。
-                        // nil 守卫让 RootView 重建（如旋转 / 离开返回）时不会重新构造覆盖既有 instance。
+                        // 保证 reset 按钮调的 removeAll() 清的是 container.keychainStore 这同一份.
+                        // nil 守卫让 RootView 重建（如旋转 / 离开返回）时不会重新构造覆盖既有 instance.
                         if resetIdentityViewModel == nil {
                             resetIdentityViewModel = container.makeResetIdentityViewModel()
                         }
                         #endif
                     },
                     onReadyTask: {
-                        // Story 5.5 round 4 [P2] fix: 把 ping 调用从启动 .task 挪到 .ready 进入后再异步触发.
-                        //
-                        // 背景: round 3 fix 把 `await homeViewModel.start()` 从 RootView 启动 .task 中删除,
-                        // 让冷启动 HTTP 预算保持在 ≤2 (`/auth/guest-login` + `/home`). 但删除得过死,
-                        // ping 永远没人调 → serverInfo 永远是 "----" placeholder, 版本 footer regress.
-                        //
-                        // 修复: 把 `start()` 调用挪到 .ready 分支的 onReadyTask, 此时:
-                        //   1. 冷启动链路 (`/auth/guest-login` + `/home`) 已成功完成进入 .ready
-                        //   2. ping 不阻塞首屏渲染 (是 .ready 后异步发起)
-                        //   3. 冷启动期间仍只有 2 个 HTTP, ping 是首屏渲染**之后**的第 3 个独立请求
-                        //   4. start() 内部第 4 层短路 (`hasLoadedHome=true`) 已被 round 3 移除, 现在
-                        //      ping 会真正发出来填充 serverInfo footer
-                        //
-                        // **Story 5.5 round 6 [P2] fix**: ping bind 也挪到这里 —— 跟 start 走同一个
-                        // .ready 分支 .task, 杜绝原"bind 在外层 .task / start 在 .ready .task" 两个独立
-                        // .task 之间的 race（SwiftUI 不保证两 .task 顺序：fast bootstrap 路径会在 bind 跑
-                        // 完之前进 .ready → start() 看到 nil useCase silent return → footer 永远 "----"）.
-                        // 现在 bind 总在 start 同一闭包内先执行 → 不可能 race.
-                        // 详见 docs/lessons/2026-04-27-swiftui-multi-task-no-ordering.md.
+                        // Story 5.5 round 4 / round 6 钦定 wire：bind ping + start 在同一 .ready
+                        // 分支 .task 内串行（避免 SwiftUI 多 .task 顺序 race；详见 lesson
+                        // 2026-04-27-swiftui-multi-task-no-ordering.md）.
                         homeViewModel.bind(pingUseCase: container.makePingUseCase())
                         await homeViewModel.start()
-                    },
-                    sheetContent: sheetContent(for:)
+                    }
                 )
             } else {
-                // launchStateMachine 还没注入 —— 显示 LaunchingView 兜底（理论上不应出现，
-                // 因为 .onAppear 立即注入；保留兜底防 .onAppear 调用前的极短窗口期）.
                 LaunchingView().transition(.opacity)
             }
 
             #if DEBUG
-            // Story 5.1 AC5: UITest hook —— XCUITest 通过 launchEnvironment
-            // 触发 keychain 写/读，把结果通过 hidden a11y text 暴露给 XCUIApplication 探测。
-            // 仅 #if DEBUG 编译；release build 该 view 不存在 → 生产代码零污染。
-            // 与 KeychainPersistenceUITests 配合实现"跨 App launch 持久化" 验证（NFR7）。
+            // Story 5.1 AC5: UITest hook —— XCUITest 通过 launchEnvironment 触发 keychain 写/读.
             KeychainUITestHookView(container: container)
             #endif
         }
         .onAppear {
-            // Story 5.2 新增：lazy 注入 launchStateMachine。
-            // 这一步必须比 .task 早跑：.onAppear 在 SwiftUI 生命周期中先于 .task 触发；
-            // 但 .task 内部仍调一次 ensure 兜底 race。
             ensureLaunchStateMachineWired()
         }
         .task {
-            // Story 5.5 新增：bind LoadHomeUseCase + ErrorPresenter，让 ErrorPresenter onRetry 闭包
-            // 能驱动 ViewModel 重试（resetLoadHomeForRetry → loadHome）.
-            // 启动期 LoadHome 已通过 bootstrapStep1 closure 调过一次（applyHomeData 同步注入数据 +
-            // 置 hasLoadedHome=true），此处的 bind 仅为 onRetry 路径建立 wire；ViewModel.loadHome()
-            // 在 hasLoadedHome=true 状态下被短路，不会双发请求.
-            //
-            // **Story 5.5 round 6 [P2] fix**: PingUseCase 的 bind 调用已挪到 LaunchedContentView 的
-            // .ready 分支 onReadyTask 闭包内（与 `await homeViewModel.start()` 同一个闭包，先 bind 后
-            // start，杜绝两个独立 .task 之间的 race —— 详见 onReadyTask 处的 fix 注释）.
-            // LoadHome bind 留在这里：onRetry wire 是启动早期就需要、非 ready 路径依赖的；
-            // 与 ping 不同（ping 只在 .ready 才有意义）.
+            // Story 5.5：bind LoadHomeUseCase + ErrorPresenter，让 ErrorPresenter onRetry 闭包
+            // 能驱动 ViewModel 重试.
             homeViewModel.bind(
                 loadHomeUseCase: container.makeLoadHomeUseCase(),
                 errorPresenter: container.errorPresenter
             )
         }
         .task {
-            // Story 2.9 新增 / Story 5.2 升级：跑启动状态机 bootstrap。独立 .task 让两个 await 并发跑（不互相阻塞）。
-            // bootstrap() 内部通过 hasBootstrapped flag 防 .task 重启时重复跑 step。
-            // 兜底：若 .onAppear 还没跑（理论上不应出现），先 ensure 注入再 bootstrap.
             ensureLaunchStateMachineWired()
             await launchStateMachine?.bootstrap()
         }
         .errorPresentationHost(presenter: container.errorPresenter)
     }
 
+    /// 取当前 ResetIdentityViewModel? 给 LaunchedContentView (Debug 注入；Release 永远 nil).
+    private func currentResetIdentityViewModel() -> ResetIdentityViewModel? {
+        #if DEBUG
+        return resetIdentityViewModel
+        #else
+        return nil
+        #endif
+    }
+
     /// Story 5.2 AC8 新增：lazy 注入 `launchStateMachine`，把 GuestLoginUseCase + SessionStore wire 到 bootstrapStep1.
-    ///
-    /// 为何 lazy：bootstrapStep1 closure 需要捕获 `container.makeGuestLoginUseCase()` 与 `container.sessionStore`，
-    /// 但 container 是 `@StateObject`，init 阶段还没真正实体化（lesson 2026-04-26-stateobject-debug-instance-aliasing.md
-    /// + 2026-04-26-stateobject-init-vs-bind-injection.md）。`.onAppear` 时 view 已显示，container 已稳定，
-    /// 此刻构造 closure 才能捕获到正确的实例。
-    ///
-    /// nil 守卫：防 .onAppear / .task 多次触发时重复构造覆盖既有 instance
-    /// （lesson 2026-04-26-swiftui-task-modifier-reentrancy.md）。
-    /// `bootstrap()` 内部还有 `hasBootstrapped` flag 短路，两层防御。
-    ///
-    /// **UITest hook（仅 #if DEBUG）**：当 launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] == "1" 时，
-    /// bootstrapStep1 退化为 no-op —— 保持 Story 2.9 既有 LaunchingView → HomeView 行为，
-    /// 让 HomeUITests / NavigationUITests 不依赖真实 server 即可继续工作.
-    /// 与 KeychainUITestHookView 同模式（launchEnvironment hook 仅 Debug 编译；release 路径零污染）.
     private func ensureLaunchStateMachineWired() {
         guard launchStateMachine == nil else { return }
 
@@ -201,28 +120,9 @@ struct RootView: View {
         let loadHomeUseCase = container.makeLoadHomeUseCase()
         let sessionStore = container.sessionStore
         let homeViewModel = self.homeViewModel
-        // Story 5.5 round 3 [P1] fix: 移除 round 2 引入的 GuestLoginCompletionGate actor.
-        // 原方案: gate 永久记录 "guest-login 曾经成功" → retry() 重跑闭包时**永远**跳过 useCase.execute(),
-        // 让 /home 因 .unauthorized / .missingCredentials 失败时复用同一份坏掉的鉴权状态死循环重试,
-        // 用户只能看到同一失败结果直到重启 App. round 2 P2 试图省一次 /auth/guest-login 往返,
-        // 但代价是把"重试可恢复"语义变成"重试不可恢复"—— 不可接受的 trade-off.
-        //
-        // 新方案 (fail-safe): retry() 重跑闭包 = guest-login + load-home 都重跑一次.
-        // GuestLoginUseCase.execute() 本身幂等（每次产生新 token 写 keychain）, 重复调用无副作用,
-        // 反而能保证 retry 时一定有新鲜 token. round 2 P2 的"省一次往返"成本 (~50ms) 可接受,
-        // 换来"重试一定能自愈坏掉的鉴权状态"的语义保证.
-        // 详见 docs/lessons/2026-04-27-bootstrap-retry-must-not-skip-auth.md.
+        let coordinator = self.coordinator
         launchStateMachine = AppLaunchStateMachine(
             bootstrapStep1: { @Sendable in
-                // Step 1a: 游客登录 —— 写 keychain token + sessionStore.user/pet.
-                // 每次 bootstrap / retry 都跑一次, 保证坏掉的鉴权状态可被 retry 刷新.
-                //
-                // **错误映射**（Story 5.5 round 4 [P2] fix）: guest-login 失败也必须经
-                // AppErrorMapper → BootstrapMappedError, 与 LoadHome 失败路径一致.
-                // 否则 raw APIError 抛给状态机时只能走 errorDescription fallback,
-                // 弹出 "Network error: ..." 等 developer-facing 串, 失去 mapper 的
-                // alert/retry 区分语义 (例如 .business(1009) 应是 .alert, .network 应是 .retry).
-                // 详见 docs/lessons/2026-04-27-bootstrap-all-error-paths-route-via-mapper.md.
                 let output: GuestLoginOutput
                 do {
                     output = try await useCase.execute()
@@ -235,22 +135,6 @@ struct RootView: View {
                 await MainActor.run {
                     sessionStore.updateSession(SessionState(user: output.user, pet: output.pet))
                 }
-                // Story 5.5 AC6 Step 1b: 串行调 GET /home 拿首屏数据 → applyHomeData 同步注入
-                // 任一步抛错 → step1 整体失败 → 状态机走 .needsAuth(presentation:) → 显示对应错误 UI
-                //
-                // 串行而非并行：LoadHome 需要 token（GuestLogin 写 keychain 完成后才有）；
-                // 并行会引发 LoadHome 先发 → 401 → 静默重登 → 复杂边界.
-                //
-                // 不用 bootstrapStep2 插槽：让 GuestLogin + LoadHome 是单次原子启动事务的失败语义；
-                // 用户重试 → 整个 step1 closure 重跑（但 guest-login 由 gate 短路, 实际只重跑 loadHome）.
-                // 详见 Story 5.5 Dev Note #2.
-                //
-                // **错误映射**（Story 5.5 round 1 [P2] + round 2 [P1] fix）: LoadHome 失败时
-                // 调 AppErrorMapper.presentation(for:) 派出对应 ErrorPresentation（alert / retry / toast）,
-                // 再用 BootstrapMappedError 包装抛出 —— 状态机直接接 presentation 路由, 不再降级为
-                // 单一 retry. 防 .unauthorized / .missingCredentials / .decoding 等 mapper 钦定为
-                // .alert 的错误被错误降级为 RetryView, 让用户卡在 unrecoverable retry loop.
-                // 详见 docs/lessons/2026-04-27-launch-state-machine-must-carry-presentation.md.
                 let homeData: HomeData
                 do {
                     homeData = try await loadHomeUseCase.execute()
@@ -262,16 +146,17 @@ struct RootView: View {
                 }
                 await MainActor.run {
                     homeViewModel.applyHomeData(homeData)
+                    // Story 37.3 codex round 1 [P1] fix: 把 /home 返回的 room.currentRoomId
+                    // 传播进 coordinator —— HomeContainerView 互斥状态机以
+                    // coordinator.currentRoomId 为决策入参；不写就会让"已在房间"用户在
+                    // bootstrap/retry 后被错误落到 idle home screen.
+                    // 详见 docs/lessons/2026-04-30-coordinator-must-mirror-loaded-home-room-state.md.
+                    coordinator.currentRoomId = homeData.room.currentRoomId
                 }
             }
-            // bootstrapStep2 仍走默认 { } no-op；本 story 故意不用 step2 插槽（Dev Note #2）
         )
 
         // ADR-0008 v2 §6.3 / Story 0008-impl-1: wire 401 cold-start handler.
-        // launchStateMachine 已创建 → setHandler 注入真实闭包，闭包内：
-        //   1. sessionStore.clear() —— 让订阅 SessionStore 的 view 立即过渡到 fallback 态
-        //   2. stateMachine.triggerColdStart() —— 重置 hasBootstrapped + state=.launching + 重跑 bootstrap
-        // weak 引用防 retain cycle（容器 → sink → handler closure → 容器）.
         if let stateMachine = launchStateMachine {
             container.unauthorizedHandlerSink.setHandler { [weak stateMachine, weak sessionStore] in
                 await MainActor.run {
@@ -281,102 +166,17 @@ struct RootView: View {
             }
         }
     }
-
-    /// Debug build 走带 resetIdentityViewModel 的 init;Release build 走旧 init（按钮不存在）。
-    /// resetIdentityViewModel 在 .onAppear 之前为 nil；HomeView 已支持 Optional（按钮在 nil 时不渲染），
-    /// 短暂的 nil 期对 UX 无影响（dev 工具，非 release 关键路径）。
-    ///
-    /// Story 5.2 codex round 1 [P1] fix：两条 init 都传 `sessionStore`，让 HomeView 订阅
-    /// `SessionStore.@Published session`，bootstrapStep1 写入后 nickname 立刻刷新到真实身份.
-    /// 详见 docs/lessons/2026-04-27-sessionstore-home-nickname-source-of-truth.md.
-    @ViewBuilder
-    private var homeView: some View {
-        #if DEBUG
-        HomeView(
-            viewModel: homeViewModel,
-            resetIdentityViewModel: resetIdentityViewModel,
-            sessionStore: container.sessionStore
-        )
-        #else
-        HomeView(
-            viewModel: homeViewModel,
-            resetIdentityViewModel: nil,
-            sessionStore: container.sessionStore
-        )
-        #endif
-    }
-
-    /// 把 HomeViewModel 三个 CTA 闭包接到 coordinator.present(...)。
-    /// .onAppear 时机重新 wire 一次（防止 RootView 重新构建后失去引用），
-    /// 不重复注册不会导致 leak —— 闭包都是值类型，每次赋值覆盖前一个。
-    private func wireHomeViewModelClosures() {
-        homeViewModel.onRoomTap = { [coordinator] in
-            coordinator.present(.room)
-        }
-        homeViewModel.onInventoryTap = { [coordinator] in
-            coordinator.present(.inventory)
-        }
-        homeViewModel.onComposeTap = { [coordinator] in
-            coordinator.present(.compose)
-        }
-    }
-
-    /// sheet 内容也挂一份 errorPresentationHost：
-    /// SwiftUI 的 `.fullScreenCover` 在独立 window scene 渲染，外层 modifier 链不传播到 sheet 子树；
-    /// 主 host（在 RootView body 末尾）会被 sheet 整片盖住，导致 sheet 打开时全局错误 UI 隐形。
-    /// 让 sheet 子树共用同一个 ErrorPresenter 实例 → presenter.current 是 @Published source of truth →
-    /// 两个 host 都监听同一份状态、同步渲染 → sheet 内的 host 渲染在 sheet 顶层，错误 UI 始终可见。
-    /// 详见 docs/lessons/2026-04-26-fullscreencover-isolated-environment.md（codex round 1 [P1] finding 修复）。
-    @ViewBuilder
-    private func sheetContent(for sheet: SheetType) -> some View {
-        Group {
-            switch sheet {
-            case .room:
-                RoomPlaceholderView(onClose: { coordinator.dismiss() })
-            case .inventory:
-                InventoryPlaceholderView(onClose: { coordinator.dismiss() })
-            case .compose:
-                ComposePlaceholderView(onClose: { coordinator.dismiss() })
-            }
-        }
-        .errorPresentationHost(presenter: container.errorPresenter)
-    }
 }
 
 // Story 5.5 round 3 [P1] fix: 移除原 GuestLoginCompletionGate actor.
-// round 2 [P2] 引入 gate 短路 guest-login 重跑, 但让 .unauthorized / .missingCredentials 失败死循环
-// (gate 永久记录 → retry 跳过 useCase.execute() → 复用同一份坏掉的鉴权状态). round 3 [P1] 改回
-// "retry 时 guest-login 也重跑" 的 fail-safe 路径; useCase.execute() 幂等, 重复调一次无副作用,
-// 多 ~50ms 一次往返的成本远小于"重试不可恢复"风险.
 // 详见 docs/lessons/2026-04-27-bootstrap-retry-must-not-skip-auth.md.
 
 /// Story 5.5 codex round 1 [P2] fix + round 2 [P1] fix: 把 bootstrap step closure 内的失败
 /// 包装成携带完整 ErrorPresentation 语义的 LocalizedError, 让状态机决定 retry vs alert vs toast.
-///
-/// **为什么单独一个 wrapper 类型**:
-/// - AppLaunchStateMachine.presentationFor 优先识别本类型 → 直接用其 presentation 字段（不重做判断）.
-/// - APIError 直接抛给状态机的话, 状态机只能取 errorDescription 做 fallback, 损失 alert/retry 区分.
-/// - 在 bootstrap 边界做一层 wrapper：内部 underlying 保留原 APIError 给 log / 上报,
-///   外层 presentation 由 AppErrorMapper 单一决定 → 状态机收到的就是"该弹 alert 还是 retry".
-///
-/// **round 2 [P1] fix**: 字段从 `userFacingMessage: String` 升级为 `presentation: ErrorPresentation`.
-/// 原方案只携带 message → 状态机只能塞进 .needsAuth(message:) → 渲染层只看 message,
-/// 永远走 RetryView, 把 .unauthorized / .missingCredentials / .decoding 这些 AppErrorMapper 钦定
-/// 为 .alert（带"请重启应用" guidance）的错误降级为 retry, 用户卡在 unrecoverable retry loop.
-/// 升级后 RootView LaunchedContentView 根据 presentation 三态分发：
-/// - .alert → AlertOverlayView（"请重启应用" 不给重试按钮的 blocking alert）
-/// - .retry → RetryView（用户点重试 → stateMachine.retry()）
-/// - .toast → AlertOverlayView 兜底（toast 是非 modal 的轻量提示, bootstrap 阶段不该用 → 兜底为 alert）
-///
-/// LocalizedError conformance 保留：让 errorDescription 仍可读（log / 调试），但状态机走 presentation 路径,
-/// 不再依赖 errorDescription 做 UI 决策.
-///
-/// internal access：让 AppLaunchStateMachineTests / RootView 集成测试能直接构造断言.
 struct BootstrapMappedError: LocalizedError {
     let presentation: ErrorPresentation
     let underlying: Error
 
-    /// 从 presentation 提取 message 给 LocalizedError conformance（log / 调试用，不影响 UI 决策）.
     var errorDescription: String? {
         switch presentation {
         case let .toast(message):
@@ -391,58 +191,65 @@ struct BootstrapMappedError: LocalizedError {
 
 /// Story 5.2 新增子视图：用 `@ObservedObject` 订阅 `AppLaunchStateMachine.state` 的变化.
 ///
-/// 为何抽出来：RootView 的 `launchStateMachine` 字段是 `@State Optional<AppLaunchStateMachine>`
-/// （不是 `@StateObject`，因为 closure 必须 lazy 注入捕获 container 字段）.
-/// `@State` 仅监听 Optional 自身的 nil↔非 nil 变化，**不**会订阅 wrapped class 的 `objectWillChange`,
-/// 所以直接在 RootView body 内 `switch stateMachine.state` 不会随 @Published state 变化重渲染.
-/// 解法是把 stateMachine 作为参数传给子视图，子视图标 `@ObservedObject` 让 SwiftUI 重新接 publisher,
-/// state 变化时重渲染子视图，三态 switch 才能正常切换.
-///
-/// 参考精神：与 Story 2.8 `HomeView` 接收 `resetIdentityViewModel: ResetIdentityViewModel?` 然后
-/// 内部用 `@ObservedObject` 订阅同模式.
+/// Story 37.3 改造（ADR-0009 §3.5 步骤 1）：
+///   - .ready 分支改渲染 MainTabView + 注入 4 个 environment（coordinator / homeViewModel /
+///     resetIdentityViewModel / sessionStore），让 HomeContainerView 通过 environment 透传给 HomeView.
+///   - homeView 闭包参数删除（不再渲染 HomeView 当根；HomeContainerView 内嵌 HomeView 由 MainTabView
+///     的 Home Tab 拿到）.
+///   - **保留** `.fullScreenCover(item: $coordinator.presentedSheet)` modifier 服务 `.compose` 次级
+///     路由（codex round 1 [P2] fix）. 渲染 ComposePlaceholderView（Story 33.1 落地真实合成 view）.
 private struct LaunchedContentView: View {
     @ObservedObject var stateMachine: AppLaunchStateMachine
     @ObservedObject var coordinator: AppCoordinator
-    let homeView: () -> AnyView
+    let homeViewModel: HomeViewModel
+    let sessionStore: SessionStore?
+    let resetIdentityViewModel: ResetIdentityViewModel?
     let onReadyAppear: () -> Void
     let onReadyTask: () async -> Void
-    let sheetContent: (SheetType) -> AnyView
 
     init(
         stateMachine: AppLaunchStateMachine,
         coordinator: AppCoordinator,
-        @ViewBuilder homeView: @escaping () -> some View,
+        homeViewModel: HomeViewModel,
+        sessionStore: SessionStore?,
+        resetIdentityViewModel: ResetIdentityViewModel?,
         onReadyAppear: @escaping () -> Void,
-        onReadyTask: @escaping () async -> Void = { },
-        @ViewBuilder sheetContent: @escaping (SheetType) -> some View
+        onReadyTask: @escaping () async -> Void = { }
     ) {
         self.stateMachine = stateMachine
         self.coordinator = coordinator
-        self.homeView = { AnyView(homeView()) }
+        self.homeViewModel = homeViewModel
+        self.sessionStore = sessionStore
+        self.resetIdentityViewModel = resetIdentityViewModel
         self.onReadyAppear = onReadyAppear
         self.onReadyTask = onReadyTask
-        self.sheetContent = { AnyView(sheetContent($0)) }
     }
 
     var body: some View {
-        // 三态 switch + 每分支显式 `.transition(.opacity)`（lesson 2026-04-26-swiftui-switch-transition-explicit.md）
-        // .needsAuth 内部根据 presentation 类型再分三态（Story 5.5 round 2 [P1] fix）.
         ZStack {
             switch stateMachine.state {
             case .launching:
                 LaunchingView()
                     .transition(.opacity)
             case .ready:
-                homeView()
+                MainTabView()
+                    .environmentObject(coordinator)
+                    .environmentObject(homeViewModel)
+                    .environment(\.sessionStore, sessionStore)
+                    .environment(\.resetIdentityViewModel, resetIdentityViewModel)
                     .onAppear { onReadyAppear() }
                     .task {
-                        // Story 5.5 round 4 [P2] fix: ping 在 .ready 进入后异步触发,
-                        // 不阻塞首屏渲染, 也不计入冷启动 HTTP 预算 (≤2) —— 是首屏后悄悄填 footer.
-                        // 见 RootView ensureLaunchStateMachineWired 处的 onReadyTask 闭包注释.
                         await onReadyTask()
                     }
+                    // codex round 1 [P2] fix: 重新挂回 .fullScreenCover —— ADR-0009 §3.4 SheetType
+                    // 白名单仍含 .compose（Story 33.1 落地真实形式）；删 modifier 会让
+                    // coordinator.present(.compose) 变 silent no-op.
+                    // 详见 docs/lessons/2026-04-30-coordinator-must-mirror-loaded-home-room-state.md.
                     .fullScreenCover(item: $coordinator.presentedSheet) { sheet in
-                        sheetContent(sheet)
+                        switch sheet {
+                        case .compose:
+                            ComposeSheetPlaceholder()
+                        }
                     }
                     .transition(.opacity)
             case .needsAuth(let presentation):
@@ -453,48 +260,8 @@ private struct LaunchedContentView: View {
         .animation(.easeInOut(duration: 0.2), value: stateMachine.state)
     }
 
-    /// Story 5.5 round 2 [P1] fix: 根据 presentation 三态分发错误 UI.
-    /// Story 5.5 round 4 [P2] fix: 拆 retry-able 和 alert-only 两类 dismiss 行为.
-    /// Story 5.5 round 5 [P1+P2] fix: alert dismiss 调 exit(0) —— 但被 round 7 review 推翻.
-    /// Story 5.5 round 7 [P1] fix: alert dismiss 改回调 stateMachine.retry() (user-driven recovery).
-    /// **Story 5.5 round 8 [P1] fix（终极方案）**: bootstrap 路径的 `.alert` / `.toast` 不再用
-    /// `AlertOverlayView` (dismiss-able overlay), 改用全新的 `TerminalErrorView` (静态全屏 fallback
-    /// page，无任何按钮，user 必须主动杀进程退出).
-    ///
-    /// **dismiss 行为迭代史（必读 — 防再次 regress；本 story 死磕了 6 轮）**：
-    /// - round 0 (dev-story): 默认 .needsAuth 自动 retry → P2 finding (隐式重试, 不可控).
-    /// - round 3 fix: 用 ErrorPresentation 区分 alert/retry, 但 alert dismiss 仍 retry → P1 死循环
-    ///   (alert 的 mapper 文案是 "请重启应用", dismiss 立即重试 → 仍失败 → 同 alert 弹回 → 死循环).
-    /// - round 4 fix: alert dismiss 改 no-op → P2 卡死 (用户点 OK 后 state 不变 → AlertOverlayView 仍显示).
-    /// - round 5 fix: alert dismiss 改 exit(0) → P1 (round 7 review): iOS HIG 明确禁止 app
-    ///   自己 exit(0), App Store 审核会拒, 用户感觉是 force-quit / crash 而不是 graceful error 处理.
-    /// - round 7 fix: alert dismiss → stateMachine.retry() + mapper 文案补 "持续失败时请杀进程重启 App"
-    ///   → P1 (本轮 round 8 review): user 仍可被困 retry → fail → retry 循环, 文案提示也救不了
-    ///   `.missingCredentials` 这种 retry 根本无效的 case.
-    /// - **round 8 fix (current — 终极方案)**: 把 dismiss-able overlay (AlertOverlayView) 整个
-    ///   抽离 bootstrap 路径, 改用 TerminalErrorView 静态全屏 page (无按钮 → user 必须主动杀进程).
-    ///   **不再有 dismiss closure 可纠结**.
-    ///
-    /// **为什么 round 8 是终极方案**:
-    /// 5 轮 fix-review 的根因复盘揭示: bootstrap terminal-class 错误的"dismiss 行为"本身就是个伪命题.
-    /// `AlertOverlayView` 设计是 "dismiss-able overlay" → 必须有 OK 按钮 → 必须有 dismiss closure →
-    /// closure 选什么动作（retry / no-op / exit / 提示）都会跟 terminal 错误的语义冲突
-    /// (terminal = 重试无效 = 任何 in-app 动作都救不回). 唯一可调和的方案: 不给 dismiss 入口.
-    /// iOS error boundary 模式: terminal error = full-screen static page = user 主动 force-quit.
-    ///
-    /// - `.retry`: 用户可点重试触发 stateMachine.retry()（继续走 GuestLogin + LoadHome 重试链路）.
-    ///   transient 业务码（1005/1007/1008/1009 / network）会落到这里,bootstrap 失败 → RetryView → 用户重试 → 自愈.
-    /// - `.alert`: terminal-class 错误 (.unauthorized / .missingCredentials / .decoding / 永久业务码).
-    ///   **round 8 改用 TerminalErrorView**: 静态全屏 page, 无按钮, user 必须 force-quit.
-    ///   注意: bootstrap 路径才用 TerminalErrorView; 非 bootstrap 路径（ErrorPresenter.present 的 alert）
-    ///   仍用 AlertOverlayView (dismiss-able 适合 transient business error 的非 modal 弹窗).
-    /// - `.toast`: bootstrap 阶段不应该派发 toast（mapper 当前根本不派 toast；本分支是防御性兜底）.
-    ///   出现说明 mapper 配置异常 → 兜底渲染为 TerminalErrorView (toast 自动消失后留白屏更糟,
-    ///   按 alert 同样视作 terminal).
-    /// 详见 docs/lessons/2026-04-27-bootstrap-terminal-error-static-fallback-page.md
-    /// + docs/lessons/2026-04-27-bootstrap-alert-dismiss-must-be-user-driven-recovery.md
-    /// + docs/lessons/2026-04-27-bootstrap-all-error-paths-route-via-mapper.md
-    /// + docs/lessons/2026-04-27-business-error-transient-vs-terminal.md.
+    /// Story 5.5 round 8 [P1] fix（终极方案）: bootstrap 路径的 `.alert` / `.toast` 改用
+    /// 全新的 `TerminalErrorView` (静态全屏 fallback page，无任何按钮，user 必须主动杀进程退出).
     @ViewBuilder
     private func needsAuthContent(for presentation: ErrorPresentation) -> some View {
         switch presentation {
@@ -504,14 +271,22 @@ private struct LaunchedContentView: View {
                 onRetry: { Task { await stateMachine.retry() } }
             )
         case let .alert(title, message):
-            // round 8 [P1] fix: 不再用 AlertOverlayView (dismiss-able overlay 必须有 OK 按钮 → 必须有
-            // dismiss closure → 5 轮迭代证明 closure 行为不可调和). 改用 TerminalErrorView 静态全屏
-            // page (无按钮 → user 必须 force-quit). 详见上方 dismiss 行为迭代史 + lesson 文档.
             TerminalErrorView(title: title, message: message)
         case let .toast(message):
-            // 兜底：bootstrap 阶段拿到 toast presentation 异常 —— mapper 配置错（不该派 toast 给 bootstrap）.
-            // round 8 改用 TerminalErrorView 兜底 (与 .alert 同 treatment, toast 自动消失后留白屏更糟).
             TerminalErrorView(title: "提示", message: message)
         }
+    }
+}
+
+/// Story 37.3 codex round 1 [P2] fix: `.compose` 路由的临时占位 view.
+///
+/// ADR-0009 §3.4 SheetType 白名单仍保留 `.compose`（Story 33.1 决定具体形式 / 落地真实合成 view）.
+/// 在此之前，coordinator.present(.compose) 必须有 view 挂载，否则 state 改了但 UI 不渲染.
+///
+/// a11y identifier `compose_placeholder` 让 UITest 能验证"present(.compose) 后 sheet 真的弹出".
+struct ComposeSheetPlaceholder: View {
+    var body: some View {
+        Text("compose placeholder")
+            .accessibilityIdentifier("compose_placeholder")
     }
 }
