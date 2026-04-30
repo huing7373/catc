@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-04-30
+last_updated: 2026-04-30  # Story 37.1 done (ADR-0009 Accepted 已落地)
 # Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
 # 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
@@ -92,8 +92,8 @@ development_status:
   epic-5-retrospective: optional
   # ===== Epic 37 中段插入（sprint-change-proposal-2026-04-29-v2.md 落地 2026-04-30）=====
   # 实际执行顺序：epic-5 done 后立即开始；epic-6（节点 2 demo 验收）等本 epic 全部 done 才启动
-  epic-37: backlog
-  37-1-adr-0009-导航架构: backlog
+  epic-37: in-progress
+  37-1-adr-0009-导航架构: done
   37-2-adr-0010-appstate: backlog
   37-3-rootview-maintabview-改造: backlog
   37-4-appstate-实装-loadhome-迁移: backlog
