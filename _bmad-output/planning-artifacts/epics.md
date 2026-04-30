@@ -4558,7 +4558,7 @@ So that 打开 ios/ 立即知道怎么开始.
 >
 > **执行顺序（关键）**：本 Epic 编号 37 但**实际是 sprint 中段插入** —— epic-5 done 后立即开始，epic-6（节点 2 demo 验收）等本 Epic 全部 done 才启动。`sprint-status.yaml` 内 epic-37 yaml block 物理位置在 `epic-5-retrospective` 后、`epic-6` 前。
 >
-> **范围分类**：**Major** —— 推翻 Story 2.3 + Story 5.5 的核心架构决策（partial revert）；含 2 个新 ADR（[ADR-0009](../implementation-artifacts/decisions/0009-iphone-navigation-tabview.md) iPhone 导航架构 TabView + [ADR-0010](../implementation-artifacts/decisions/0010-iphone-app-state.md) 全局 AppState 单 source of truth）；改动跨节点（影响 Epic 6 / 12 / 21 / 24 / 27 / 30 / 33 / 35）。
+> **范围分类**：**Major** —— **completely supersedes** Story 2.3 + Story 5.5 的部分核心架构决策（主入口 + 数据持有部分钦定 dead；详见 ADR-0009 §4.1 + ADR-0010 §4.1）；含 2 个新 ADR（[ADR-0009](../implementation-artifacts/decisions/0009-iphone-navigation-tabview.md) iPhone 导航架构 TabView + [ADR-0010](../implementation-artifacts/decisions/0010-iphone-app-state.md) 全局 AppState 单 source of truth）；改动跨节点（影响 Epic 6 / 12 / 21 / 24 / 27 / 30 / 33 / 35）。
 >
 > **Story 依赖链**：37.1 + 37.2（决策）→ 37.3 + 37.4（重构）→ 37.5 + 37.6（UI 基础）→ 37.7-37.12（Scaffold 主体）→ 37.13 + 37.14（收尾）。前两层每对内可并行；37.7-37.12 6 条仅依赖 37.5 + 37.6 + 基类骨架，可并行。
 >
@@ -4604,7 +4604,9 @@ So that Story 37.4 实装有契约依据，下游所有 ViewModel 改用 AppStat
 **And** **deliverable**：ADR-0010 文档 status 字段更新 commit + iphone/README.md 加「全局状态」段引用
 **And** spike / 配置 / 文档同步类 story，不强制单元测试
 
-### Story 37.3: RootView/MainTabView 改造 + AppCoordinator 缩窄 + currentTab 归属
+### Story 37.3: RootView 主入口重新实装（按 ADR-0009 完全 supersedes Story 2.3 主入口部分）
+
+> **2026-04-30 X1+X2 修订**：本 story 路径是「**重新实装**：旧 RootView 主入口 3 CTA + fullScreenCover 路由 + AppCoordinator.SheetType `.room/.wardrobe` 整段**直接删除**；新 MainTabView + HomeContainerView **从空白构建**；caller 漏改靠**编译器报错**驱动；**不**做"全 codebase grep 引用兜底"这种妥协式校验」。Story 2.3 的主入口部分钦定**已 dead**（sprint-status.yaml 内 `2-3-...` 状态 `superseded`）。
 
 As an iPhone 用户,
 I want 主入口从 3 CTA + Sheet 改为 4 Tab 浮动 TabBar，每 Tab 独立 NavigationStack,
@@ -4612,49 +4614,52 @@ So that App IA 与 ui_design 完全对齐.
 
 **Acceptance Criteria:**
 
-**Given** Story 37.1 ADR-0009 Accepted
+**Given** Story 37.1 ADR-0009 Accepted（Status 已改 Accepted）
 **When** 完成本 story
-**Then** 按 ADR-0009 §3.5 步骤 1-8 改造:
-- 新建 `iphone/PetApp/App/MainTabView.swift`：含 `TabView(selection: $coordinator.currentTab) { HomeContainerView().tag(Tab.home); WardrobeView().tag(Tab.wardrobe); FriendsView().tag(Tab.friends); ProfileView().tag(Tab.profile) }` + 浮动自绘 TabBar overlay（按 ui_design §iOS 设备规格：高 72pt、距底 14pt、距左右 12pt、theme.shadow.md、Card 圆角）
-- AppCoordinator 加 `@Published var currentTab: Tab = .home` + `func switchTab(_ tab: Tab)` 方法（程式化切 Tab 入口）
-- 新建 `iphone/PetApp/Features/Home/Views/HomeContainerView.swift`：根据 `appState.currentRoomId` 切换 HomeView ↔ RoomView（互斥状态机，淡入淡出 0.3s）
-- RootView `.ready` 分支：从 `HomeView { ... }.fullScreenCover(...)` 改为 `MainTabView()`
-- HomeView 删除旧 3 CTA 按钮（"进入房间"/"仓库"/"合成"）；保留 ping/version 角落显示 + .task 调用
-- AppCoordinator.SheetType 删除 `.room` / `.wardrobe` case；保留 `.compose` 占位（Story 33.1 决定是否实装）
-- JoinRoomModal 改用 `.sheet` 挂在 HomeView 内（Story 37.12 落地）
-- launching / needsAuth 三态机保留不动
-**And** 删除前先 grep 全 codebase 找所有 `coordinator.present(.room)` / `.wardrobe` / `SheetType.room` / `.wardrobe` 引用，确认无遗漏
-**And** accessibility identifier 不丢失：`tab_home` / `tab_wardrobe` / `tab_friends` / `tab_profile` 4 个新加；旧 `homeButton_room` / `homeButton_wardrobe` / `homeButton_compose` 删除（无对应 UI 元素）
+**Then** 按 ADR-0009 §3.5 步骤 1-8 **从空白重新实装**主入口:
+- **新建** `iphone/PetApp/App/MainTabView.swift`：`TabView(selection: $coordinator.currentTab) { HomeContainerView().tag(Tab.home); WardrobeView().tag(Tab.wardrobe); FriendsView().tag(Tab.friends); ProfileView().tag(Tab.profile) }` + 浮动自绘 TabBar overlay（按 ui_design §iOS 设备规格：高 72pt、距底 14pt、距左右 12pt、theme.shadow.md、Card 圆角）；持 `@EnvironmentObject var coordinator: AppCoordinator`
+- **新建** `iphone/PetApp/Features/Home/Views/HomeContainerView.swift`：根据 `appState.currentRoomId` 在 HomeView ↔ RoomView 互斥切换（淡入淡出 0.3s）
+- **删除** RootView `.ready` 分支内旧 HomeView body / `.fullScreenCover(item: $coordinator.presentedSheet)` 主入口路由；改为渲染 `MainTabView()` + 注入 `@StateObject coordinator: AppCoordinator`
+- **删除** HomeView 旧 3 CTA 按钮（"进入房间"/"仓库"/"合成"）相关代码；保留 ping/version 角落显示 + LoadHome `.task` 调用 wire 由 MainTabView/HomeView 重新挂（功能正确性靠 UITest 兜底，不靠 grep）
+- **删除** AppCoordinator.SheetType 内 `.room` / `.wardrobe` enum case；**新增** `@Published var currentTab: Tab = .home` + `func switchTab(_ tab: Tab)` 方法；保留 `.compose` 占位（Story 33.1 决定）
+- **新建** JoinRoomModal `.sheet` 挂载点在 HomeView 内（Story 37.12 落地真正 modal 内容）
+- launching / needsAuth 三态机保留不动（独立决策，与本 ADR 无关）
+**And** **caller 漏改靠编译器报错**：删除 `SheetType.room` / `.wardrobe` 后任何旧 caller `coordinator.present(.room)` 等代码会编译失败；dev 修编译错误时即修完全部 caller。**不依赖** grep 兜底
+**And** accessibility identifier 全表更新：`tab_home` / `tab_wardrobe` / `tab_friends` / `tab_profile` 4 个新加；旧 `homeButton_room` / `homeButton_wardrobe` / `homeButton_compose` 因 UI 元素已删除自然失效（Story 37.13 a11y 总表落地时清理）
 **And** **单元测试覆盖**（≥5 case，纯 XCTest）:
 - happy: appState.currentRoomId = nil → HomeContainerView 显示 HomeView
 - happy: `appState.currentRoomId = "room_1234567"` → HomeContainerView 显示 RoomView
 - happy: `coordinator.switchTab(.wardrobe)` → coordinator.currentTab == .wardrobe
 - happy: launching → MainTabView 不显示
 - edge: appState.currentRoomId 从 "room_1234567" 切到 nil → HomeContainerView 切回 HomeView，过渡动画触发
-**And** **UI 测试覆盖**（XCUITest）:
-- 启动 → 验证 4 Tab 可定位（accessibility identifier `tab_home` / `tab_wardrobe` / `tab_friends` / `tab_profile`）
-- 切到 Wardrobe Tab 验证 WardrobeView 出现（accessibility identifier `wardrobeView`）
+**And** **UI 测试覆盖（功能完整性硬保证，不靠 grep 兜底）**：
+- 启动 → 验证 mock server 收到 1 次 `/ping` + 1 次 `/version` + 1 次 `/home`（Story 2.5 + Story 5.5 链路在新 RootView 内仍生效）
+- 4 Tab 可定位（a11y identifier `tab_home` / `tab_wardrobe` / `tab_friends` / `tab_profile`）
+- 切到 Wardrobe Tab 验证 WardrobeView 出现（`wardrobeView` 可定位）
 - ping/version 角落显示仍在 Home Tab 可见
+- 错误链路（401 → AuthBoundary cold-start）触发 → needsAuth 三态机正确
 
-### Story 37.4: AppState 实装 + LoadHomeUseCase hydrate 迁移 + HomeViewModel.homeData 废
+### Story 37.4: AppState 重新实装 + HomeViewModel.homeData 删除（按 ADR-0010 完全 supersedes Story 5.5 数据持有部分）
+
+> **2026-04-30 X1+X2 修订**：本 story 路径是「**重新实装**：HomeViewModel.homeData 字段**直接删除**；caller 漏改靠**编译器报错**驱动；**不**做"全 codebase grep `homeViewModel.homeData` 引用"这种妥协式校验」。Story 5.5 的数据持有部分钦定**已 dead**（sprint-status.yaml 内 `5-5-...` 状态 `superseded`）。
 
 As an iOS 开发,
-I want 引入全局 AppState 持有所有 domain state，把 Story 5.5 LoadHomeUseCase 的 hydrate 目标从 HomeViewModel.homeData 改为 AppState,
+I want 引入全局 AppState 持有所有 domain state，按 ADR-0010 重新实装数据流,
 So that 4 Tab 数据共享有单一权威来源，跨 Tab 联动天然支持.
 
 **Acceptance Criteria:**
 
-**Given** Story 37.2 ADR-0010 Accepted
+**Given** Story 37.2 ADR-0010 Accepted（Status 已改 Accepted）
 **When** 完成本 story
-**Then** 按 ADR-0010 §3 落地:
-- 新建 `iphone/PetApp/App/AppState.swift`（按 §3.2 白名单字段；`currentRoomId: String?` 按 AR21 ID 字符串约定 + `@MainActor final class ObservableObject` + `@Published` 各字段）
-- 新建 `iphone/PetAppTests/Helpers/AppStateTestHelpers.swift`（MockAppState builder + reset helper）
-- RootView 加 `@StateObject var appState = AppState()` + `.environmentObject(appState)` 注入子树
-- LoadHomeUseCase 调用方（HomeViewModel.bind 内）改：从 `self.homeData = homeData` 改为 `self.appState.hydrate(homeData)`；HomeViewModel 持 `appState` 引用（**构造注入**——`init(appState: AppState, pingUseCase:, loadHomeUseCase:)`；不允许 @EnvironmentObject）
-- 删除 HomeViewModel.homeData 字段
-- ResetIdentityViewModel.resetTapped 加 `appState.reset()`
-- 全 codebase grep `homeViewModel.homeData` / `HomeViewModel.homeData` 引用，逐一改读 `appState.currentUser` / `currentPet` / 等
-**And** **单元测试覆盖**（AppStateTests，≥6 case）:
+**Then** 按 ADR-0010 §3 **从空白重新实装** AppState 数据流:
+- **新建** `iphone/PetApp/App/AppState.swift`（按 §3.2 白名单字段；`currentRoomId: String?` 按 AR21 + `@MainActor final class ObservableObject` + `@Published` 各字段）
+- **新建** `iphone/PetAppTests/Helpers/AppStateTestHelpers.swift`（MockAppState builder + reset helper）
+- **删除** HomeViewModel.homeData 字段（直接删，不留 deprecation 注释）；删除后任何 caller 读 `homeViewModel.homeData?.X` 立即编译失败 → dev 修编译错误时即修完全部 caller
+- **重新实装** HomeViewModel：`init(appState: AppState, pingUseCase:, loadHomeUseCase:)` 构造注入（**不允许 @EnvironmentObject**，详见 ADR-0010 §3.1 注入规则）；`bind` 内 `await loadHomeUseCase.execute()` 拿到 `HomeData` 后调 `self.appState.hydrate(homeData)`（不再 `self.homeData = homeData`）
+- **新增** RootView `@StateObject var appState = AppState()` + `.environmentObject(appState)` 注入子树（与 Story 37.3 RootView 改造合并 commit 或 sequential commit 均可）
+- **新增** ResetIdentityViewModel.resetTapped 内 `appState.reset()` 调用（Story 2.8 dev 按钮链路）
+- **caller 漏改靠编译器报错**：HomeViewModel.homeData 字段删除后，所有读它的代码立即 build error；dev 在 build 通过前必须改完。**不依赖** grep 兜底
+**And** **单元测试覆盖**（AppStateTests，≥6 case，纯 XCTest）:
 - happy: hydrate(homeData) → currentUser / currentPet / currentStepAccount / currentChest / currentRoomId 全部就绪
 - happy: reset() → 全字段 nil/empty
 - happy: `setCurrentRoomId("room_1234567")` → `currentRoomId == "room_1234567"`（String 契约）
@@ -4662,7 +4667,7 @@ So that 4 Tab 数据共享有单一权威来源，跨 Tab 联动天然支持.
 - happy: updateMyPetState(.walk) → currentPet.currentState 更新
 - edge: hydrate 之前读字段 → 全是 nil（不崩）
 **And** **改写现有 LoadHomeUseCase 集成测试**：断言从 `homeViewModel.homeData != nil` 改为 `appState.currentUser != nil`
-**And** **UI 测试覆盖**：启动 → 验证 mock server 收到 1 次 /home → 主界面 CatStage 显示 mock pet 名 + StatusBar 显示 mock 步数（数据从 appState 投影）
+**And** **UITest 验收**：启动 → 验证 mock server 收到 1 次 `/home` → 主界面 CatStage 显示 mock pet 名 + StatusBar 显示 mock 步数（数据从 appState 投影；功能完整性硬保证，不靠 grep）
 
 ### Story 37.5: Theme & Design Tokens（candy 完整 + 三主题 stub）
 

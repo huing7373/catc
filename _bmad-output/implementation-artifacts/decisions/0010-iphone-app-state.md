@@ -1,9 +1,9 @@
-# ADR-0010: iPhone 引入全局 AppState 单 source of truth（部分推翻 Story 5.5 数据流）
+# ADR-0010: iPhone 引入全局 AppState 单 source of truth（**完全 supersede** Story 5.5 数据持有部分）
 
 - **Status**: Proposed（待用户终审 + Story 37.2 落地后改 Accepted）
-- **Date**: 2026-04-29
+- **Date**: 2026-04-29 / 2026-04-30 v2 (X1+X2 修订：partial revert → completely supersedes)
 - **Decider**: Developer
-- **Supersedes**: Story 5.5 已 done 决策的「`HomeViewModel.homeData` 持有 user/pet/stepAccount/chest/room」**数据持有部分**（LoadHomeUseCase / HomeRepository 不变，仅改 hydrate 目标）
+- **Supersedes**: Story 5.5 已 done 决策的「`HomeViewModel.homeData` 持有 user/pet/stepAccount/chest/room」**数据持有部分**（**完全 supersede 而非修订**——该字段 acceptance 不再 active；LoadHomeUseCase / HomeRepository 不变，仅 hydrate 目标改 AppState）
 - **Related**: ADR-0009（导航架构 TabView，本 ADR 联动）；Story 37.2（本 ADR）；Story 37.4（实装 AppState + 迁移）；Story 12.7 / 24.1 / 27.1 / 35.x（下游 ViewModel 改用 AppState）
 
 ---
@@ -245,20 +245,21 @@ ResetIdentityViewModel.resetTapped() (Story 2.8 dev 按钮)
 
 ## 4. Consequences
 
-### 4.1 对 Story 5.5 的影响：partial revert
+### 4.1 对 Story 5.5 的影响：completely supersedes 数据持有部分（不是 partial revert）
 
-**保留**：
-- LoadHomeUseCase（不动 use case 接口签名）
+> **2026-04-30 X1+X2 措辞强化**：本节原使用 "partial revert" 表述（暗含"现有代码保留 + 局部修改"语义），但实装路径是「**重新实装**：HomeViewModel.homeData 字段直接删除；caller 漏改靠**编译器报错**驱动；不做"全 codebase grep `homeViewModel.homeData` 引用"这种妥协式校验」。Story 5.5 的数据持有部分钦定**已 dead**——sprint-status.yaml 内 `5-5-...` 状态改 superseded（见提案 v2 §4 提案 ④）。
+
+**保留（独立决策延续，非 Story 5.5 acceptance 的一部分）**：
+- LoadHomeUseCase 接口签名（输入无参 / 输出 HomeData）
 - HomeRepository
 - GET /home 调用契约
 - LoadHomeUseCase 集成测试基本结构
 
-**改动**：
-- LoadHomeUseCase 的输出注入目标：从 `HomeViewModel.homeData` 改为 `appState.hydrate(homeData)`
-- HomeViewModel.homeData 字段废
-- 主界面数据读取从 `homeViewModel.homeData?.user` 改为 `appState.currentUser`
+**Supersede（Story 5.5 该部分钦定不再 active）**：
+- 旧路径：`LoadHomeUseCase → HomeViewModel.homeData (字段持 user/pet/stepAccount/chest/room)`
+- 新路径：`LoadHomeUseCase → appState.hydrate(homeData)`；HomeViewModel.homeData **字段不存在**；主界面数据读取一律走 `appState.*`
 
-**Git 历史**：完整保留。Story 5.5 status 不改（仍标 done），但本 ADR 内声明 partial revert。
+**Git 历史**：完整保留（commit 不可逆）。Story 5.5 sprint-status 改 **`superseded`** 状态——done 的 commit 保留作为历史记录，但其数据持有部分的 acceptance 不再作为 active spec；新实装见 Story 37.4。**不走 "partial revert + 渐进迁移 + grep 兜底"路径**——彻底重写。
 
 ### 4.2 对 ADR-0009 的联动
 

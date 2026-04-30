@@ -59,7 +59,7 @@ development_status:
   epic-2: in-progress
   2-1-ios-mock-框架选型-ios-目录决策-spike: done
   2-2-swiftui-app-入口-主界面骨架-信息架构定稿: done
-  2-3-导航架构搭建: done
+  2-3-导航架构搭建: superseded  # 2026-04-30 ADR-0009 完全 supersede 主入口部分钦定（详见 ADR-0009 §4.1）；新实装见 Story 37.3。Git history 保留（commit 不可逆），但其主入口部分 acceptance 不再 active
   2-4-apiclient-封装: done
   2-5-ping-调用-主界面显示-server-version-信息: done
   2-6-基础错误-ui-框架: done
@@ -88,7 +88,7 @@ development_status:
   5-2-启动自动登录-usecase: done
   5-3-apiclient-interceptor-自动注入-bearer-token: done
   5-4-无效-token-静默重新登录: done
-  5-5-loadhomeusecase-主界面用-get-home-一次拉取全部数据: done
+  5-5-loadhomeusecase-主界面用-get-home-一次拉取全部数据: superseded  # 2026-04-30 ADR-0010 完全 supersede 数据持有部分钦定（HomeViewModel.homeData 字段；详见 ADR-0010 §4.1）；新实装见 Story 37.4。LoadHomeUseCase 调用契约保留作独立决策延续
   epic-5-retrospective: optional
   # ===== Epic 37 中段插入（sprint-change-proposal-2026-04-29-v2.md 落地 2026-04-30）=====
   # 实际执行顺序：epic-5 done 后立即开始；epic-6（节点 2 demo 验收）等本 epic 全部 done 才启动

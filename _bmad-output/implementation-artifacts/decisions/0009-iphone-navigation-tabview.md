@@ -1,9 +1,9 @@
-# ADR-0009: iPhone 导航架构改用 TabView（推翻 Story 2.3 主入口模式）
+# ADR-0009: iPhone 导航架构改用 TabView（**完全 supersede** Story 2.3 主入口部分）
 
 - **Status**: Proposed（待用户终审 + Story 37.1 落地后改 Accepted）
-- **Date**: 2026-04-29
+- **Date**: 2026-04-29 / 2026-04-30 v2 (X1+X2 修订：partial revert → completely supersedes)
 - **Decider**: Developer
-- **Supersedes**: Story 2.3 已 done 决策的「主入口 NavigationStack + 全屏 Sheet」**主入口部分**（次级 sheet 场景仍保留）；ADR-0002 §3.3 不变
+- **Supersedes**: Story 2.3 已 done 决策的「主入口 NavigationStack + 全屏 Sheet」**主入口部分**（**完全 supersede 而非修订**——该部分 acceptance 不再 active；次级 sheet 场景仍保留作为 ADR 内独立决策延续）；ADR-0002 §3.3 不变
 - **Related**: ADR-0010（AppState 单 source of truth，本 ADR 联动）；Story 37.1（本 ADR）；Story 37.3（实装 RootView TabView 改造）；Story 12.7 / 24.1 / 33.1 / 35.x（下游入口改写）
 
 ---
@@ -154,7 +154,10 @@ Story 2.3「导航架构搭建」已 done，钦定的主入口模式是：
 
 ## 4. Consequences
 
-### 4.1 对 Story 2.3 的影响：partial revert
+### 4.1 对 Story 2.3 的影响：completely supersedes 主入口部分（不是 partial revert）
+
+> **2026-04-30 X1+X2 措辞强化**：本节原使用 "partial revert" 表述（暗含"现有代码保留 + 局部修改"语义），但实装路径是「**重新实装**：旧 RootView 主入口 3 CTA + fullScreenCover 路由 + AppCoordinator.SheetType `.room/.wardrobe` 整段删除；新 MainTabView + HomeContainerView **从空白构建**；caller 漏改靠**编译器报错**驱动；功能正确性由 UITest 全链路覆盖兜底」。Story 2.3 的主入口部分钦定**已 dead**——sprint-status.yaml 内 `2-3-...` 状态改 superseded（见提案 v2 §4 提案 ④）。
+
 
 **保留**：
 - NavigationStack push 模板（Tab 内部沿用）
@@ -168,7 +171,7 @@ Story 2.3「导航架构搭建」已 done，钦定的主入口模式是：
 - `SheetType.room` / `SheetType.wardrobe` 枚举 case
 - RootView .ready 分支的 fullScreenCover 主入口路由
 
-**Git 历史**：完整保留。Story 2.3 status 不改（仍标 done），但本 ADR 内声明 partial revert，sprint-status.yaml 不动。
+**Git 历史**：完整保留（commit 不可逆）。Story 2.3 sprint-status 改 **`superseded`** 状态（不是 done 也不是 deleted）—— done 的 commit 保留作为历史记录，但其主入口部分的 acceptance 不再作为 active spec 被 dev 参考；新实装见 Story 37.3。**不走 "partial revert + 渐进迁移 + grep 兜底"路径**——彻底重写。
 
 ### 4.2 对下游 Story 的影响
 
