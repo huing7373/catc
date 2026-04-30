@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>小猫 App</title>
+
+<!-- 字体 -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@400;500;600;700;800&family=Nunito:wght@400;600;700;800&family=Quicksand:wght@400;500;600;700&family=LXGW+WenKai+TC&family=Noto+Sans+SC:wght@400;500;600;700;800&family=ZCOOL+KuaiLe&display=swap" rel="stylesheet">
+
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    font-family: 'Nunito', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--page-bg, #f5efe6);
+    transition: background 0.4s ease;
+  }
+  * { box-sizing: border-box; }
+
+  /* 主题 CSS 变量 */
+  body.theme-candy {
+    --page-bg: #f7e9e0;
+    --accent: #ff8fa3;
+    --accent-soft: #ffd6df;
+    --accent-deep: #e15f7c;
+    --surface: #fff9f5;
+    --surface-2: #fff1e8;
+    --ink: #4a2c36;
+    --ink-soft: #8b6b75;
+    --ink-mute: #b99ba5;
+    --success: #7bc47f;
+    --warn: #ffb26b;
+    --coin: #ffb84d;
+    --border: rgba(74,44,54,0.08);
+    --shadow-sm: 0 2px 0 rgba(180,100,120,0.08);
+    --shadow-md: 0 6px 16px rgba(180,100,120,0.14);
+    --shadow-lg: 0 14px 38px rgba(180,100,120,0.18);
+  }
+  body.theme-matcha {
+    --page-bg: #ebe6d8;
+    --accent: #94b97c;
+    --accent-soft: #dfe8c8;
+    --accent-deep: #63894a;
+    --surface: #fbf9f0;
+    --surface-2: #f3efdf;
+    --ink: #3c3e2a;
+    --ink-soft: #77795d;
+    --ink-mute: #a8a88a;
+    --success: #8bc062;
+    --warn: #e3b270;
+    --coin: #d6a64a;
+    --border: rgba(60,62,42,0.08);
+    --shadow-sm: 0 2px 0 rgba(100,120,80,0.08);
+    --shadow-md: 0 6px 16px rgba(100,120,80,0.14);
+    --shadow-lg: 0 14px 38px rgba(100,120,80,0.18);
+  }
+  body.theme-sky {
+    --page-bg: #e4edf5;
+    --accent: #7bb3e0;
+    --accent-soft: #cfe2f2;
+    --accent-deep: #4e86b6;
+    --surface: #f6fafd;
+    --surface-2: #eaf1f8;
+    --ink: #2a3c4c;
+    --ink-soft: #647785;
+    --ink-mute: #9eafbc;
+    --success: #7ac3a8;
+    --warn: #f1b86e;
+    --coin: #e8b13f;
+    --border: rgba(42,60,76,0.08);
+    --shadow-sm: 0 2px 0 rgba(80,120,160,0.08);
+    --shadow-md: 0 6px 16px rgba(80,120,160,0.14);
+    --shadow-lg: 0 14px 38px rgba(80,120,160,0.18);
+  }
+
+  body.dark-mode.theme-candy {
+    --page-bg: #2a1c22;
+    --surface: #3a2831;
+    --surface-2: #31222b;
+    --ink: #fbe5ec;
+    --ink-soft: #c9a3af;
+    --ink-mute: #8c6974;
+    --border: rgba(255,255,255,0.06);
+  }
+  body.dark-mode.theme-matcha {
+    --page-bg: #20221a;
+    --surface: #2f3229;
+    --surface-2: #282b22;
+    --ink: #eef0d8;
+    --ink-soft: #b9bb9a;
+    --ink-mute: #7f8165;
+    --border: rgba(255,255,255,0.06);
+  }
+  body.dark-mode.theme-sky {
+    --page-bg: #1a242e;
+    --surface: #2a3540;
+    --surface-2: #233039;
+    --ink: #e5eef7;
+    --ink-soft: #9fb2c2;
+    --ink-mute: #6b7f8c;
+    --border: rgba(255,255,255,0.06);
+  }
+
+  body.font-rounded { --app-font: 'Nunito', 'Noto Sans SC', sans-serif; }
+  body.font-baloo   { --app-font: 'Baloo 2', 'ZCOOL KuaiLe', 'Noto Sans SC', sans-serif; }
+  body.font-kai     { --app-font: 'LXGW WenKai TC', 'Quicksand', serif; }
+
+  #root { width: 100vw; height: 100vh; }
+</style>
+</head>
+<body class="theme-candy font-rounded">
+  <div id="root"></div>
+
+  <!-- React + Babel -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <!-- iOS frame + Tweaks panel -->
+  <script type="text/babel" src="ios-frame.jsx"></script>
+  <script type="text/babel" src="tweaks-panel.jsx"></script>
+
+  <!-- 应用 -->
+  <script type="text/babel" src="components/primitives.jsx"></script>
+  <script type="text/babel" src="components/cat-placeholder.jsx"></script>
+  <script type="text/babel" src="components/tab-bar.jsx"></script>
+  <script type="text/babel" src="screens/home.jsx"></script>
+  <script type="text/babel" src="screens/room.jsx"></script>
+  <script type="text/babel" src="screens/wardrobe.jsx"></script>
+  <script type="text/babel" src="screens/friends.jsx"></script>
+  <script type="text/babel" src="screens/profile.jsx"></script>
+  <script type="text/babel" src="app.jsx"></script>
+</body>
+</html>
