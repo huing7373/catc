@@ -2,7 +2,7 @@
 date: 2026-04-30
 source_review: file:/tmp/epic-loop-review-37-2-r2.md (codex review --base <baseline>, round 2, Story 37.2)
 story: 37-2-adr-0010-appstate
-commit: <pending>
+commit: 8a11f52
 lesson_count: 1
 ---
 
