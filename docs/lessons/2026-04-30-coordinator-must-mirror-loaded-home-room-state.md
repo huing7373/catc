@@ -2,7 +2,7 @@
 date: 2026-04-30
 source_review: codex round 1 review of Story 37-3-rootview-maintabview-改造 (file: /tmp/epic-loop-review-37-3-r1.md)
 story: 37-3-rootview-maintabview-改造
-commit: <pending>
+commit: 5bb6ed5
 lesson_count: 2
 ---
 

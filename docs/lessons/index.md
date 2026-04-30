@@ -91,4 +91,4 @@
 | 2026-04-28 | [error case 不该 conflate transient (store 读失败) vs terminal (store 读成功但空) — 信息保真度必须从 case 设计层做对](2026-04-28-local-store-transient-vs-terminal-must-distinguish.md) | 1 | error-handling, architecture | `fb4bfb7` | **[ADR-0008]** （case 拆分保留 §6.5；反模式 8.5 保留）
 | 2026-04-30 | [文档时态精确性 vs 路径 B ADR Accepted 语义（与 codex review 的天然张力）](2026-04-30-doc-tense-vs-path-b-adr-acceptance.md) | 2 | docs, architecture | `55ae68c` |
 | 2026-04-30 | [路径 B ADR §6 验证语义的 inline forward annotation（codex round 2 协调）](2026-04-30-adr-section-6-path-b-inline-semantics.md) | 1 | architecture, docs, process | `8a11f52` |
-| 2026-04-30 | [Coordinator 必须镜像 server 加载的房间态 & 路由白名单缩窄时不能丢 presenter](2026-04-30-coordinator-must-mirror-loaded-home-room-state.md) | 2 | architecture | `<pending>` |
+| 2026-04-30 | [Coordinator 必须镜像 server 加载的房间态 & 路由白名单缩窄时不能丢 presenter](2026-04-30-coordinator-must-mirror-loaded-home-room-state.md) | 2 | architecture | `5bb6ed5` |
