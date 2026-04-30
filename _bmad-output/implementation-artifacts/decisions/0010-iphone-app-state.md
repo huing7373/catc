@@ -1,6 +1,6 @@
 # ADR-0010: iPhone 引入全局 AppState 单 source of truth（**完全 supersede** Story 5.5 数据持有部分）
 
-- **Status**: Proposed（待用户终审 + Story 37.2 落地后改 Accepted）
+- **Status**: Accepted（2026-04-30 Story 37.2 落地）
 - **Date**: 2026-04-29 / 2026-04-30 v2 (X1+X2 修订：partial revert → completely supersedes)
 - **Decider**: Developer
 - **Supersedes**: Story 5.5 已 done 决策的「`HomeViewModel.homeData` 持有 user/pet/stepAccount/chest/room」**数据持有部分**（**完全 supersede 而非修订**——该字段 acceptance 不再 active；LoadHomeUseCase / HomeRepository 不变，仅 hydrate 目标改 AppState）
@@ -309,8 +309,8 @@ ResetIdentityViewModel.resetTapped() (Story 2.8 dev 按钮)
 
 ## 6. 验收（本 ADR 改 Accepted 的标准）
 
-- [ ] 用户终审通过 Sprint Change Proposal v2
-- [ ] Story 37.4 落地后跑 `bash iphone/scripts/build.sh --test` 通过
-- [ ] AppStateTests.swift 含 ≥6 case（hydrate / reset / 各 update mutation）
-- [ ] LoadHomeUseCase 集成测试改为断言 appState.* 而非 homeViewModel.homeData
-- [ ] codex 对 Sprint Change Proposal v2 verdict ≥ Accept with revisions
+- [x] 用户终审通过 Sprint Change Proposal v2
+- [x] Story 37.4 落地后跑 `bash iphone/scripts/build.sh --test` 通过
+- [x] AppStateTests.swift 含 ≥6 case（hydrate / reset / 各 update mutation）
+- [x] LoadHomeUseCase 集成测试改为断言 appState.* 而非 homeViewModel.homeData
+- [x] codex 对 Sprint Change Proposal v2 verdict ≥ Accept with revisions

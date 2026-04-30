@@ -89,3 +89,4 @@
 | 2026-04-28 | [`.decoding` / `.unauthorized` 必须按 transient 二分原则归 `.retry` & 9 轮 fix-review 累积出 transient/terminal 通用判则](2026-04-28-decoding-and-unauthorized-must-be-transient-retry.md) | 2 | error-handling, process | `2d89afe` |
 | 2026-04-28 | [`AppErrorMapper` 非 APIError fallback 必须按 transient 二分原则归 `.retry`，不是 `.alert`](2026-04-28-non-api-error-fallback-must-be-transient-retry.md) | 1 | error-handling | `9f4ad26` |
 | 2026-04-28 | [error case 不该 conflate transient (store 读失败) vs terminal (store 读成功但空) — 信息保真度必须从 case 设计层做对](2026-04-28-local-store-transient-vs-terminal-must-distinguish.md) | 1 | error-handling, architecture | `fb4bfb7` | **[ADR-0008]** （case 拆分保留 §6.5；反模式 8.5 保留）
+| 2026-04-30 | [文档时态精确性 vs 路径 B ADR Accepted 语义（与 codex review 的天然张力）](2026-04-30-doc-tense-vs-path-b-adr-acceptance.md) | 2 | docs, architecture | `<pending>` |

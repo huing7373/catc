@@ -73,6 +73,18 @@ open iphone/PetApp.xcodeproj
 
 **当前 Epic 2 阶段 0 个第三方 SPM 依赖**（[ADR-0002 §3.1 / §3.2 / §3.3](../_bmad-output/implementation-artifacts/decisions/0002-ios-stack.md) 一致原则：零外部依赖）。仅用 Foundation / Combine / SwiftUI / XCTest 系统库。未来 PR 引入 SPM 依赖前必须先讨论 / 写 ADR。
 
+### 导航架构
+
+> ⚠️ **目标态文档（pending implementation）**：本节描述的 `HomeContainerView` / 4 Tab 主入口为 [ADR-0009](../_bmad-output/implementation-artifacts/decisions/0009-iphone-navigation-tabview.md) 钦定的目标态，**实装由 Story 37.3 完成**（当前 sprint-status.yaml 中 `37-3-rootview-maintabview-改造` 仍为 backlog）。在 37.3 落地前，仓库内并不存在 `HomeContainerView`，请勿据本节字面引用类型 / 数据流。
+
+iPhone 主入口**将**为 4 Tab + Home Tab 互斥状态机（HomeContainerView 根据 `appState.currentRoomId` 在 HomeView ↔ RoomView 间切换）。详见 [ADR-0009](../_bmad-output/implementation-artifacts/decisions/0009-iphone-navigation-tabview.md)（Status: Accepted）。Story 2.3 主入口部分**将**在 Story 37.3 落地后 supersede（届时 sprint-status.yaml 内 `2-3-...` 状态会改为 superseded），新实装见 Story 37.3。
+
+### 全局状态
+
+> ⚠️ **目标态文档（pending implementation）**：本节描述的全局 `AppState` 为 [ADR-0010](../_bmad-output/implementation-artifacts/decisions/0010-iphone-app-state.md) 钦定的目标态，**实装 + LoadHomeUseCase 迁移由 Story 37.4 完成**（当前 sprint-status.yaml 中 `37-4-appstate-实装-loadhome-迁移` 仍为 backlog）。在 37.4 落地前，仓库内并不存在 `AppState` 类型；现网代码仍走 Story 5.5 钦定的 `HomeViewModel.homeData` 路径。
+
+App 内所有 domain state（user / pet / stepAccount / chest / currentRoomId / inventory / equips / emojiCatalog）**将**由全局 `AppState: ObservableObject` 单实例持有；ViewModel 仅允许**构造注入** AppState（**禁止** ViewModel 内部用 `@EnvironmentObject`）。详见 [ADR-0010](../_bmad-output/implementation-artifacts/decisions/0010-iphone-app-state.md)（Status: Accepted）。Story 5.5 数据持有部分（`HomeViewModel.homeData` 字段）**将**在 Story 37.4 落地后 supersede（届时 sprint-status.yaml 内 `5-5-...` 状态会改为 superseded），新实装见 Story 37.4。
+
 ---
 
 ## 跑测试
