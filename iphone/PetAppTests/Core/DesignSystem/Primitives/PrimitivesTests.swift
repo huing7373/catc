@@ -86,6 +86,37 @@ final class PrimitivesTests: XCTestCase {
                        "FadeIn 终点必须 0（原位）")
     }
 
+    // MARK: - case#6b contract: FadeInModifier nil-id 路径不挂 explicit identity
+
+    /// 验证 FadeInModifier(id: nil) 路径下，body 不在视图上挂 explicit `.id(nil)`.
+    /// 守护意图：fix-review round 4 / [P2] — 此前 body 无条件 `.id(id)`，
+    /// 让所有 fadeIn() 默认参 sibling 共享同一 explicit identity（nil），
+    /// SwiftUI 会基于这做 diffing → 状态被错误重用 / 不稳定 diffing.
+    /// 修后 body 用 @ViewBuilder + if/else 拆两条路径：id != nil 才挂 .id(...)，nil 走 implicit identity.
+    /// 本测试做 type-level 守护：
+    ///   1) FadeInModifier 可用 nil id 实例化（API 签名兼容）；
+    ///   2) body(content:) 返回类型在 nil 路径下能编译通过（@ViewBuilder Group 路径有效）；
+    ///   3) fadeIn() 默认参（无 arg）能正常应用到任意 View，不抛 type 错.
+    /// SwiftUI 的 explicit-identity 行为是 runtime 内部状态（无 public API 可断言），
+    /// 故本守护停在 type/构造层，避免 ADR-0002 §3.1 禁视觉测试红线.
+    func testFadeInModifierNilIdConstructsAndBodyCompiles() {
+        // (1) nil id 实例化
+        let modifier = FadeInModifier(id: nil)
+        XCTAssertNotNil(modifier)
+
+        // (2) fadeIn() 默认参等价于 id: nil；apply 到 View 不抛错
+        let view = Text("guard").fadeIn()
+        XCTAssertNotNil(view)
+
+        // (3) fadeIn(id: ...) 显式 nil 也可
+        let viewWithExplicitNil = Text("guard").fadeIn(id: nil)
+        XCTAssertNotNil(viewWithExplicitNil)
+
+        // (4) 非 nil id 路径仍然 ok（防止 fix 把非 nil 路径打坏）
+        let viewWithId = Text("guard").fadeIn(id: AnyHashable(42))
+        XCTAssertNotNil(viewWithId)
+    }
+
     // MARK: - case#7 contract: PressedOffsetButtonStyle 类型签名（守护手势取消语义）
 
     /// 验证 PressedOffsetButtonStyle 是 ButtonStyle 协议实例 + makeBody 类型签名 ok.

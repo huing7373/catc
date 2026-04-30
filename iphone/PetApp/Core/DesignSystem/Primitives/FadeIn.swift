@@ -32,8 +32,15 @@ public struct FadeInModifier: ViewModifier {
         self.id = id
     }
 
+    @ViewBuilder
     public func body(content: Content) -> some View {
-        content
+        // 仅当 id 非 nil 时挂 .id(...)；否则不挂 explicit identity.
+        // 守护意图：fix-review round 4 / [P2] — 早先版本对 nil id 也调 .id(nil)，
+        // 会让所有 fadeIn() 默认参 sibling views 共享同一 explicit identity（nil），
+        // SwiftUI 据此做 diffing 会引发 state retention bug（视图状态被错误重用）.
+        // ui_design 契约（home.jsx fadeIn keyframes）只规定 offset/opacity 行为，
+        // 不要求 explicit identity；故 nil 路径走 implicit identity（位置/类型）安全.
+        let core = content
             .opacity(visible ? 1 : 0)
             .offset(y: visible ? Self.offsetEndY : Self.offsetStartY)
             .onAppear {
@@ -41,7 +48,11 @@ public struct FadeInModifier: ViewModifier {
                     visible = true
                 }
             }
-            .id(id)
+        if let id = id {
+            core.id(id)
+        } else {
+            core
+        }
     }
 }
 
