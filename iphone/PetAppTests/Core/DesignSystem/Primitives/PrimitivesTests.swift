@@ -117,6 +117,36 @@ final class PrimitivesTests: XCTestCase {
         XCTAssertNotNil(viewWithId)
     }
 
+    // MARK: - case#6c contract: FadeInModifier id 重放路径（id 变化驱动 onChange 闭包）
+
+    /// 验证 FadeInModifier 在 id 变化路径下能稳定构造 + 接受不同 id 实例化.
+    /// 守护意图：fix-review round 5 / [P2] — 此前 body 只挂 onAppear，没挂 onChange(of:id)，
+    /// 导致 `.id(id)` 重建子树后 ViewModifier 自身的 @State `visible` 跨重建幸存为 true，
+    /// 第二次 onAppear 跑时 withAnimation 看到无变化 → 没动画.
+    /// 修后 body 加了 `.onChange(of: id) { _, _ in visible = false; withAnimation(...) }`.
+    /// SwiftUI 的 onChange 闭包是 runtime 行为（无 public API 可直接断言它跑了），
+    /// 故本守护停在 type/构造层（ADR-0002 §3.1 禁视觉测试，不渲染、不断 frame）：
+    ///   1) 多个不同 id 路径都能编译 + 实例化（`.fadeIn(id: ...)` 链 type 稳定）；
+    ///   2) String / Int / UUID 等 Hashable 包装为 AnyHashable 后路径不抛 type 错；
+    ///   3) 同一视图换不同 id（模拟 caller 切 tab / 刷新内容）能反复 apply.
+    func testFadeInModifierIdReplayPathConstructs() {
+        // (1) 不同类型 Hashable id 都能构造
+        let m1 = FadeInModifier(id: AnyHashable("home"))
+        let m2 = FadeInModifier(id: AnyHashable(42))
+        let m3 = FadeInModifier(id: AnyHashable(UUID()))
+        XCTAssertNotNil(m1)
+        XCTAssertNotNil(m2)
+        XCTAssertNotNil(m3)
+
+        // (2) 同一视图反复 apply 不同 id（模拟 tab 切换 / 内容刷新）
+        let v1 = Text("tab").fadeIn(id: 0)
+        let v2 = Text("tab").fadeIn(id: 1)
+        let v3 = Text("tab").fadeIn(id: "refresh-2026-04-30")
+        XCTAssertNotNil(v1)
+        XCTAssertNotNil(v2)
+        XCTAssertNotNil(v3)
+    }
+
     // MARK: - case#7 contract: PressedOffsetButtonStyle 类型签名（守护手势取消语义）
 
     /// 验证 PressedOffsetButtonStyle 是 ButtonStyle 协议实例 + makeBody 类型签名 ok.

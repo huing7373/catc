@@ -98,3 +98,4 @@
 | 2026-04-30 | [SwiftUI `.frame(maxWidth: .infinity)` 与 `.padding` 顺序对齐 CSS box-sizing（fullWidth 按钮溢出修复）](2026-04-30-swiftui-modifier-order-frame-vs-padding.md) | 1 | ui-fidelity | `<pending>` |
 | 2026-04-30 | [SwiftUI strokeBorder vs stroke 内外绘语义 & ButtonStyle vs 自定义 DragGesture 取消语义](2026-04-30-swiftui-strokeborder-vs-stroke-and-buttonstyle-vs-draggesture.md) | 2 | style, architecture | `<pending>` |
 | 2026-04-30 | [SwiftUI `.id(nil)` 共享 explicit identity 陷阱（ViewModifier 默认参容易踩）](2026-04-30-swiftui-explicit-id-nil-shared-identity.md) | 1 | architecture | `<pending>` |
+| 2026-04-30 | [ViewModifier @State 跨 `.id` 重建幸存 + `.shadow` 投影到 children + fix-review 5 轮 cap 破例决议](2026-04-30-swiftui-state-survives-id-and-shadow-over-children.md) | 4 | architecture, ui-fidelity, process | `<pending>` |

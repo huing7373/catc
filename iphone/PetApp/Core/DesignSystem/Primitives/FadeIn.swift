@@ -40,10 +40,26 @@ public struct FadeInModifier: ViewModifier {
         // SwiftUI 据此做 diffing 会引发 state retention bug（视图状态被错误重用）.
         // ui_design 契约（home.jsx fadeIn keyframes）只规定 offset/opacity 行为，
         // 不要求 explicit identity；故 nil 路径走 implicit identity（位置/类型）安全.
+        //
+        // ⚠️ 守护意图：fix-review round 5 / [P2] — `.id(id)` 重建 content 子树，
+        // 但 ViewModifier 自身的 @State (`visible`) 不属于 content 子树，跨 id 变化**幸存**.
+        // 所以光靠 .id(id) 重触发 onAppear 是不够的：第二次 onAppear 跑时 visible 已经是
+        // true，withAnimation 看到"无变化"→ 没动画.
+        // 修法：onChange(of: id) 显式把 visible 拨回 false（不带动画），再用 withAnimation
+        // 重新驱动到 true，让 SwiftUI 看到差值，渲染过渡曲线.
+        // iOS 17+ onChange 签名是 `(of:initial:_:)` 闭包带 (oldValue, newValue) 双参（本项目
+        // deploymentTarget = iOS 17.0，见 iphone/project.yml）.
         let core = content
             .opacity(visible ? 1 : 0)
             .offset(y: visible ? Self.offsetEndY : Self.offsetStartY)
             .onAppear {
+                withAnimation(.easeInOut(duration: 0.28)) {
+                    visible = true
+                }
+            }
+            .onChange(of: id) { _, _ in
+                // id 变化 → 重放：先瞬时回 false（无动画），再驱动到 true（带 0.28s easeInOut）.
+                visible = false
                 withAnimation(.easeInOut(duration: 0.28)) {
                     visible = true
                 }

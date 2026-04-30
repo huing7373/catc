@@ -58,9 +58,19 @@ public struct PrimaryButton: View {
             // 44pt（22 × 2），在 modal card / list row 等约束布局里溢出或被裁剪.
             .padding(.horizontal, theme.spacing.s22)
             .frame(maxWidth: fullWidth ? .infinity : nil)
+            // ⚠️ 守护意图：fix-review round 5 / [P2] — `.shadow(...)` attach 在
+            // background 的 RoundedRectangle 上，**不能**挂在最外层 label 链.
+            // 错误模式：`.background(RoundedRectangle).overlay(...).shadow(...)` —
+            // SwiftUI 的 `.shadow` 会对整棵被修饰子树（含 HStack 内的 Text + Image）
+            // 渲染 alpha 投影 → CTA label 文字 + SF Symbol 都带模糊阴影，
+            // 与 ui_design `primitives.jsx` `PrimaryButton` 的 `boxShadow` 语义
+            // （仅 pill 背景投影）不符.
+            // 正确模式：把 `.shadow` chain 到 `RoundedRectangle.fill(...)`，
+            // 投影只渲染 pill shape，不波及 label.
             .background(
                 RoundedRectangle(cornerRadius: theme.radius.pill)
                     .fill(backgroundColor)
+                    .shadow(color: shadowColor, radius: 0, x: 0, y: shadowY)
             )
             .overlay(
                 Group {
@@ -70,7 +80,6 @@ public struct PrimaryButton: View {
                     }
                 }
             )
-            .shadow(color: shadowColor, radius: 0, x: 0, y: shadowY)
             .opacity(isEnabled ? 1.0 : 0.5)
         }
         // 用 SwiftUI 钦定的 ButtonStyle / configuration.isPressed 路径处理按下视觉，

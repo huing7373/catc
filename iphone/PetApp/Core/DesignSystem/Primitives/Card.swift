@@ -29,21 +29,29 @@ public struct Card<Content: View>: View {
     public var body: some View {
         let resolvedCornerRadius = cornerRadius ?? theme.radius.cardXl
         let resolvedPadding = padding ?? theme.spacing.s16
+        // ⚠️ 守护意图：fix-review round 5 / [P2] — `.shadow(...)` 必须 attach 在
+        // background 的 RoundedRectangle 上，**不能**挂在最外层 view 链.
+        // 错误模式：`content().padding().background(...).overlay(...).shadow(...)` —
+        // SwiftUI 的 `.shadow` 会渲染**整棵被修饰子树**的 alpha 蒙版投影，导致 content()
+        // 内的 Text / Icon 等 child view 都被一起投影 → 文字/图标边缘有模糊阴影，
+        // 与 ui_design `primitives.jsx` `Card` 的 CSS `box-shadow` 语义（仅外壳投影）不符.
+        // 正确模式：把 `.shadow` 直接 chain 到 `RoundedRectangle.fill(...)` 那一层，
+        // 这样投影只渲染 shape 本身的 alpha，不波及 children.
         return content()
             .padding(resolvedPadding)
             .background(
                 RoundedRectangle(cornerRadius: resolvedCornerRadius)
                     .fill(theme.colors.surface)
+                    .shadow(
+                        color: theme.shadow.sm.color,
+                        radius: theme.shadow.sm.radius,
+                        x: theme.shadow.sm.x,
+                        y: theme.shadow.sm.y
+                    )
             )
             .overlay(
                 RoundedRectangle(cornerRadius: resolvedCornerRadius)
                     .stroke(theme.colors.border, lineWidth: 1)
-            )
-            .shadow(
-                color: theme.shadow.sm.color,
-                radius: theme.shadow.sm.radius,
-                x: theme.shadow.sm.x,
-                y: theme.shadow.sm.y
             )
     }
 }
