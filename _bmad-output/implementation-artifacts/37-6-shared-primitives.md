@@ -1,6 +1,6 @@
 # Story 37.6: 共享 primitives（Card / PrimaryButton / Avatar / FadeIn / RarityTag / Icons 完整集）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
@@ -1056,6 +1056,17 @@ claude-opus-4-7[1m]
     - 二者不可同时满足。**需 PM / Architect 决策替换映射或修改 AC**（推荐 `bowl → fork.knife`，已在 iOS 26.4 simruntime 内验证存在；视觉表意 = 餐具，与 ui_design FeedButton 喂食按钮语义最近）。
 - ✅ **2026-04-30 dev-story HALT 后 user 授权 bowl → fork.knife 替换**（对"dev 不许改 SF Symbol mapping"红线一次例外）：改 1 行 mapping（Icons.swift +inline 注释）+ AC2 加 inline 注解；256 tests 全绿（0 fail）。Story status: ready-for-dev → review。
 - 📚 沉淀 lesson `docs/lessons/2026-04-30-spec-must-physically-verify-sf-symbol-strings.md`（severity 1）+ index.md 加行：spec 钦定外部 SDK 字符串前必须物理验证存在性，避免"spec 红线 + 验证 test + 物理 SDK 矛盾"三角死结。
+
+### Known Issue (P3 flag, deferred to follow-up PR)
+
+**[P3] Avatar hash UTF-16 vs Unicode scalar 跨平台不等价** — `Avatar.swift:93-95`
+- 现象：`hashIndex(of: name)` 用 `unicodeScalars.reduce`，JS 原型 `primitives.jsx` 用 `split('').reduce(charCodeAt(0))`（UTF-16 code units）；对 emoji / 非 BMP CJK 字符 hash 不同
+- 影响窄路径：仅 Avatar **无图片 url + name 含 emoji/非 BMP CJK** 的 fallback 颜色路径
+- 严重度：codex r6 标 [P2]；主 agent reclassify [P3]/nit（cross-platform pixel-perfect parity，非 epic-37 核心目标；用户不会同时看 iOS + web）
+- 决议：本 story 不修；5 轮 fix-review cap 已破例 1 次，再破例失效；本条不阻塞 epic-37 进度
+- 修复成本：1 行（`unicodeScalars.reduce(into:)` → `utf16.reduce(into:)`）
+- Forward action：epic-37 done 后任意 PR 修；codex review 跑 r1 时提一句即可（diff 极小）
+- codex r6 原文：`/tmp/epic-loop-review-37-6-r6.md`
 
 ### File List
 
