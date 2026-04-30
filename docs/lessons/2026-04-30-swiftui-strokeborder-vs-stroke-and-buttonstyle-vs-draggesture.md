@@ -2,7 +2,7 @@
 date: 2026-04-30
 source_review: /tmp/epic-loop-review-37-6-r3.md (codex P2×2 — Story 37.6 round 3)
 story: 37-6-shared-primitives
-commit: <pending>
+commit: abc8ab3
 lesson_count: 2
 ---
 

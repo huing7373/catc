@@ -3,7 +3,7 @@ title: spec 钦定 SF Symbol 字符串前必须物理验证可用性
 date: 2026-04-30
 severity: 1
 category: spec-design, process
-commit: <pending>
+commit: b18c9d5
 related_stories: [37-6-shared-primitives]
 ---
 
