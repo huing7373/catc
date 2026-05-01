@@ -1,6 +1,6 @@
 # Story 37.7: HomeView Scaffold + HomeViewModel class 层次 + Mock/Real 两子类
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
