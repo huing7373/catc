@@ -67,12 +67,16 @@ final class HomeViewTests: XCTestCase {
     // Story 37.4 改造：HomeView 现在依赖 @EnvironmentObject AppState；测试用 .environmentObject(_:)
     // 注入空态 AppState（hasHydrated == false → 渲染 loading placeholder，与 UITest skip-guest-login 路径一致）.
 
+    // Story 37.7: HomeView 改 generic struct + chestSlot ViewBuilder closure；
+    // 用 MockHomeViewModel（基类 HomeViewModel 的 abstract method 用 fatalError 占位，不能直接实例化测视图行为）.
+    // 这里两 case 仅验证 layout 不 crash —— 视图不调任何 onXxxTap，所以基类 HomeViewModel 也可用,
+    // 但为统一起见仍走 MockHomeViewModel（避免未来扩展测试场景时遇到 abstract method 路径 crash）.
     func testHomeViewRendersOnSmallScreenWithoutCrash() {
         // iPhone SE (3rd gen) ≈ 375 x 667
-        let viewModel = HomeViewModel()
+        let viewModel = MockHomeViewModel()
         let appState = AppState()
         let controller = UIHostingController(
-            rootView: HomeView(viewModel: viewModel).environmentObject(appState)
+            rootView: HomeView(state: viewModel) { EmptyView() }.environmentObject(appState)
         )
         controller.view.bounds = CGRect(x: 0, y: 0, width: 375, height: 667)
         controller.view.layoutIfNeeded()
@@ -81,10 +85,10 @@ final class HomeViewTests: XCTestCase {
 
     func testHomeViewRendersOnLargeScreenWithoutCrash() {
         // iPhone 15 Pro Max ≈ 430 x 932
-        let viewModel = HomeViewModel()
+        let viewModel = MockHomeViewModel()
         let appState = AppState()
         let controller = UIHostingController(
-            rootView: HomeView(viewModel: viewModel).environmentObject(appState)
+            rootView: HomeView(state: viewModel) { EmptyView() }.environmentObject(appState)
         )
         controller.view.bounds = CGRect(x: 0, y: 0, width: 430, height: 932)
         controller.view.layoutIfNeeded()

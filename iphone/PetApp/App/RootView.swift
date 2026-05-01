@@ -31,7 +31,20 @@ import SwiftUI
 struct RootView: View {
     @StateObject private var coordinator = AppCoordinator()
     @StateObject private var container = AppContainer()
-    @StateObject private var homeViewModel = HomeViewModel()
+    /// Story 37.7 codex round 1 [P1] fix：`RealHomeViewModel` 而非裸 `HomeViewModel`.
+    ///
+    /// 原 (Story 2.5+) 注入裸 `HomeViewModel()` 在 Story 37.7 引入 5 个 abstract method (`onCreateTap`
+    /// / `onJoinTap` / `onFeedTap` / `onPetTap` / `onPlayTap`，基类 `fatalError("subclass override")`)
+    /// 之后变成生产 crash 路径——用户在 .ready 子树点 actionRow 三按钮 / teamIdleCard "创建队伍" /
+    /// "加入队伍" 任一按钮就会 crash. RealHomeViewModel override 5 个方法走占位行为（写 showJoinModal
+    /// / interactionAnimation），让 UI 链路活起来.
+    ///
+    /// 注：用 parameterless `RealHomeViewModel()` 而非 `RealHomeViewModel(appState:)` —— SwiftUI
+    /// `@StateObject` 属性初始化器内不能交叉引用同级 `@StateObject appState`（self 未求值）；
+    /// AppState 通过下方 `.task` 内 `homeViewModel.bind(appState: appState)` 延迟注入（与 pingUseCase /
+    /// loadHomeUseCase 既有 bind 模式一致）.
+    /// 详见 docs/lessons/2026-04-30-real-home-viewmodel-injection-must-not-leave-base-fatalerror.md.
+    @StateObject private var homeViewModel: HomeViewModel = RealHomeViewModel()
 
     /// Story 37.4 AC3：全局 AppState 单 source of truth；通过 `.environmentObject(appState)` 注入子树.
     /// 与 coordinator / homeViewModel 同级 @StateObject 持有；HomeViewModel.bind(appState:) 在 .task 内调

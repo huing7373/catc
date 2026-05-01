@@ -11,10 +11,9 @@ final class HomeUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    /// Story 37.3 修改（ADR-0009 §3.5 步骤 4）：
-    ///   - 删除 btnRoom / btnInventory / btnCompose 三按钮断言（HomeView 已删除 bottomButtonRow）.
-    ///   - 保留 userInfo / petArea / stepBalance / chestArea / versionLabel / petName / chestRemaining
-    ///     等其它断言.
+    /// Story 37.3 修改（ADR-0009 §3.5 步骤 4）：删除 3 CTA 按钮断言.
+    /// Story 37.7 修改：删除 chestArea / chestRemaining 断言（chestSlot 接缝期 EmptyView 不渲染）；
+    ///   保留 userInfo / petArea / stepBalance / versionLabel 5 个常量在新 statusBar / catStage / versionFooter 内继续.
     func testHomeViewShowsAllPlaceholders() throws {
         let app = XCUIApplication()
         // Story 5.2 hook：让 launch state machine 跳过真实 GuestLoginUseCase（无 server / 不依赖网络），
@@ -36,11 +35,52 @@ final class HomeUITests: XCTestCase {
         let stepBalance = app.descendants(matching: .any)[AccessibilityID.Home.stepBalance]
         XCTAssertTrue(stepBalance.waitForExistence(timeout: timeout), "stepBalance 区块未找到")
 
-        let chestArea = app.descendants(matching: .any)[AccessibilityID.Home.chestArea]
-        XCTAssertTrue(chestArea.waitForExistence(timeout: timeout), "chestArea 区块未找到")
+        // Story 37.7：chestArea / chestRemaining 在本期 chestSlot 接缝期不渲染（chestSlot 默认 EmptyView()）.
+        // 老 testHomeViewShowsAllSixPlaceholders 不删除整个 case（保 git history + Story 2.5 / 5.5 wire 链路），
+        // 仅去除对 chest 的两断言；Story 21.1 落地 ChestCardView 时再恢复 / 改名.
 
         let versionLabel = app.descendants(matching: .any)[AccessibilityID.Home.versionLabel]
         XCTAssertTrue(versionLabel.waitForExistence(timeout: timeout), "版本号区块未找到")
+    }
+
+    /// Story 37.7 AC8：HomeView Scaffold 7 锚 a11y identifier 可定位验证.
+    /// 与 Story 2.2 testHomeViewShowsAllSixPlaceholders 同模式；本 test 验证 ui_design 高保真 5 区块各 a11y 锚.
+    /// 本 UITest case 不主动点击按钮 / 验证 sheet 弹出（属 Story 12.7 / 37.12 范围）；仅验证视觉锚存在.
+    func testHomeScaffoldShowsAllSevenAnchors() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
+        app.launch()
+
+        let timeout: TimeInterval = 5
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["homeStatusBar"].waitForExistence(timeout: timeout),
+            "homeStatusBar 区块未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["homeCatStage"].exists,
+            "homeCatStage 区块未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["homeActionFeed"].exists,
+            "homeActionFeed 按钮未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["homeActionPet"].exists,
+            "homeActionPet 按钮未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["homeActionPlay"].exists,
+            "homeActionPlay 按钮未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["homeTeamIdleCard_create"].exists,
+            "homeTeamIdleCard_create 按钮未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["homeTeamIdleCard_join"].exists,
+            "homeTeamIdleCard_join 按钮未找到"
+        )
     }
 
     /// Story 2.8 round 2 fix：父容器 userInfoBar 在引入 ResetIdentityButton 后，

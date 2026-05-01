@@ -53,11 +53,15 @@ private struct HomeContainerHomeViewBridge: View {
     @Environment(\.sessionStore) var sessionStore
 
     var body: some View {
+        // Story 37.7: HomeView 改 generic struct + chestSlot ViewBuilder closure 接缝.
+        // 参数名 viewModel → state；本期 chestSlot 传 EmptyView()（Story 21.1 改传 ChestCardView()）.
         HomeView(
-            viewModel: homeViewModel,
+            state: homeViewModel,
             resetIdentityViewModel: resetIdentityViewModel,
             sessionStore: sessionStore
-        )
+        ) {
+            EmptyView()
+        }
     }
 }
 

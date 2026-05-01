@@ -45,6 +45,15 @@
 //   （ADR-0010 §3.2 表格"Loading / error toast → ViewModel @Published"钦定）.
 // - 三个 init 追加 `appState: AppState? = nil` 默认参数（不删除老接口；测试 / Preview 仍走老路径）.
 // - applyHomeData(_:) 承担**双重职责**：写 AppState（驱动 UI）+ 设 hasLoadedHome=true（驱动 ViewModel 短路 flag）.
+//
+// Story 37.7 改造（class 层次重构 + 5 字段 + 5 abstract method）：
+// - `final class` → `class`（去 final）让 MockHomeViewModel / RealHomeViewModel 子类可继承.
+// - 新增 5 个 @Published 字段：greeting / weather / stats / interactionAnimation / showJoinModal
+//   （HomeView 5 区块视觉契约 + Story 12.7 / 21.1 / 37.12 接缝点）.
+// - 新增 5 个 abstract method：onCreateTap / onJoinTap / onFeedTap / onPetTap / onPlayTap，
+//   基类用 `fatalError("subclass override")` 占位强制子类必 override（漏 override 立刻 crash）.
+// - 全部 Story 2.2 / 2.5 / 5.5 / 37.4 老公开 API（init #1/#2/#3 + bind 3 个 + start / loadHome /
+//   applyHomeData / resetLoadHomeForRetry / readAppVersion / applyHomeError）签名 / 行为完全不变.
 
 import Foundation
 import Combine
@@ -59,7 +68,7 @@ public enum HomeLoadingState: Equatable {
 }
 
 @MainActor
-public final class HomeViewModel: ObservableObject {
+public class HomeViewModel: ObservableObject {
     @Published public var nickname: String
     @Published public var appVersion: String
     @Published public var serverInfo: String
@@ -68,6 +77,28 @@ public final class HomeViewModel: ObservableObject {
     /// Story 37.4 AC2 / ADR-0010 §3.2 表格：loading / error toast 仍归 HomeViewModel transient state；
     /// domain state（user/pet/stepAccount/chest）改由 AppState 持有（不再有 self.homeData 字段）.
     @Published public var loadingState: HomeLoadingState = .idle
+
+    // MARK: - Story 37.7 新增字段（HomeView 5 区块视觉契约 + 下游 story 接缝点）
+
+    /// 顶部 statusBar 主标题（home.jsx:34 钦定 22pt 800 weight；mock 默认 "想你啦 ♥"）.
+    /// MockHomeViewModel / RealHomeViewModel 子类构造时按需覆写.
+    @Published public var greeting: String = "想你啦 ♥"
+
+    /// 顶部 statusBar 副标题（home.jsx:28 钦定 12pt 600 weight；mock 默认 "今天 · 晴"）.
+    @Published public var weather: String = "今天 · 晴"
+
+    /// CatStage 三状态条数据（饱食/心情/活力）；mock 默认 .mockHappy.
+    /// 节点 8 / 14.x 后 WS pet.state.changed 真实状态切换时再分化.
+    @Published public var stats: PetStats = .mockHappy
+
+    /// CatStage floatUp emoji 浮动动画状态（idle 不渲染；flying("🍥"/"💕"/"⭐") 触发 1.4s 浮动消失）.
+    /// 由 onFeedTap / onPetTap / onPlayTap 设置；HomeView .onChange 内部 1.4s 后自动重置回 idle.
+    @Published public var interactionAnimation: AnimationState = .idle
+
+    /// JoinRoomModal sheet 双向绑定状态（HomeView `.sheet(isPresented: $state.showJoinModal)`）.
+    /// onJoinTap 设 true；JoinRoomModalPlaceholder（Story 37.12 真实 modal）dismiss 时 SwiftUI 自动设 false.
+    /// 唯一 owner = ViewModel @Published（避免 SwiftUI @State 双写漂移；详见 Dev Notes "showJoinModal 唯一 owner"）.
+    @Published public var showJoinModal: Bool = false
 
     // Story 37.3 删除（ADR-0009 §3.5 步骤 4）：
     //   onRoomTap / onInventoryTap / onComposeTap 三个 closure 字段已删除.
@@ -359,5 +390,34 @@ public final class HomeViewModel: ObservableObject {
             return desc
         }
         return "首屏加载失败，请重试"
+    }
+
+    // MARK: - Story 37.7: 5 个 abstract method（基类 fatalError 占位，子类必 override）
+
+    /// 用户点击 TeamIdleCard "创建队伍" 按钮 → MockHomeViewModel 记录 invocation /
+    /// RealHomeViewModel Story 12.7 实装 CreateRoomUseCase 调用.
+    /// 基类 `fatalError`：漏 override 时立刻 crash（不接受 default empty 实现 silent miss）.
+    public func onCreateTap() {
+        fatalError("HomeViewModel.onCreateTap must be overridden by subclass")
+    }
+
+    /// 用户点击 TeamIdleCard "加入队伍" 按钮 → 子类 override 设 showJoinModal = true 触发 sheet.
+    public func onJoinTap() {
+        fatalError("HomeViewModel.onJoinTap must be overridden by subclass")
+    }
+
+    /// 用户点击 ActionRow "喂食" 按钮 → 子类 override 设 interactionAnimation = .flying("🍥").
+    public func onFeedTap() {
+        fatalError("HomeViewModel.onFeedTap must be overridden by subclass")
+    }
+
+    /// 用户点击 ActionRow "抚摸" 按钮 → 子类 override 设 interactionAnimation = .flying("💕").
+    public func onPetTap() {
+        fatalError("HomeViewModel.onPetTap must be overridden by subclass")
+    }
+
+    /// 用户点击 ActionRow "玩耍" 按钮 → 子类 override 设 interactionAnimation = .flying("⭐").
+    public func onPlayTap() {
+        fatalError("HomeViewModel.onPlayTap must be overridden by subclass")
     }
 }

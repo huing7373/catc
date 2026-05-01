@@ -99,3 +99,4 @@
 | 2026-04-30 | [SwiftUI strokeBorder vs stroke 内外绘语义 & ButtonStyle vs 自定义 DragGesture 取消语义](2026-04-30-swiftui-strokeborder-vs-stroke-and-buttonstyle-vs-draggesture.md) | 2 | style, architecture | `abc8ab3` |
 | 2026-04-30 | [SwiftUI `.id(nil)` 共享 explicit identity 陷阱（ViewModifier 默认参容易踩）](2026-04-30-swiftui-explicit-id-nil-shared-identity.md) | 1 | architecture | `6a94989` |
 | 2026-04-30 | [ViewModifier @State 跨 `.id` 重建幸存 + `.shadow` 投影到 children + fix-review 5 轮 cap 破例决议](2026-04-30-swiftui-state-survives-id-and-shadow-over-children.md) | 4 | architecture, ui-fidelity, process | `d7baa12` |
+| 2026-04-30 | [引入 abstract method base class 时必须同步迁移所有 caller，不能留 fatalError 在 production 注入路径](2026-04-30-real-home-viewmodel-injection-must-not-leave-base-fatalerror.md) | 1 | architecture, swift, refactor-discipline | <pending> |

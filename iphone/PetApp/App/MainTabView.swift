@@ -110,10 +110,13 @@ struct MainTabView_Previews: PreviewProvider {
     static var previews: some View {
         // Story 37.4: HomeContainerView 改读 @EnvironmentObject AppState；
         // Preview 也必须注入空态 AppState 让子树渲染不 crash.
+        // Story 37.7 codex round 1 [P1] fix：Preview 也注入 `MockHomeViewModel`（而非裸 HomeViewModel），
+        // 防开发者在 Preview 内点 actionRow / teamIdleCard 触发基类 fatalError. MainTabView 持的
+        // `@EnvironmentObject var homeViewModel: HomeViewModel` 接受任意 HomeViewModel 子类.
         MainTabView()
             .environmentObject(AppCoordinator())
             .environmentObject(AppState())
-            .environmentObject(HomeViewModel())
+            .environmentObject(MockHomeViewModel() as HomeViewModel)
     }
 }
 #endif
