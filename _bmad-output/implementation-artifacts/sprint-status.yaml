@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-04-30 (story 37-9 created, ready-for-dev)
+# last_updated: 2026-04-30 (story 37-9 done)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -101,7 +101,7 @@ development_status:
   37-6-shared-primitives: done
   37-7-homeview-scaffold: done
   37-8-roomview-scaffold: done
-  37-9-wardrobeview-scaffold: review
+  37-9-wardrobeview-scaffold: done
   37-10-friendsview-scaffold: backlog
   37-11-profileview-scaffold: backlog
   37-12-joinroommodal-跨屏跳转: backlog
