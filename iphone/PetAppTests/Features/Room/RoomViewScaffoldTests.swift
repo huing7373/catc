@@ -121,6 +121,10 @@ final class RoomViewScaffoldTests: XCTestCase {
     /// 老 bug 模式（避免）：派生只在 init / bind 入口一次性 hydrate → reset → currentRoomId nil 后，
     /// roomCodeForCopy 仍残留旧值 "room_xxx". 修复：subscribeRoomCode(to:) 订阅 appState.$currentRoomId,
     /// 任何变化（含 reset → nil）都自动重派.
+    ///
+    /// round 3 P2 fix（codex review）：hostCatName 不再 sink 派生 currentPet —— 即便 appState 里
+    /// currentPet 已 hydrate 为"测试猫"，hostCatName 也应保持 RoomScaffoldDefaults 占位（pre-WS 阶段
+    /// "不知道 host 是谁就用占位"，避免用户加入别人房间时显示自己的猫名）；reset 后同样保持占位.
     func testRealRoomViewModelBindAppStateThenResetUpdatesFields() {
         let appState = AppState()
         appState.setCurrentRoomId("room_1234567")
@@ -129,12 +133,16 @@ final class RoomViewScaffoldTests: XCTestCase {
         let vm = RealRoomViewModel()
         vm.bind(appState: appState)
 
-        // bind 后 sink 应已派生 roomCodeForCopy / hostCatName.
+        // bind 后 roomCode sink 已派生 roomCodeForCopy.
         XCTAssertEqual(vm.roomCodeForCopy, "room_1234567")
-        XCTAssertEqual(vm.hostCatName, "测试猫")  // makeSampleHomeData pet.name = "测试猫"
+        // round 3 P2 fix：hostCatName 不从 currentPet 派生 — 即便 appState.currentPet="测试猫"，
+        // hostCatName 仍保持 init 时 seed 的 RoomScaffoldDefaults.hostCatName 占位.
+        XCTAssertEqual(vm.hostCatName, RoomScaffoldDefaults.hostCatName,
+                       "round 3 P2 fix：hostCatName 不再派生自 appState.currentPet（local 猫 ≠ room host 猫）")
 
-        // reset：appState.reset() 把 currentRoomId / currentPet 置 nil → sink 触发 → 字段必须回 RoomScaffoldDefaults 占位.
+        // reset：appState.reset() 把 currentRoomId 置 nil → roomCode sink 触发 → 回 RoomScaffoldDefaults 占位.
         // round 1 P2 fix：fallback 从空字符串 / "默认小猫" 改为 RoomScaffoldDefaults 占位（让 in-room 不渲染空房间）.
+        // hostCatName 在 reset 前后都保持 RoomScaffoldDefaults 占位（无 sink → 不会因 currentPet 置 nil 而变）.
         appState.reset()
         XCTAssertEqual(vm.roomCodeForCopy, RoomScaffoldDefaults.roomCodeForCopy)
         XCTAssertEqual(vm.hostCatName, RoomScaffoldDefaults.hostCatName)
@@ -224,6 +232,72 @@ final class RoomViewScaffoldTests: XCTestCase {
         XCTAssertNil(
             appState.currentRoomId,
             "bind 后立即调 onLeaveTap 必须能写 currentRoomId=nil — 守护 RootView.onAppear 同步 bind 契约"
+        )
+    }
+
+    // MARK: - case#10 happy: round 3 P2 fix 守护 — hostCatName 不从 appState.currentPet 派生
+
+    /// Story 37.8 round 3 P2 fix 契约守护测试（codex review finding）：
+    /// **场景**：用户加入别人的房间（restored session 走 /home → currentRoomId 非 nil + currentPet =
+    /// 本地用户的猫）. 此时 RealRoomViewModel.hostCatName 必须保持 RoomScaffoldDefaults.hostCatName
+    /// 占位，**不**派生自 appState.currentPet（那是本地猫，不是 room host 的猫）.
+    ///
+    /// 老 bug 模式（避免）：
+    ///   subscribeHostCatName sink → appState.$currentPet → "<我的猫>的小屋"（user-visible 错误）.
+    ///
+    /// 修复策略（option A，与 user review summary 对齐）：
+    ///   彻底删除 hostCatName 的 sink；hostCatName 永远 = init 时 seed 的 RoomScaffoldDefaults.hostCatName,
+    ///   直到 Story 12.1 接 WS room.snapshot 后由新 subscribe 入口写真实 host 名.
+    ///
+    /// 本测试是 round 3 P2 fix 的 contract guard：未来任何 PR 把 subscribeHostCatName 加回来都会让
+    /// 本测试 fail，提示 reviewer "你正在重新引入用户加入别人房间时显示自己猫名的 bug".
+    func testRealRoomViewModelHostCatNameDoesNotDeriveFromCurrentPet() {
+        let appState = AppState()
+        // 模拟"用户加入别人的房间"：currentRoomId 已 set + currentPet 是本地猫.
+        appState.setCurrentRoomId("room_joined_other")
+        appState.applyHomeData(makeSampleHomeData(currentRoomId: "room_joined_other"))
+        // 前置 sanity：appState.currentPet?.name == "测试猫"（本地猫）.
+        XCTAssertEqual(appState.currentPet?.name, "测试猫", "前置：appState.currentPet 已 hydrate 为本地猫")
+
+        // 路径 1: init(appState:) 构造路径（包含 subscribeRoomCode hookup；旧 bug：还会 hookup hostCatName sink）.
+        let vm1 = RealRoomViewModel(appState: appState)
+        XCTAssertEqual(
+            vm1.hostCatName,
+            RoomScaffoldDefaults.hostCatName,
+            "round 3 P2 fix：init(appState:) 路径不得让 hostCatName 派生为本地猫名 '\(appState.currentPet?.name ?? "?")'"
+        )
+        // sanity：roomCode sink 仍正常工作（roomCodeForCopy 仍派生自 currentRoomId）.
+        XCTAssertEqual(vm1.roomCodeForCopy, "room_joined_other")
+
+        // 路径 2: parameterless init() + bind(appState:) 异步注入路径.
+        let vm2 = RealRoomViewModel()
+        vm2.bind(appState: appState)
+        XCTAssertEqual(
+            vm2.hostCatName,
+            RoomScaffoldDefaults.hostCatName,
+            "round 3 P2 fix：bind(appState:) 路径不得让 hostCatName 派生为本地猫名"
+        )
+        XCTAssertEqual(vm2.roomCodeForCopy, "room_joined_other")
+
+        // 即便事后再变更 currentPet（譬如换猫名 / 切账号），hostCatName 仍不应跟动.
+        let prev = appState.currentPet
+        let updatedPet = HomePet(
+            id: prev?.id ?? "p_unknown",
+            petType: prev?.petType ?? 1,
+            name: "另一只本地猫",
+            currentState: prev?.currentState ?? .rest,
+            equips: prev?.equips ?? []
+        )
+        appState.currentPet = updatedPet
+        XCTAssertEqual(
+            vm1.hostCatName,
+            RoomScaffoldDefaults.hostCatName,
+            "round 3 P2 fix：currentPet 变更后 hostCatName 仍必须保持占位（无 sink 在派生）"
+        )
+        XCTAssertEqual(
+            vm2.hostCatName,
+            RoomScaffoldDefaults.hostCatName,
+            "round 3 P2 fix：currentPet 变更后 hostCatName 仍必须保持占位（无 sink 在派生）"
         )
     }
 }

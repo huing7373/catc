@@ -15,13 +15,20 @@
 //   parameterless `init()` 路径让 RootView `@StateObject` 老模式可用 —— AppState 也是同级 @StateObject,
 //   不能在属性初始化器内交叉引用（编译期不允许 self 提前求值）；AppState 通过 `bind(appState:)` 异步注入.
 // 派生 state 用 sink 路径而非一次性 hydrate（与 RealHomeViewModel codex round 4 [P3] lesson 同精神）：
-//   roomCodeForCopy / hostCatName 订阅 appState.$currentRoomId / appState.$currentPet，
-//   reset 路径（appState.reset() 把 currentRoomId 置 nil）也能即时反映到字段（不残留旧值）.
+//   roomCodeForCopy 订阅 appState.$currentRoomId，reset 路径（appState.reset() 把 currentRoomId 置 nil）
+//   也能即时反映到字段（不残留旧值）.
 //
 // round 1 P2 fix（codex review）：
 //   两条 init 路径都用 RoomScaffoldDefaults seed 起始 members / userIsHost / hostCatName / roomCodeForCopy；
-//   sink 路径作为 override（currentRoomId 来 → 派生 roomCodeForCopy；currentPet 来 → 派生 hostCatName），
+//   sink 路径作为 override（currentRoomId 来 → 派生 roomCodeForCopy），
 //   不让 RoomScaffoldView 在 Real path 渲染空房间（4 个 mock 占位先在；Story 12.1 接 WS 后被 snapshot 覆盖）.
+//
+// round 3 P2 fix（codex review）：删除 hostCatName 的 sink — 不再从 appState.$currentPet 派生.
+//   原因：`currentPet` 是**本地用户的猫**，不是 room host 的猫. 用户加入别人的房间时,
+//   restored session 走 sink 派生 → hostCatName 显示"我的猫的小屋"是 user-visible 错误数据.
+//   Pre-WS 阶段安全策略 = "不知道就用 placeholder"；hostCatName 永远保持 RoomScaffoldDefaults.hostCatName
+//   占位，直到 Story 12.1 接 WS room.snapshot 后由 RealRoomViewModel 新 subscribe 入口写真实 host 名
+//   （**不**复用 appState.currentPet — currentPet 仅适用于"自己作为 host"的场景，不是通用 host 名源）.
 
 import Foundation
 import Combine
@@ -36,11 +43,15 @@ public final class RealRoomViewModel: RoomViewModel {
 
     /// Story 37.8（同 RealHomeViewModel codex round 4 [P3] lesson 精神）：派生 state 必须订阅
     /// publisher，而不是一次性 hydrate；reset 路径（appState.reset() 把 currentRoomId 置 nil）才能
-    /// 即时反映到 roomCodeForCopy / hostCatName。两个 sink 句柄；hookup 时机：
+    /// 即时反映到 roomCodeForCopy。hookup 时机：
     ///   - init(appState:) 路径：构造完成后立即订阅
     ///   - bind(appState:) 路径：override 内首次 bind 时订阅（防多次 .task 重订阅）.
+    ///
+    /// round 3 P2 fix（codex review）：原 `hostCatNameSubscription` 字段已删除 — 不再从
+    /// `appState.$currentPet` 派生 hostCatName（currentPet 是本地用户的猫，不是 room host 的猫；
+    /// 用户加入别人的房间时显示"我的猫的小屋"是 user-visible 错误数据）.
+    /// Story 12.1 接 WS 后通过新 subscribe 入口写真实 host 名（**不**复用 appState.currentPet）.
     private var roomCodeSubscription: AnyCancellable?
-    private var hostCatNameSubscription: AnyCancellable?
 
     /// parameterless init —— RootView `@StateObject` 老模式可用; AppState 通过 bind 异步注入.
     /// 不写 `override`：基类没有显式 no-arg init（Swift 通过默认参数合成无参调用，不形成 override 关系）.
@@ -65,20 +76,23 @@ public final class RealRoomViewModel: RoomViewModel {
         self.hostCatName = RoomScaffoldDefaults.hostCatName
         self.members = RoomScaffoldDefaults.members
         self.userIsHost = RoomScaffoldDefaults.userIsHost
-        // 构造路径已注入 AppState；立即订阅 currentRoomId / currentPet 变化派生 roomCodeForCopy / hostCatName,
+        // 构造路径已注入 AppState；立即订阅 currentRoomId 变化派生 roomCodeForCopy,
         // 一旦 publisher 同步发首值即覆盖上面的 default seed（reset 路径置 nil 时会 fallback 回 default）.
+        // round 3 P2 fix：不再订阅 currentPet 派生 hostCatName — pre-WS 阶段保持 RoomScaffoldDefaults
+        // 占位（currentPet 是本地用户的猫，不是 room host；详见文件头注释）.
+        // Story 12.1 接 WS room.snapshot 后通过新 subscribe 入口写真实 host 名（不复用 appState.currentPet）.
         subscribeRoomCode(to: appState)
-        subscribeHostCatName(to: appState)
-        // members / userIsHost 在 Story 12.1 接 WS room.snapshot 后被覆盖；当前保留 RoomScaffoldDefaults seed.
+        // members / userIsHost / hostCatName 在 Story 12.1 接 WS room.snapshot 后被覆盖；
+        // 当前保留 RoomScaffoldDefaults seed.
     }
 
-    /// AppState 异步注入入口（与 HomeViewModel.bind(appState:) 同模式 + RealHomeViewModel.bind 双路 sink）.
+    /// AppState 异步注入入口（与 HomeViewModel.bind(appState:) 同模式 + RealHomeViewModel.bind 单路 sink）.
+    /// round 3 P2 fix：去掉 subscribeHostCatName — 详见文件头 round 3 注释.
     public func bind(appState: AppState) {
         let alreadySubscribed = roomCodeSubscription != nil
         self.appState = appState
         guard !alreadySubscribed else { return }
         subscribeRoomCode(to: appState)
-        subscribeHostCatName(to: appState)
     }
 
     /// 订阅 appState.$currentRoomId —— hydrate / reset / 单独 mutate 都派生 roomCodeForCopy.
@@ -93,19 +107,17 @@ public final class RealRoomViewModel: RoomViewModel {
             }
     }
 
-    /// 订阅 appState.$currentPet —— pet 名字派生 hostCatName.
-    /// pet 有名字 → 用 name；pet=nil → fallback 到 RoomScaffoldDefaults.hostCatName 占位.
-    private func subscribeHostCatName(to appState: AppState) {
-        hostCatNameSubscription = appState.$currentPet
-            .sink { [weak self] pet in
-                guard let self else { return }
-                if let petName = pet?.name, !petName.isEmpty {
-                    self.hostCatName = petName
-                } else {
-                    self.hostCatName = RoomScaffoldDefaults.hostCatName
-                }
-            }
-    }
+    // round 3 P2 fix（codex review）：
+    //   原 `subscribeHostCatName(to:)` 方法已删除 — 不再从 appState.$currentPet 派生 hostCatName.
+    //   理由：currentPet 是**本地用户的猫**，不是 room host 的猫. 用户加入别人的房间（restored
+    //   session 走 /home → currentRoomId 非 nil + currentPet=本地猫）时，sink 派生让 scaffold title
+    //   显示"<我的猫>的小屋"，是 user-visible 错误数据.
+    //   Pre-WS 阶段安全策略 = "不知道就用 placeholder"：hostCatName 永远保持 init 时 seed 的
+    //   RoomScaffoldDefaults.hostCatName 占位.
+    //
+    //   forward action — Story 12.1 落地 WS：RealRoomViewModel 加新 subscribe 入口（如 subscribe room
+    //   snapshot stream）写真实 host 名，**不**复用 appState.currentPet（currentPet 仅适用于"自己作为
+    //   host"的场景，不是通用 host 名源）.
 
     // MARK: - override abstract methods（本 story 占位；Story 12.7 实装真实 LeaveRoomUseCase）
 
