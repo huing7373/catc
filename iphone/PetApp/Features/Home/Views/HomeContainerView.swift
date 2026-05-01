@@ -26,8 +26,9 @@ public struct HomeContainerView: View {
     public var body: some View {
         ZStack {
             if HomeRoomDispatcher.shouldShowRoom(currentRoomId: appState.currentRoomId) {
-                // inRoom 态：显示 RoomView 占位 stub（Story 37.8 实装真实内容）.
-                RoomViewPlaceholder()
+                // Story 37.8：inRoom 态渲染 RoomScaffoldView（替换 Story 37.3 RoomViewPlaceholder 占位）.
+                // RoomViewPlaceholder.swift 类型本身保留不删（保 git history；下游 Story 37.13 决定）.
+                HomeContainerRoomViewBridge()
                     .transition(.opacity)
             } else {
                 // idle 态：显示 HomeView 包在 NavigationStack 内（Story 5.5 既有内容不动；
@@ -39,6 +40,18 @@ public struct HomeContainerView: View {
             }
         }
         .animation(.easeInOut(duration: 0.3), value: appState.currentRoomId)
+    }
+}
+
+/// HomeContainerView 内的 RoomScaffoldView 注入桥接子视图（与 HomeContainerHomeViewBridge 同模式）.
+///
+/// 为何抽出来：保 RoomViewModel 通过 EnvironmentObject 注入；与 HomeViewModel 注入路径同精神.
+/// Story 12.1 落地时改用 RealRoomViewModel 替换基类（RootView wire 决定）.
+private struct HomeContainerRoomViewBridge: View {
+    @EnvironmentObject var roomViewModel: RoomViewModel
+
+    var body: some View {
+        RoomScaffoldView(state: roomViewModel)
     }
 }
 

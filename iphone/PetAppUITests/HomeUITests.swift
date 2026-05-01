@@ -83,6 +83,52 @@ final class HomeUITests: XCTestCase {
         )
     }
 
+    /// Story 37.8 AC8：RoomScaffoldView 7 锚 a11y identifier 可定位验证.
+    /// 通过 launch env `UITEST_FORCE_IN_ROOM=1` 让 RootView/HomeContainerView 启动即切到 inRoom 态.
+    /// 与 Story 37.7 testHomeScaffoldShowsAllSevenAnchors 同模式；本 test 验证 ui_design 高保真 5 区块各 a11y 锚.
+    /// 本 UITest case 不主动点击按钮 / 验证退出 / 复制功能链路（属 Story 12.x 范围）；仅验证视觉锚存在.
+    func testRoomScaffoldShowsAllSevenAnchors() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
+        app.launchEnvironment["UITEST_FORCE_IN_ROOM"] = "1"   // Story 37.8 新增 env flag
+        app.launch()
+
+        let timeout: TimeInterval = 5
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["returnButton"].waitForExistence(timeout: timeout),
+            "returnButton 区块未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["roomIdDisplay"].exists,
+            "roomIdDisplay 区块未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["copyButton"].exists,
+            "copyButton 区块未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["roomMember_0"].exists,
+            "roomMember_0 区块未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["roomMember_1"].exists,
+            "roomMember_1 区块未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["roomMember_2"].exists,
+            "roomMember_2 区块未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["roomMember_3"].exists,
+            "roomMember_3 区块未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["leaveButton"].exists,
+            "leaveButton 区块未找到"
+        )
+    }
+
     /// Story 2.8 round 2 fix：父容器 userInfoBar 在引入 ResetIdentityButton 后，
     /// `.accessibilityElement(children: .contain)` 必须仍保留 `.accessibilityLabel(nickname)`，
     /// 否则 VoiceOver 用户读 home_userInfo 时听不到 nickname summary（只听到子元素列表）。

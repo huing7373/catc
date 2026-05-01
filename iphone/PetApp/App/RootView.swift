@@ -46,6 +46,14 @@ struct RootView: View {
     /// 详见 docs/lessons/2026-04-30-real-home-viewmodel-injection-must-not-leave-base-fatalerror.md.
     @StateObject private var homeViewModel: HomeViewModel = RealHomeViewModel()
 
+    /// Story 37.8 AC5：RoomScaffoldView 注入入口；与 homeViewModel 同模式 @StateObject 持有 + .environmentObject 注入子树.
+    /// 用基类 RoomViewModel 而非 RealRoomViewModel —— 基类无参 init() 不调 abstract method（即 idle 态下不会触发 fatalError），
+    /// inRoom 态由 HomeContainerView 互斥状态机渲染 RoomScaffoldView 调用 onLeaveTap/onCopyTap 时才需要 override；
+    /// 本期 idle → inRoom 切换路径在 Story 12.1（RealRoomViewModel + WS）落地前不会从用户路径走通（join flow 未实装），
+    /// UITest 路径通过 `UITEST_FORCE_IN_ROOM` env flag 走 mock 数据（详见 Dev Notes "UITest force-in-room flag"）.
+    /// Story 12.1 决定何时切到 RealRoomViewModel.
+    @StateObject private var roomViewModel: RoomViewModel = RealRoomViewModel()
+
     /// Story 37.4 AC3：全局 AppState 单 source of truth；通过 `.environmentObject(appState)` 注入子树.
     /// 与 coordinator / homeViewModel 同级 @StateObject 持有；HomeViewModel.bind(appState:) 在 .task 内调
     /// 形成 weak 反向引用，让 applyHomeData(_:) 写入 AppState（不再写自身 homeData 字段）.
@@ -72,6 +80,7 @@ struct RootView: View {
                     stateMachine: stateMachine,
                     coordinator: coordinator,
                     homeViewModel: homeViewModel,
+                    roomViewModel: roomViewModel,
                     appState: appState,
                     currentTheme: currentTheme,
                     sessionStore: container.sessionStore,
@@ -117,6 +126,12 @@ struct RootView: View {
             // Story 37.4 AC3：注入 AppState，让 HomeViewModel.applyHomeData(_:) 内部写 AppState
             // （不再写自身 homeData 字段；ADR-0010 §3.5 钦定）.
             homeViewModel.bind(appState: appState)
+            // Story 37.8 AC5：RoomViewModel.bind(appState:) 异步注入路径（与 HomeViewModel 同模式）.
+            // RealRoomViewModel.bind(appState:) 内部 sink 派生 roomCodeForCopy / hostCatName.
+            // 用 if let 守 cast：基类 RoomViewModel 没有 bind(appState:) 方法，只有 RealRoomViewModel 有.
+            if let realRoomVM = roomViewModel as? RealRoomViewModel {
+                realRoomVM.bind(appState: appState)
+            }
         }
         .task {
             ensureLaunchStateMachineWired()
@@ -142,6 +157,13 @@ struct RootView: View {
         if ProcessInfo.processInfo.environment["UITEST_SKIP_GUEST_LOGIN"] == "1" {
             // UITest 路径：bootstrap 立即成功，复用 Story 2.9 默认 closure 行为（让 HomeView 可渲染）
             launchStateMachine = AppLaunchStateMachine()
+            // Story 37.8 AC8: UITest 路径强制切到 inRoom 态（让 RoomScaffoldView 7 锚 a11y identifier 可定位）.
+            // 仅 Debug build 生效；Production build 此 env 被忽略.
+            // 复用 Story 37.4 setCurrentRoomId 入口；不污染生产 wire；UITest 跑完 reset env 即恢复正常.
+            // env flag 名 `UITEST_FORCE_IN_ROOM` 与现有 `UITEST_SKIP_GUEST_LOGIN` 同前缀（Story 2.2 落地的命名风格）.
+            if ProcessInfo.processInfo.environment["UITEST_FORCE_IN_ROOM"] == "1" {
+                appState.setCurrentRoomId("1234567")
+            }
             return
         }
         #endif
@@ -238,6 +260,9 @@ private struct LaunchedContentView: View {
     @ObservedObject var stateMachine: AppLaunchStateMachine
     @ObservedObject var coordinator: AppCoordinator
     let homeViewModel: HomeViewModel
+    /// Story 37.8 AC5：接收 RootView 的 RoomViewModel，注入到 .ready 子树 environmentObject.
+    /// HomeContainerRoomViewBridge 通过 @EnvironmentObject var roomViewModel: RoomViewModel 取出.
+    let roomViewModel: RoomViewModel
     /// Story 37.4 AC3：接收 RootView 的 AppState，注入到 .ready 子树 environmentObject.
     let appState: AppState
     /// Story 37.5 AC8: 接收 RootView 的 ThemeName，转 Theme 实例后注入 .ready 子树 environment(\.theme).
@@ -251,6 +276,7 @@ private struct LaunchedContentView: View {
         stateMachine: AppLaunchStateMachine,
         coordinator: AppCoordinator,
         homeViewModel: HomeViewModel,
+        roomViewModel: RoomViewModel,
         appState: AppState,
         currentTheme: ThemeName,
         sessionStore: SessionStore?,
@@ -261,6 +287,7 @@ private struct LaunchedContentView: View {
         self.stateMachine = stateMachine
         self.coordinator = coordinator
         self.homeViewModel = homeViewModel
+        self.roomViewModel = roomViewModel
         self.appState = appState
         self.currentTheme = currentTheme
         self.sessionStore = sessionStore
@@ -279,6 +306,7 @@ private struct LaunchedContentView: View {
                 MainTabView()
                     .environmentObject(coordinator)
                     .environmentObject(homeViewModel)
+                    .environmentObject(roomViewModel)
                     .environmentObject(appState)
                     .environment(\.theme, currentTheme.theme)
                     .environment(\.sessionStore, sessionStore)
