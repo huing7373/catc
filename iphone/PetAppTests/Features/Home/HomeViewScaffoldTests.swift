@@ -34,14 +34,68 @@ final class HomeViewScaffoldTests: XCTestCase {
         XCTAssertEqual(vm.invocations, [.createTap])
     }
 
-    // MARK: - case#3 happy: 点 "喂食" → interactionAnimation = .flying("🍥")
+    // MARK: - case#3 happy: 点 "喂食" → interactionAnimation 是 .flying(emoji: "🍥", id: ...)
 
-    /// 验证 onFeedTap 调用后 interactionAnimation 切到 .flying("🍥") + invocations 含 .feedTap.
+    /// 验证 onFeedTap 调用后 interactionAnimation 切到 .flying(emoji: "🍥", id: <随机 UUID>)
+    /// + invocations 含 .feedTap.
+    /// Story 37.7 codex round 2 [P2] fix：UUID 每次 onTap 新生成，不能用固定 UUID 等值断言；
+    /// 改用 case-let pattern match 解构 emoji 字段断言（id 字段独立用 case#3b 守护连点重放）.
     func testOnFeedTapTriggersFlyingEmojiAndInvocation() {
         let vm = MockHomeViewModel()
         vm.onFeedTap()
-        XCTAssertEqual(vm.interactionAnimation, .flying("🍥"))
+        guard case let .flying(emoji, _) = vm.interactionAnimation else {
+            XCTFail("expected .flying after onFeedTap, got \(vm.interactionAnimation)")
+            return
+        }
+        XCTAssertEqual(emoji, "🍥")
         XCTAssertEqual(vm.invocations, [.feedTap])
+    }
+
+    // MARK: - case#3b happy: 同 emoji 连点 → 两次 interactionAnimation 不 Equatable（核心契约）
+
+    /// Story 37.7 codex round 2 [P2] fix 守护测试：
+    ///   连点 onFeedTap 两次 → 两次 interactionAnimation Equatable 比较应为不等
+    ///   （UUID id 不同；emoji 相同）. 这是 SwiftUI `onChange(of:)` 能感知重放动画的核心契约.
+    /// 若未来有人改回 `case flying(String)` 单字段或共用 UUID，本 case 立刻 fail.
+    func testRapidSameEmojiTapsProduceDistinctAnimationStates() {
+        let vm = MockHomeViewModel()
+        vm.onFeedTap()
+        let first = vm.interactionAnimation
+        vm.onFeedTap()
+        let second = vm.interactionAnimation
+
+        // 两次都是 .flying("🍥", _) 但 UUID 不同 → Equatable 不等.
+        XCTAssertNotEqual(first, second, ".flying 同 emoji 连点必须产生不等的 AnimationState（连点重放契约）")
+
+        // 双重守护：emoji 字段相同（行为一致），id 字段不同（重放保证）.
+        guard case let .flying(emoji1, id1) = first,
+              case let .flying(emoji2, id2) = second
+        else {
+            XCTFail("expected both states .flying, got \(first) / \(second)")
+            return
+        }
+        XCTAssertEqual(emoji1, "🍥")
+        XCTAssertEqual(emoji2, "🍥")
+        XCTAssertNotEqual(id1, id2, "UUID 必须每次 onTap 新生成（option A 实装核心）")
+    }
+
+    // MARK: - case#3c contract: AnimationState Equatable 实装契约（id 不同视为不等）
+
+    /// Story 37.7 codex round 2 [P2] fix：直接用两个固定但不同的 UUID 构造 .flying 断言不等.
+    /// 这是 option A 修法的最小契约：未来重构若误把 id 设成 ignored 字段（如 Equatable 自定义实装
+    /// 跳过 id 比较），本 case 立刻 fail.
+    func testAnimationStateFlyingEquatabilityRequiresMatchingId() {
+        let id1 = UUID()
+        let id2 = UUID()
+        XCTAssertNotEqual(id1, id2)
+
+        let a: AnimationState = .flying(emoji: "🍥", id: id1)
+        let b: AnimationState = .flying(emoji: "🍥", id: id2)
+        XCTAssertNotEqual(a, b, ".flying 同 emoji 不同 id 必须不 Equatable（连点重放核心契约）")
+
+        // 反向 sanity check：emoji + id 完全相同 → Equatable.
+        let c: AnimationState = .flying(emoji: "🍥", id: id1)
+        XCTAssertEqual(a, c, ".flying 同 emoji 同 id 应 Equatable（sanity）")
     }
 
     // MARK: - case#4 happy: 点 "加入队伍" → showJoinModal = true

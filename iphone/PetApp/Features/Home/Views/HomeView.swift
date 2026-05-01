@@ -42,6 +42,11 @@ public struct HomeView<ChestSlot: View>: View {
     /// 本期调用方传 EmptyView() 占位（HomeContainerHomeViewBridge / Preview）；视图位置在 ScrollView VStack 第 4 区块.
     private let chestSlot: () -> ChestSlot
 
+    /// Story 37.7 codex round 2 [P2] fix：interactionAnimation `.flying` → `.idle` 重置 timer 句柄.
+    /// rapid tap（如 t=0 Feed → t=0.5s Play）时取消上一个 1.4s sleep task —— 否则
+    /// 第一个 timer 在 t=1.4s 触发把 .idle 写入，第二个 emoji 提前消失（应当持续到 t=1.9s）.
+    @State private var resetTask: Task<Void, Never>?
+
     /// Story 37.7 AC3: 唯一 init —— 删除老 3 个重载，caller 漏改靠编译器报错驱动.
     /// 参数名 `state` 而非 `viewModel`（v2 提案钦定）.
     public init(
@@ -88,9 +93,16 @@ public struct HomeView<ChestSlot: View>: View {
             // floatUp 动画完成后自动重置回 idle（1.4s ≈ ui_design home.jsx 钦定 floatUp 时长）.
             // 保 mock / production 行为一致：只有 .flying(...) 触发重置 timer，.idle 不做任何事.
             // iOS 17+ 双参签名：(oldValue, newValue) -> Void（避免单参 deprecation warning）.
+            //
+            // Story 37.7 codex round 2 [P2] fix（"rapid tap stale timer 提前清动画"）：
+            //   每次进入 .flying 前先 cancel 上一个 resetTask —— 否则连续 onTap 时旧 timer
+            //   仍会在 1.4s 后触发 .idle，把新 emoji 提前抹掉. 新 task body 开头 `Task.isCancelled`
+            //   double-check 防 sleep 期间被取消的 race（cancel 不会中断 sleep，只标记 isCancelled）.
             guard case .flying = newValue else { return }
-            Task { @MainActor [weak state] in
+            resetTask?.cancel()
+            resetTask = Task { @MainActor [weak state] in
                 try? await Task.sleep(nanoseconds: 1_400_000_000)
+                if Task.isCancelled { return }
                 state?.interactionAnimation = .idle
             }
         }
@@ -233,7 +245,7 @@ public struct HomeView<ChestSlot: View>: View {
                 // `.animation(.easeOut(duration: 1.4), value: state.interactionAnimation)` 让此过渡
                 // 跟随 interactionAnimation 切换驱动. HomeView body 末尾 `.onChange` 在 1.4s 后
                 // 自动把 interactionAnimation 重置回 .idle，触发离场动画.
-                if case let .flying(emoji) = state.interactionAnimation {
+                if case let .flying(emoji, _) = state.interactionAnimation {
                     Text(emoji)
                         .font(.system(size: 44))
                         .offset(y: -110)

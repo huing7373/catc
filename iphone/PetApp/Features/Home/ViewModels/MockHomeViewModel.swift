@@ -50,21 +50,23 @@ public final class MockHomeViewModel: HomeViewModel {
         self.showJoinModal = true
     }
 
+    // Story 37.7 codex round 2 [P2] fix：同 RealHomeViewModel 一样，每次 onTap 用 UUID() 新实例
+    // 保证 AnimationState Equatable 不等（连点同 emoji 也重放动画）.
     public override func onFeedTap() {
         os_log(.debug, "MockHomeViewModel.onFeedTap")
         invocations.append(.feedTap)
-        self.interactionAnimation = .flying("🍥")
+        self.interactionAnimation = .flying(emoji: "🍥", id: UUID())
     }
 
     public override func onPetTap() {
         os_log(.debug, "MockHomeViewModel.onPetTap")
         invocations.append(.petTap)
-        self.interactionAnimation = .flying("💕")
+        self.interactionAnimation = .flying(emoji: "💕", id: UUID())
     }
 
     public override func onPlayTap() {
         os_log(.debug, "MockHomeViewModel.onPlayTap")
         invocations.append(.playTap)
-        self.interactionAnimation = .flying("⭐")
+        self.interactionAnimation = .flying(emoji: "⭐", id: UUID())
     }
 }

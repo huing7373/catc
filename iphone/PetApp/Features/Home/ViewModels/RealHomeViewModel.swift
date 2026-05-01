@@ -60,18 +60,20 @@ public final class RealHomeViewModel: HomeViewModel {
         self.showJoinModal = true
     }
 
+    // Story 37.7 codex round 2 [P2] fix：每次 .flying 用新 `UUID()` —— 同 emoji 连点
+    // （如 Feed → 🍥 → 🍥）也保证 AnimationState Equatable 不等，HomeView onChange 重放动画.
     public override func onFeedTap() {
         os_log(.debug, "RealHomeViewModel.onFeedTap (Story 14.x will wire WS pet.state.changed)")
-        self.interactionAnimation = .flying("🍥")
+        self.interactionAnimation = .flying(emoji: "🍥", id: UUID())
     }
 
     public override func onPetTap() {
         os_log(.debug, "RealHomeViewModel.onPetTap")
-        self.interactionAnimation = .flying("💕")
+        self.interactionAnimation = .flying(emoji: "💕", id: UUID())
     }
 
     public override func onPlayTap() {
         os_log(.debug, "RealHomeViewModel.onPlayTap")
-        self.interactionAnimation = .flying("⭐")
+        self.interactionAnimation = .flying(emoji: "⭐", id: UUID())
     }
 }

@@ -406,17 +406,18 @@ public class HomeViewModel: ObservableObject {
         fatalError("HomeViewModel.onJoinTap must be overridden by subclass")
     }
 
-    /// 用户点击 ActionRow "喂食" 按钮 → 子类 override 设 interactionAnimation = .flying("🍥").
+    /// 用户点击 ActionRow "喂食" 按钮 → 子类 override 设 interactionAnimation = .flying(emoji: "🍥", id: UUID()).
+    /// Story 37.7 codex round 2 [P2] fix：每次新 UUID 保证连点同 emoji 也触发 onChange 重放动画.
     public func onFeedTap() {
         fatalError("HomeViewModel.onFeedTap must be overridden by subclass")
     }
 
-    /// 用户点击 ActionRow "抚摸" 按钮 → 子类 override 设 interactionAnimation = .flying("💕").
+    /// 用户点击 ActionRow "抚摸" 按钮 → 子类 override 设 interactionAnimation = .flying(emoji: "💕", id: UUID()).
     public func onPetTap() {
         fatalError("HomeViewModel.onPetTap must be overridden by subclass")
     }
 
-    /// 用户点击 ActionRow "玩耍" 按钮 → 子类 override 设 interactionAnimation = .flying("⭐").
+    /// 用户点击 ActionRow "玩耍" 按钮 → 子类 override 设 interactionAnimation = .flying(emoji: "⭐", id: UUID()).
     public func onPlayTap() {
         fatalError("HomeViewModel.onPlayTap must be overridden by subclass")
     }
