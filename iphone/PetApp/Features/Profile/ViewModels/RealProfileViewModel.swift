@@ -194,4 +194,19 @@ public final class RealProfileViewModel: ProfileViewModel {
         os_log(.debug, "RealProfileViewModel.onCollectionViewAllTap (后续 epic will push AllCollectionsView)")
         lastToastMessage = "查看全部收藏（敬请期待）"
     }
+
+    /// Story 37.11 round 3 codex review [P2] 修复 + lesson 6 预防性应用：
+    /// Real override 必须本地 mutate state（不能仅 log）—— 与 Mock 同语义.
+    /// 后续 epic 改 NavigationLink push 到 MessagesView 消息中心.
+    public override func onBellTap() {
+        os_log(.debug, "RealProfileViewModel.onBellTap (后续 epic will push MessagesView)")
+        lastToastMessage = "消息中心（敬请期待）"
+    }
+
+    /// Story 37.11 round 3 codex review [P2] 修复 + lesson 6 预防性应用.
+    /// 后续 epic 改 NavigationLink push 到 SettingsView.
+    public override func onSettingsTap() {
+        os_log(.debug, "RealProfileViewModel.onSettingsTap (后续 epic will push SettingsView)")
+        lastToastMessage = "设置（敬请期待）"
+    }
 }

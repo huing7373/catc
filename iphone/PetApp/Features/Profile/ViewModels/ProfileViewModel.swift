@@ -87,4 +87,29 @@ public class ProfileViewModel: ObservableObject {
     public func onCollectionViewAllTap() {
         fatalError("ProfileViewModel.onCollectionViewAllTap must be overridden by subclass")
     }
+
+    /// headerCard 右上角 bell 圆形按钮触发（占位"消息中心"入口）.
+    /// MockProfileViewModel: 写 lastToastMessage = "消息中心（敬请期待）" + 记录 invocation.
+    /// RealProfileViewModel（本 story 占位）: **本地 mutate** —— 同 Mock.
+    ///   按 Story 37.9 round 1 P1 lesson `2026-04-30-real-viewmodel-override-placeholder-must-mutate-state.md` 钦定路径.
+    /// 后续 epic: 改 NavigationLink push 到 MessagesView 消息中心.
+    ///
+    /// Story 37.11 round 3 codex review [P2] 修复：
+    /// 之前 ProfileScaffoldView headerIconButton 闭包直接写 `state.lastToastMessage = "..."` 绕过 ViewModel seam，
+    /// 导致后续 epic 接 NavigationLink 真实导航时必须改 View 而非 VM —— 违反 "zero-edit scaffold" 契约.
+    /// lesson: 2026-05-01-scaffold-view-must-not-bypass-viewmodel-method-seam.md
+    public func onBellTap() {
+        fatalError("ProfileViewModel.onBellTap must be overridden by subclass")
+    }
+
+    /// headerCard 右上角 settings 圆形按钮触发（占位"设置"入口）.
+    /// MockProfileViewModel: 写 lastToastMessage = "设置（敬请期待）" + 记录 invocation.
+    /// RealProfileViewModel（本 story 占位）: **本地 mutate** —— 同 Mock.
+    ///   按 Story 37.9 round 1 P1 lesson 钦定路径.
+    /// 后续 epic: 改 NavigationLink push 到 SettingsView.
+    ///
+    /// Story 37.11 round 3 codex review [P2] 修复（同 onBellTap）.
+    public func onSettingsTap() {
+        fatalError("ProfileViewModel.onSettingsTap must be overridden by subclass")
+    }
 }

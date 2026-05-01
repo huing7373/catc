@@ -22,6 +22,9 @@ public final class MockProfileViewModel: ProfileViewModel {
         case wechatModalDismissTap
         case menuTap(item: ProfileMenuItem)
         case collectionViewAllTap
+        /// Story 37.11 round 3 codex review [P2] 新增：bell / settings header 按钮.
+        case bellTap
+        case settingsTap
     }
 
     @Published public var invocations: [Invocation] = []
@@ -84,5 +87,19 @@ public final class MockProfileViewModel: ProfileViewModel {
         os_log(.debug, "MockProfileViewModel.onCollectionViewAllTap")
         invocations.append(.collectionViewAllTap)
         lastToastMessage = "查看全部收藏（敬请期待）"
+    }
+
+    /// Story 37.11 round 3 codex review [P2] 修复：bell 按钮通过 ViewModel seam.
+    public override func onBellTap() {
+        os_log(.debug, "MockProfileViewModel.onBellTap")
+        invocations.append(.bellTap)
+        lastToastMessage = "消息中心（敬请期待）"
+    }
+
+    /// Story 37.11 round 3 codex review [P2] 修复：settings 按钮通过 ViewModel seam.
+    public override func onSettingsTap() {
+        os_log(.debug, "MockProfileViewModel.onSettingsTap")
+        invocations.append(.settingsTap)
+        lastToastMessage = "设置（敬请期待）"
     }
 }

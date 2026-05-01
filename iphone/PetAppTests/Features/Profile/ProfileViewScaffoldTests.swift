@@ -89,6 +89,53 @@ final class ProfileViewScaffoldTests: XCTestCase {
         XCTAssertEqual(vm.invocations, [.collectionViewAllTap])
     }
 
+    // MARK: - case#6b 守护 (round 3 [P2-A]): bell / settings 必须走 ViewModel seam（不绕过到 view 层）
+
+    /// Story 37.11 round 3 codex review [P2-A] guard test:
+    /// 防 ProfileScaffoldView headerIconButton 闭包直接写 state.lastToastMessage 绕过 ViewModel seam.
+    /// 路径：bell 按钮按下 → state.onBellTap() → invocations 含 .bellTap + lastToastMessage 非空.
+    /// lesson: 2026-05-01-scaffold-view-must-not-bypass-viewmodel-method-seam.md
+    func testBellTapTriggersToastAndRecordsInvocation() {
+        let vm = MockProfileViewModel()
+        XCTAssertNil(vm.lastToastMessage)
+
+        vm.onBellTap()
+        XCTAssertNotNil(vm.lastToastMessage, "bell tap 必须 mutate lastToastMessage（守护 ViewModel seam）")
+        XCTAssertTrue(vm.lastToastMessage!.contains("消息"))
+        XCTAssertEqual(vm.invocations, [.bellTap], "bell tap 必须记录 invocation（防 view 层绕过 seam）")
+    }
+
+    func testSettingsTapTriggersToastAndRecordsInvocation() {
+        let vm = MockProfileViewModel()
+        XCTAssertNil(vm.lastToastMessage)
+
+        vm.onSettingsTap()
+        XCTAssertNotNil(vm.lastToastMessage, "settings tap 必须 mutate lastToastMessage（守护 ViewModel seam）")
+        XCTAssertTrue(vm.lastToastMessage!.contains("设置"))
+        XCTAssertEqual(vm.invocations, [.settingsTap], "settings tap 必须记录 invocation（防 view 层绕过 seam）")
+    }
+
+    // MARK: - case#6c 守护 (round 3 [P2-B]): sheet swipe-dismiss 必须经 ViewModel.onWeChatModalDismissTap
+
+    /// Story 37.11 round 3 codex review [P2-B] guard test:
+    /// 防 .sheet(isPresented:) swipe-dismiss 路径绕过 onWeChatModalDismissTap.
+    /// 修法：.sheet(isPresented:, onDismiss:) 让 SwiftUI 在所有 dismiss 路径调 ViewModel hook.
+    /// 测试模拟 swipe-dismiss：showBindModal 已被 SwiftUI 设为 false（先手动设），再调 onWeChatModalDismissTap()
+    /// （sheet onDismiss 闭包会做的事），断言 ViewModel hook 仍正常 mutate state（idempotent）+ invocation 记录.
+    /// lesson: 2026-05-01-sheet-swipe-dismiss-must-route-through-viewmodel-hook.md
+    func testSheetSwipeDismissRoutesThroughViewModelHook() {
+        let vm = MockProfileViewModel(showBindModal: true)
+        XCTAssertTrue(vm.showBindModal)
+
+        // 模拟 SwiftUI swipe-dismiss：先把 showBindModal 设 false（SwiftUI binding 副作用），
+        // 再触发 onDismiss 闭包（ProfileScaffoldView .sheet 钦定路径）→ 必须 mutate state + 记录 invocation.
+        vm.showBindModal = false  // SwiftUI 已替我们做了
+        vm.onWeChatModalDismissTap()  // sheet onDismiss 闭包钦定调用
+
+        XCTAssertFalse(vm.showBindModal, "swipe-dismiss + ViewModel hook：showBindModal 仍 false（idempotent）")
+        XCTAssertEqual(vm.invocations, [.wechatModalDismissTap], "swipe-dismiss 路径必须记录 invocation")
+    }
+
     // MARK: - case#7 守护: RealProfileViewModel 构造注入 AppState 不 crash + override 不 fatalError + Real override 必 mutate state
 
     /// 防 RealProfileViewModel 漏 override 时本测试立刻 fail（fatalError 在测试中 → trap）.

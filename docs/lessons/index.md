@@ -111,3 +111,4 @@
 | 2026-04-30 | [Spec 边界灰区的 fallback 路径在 review 触发时必须立即兑现 epic AC](2026-04-30-spec-boundary-grey-area-fallback-must-honor-epic-ac-when-review-flags-it.md) | 1 | architecture, ui-fidelity, process | `b87d373` |
 | 2026-04-30 | [Real ViewModel transient state 必须在 appState reset 路径同步清回 defaults（不只重算派生字段）](2026-04-30-real-viewmodel-must-clear-transient-state-on-reset.md) | 1 | architecture | `2929d78` |
 | 2026-05-01 | [Real ViewModel transient state 清理判据必须用「user 身份变化」而非仅「user == nil」（cold-start 路径不经 appState.reset()）](2026-05-01-real-viewmodel-transient-must-clear-on-any-identity-change.md) | 1 | architecture | `<pending>` |
+| 2026-05-01 | [Scaffold View 必须经 ViewModel method seam（按钮闭包 / sheet swipe-dismiss 都不能绕过）](2026-05-01-scaffold-bypass-viewmodel-seam.md) | 2 | architecture | `<pending>` |

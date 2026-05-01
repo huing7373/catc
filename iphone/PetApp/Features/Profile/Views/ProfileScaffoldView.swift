@@ -48,7 +48,18 @@ public struct ProfileScaffoldView: View {
         .background(theme.colors.pageBg.ignoresSafeArea())
         .accessibilityIdentifier("profileView")
         .overlay(alignment: .bottom) { toastOverlay }
-        .sheet(isPresented: $state.showBindModal) {
+        // Story 37.11 round 3 codex review [P2-B] 修复：sheet swipe-dismiss 必须经 ViewModel seam.
+        // .sheet(isPresented:) 的 binding 在 swipe-dismiss 时 SwiftUI 直接把 binding 设 false，
+        // 不会调用任何 dismiss handler；改用 onDismiss 闭包让 ViewModel.onWeChatModalDismissTap()
+        // 在所有 dismiss 路径（按钮 + swipe + 编程关闭）都被调到，
+        // 防后续 epic（如 lastWechatPromptAt 持久化）silently skip swipe path.
+        // 实装内部对 showBindModal 的 mutation 是 idempotent —— SwiftUI 已先把 binding 设 false，
+        // ViewModel 再把它设 false 是 no-op，不会重复处理.
+        // lesson: 2026-05-01-sheet-swipe-dismiss-must-route-through-viewmodel-hook.md
+        .sheet(
+            isPresented: $state.showBindModal,
+            onDismiss: { state.onWeChatModalDismissTap() }
+        ) {
             bindWechatSheet
         }
     }
@@ -65,11 +76,16 @@ public struct ProfileScaffoldView: View {
                     .foregroundColor(.white)
                 Spacer()
                 HStack(spacing: 8) {
+                    // Story 37.11 round 3 codex review [P2-A] 修复：
+                    // bell / settings 按钮必须走 ViewModel onBellTap / onSettingsTap method seam，
+                    // 不再直接写 state.lastToastMessage —— 防后续 epic 接 NavigationLink 真实导航
+                    // 时必须改 View 而非 VM（违反 zero-edit scaffold 契约）.
+                    // lesson: 2026-05-01-scaffold-view-must-not-bypass-viewmodel-method-seam.md
                     headerIconButton(iconKey: "bell") {
-                        state.lastToastMessage = "消息中心（敬请期待）"
+                        state.onBellTap()
                     }
                     headerIconButton(iconKey: "settings") {
-                        state.lastToastMessage = "设置（敬请期待）"
+                        state.onSettingsTap()
                     }
                 }
             }
