@@ -2,7 +2,7 @@
 date: 2026-04-30
 source_review: /tmp/epic-loop-review-37-10-r1.md (codex review of Story 37.10 round 1)
 story: 37-10-friendsview-scaffold
-commit: <pending>
+commit: b87d373
 lesson_count: 1
 ---
 
