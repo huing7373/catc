@@ -47,11 +47,13 @@ struct RootView: View {
     @StateObject private var homeViewModel: HomeViewModel = RealHomeViewModel()
 
     /// Story 37.8 AC5：RoomScaffoldView 注入入口；与 homeViewModel 同模式 @StateObject 持有 + .environmentObject 注入子树.
-    /// 用基类 RoomViewModel 而非 RealRoomViewModel —— 基类无参 init() 不调 abstract method（即 idle 态下不会触发 fatalError），
-    /// inRoom 态由 HomeContainerView 互斥状态机渲染 RoomScaffoldView 调用 onLeaveTap/onCopyTap 时才需要 override；
-    /// 本期 idle → inRoom 切换路径在 Story 12.1（RealRoomViewModel + WS）落地前不会从用户路径走通（join flow 未实装），
-    /// UITest 路径通过 `UITEST_FORCE_IN_ROOM` env flag 走 mock 数据（详见 Dev Notes "UITest force-in-room flag"）.
-    /// Story 12.1 决定何时切到 RealRoomViewModel.
+    /// 静态类型 `RoomViewModel`（基类）让 SwiftUI `@StateObject` 老模式可用 —— AppState 也是同级 @StateObject,
+    /// 不能在属性初始化器内交叉引用（编译期不允许 self 提前求值）.AppState 通过 `.onAppear` 同步注入
+    /// （Story 37.8 round 2 [P2] fix；详见下方 `.onAppear` 内注释 + lesson
+    /// docs/lessons/2026-04-30-onappear-vs-task-sync-bind-before-first-paint.md）.
+    /// 实例类型 `RealRoomViewModel`（生产实装；onLeaveTap / onCopyTap override 完整）—— round 1 P2 fix
+    /// 已把基类换 Real，让 inRoom path（UITEST_FORCE_IN_ROOM / 未来 Story 12.1 join flow）走 onLeaveTap
+    /// 调 appState.setCurrentRoomId(nil) 切回 idle 不再 silent no-op.
     @StateObject private var roomViewModel: RoomViewModel = RealRoomViewModel()
 
     /// Story 37.4 AC3：全局 AppState 单 source of truth；通过 `.environmentObject(appState)` 注入子树.
@@ -114,24 +116,35 @@ struct RootView: View {
             #endif
         }
         .onAppear {
+            // Story 37.8 round 2 [P2] fix（codex review）：把 `bind(appState:)` 同步搬到 `.onAppear`，
+            // 让 RealHomeViewModel / RealRoomViewModel 在第一次 paint 之前就持有 AppState 引用.
+            //
+            // 旧（round 1）实装在下方 `.task` 内调 bind(appState:) 是异步路径——SwiftUI 在第一次
+            // paint 之前 `.task` 还没触发，HomeContainerView 互斥状态机已经按 appState.currentRoomId
+            // 决定走 inRoom 分支 → RoomScaffoldView 渲染 → RealRoomViewModel.appState 仍 nil →
+            // leave tap silent no-op + room title/code 显示 placeholder. 触发条件：
+            //   · `/home` 返回 `room.currentRoomId != nil`（restored in-room session）→ AppLaunchStateMachine
+            //     bootstrapStep1 内 appState.applyHomeData 写非 nil currentRoomId → ready 子树第一帧 paint
+            //   · UITEST_FORCE_IN_ROOM env flag → ensureLaunchStateMachineWired 内 setCurrentRoomId 立即写
+            //     非 nil → ready 子树第一帧 paint
+            //
+            // `.onAppear` 在 SwiftUI 第一次 paint 之前同步执行，比 `.task` 早 → 任何渲染之前 VM 已绑定.
+            // 复用现有 bind(appState:) 入口（idempotent；alreadySubscribed guard），不动 ViewModel 持有结构.
+            // 详见 docs/lessons/2026-04-30-onappear-vs-task-sync-bind-before-first-paint.md.
+            homeViewModel.bind(appState: appState)
+            if let realRoomVM = roomViewModel as? RealRoomViewModel {
+                realRoomVM.bind(appState: appState)
+            }
             ensureLaunchStateMachineWired()
         }
         .task {
             // Story 5.5：bind LoadHomeUseCase + ErrorPresenter，让 ErrorPresenter onRetry 闭包
-            // 能驱动 ViewModel 重试.
+            // 能驱动 ViewModel 重试. 这两个依赖 container.makeLoadHomeUseCase() / container.errorPresenter
+            // 构造（容器初始化），保留 .task 异步路径.
             homeViewModel.bind(
                 loadHomeUseCase: container.makeLoadHomeUseCase(),
                 errorPresenter: container.errorPresenter
             )
-            // Story 37.4 AC3：注入 AppState，让 HomeViewModel.applyHomeData(_:) 内部写 AppState
-            // （不再写自身 homeData 字段；ADR-0010 §3.5 钦定）.
-            homeViewModel.bind(appState: appState)
-            // Story 37.8 AC5：RoomViewModel.bind(appState:) 异步注入路径（与 HomeViewModel 同模式）.
-            // RealRoomViewModel.bind(appState:) 内部 sink 派生 roomCodeForCopy / hostCatName.
-            // 用 if let 守 cast：基类 RoomViewModel 没有 bind(appState:) 方法，只有 RealRoomViewModel 有.
-            if let realRoomVM = roomViewModel as? RealRoomViewModel {
-                realRoomVM.bind(appState: appState)
-            }
         }
         .task {
             ensureLaunchStateMachineWired()

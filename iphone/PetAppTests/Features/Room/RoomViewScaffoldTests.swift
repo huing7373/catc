@@ -173,4 +173,57 @@ final class RoomViewScaffoldTests: XCTestCase {
         XCTAssertEqual(vm2.roomCodeForCopy, RoomScaffoldDefaults.roomCodeForCopy)
         XCTAssertEqual(vm2.hostCatName, RoomScaffoldDefaults.hostCatName)
     }
+
+    // MARK: - case#9 happy: round 2 P2 fix 守护 — bind(appState:) 是同步路径（不依赖 await/dispatch）
+    //
+    // 背景：codex round 2 [P2] finding —— RootView 旧实装在 `.task`（异步）内调 bind(appState:),
+    // 当 app 启动时 appState.currentRoomId != nil（restored in-room / UITEST_FORCE_IN_ROOM /
+    // /home 返回非 nil currentRoomId），HomeContainerView 在 `.task` 跑之前已经决策走 inRoom 分支 →
+    // RoomScaffoldView 渲染 → RealRoomViewModel.appState 仍是 nil → leave tap 无效 + room title/code
+    // 显示 placeholder. round 2 fix 把 bind(appState:) 搬到 `.onAppear`（第一次 paint 之前同步执行）.
+    //
+    // 本守护测试验证 bind(appState:) 是**纯同步**入口（与 onAppear 配对的契约前提）：
+    //   1. parameterless init() 后 appState 字段为 nil（用 Mirror 反射；私有字段）
+    //   2. 调 bind(appState:) 后**同步立即**(无 await / 无 RunLoop tick) appState 字段为传入实例
+    //   3. 紧接着调 onLeaveTap() 能立刻通过 self.appState?.setCurrentRoomId(nil) 写入 AppState
+    //
+    // 若未来重构把 RealRoomViewModel.bind 改为 async / 把 appState 写延后到 sink dispatch，
+    // 本测试会立即失败 —— 提示 RootView.onAppear 同步注入契约被破坏（race 又会回归）.
+    //
+    // 详见 docs/lessons/2026-04-30-onappear-vs-task-sync-bind-before-first-paint.md.
+    func testRealRoomViewModelBindAppStateIsSynchronous() {
+        let vm = RealRoomViewModel()
+
+        // 1. 构造后 private appState 字段必须 nil（覆盖 onAppear 触发前的初始态）.
+        XCTAssertNil(
+            Mirror(reflecting: vm).descendant("appState") as? AppState,
+            "parameterless init 后 appState 字段应为 nil（onAppear 之前的初始态）"
+        )
+
+        // 2. 同步调 bind(appState:) 后 private appState 字段必须**立刻**为传入实例.
+        //    用 ObjectIdentifier 做引用相等（AppState 是 class）.
+        let appState = AppState()
+        appState.setCurrentRoomId("room_round2_guard")
+        vm.bind(appState: appState)
+
+        let bound = Mirror(reflecting: vm).descendant("appState") as? AppState
+        XCTAssertNotNil(
+            bound,
+            "bind(appState:) 同步调用之后 appState 字段必须立即非 nil — RootView.onAppear 同步注入契约的前提"
+        )
+        XCTAssertTrue(
+            bound === appState,
+            "bind(appState:) 写入的必须是同一个 AppState 实例（不是 copy）"
+        )
+
+        // 3. 同步调 onLeaveTap() 能立刻把 currentRoomId 置 nil（证明 self.appState 已绑且可用，
+        //    不依赖 await / dispatch）—— 即"第一次 paint 之后用户立即点 leave，能命中 RealRoomViewModel
+        //    override 路径"的关键 invariant.
+        XCTAssertEqual(appState.currentRoomId, "room_round2_guard", "前置：currentRoomId 已写入")
+        vm.onLeaveTap()
+        XCTAssertNil(
+            appState.currentRoomId,
+            "bind 后立即调 onLeaveTap 必须能写 currentRoomId=nil — 守护 RootView.onAppear 同步 bind 契约"
+        )
+    }
 }
