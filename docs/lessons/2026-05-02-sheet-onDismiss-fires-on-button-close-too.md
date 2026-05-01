@@ -2,7 +2,7 @@
 date: 2026-05-02
 source_review: codex review round 4 for story 37-11-profileview-scaffold
 story: 37-11-profileview-scaffold
-commit: <pending>
+commit: c3f52ab
 lesson_count: 1
 ---
 

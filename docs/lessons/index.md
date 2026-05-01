@@ -110,6 +110,6 @@
 | 2026-04-30 | [Real 子类 override abstract method 的"占位实装"必须 mutate state，不能只 log（37-7 lesson 复犯）](2026-04-30-real-viewmodel-override-placeholder-must-mutate-state.md) | 1 | architecture, swift, ui-state | `7094e69` |
 | 2026-04-30 | [Spec 边界灰区的 fallback 路径在 review 触发时必须立即兑现 epic AC](2026-04-30-spec-boundary-grey-area-fallback-must-honor-epic-ac-when-review-flags-it.md) | 1 | architecture, ui-fidelity, process | `b87d373` |
 | 2026-04-30 | [Real ViewModel transient state 必须在 appState reset 路径同步清回 defaults（不只重算派生字段）](2026-04-30-real-viewmodel-must-clear-transient-state-on-reset.md) | 1 | architecture | `2929d78` |
-| 2026-05-01 | [Real ViewModel transient state 清理判据必须用「user 身份变化」而非仅「user == nil」（cold-start 路径不经 appState.reset()）](2026-05-01-real-viewmodel-transient-must-clear-on-any-identity-change.md) | 1 | architecture | `<pending>` |
-| 2026-05-01 | [Scaffold View 必须经 ViewModel method seam（按钮闭包 / sheet swipe-dismiss 都不能绕过）](2026-05-01-scaffold-bypass-viewmodel-seam.md) | 2 | architecture | `<pending>` |
-| 2026-05-02 | [SwiftUI `.sheet(onDismiss:)` 在按钮触发关闭时也会跑，必须用 dismissReason tag 做意图分发](2026-05-02-sheet-onDismiss-fires-on-button-close-too.md) | 1 | architecture | `<pending>` |
+| 2026-05-01 | [Real ViewModel transient state 清理判据必须用「user 身份变化」而非仅「user == nil」（cold-start 路径不经 appState.reset()）](2026-05-01-real-viewmodel-transient-must-clear-on-any-identity-change.md) | 1 | architecture | `18c0860` |
+| 2026-05-01 | [Scaffold View 必须经 ViewModel method seam（按钮闭包 / sheet swipe-dismiss 都不能绕过）](2026-05-01-scaffold-bypass-viewmodel-seam.md) | 2 | architecture | `cc4d914` |
+| 2026-05-02 | [SwiftUI `.sheet(onDismiss:)` 在按钮触发关闭时也会跑，必须用 dismissReason tag 做意图分发](2026-05-02-sheet-onDismiss-fires-on-button-close-too.md) | 1 | architecture | `c3f52ab` |

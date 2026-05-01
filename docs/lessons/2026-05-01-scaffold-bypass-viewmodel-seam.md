@@ -2,7 +2,7 @@
 date: 2026-05-01
 source_review: codex review round 3 — Story 37.11 ProfileScaffoldView (file: /tmp/epic-loop-review-37-11-r3.md)
 story: 37-11-profileview-scaffold
-commit: <pending>
+commit: cc4d914
 lesson_count: 2
 ---
 

@@ -2,7 +2,7 @@
 date: 2026-05-01
 source_review: file:/tmp/epic-loop-review-37-11-r2.md (codex round 2, Story 37.11)
 story: 37-11-profileview-scaffold
-commit: <pending>
+commit: 18c0860
 lesson_count: 1
 ---
 
