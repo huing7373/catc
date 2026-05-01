@@ -45,5 +45,8 @@ build/
 # AI Epic Runner runtime
 .ai-pipeline/
 
+# Claude Code scheduler runtime lock
+.claude/scheduled_tasks.lock
+
 # iPhone App build artifacts (Story 2.2 / ADR-0002 §3.4 round-3 P2 fix)
 iphone/build/
