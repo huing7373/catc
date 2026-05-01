@@ -197,6 +197,50 @@ final class ProfileViewScaffoldTests: XCTestCase {
         XCTAssertNil(vm.lastToastMessage, "reset 后 lastToastMessage 必回 nil")
     }
 
+    // MARK: - case#9c 守护: cold-start 路径（A → B 不经 reset）也清 transient state
+
+    /// Story 37.11 round 2 codex review [P2] guard test：
+    /// 路径：401 → RootView 注入的 unauthorized handler 调 SessionStore.clear() + AppLaunchStateMachine.triggerColdStart()
+    ///   → bootstrap 重跑 → applyHomeData(用户 B) 直接覆盖 currentUser；**不**调 appState.reset()
+    ///   → currentUser 直接 A → B（无 nil 中间态）→ 老"if user == nil"sink 不触发 → transient 泄漏给 B.
+    /// 修法：judge "newUserId != lastObservedUserId"（任何身份变化都清 transient）.
+    /// lesson: 2026-05-01-real-viewmodel-transient-must-clear-on-any-identity-change.md
+    func testRealProfileViewModelColdStartClearsTransientStateOnUserSwitch() {
+        let appState = AppState()
+        // 用户 A hydrate
+        let userA = makeHomeDataFixture(
+            userId: "user-A",
+            userNickname: "UserA",
+            petId: "pet-A",
+            petName: "CatA"
+        )
+        appState.applyHomeData(userA)
+
+        let vm = RealProfileViewModel(appState: appState)
+        // 模拟 A 的交互：绑微信 + toast
+        vm.onWeChatCardTap()
+        vm.onWeChatBindConfirmTap()
+        XCTAssertTrue(vm.wechatBound, "前置：A 已 wechatBound = true")
+        XCTAssertNotNil(vm.lastToastMessage, "前置：A 已写 toast")
+
+        // cold-start 路径：直接 applyHomeData(B)，**不**调 appState.reset() —— 模拟 401 重跑 bootstrap.
+        let userB = makeHomeDataFixture(
+            userId: "user-B",
+            userNickname: "UserB",
+            petId: "pet-B",
+            petName: "CatB"
+        )
+        appState.applyHomeData(userB)
+
+        // 关键断言：A → B 不经 nil 中间态，transient state 也必须清 —— 防泄漏到 B 会话.
+        XCTAssertFalse(vm.wechatBound, "cold-start A→B：wechatBound 必回 false（防跨会话污染）")
+        XCTAssertFalse(vm.showBindModal, "cold-start A→B：showBindModal 必回 false")
+        XCTAssertNil(vm.lastToastMessage, "cold-start A→B：lastToastMessage 必回 nil")
+        // profile 派生也应跟上
+        XCTAssertEqual(vm.profile.name, "UserB", "profile.name 切换到新用户 B")
+        XCTAssertEqual(vm.profile.petName, "CatB")
+    }
+
     // MARK: - case#10 守护: bind(appState:) 是同步入口（lesson 5 预防性应用）
 
     /// 防未来 Claude 把 bind 改成 async 路径让 RootView .onAppear 触发后第一帧 ViewModel 仍未连上 AppState.
@@ -231,13 +275,19 @@ final class ProfileViewScaffoldTests: XCTestCase {
 
     // MARK: - 测试辅助
 
-    /// 构造 HomeData fixture（仅注入 user.nickname + pet.name，其它字段走默认 mock）.
+    /// 构造 HomeData fixture（注入 user.nickname + pet.name；可选 user/pet id）.
     /// 避免每个 case 重复样板代码.
-    private func makeHomeDataFixture(userNickname: String, petName: String) -> HomeData {
+    /// userId/petId 可选 —— round 2 case#9c 需要不同 user.id 区分两个会话；旧 case 走默认 "u-test"/"p-test".
+    private func makeHomeDataFixture(
+        userId: String = "u-test",
+        userNickname: String,
+        petId: String = "p-test",
+        petName: String
+    ) -> HomeData {
         HomeData(
-            user: HomeUser(id: "u-test", nickname: userNickname, avatarUrl: ""),
+            user: HomeUser(id: userId, nickname: userNickname, avatarUrl: ""),
             pet: HomePet(
-                id: "p-test",
+                id: petId,
                 petType: 1,
                 name: petName,
                 currentState: .rest,

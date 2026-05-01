@@ -46,6 +46,13 @@ public final class RealProfileViewModel: ProfileViewModel {
     /// 派生 state sink 句柄（防多次 bind 重订阅 + 持有 cancellable 让 sink 存活）.
     private var profileSubscriptions: Set<AnyCancellable> = []
 
+    /// round 2 codex review [P2] 修复辅助状态：记录 sink 上一次观察到的 user id.
+    /// 判 transient 清理边界 = "user 身份是否变化"（含 A→nil / nil→A / A→B），不再仅看 nil.
+    /// 防 cold-start 路径（401 → SessionStore.clear() + bootstrap 直接换 user，**不**调 appState.reset()）：
+    /// `currentUser` 直接从 A 跳到 B（中间无 nil），旧"if user == nil"sink 不触发 → transient 泄漏到 B 会话.
+    /// nil 哨兵值：parameterless init 后首次 sink emit 时（init 默认 currentUser 即 nil）无身份变化 → no-op.
+    private var lastObservedUserId: String?
+
     /// parameterless init —— RootView `@StateObject` 老模式可用; AppState 通过 bind 异步注入.
     /// 按 Story 37.8 / 37.9 / 37.10 round 1 P2 lesson 预防性应用：seed 5 字段全部走 ProfileScaffoldDefaults,
     /// 让 launch / hydrate 前 / reset 后任何走 Real path 都立刻有 mock 占位.
@@ -92,6 +99,12 @@ public final class RealProfileViewModel: ProfileViewModel {
     /// 监听 reset 路径（user == nil）→ 清 transient state（wechatBound / showBindModal / lastToastMessage）回 defaults.
     /// 防 ResetIdentityViewModel.tap() → appState.reset() 后旧用户的 transient UI 状态污染下一会话.
     /// 见 lesson `2026-04-30-real-viewmodel-must-clear-transient-state-on-reset.md`.
+    ///
+    /// round 2 codex review [P2] 修复：判 transient 清理边界改为"任何身份变化"（A→nil / nil→A / A→B）.
+    /// 触发场景：401 cold-start → RootView 注入 handler 调 SessionStore.clear() + AppLaunchStateMachine.triggerColdStart()
+    ///   → bootstrap 重跑 → applyHomeData(用户 B) 直接覆盖 currentUser；**不调** appState.reset()
+    ///   → user 直接 A → B（无 nil 中间态）→ 旧"if user == nil"sink 不触发 → transient 泄漏.
+    /// 见 lesson `2026-05-01-real-viewmodel-transient-must-clear-on-any-identity-change.md`.
     private func subscribeProfile(to appState: AppState) {
         // 用 CombineLatest 让 currentUser + currentPet 任一变化都触发 profile 重新合并.
         Publishers.CombineLatest(appState.$currentUser, appState.$currentPet)
@@ -112,17 +125,22 @@ public final class RealProfileViewModel: ProfileViewModel {
             }
             .store(in: &profileSubscriptions)
 
-        // round 1 codex review [P2] 修复：监听 currentUser → nil（reset 路径）清 transient state.
-        // 仅在 currentUser 由非 nil → nil 的反向边触发清理（首次 nil 启动时 transient 已是 defaults，no-op）.
-        // 不放在 CombineLatest 同 sink 里：profile 派生本身已 fallback 到 defaults；transient 字段语义独立，
-        // 单独订阅让"reset 清 transient"语义更显式（避免日后改 profile sink 顺带搞砸 transient 边界）.
+        // round 1 codex review [P2] 修复（round 2 升级）：监听 currentUser 任何身份变化 → 清 transient state.
+        // 不放在 CombineLatest 同 sink 里：profile 派生本身已 fallback 到 defaults；transient 字段语义独立,
+        // 单独订阅让"reset/换会话清 transient"语义更显式（避免日后改 profile sink 顺带搞砸 transient 边界）.
+        //
+        // round 2 升级：判 transient 清理改为 newUserId != lastObservedUserId（含 A→nil / nil→A / A→B）.
+        // 边界守卫：parameterless init 后首次 sink emit 时 lastObservedUserId == nil 且 newUserId == nil（init 默认）
+        //   → 不触发清理（已是 defaults，no-op；同时也要 update lastObservedUserId 让后续 nil→A hydrate 正常进 fix path）.
         appState.$currentUser
             .sink { [weak self] user in
                 guard let self else { return }
-                if user == nil {
+                let newUserId = user?.id
+                if newUserId != self.lastObservedUserId {
                     self.wechatBound = false
                     self.showBindModal = false
                     self.lastToastMessage = nil
+                    self.lastObservedUserId = newUserId
                 }
             }
             .store(in: &profileSubscriptions)
