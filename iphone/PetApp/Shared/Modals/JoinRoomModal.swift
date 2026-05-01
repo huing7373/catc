@@ -18,6 +18,11 @@
 //   .onChange(of: roomIdInput) 走 iOS 17+ 双参签名 `{ _, newValue in ... }`;
 //   不用 `.onReceive` 监听（与 SwiftUI 主流写法不一致）.
 //
+// review r2 [P2] fix：trim / 64-char / disabled 规则下沉到 `JoinRoomInputNormalizer` 纯函数
+// helper，view body + tests 共用同一函数 —— 测试断言 helper = 断言 view 行为（因为 view 直接
+// 调用 helper），覆盖 .onChange / .disabled / confirm action 三处共用规则的回归.
+// 与 `HomeRoomDispatcher` / `HomePetNameResolver` 同精神.
+//
 // 显式 import Foundation + SwiftUI（防 transitive import；与 MockHomeViewModel round 4 [P0]
 // hardening 同精神）.
 
@@ -99,10 +104,12 @@ public struct JoinRoomModal: View {
                 .autocorrectionDisabled(true)
                 .textInputAutocapitalization(.never)
                 .onChange(of: roomIdInput) { _, newValue in
-                    // 限 64 字符（**仅** 防 UI 渲染异常；不做格式校验，server 决定合法性）.
-                    // iOS 17+ 双参签名：lesson 7 钦定路径.
-                    if newValue.count > 64 {
-                        roomIdInput = String(newValue.prefix(64))
+                    // trim + 限 64 字符 —— 走 JoinRoomInputNormalizer 共享 helper（review r2 [P2] fix）.
+                    // **仅**防 UI 渲染异常 + 让 confirm enable / disabled 判定与 .onChange 同源；
+                    // 不做格式校验，server 决定合法性. iOS 17+ 双参签名：lesson 7 钦定路径.
+                    let normalized = JoinRoomInputNormalizer.normalize(newValue)
+                    if normalized != newValue {
+                        roomIdInput = normalized
                     }
                 }
                 .accessibilityIdentifier("joinRoomInput")
@@ -145,21 +152,11 @@ public struct JoinRoomModal: View {
                 title: "确定加入",
                 variant: .primary,
                 fullWidth: true,
-                isDisabled: trimmedIsEmpty,
-                action: { onConfirm(trimmed) }
+                isDisabled: JoinRoomInputNormalizer.isSubmitDisabled(roomIdInput),
+                action: { onConfirm(JoinRoomInputNormalizer.normalize(roomIdInput)) }
             )
             .accessibilityIdentifier("joinRoomConfirmButton")
         }
-    }
-
-    /// 输入字段 trim 后字符串.
-    private var trimmed: String {
-        roomIdInput.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// trim 后判定是否为空（驱动确定加入按钮 disabled state）.
-    private var trimmedIsEmpty: Bool {
-        trimmed.isEmpty
     }
 }
 

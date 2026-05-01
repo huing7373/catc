@@ -25,6 +25,7 @@
 		19E70B9E9CCA11AAF3EF4933 /* TerminalErrorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202D06A1D0A71F260B651929 /* TerminalErrorView.swift */; };
 		1BC43A46F56D9F43F13E0B37 /* DeviceInfoProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6A56BD4CDD8A553CC16BDF6 /* DeviceInfoProvider.swift */; };
 		1D3F55B63140E9DBDCB65973 /* FriendsViewScaffoldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C38AA4FCA62B305067C947 /* FriendsViewScaffoldTests.swift */; };
+		21AA1CFEC43BA966B28F2CC5 /* JoinRoomInputNormalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E74C1C217ADEC1F96D50C8C /* JoinRoomInputNormalizer.swift */; };
 		28878259543D99E04AD019FB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FDA371AE4C3DBF3E721CDEBB /* Assets.xcassets */; };
 		293098F699F6FD8D8840EAB8 /* PingStubURLProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 998C34BD14F4C0B81C495080 /* PingStubURLProtocol.swift */; };
 		2EE87A95F401756A32D33D02 /* SheetTypeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF98E0209D35C2132ECCD6D9 /* SheetTypeTests.swift */; };
@@ -298,6 +299,7 @@
 		998C34BD14F4C0B81C495080 /* PingStubURLProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PingStubURLProtocol.swift; sourceTree = "<group>"; };
 		9A12FDBB2E4C09B1DEAFF51B /* SampleViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleViewModelTests.swift; sourceTree = "<group>"; };
 		9CAB882C2B95DC68F801BCE7 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		9E74C1C217ADEC1F96D50C8C /* JoinRoomInputNormalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoinRoomInputNormalizer.swift; sourceTree = "<group>"; };
 		A073A54C24C7F9427042535E /* RealProfileViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealProfileViewModel.swift; sourceTree = "<group>"; };
 		A0C6A4A98102338869A350D8 /* ProfileViewScaffoldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileViewScaffoldTests.swift; sourceTree = "<group>"; };
 		A1AB60BB6D5DD6441DA59CF8 /* MockURLSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockURLSession.swift; sourceTree = "<group>"; };
@@ -976,6 +978,7 @@
 		B1F8253D85F11493C85E42B2 /* Modals */ = {
 			isa = PBXGroup;
 			children = (
+				9E74C1C217ADEC1F96D50C8C /* JoinRoomInputNormalizer.swift */,
 				27159F23CEAFE8C5C69ED14B /* JoinRoomModal.swift */,
 			);
 			path = Modals;
@@ -1410,6 +1413,7 @@
 				607D338E5D68CDDBFA7F02CC /* HomeView.swift in Sources */,
 				9284C5618CDC2E6CFD5CBD60 /* HomeViewModel.swift in Sources */,
 				A956B1C741D91F637971B37B /* Icons.swift in Sources */,
+				21AA1CFEC43BA966B28F2CC5 /* JoinRoomInputNormalizer.swift in Sources */,
 				1454F0D64FD971B5C7FFF298 /* JoinRoomModal.swift in Sources */,
 				B5BA34C8B6B95C8532530FB5 /* JoinRoomModalPlaceholder.swift in Sources */,
 				93B6CD7DB27E7A0BC34E7E32 /* KeychainError.swift in Sources */,

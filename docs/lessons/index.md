@@ -114,3 +114,4 @@
 | 2026-05-01 | [Scaffold View 必须经 ViewModel method seam（按钮闭包 / sheet swipe-dismiss 都不能绕过）](2026-05-01-scaffold-bypass-viewmodel-seam.md) | 2 | architecture | `cc4d914` |
 | 2026-05-02 | [SwiftUI `.sheet(onDismiss:)` 在按钮触发关闭时也会跑，必须用 dismissReason tag 做意图分发](2026-05-02-sheet-onDismiss-fires-on-button-close-too.md) | 1 | architecture | `c3f52ab` |
 | 2026-04-30 | [UITest 自补 helper 与 XCTest SDK 方法 redeclaration](2026-04-30-uitest-helper-redeclares-sdk-method.md) | 1 | testing | `c0d7165` |
+| 2026-05-01 | [单测复刻 view 内规则等于零守护：必须把规则下沉到纯函数 helper 与 view 共用](2026-05-01-test-must-share-helper-with-view-not-replicate-rules.md) | 1 | testing | `<pending>` |
