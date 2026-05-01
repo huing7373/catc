@@ -197,6 +197,58 @@ final class HomeUITests: XCTestCase {
         )
     }
 
+    /// Story 37.10 AC8: FriendsScaffoldView 关键 a11y identifier 可定位验证.
+    /// 切到 Friends Tab 后验证主结构 + 2 个 Tab + 至少 1 个 FriendRow + 至少 1 个 friendActionButton 可见.
+    /// 与 Story 37.7 testHomeScaffoldShowsAllSevenAnchors / Story 37.8 testRoomScaffoldShowsAllSevenAnchors / Story 37.9 testWardrobeScaffoldShowsAllAnchors 同模式.
+    /// 本 UITest case 不主动验证完整 join 链路 / 切换 Tab 后 list 内容变化（属"完整流程"测试 — Story 37.12 范围）；
+    /// 仅验证视觉锚存在让 Story 37.13 a11y 总表归并时有 baseline.
+    func testFriendsScaffoldShowsAllAnchors() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
+        app.launch()
+
+        let timeout: TimeInterval = 5
+
+        // 切到 Friends Tab
+        let friendsTab = app.buttons["tab_friends"]
+        XCTAssertTrue(friendsTab.waitForExistence(timeout: timeout), "tab_friends 未找到")
+        friendsTab.tap()
+
+        // 验证主容器
+        XCTAssertTrue(
+            app.descendants(matching: .any)["friendsView"].waitForExistence(timeout: 3),
+            "friendsView 主容器未找到"
+        )
+
+        // 验证添加按钮
+        XCTAssertTrue(
+            app.descendants(matching: .any)["friendsAddButton"].exists,
+            "friendsAddButton 未找到"
+        )
+
+        // 验证 2 个 Tab
+        XCTAssertTrue(
+            app.descendants(matching: .any)["friendsTab_online"].exists,
+            "friendsTab_online 未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["friendsTab_all"].exists,
+            "friendsTab_all 未找到"
+        )
+
+        // 验证至少一个 FriendRow（具体 id 由 mock data 决定，验证 scaffold defaults 中第一个 inRoom 好友 u1）
+        XCTAssertTrue(
+            app.descendants(matching: .any)["friendRow_u1"].exists,
+            "friendRow_u1（夏夏 inRoom）未找到"
+        )
+
+        // 验证 inRoom 好友的"加入"按钮可定位
+        XCTAssertTrue(
+            app.descendants(matching: .any)["friendActionButton_u1"].exists,
+            "friendActionButton_u1（夏夏加入按钮）未找到"
+        )
+    }
+
     /// Story 2.8 round 2 fix：父容器 userInfoBar 在引入 ResetIdentityButton 后，
     /// `.accessibilityElement(children: .contain)` 必须仍保留 `.accessibilityLabel(nickname)`，
     /// 否则 VoiceOver 用户读 home_userInfo 时听不到 nickname summary（只听到子元素列表）。
