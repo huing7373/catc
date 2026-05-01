@@ -1,6 +1,6 @@
 # Story 37.12: JoinRoomModal + 跨屏 join 链路（roomId 字符串 + 直白 UI）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
