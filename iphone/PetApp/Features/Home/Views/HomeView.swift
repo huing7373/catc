@@ -231,16 +231,19 @@ public struct HomeView<ChestSlot: View>: View {
                 // floatUp emoji 浮层（interactionAnimation = .flying(emoji) 时渲染）.
                 //
                 // Story 37.7 codex round 1 [P2] fix：删除常量 `.opacity(0)`（永不可见 bug）.
-                // `.transition(.opacity)` 在 emoji `if` 入/出场切换时会自动 fade in/out；
-                // `.animation(.easeOut(duration: 1.4), value: state.interactionAnimation)` 让此过渡
-                // 跟随 interactionAnimation 切换驱动. HomeView body 末尾 `.onChange` 在 1.4s 后
-                // 自动把 interactionAnimation 重置回 .idle，触发离场动画.
+                // Story 37.7 codex round 5 [P2] fix（"emoji 静态出现不上升"）：
+                //   把 emoji 抽成 `FloatingEmojiView` 子视图，用 `@State` 控制 y offset / opacity，
+                //   `.onAppear` 内 withAnimation 驱动 0 → -110 + 1 → 0；外层 `.id(state.interactionAnimation)`
+                //   让 SwiftUI 在每次 .flying(_, UUID()) 更新时重建子视图 → @State reset → onAppear 重跑动画.
+                //   旧实装只是 emoji 直接落位 -110 + opacity transition，没有动画 position state 变化，所以视觉上
+                //   是静止 emoji fade in/out，没有"升起"效果.
+                //   注：这里 `.id(...)` 用的 explicit identity 不是 nil（与 Story 37.6 r4 lesson 不冲突）；
+                //   AnimationState.flying 每次新 UUID 即新 identity，`.idle` 也是另一个 identity（emoji 视图
+                //   仅在 .flying 分支被构造，.idle 时 if 整支不执行 → 自然卸载）.
                 if case let .flying(emoji, _) = state.interactionAnimation {
-                    Text(emoji)
-                        .font(.system(size: 44))
-                        .offset(y: -110)
+                    FloatingEmojiView(emoji: emoji)
+                        .id(state.interactionAnimation)
                         .transition(.opacity)
-                        .animation(.easeOut(duration: 1.4), value: state.interactionAnimation)
                 }
             }
             .frame(height: 280)
@@ -494,6 +497,42 @@ public enum HomePetNameResolver {
         guard hasHydrated else { return loadingPlaceholder }
         guard let pet = pet else { return noPetPlaceholder }
         return pet.name
+    }
+}
+
+/// catStage floatUp emoji 浮层子视图（Story 37.7 codex round 5 [P2] fix）.
+///
+/// 抽成独立 View 是为了让 `@State` y/opacity 跟随 `.id(state.interactionAnimation)` 重建逻辑：
+///   - 父级在 `.flying(emoji, UUID)` 不同 UUID 切换时，`.id(...)` 让 SwiftUI 视为不同 identity → 重建
+///     `FloatingEmojiView` → 新 @State 实例 → `.onAppear` 触发 → 动画从 y=0 / opacity=1 重新跑到 y=-110 / opacity=0.
+///   - 若不抽离，把 @State 放 HomeView 上，rapid tap 会因为 @State 持久不重置导致动画 jump 或不重放.
+///
+/// 时长 1.4s 与 HomeView.onChange 内 reset timer 1.4s 对齐：动画播完时 ViewModel.interactionAnimation 也被
+/// 重置回 `.idle`，emoji 视图自然卸载（if case 整支不再执行）；中途 rapid tap 触发新 UUID → 立即重建 → 重放.
+public struct FloatingEmojiView: View {
+    public let emoji: String
+
+    /// y 起点 0（cat 中心基线），向上动画到 -110.
+    @State private var animatedY: CGFloat = 0
+    /// opacity 起点 1，淡出到 0.
+    @State private var animatedOpacity: Double = 1.0
+
+    public init(emoji: String) {
+        self.emoji = emoji
+    }
+
+    public var body: some View {
+        Text(emoji)
+            .font(.system(size: 44))
+            .offset(y: animatedY)
+            .opacity(animatedOpacity)
+            .onAppear {
+                // 1.4s easeOut：y 0 → -110、opacity 1 → 0；与 ui_design home.jsx 钦定 floatUp 时长对齐.
+                withAnimation(.easeOut(duration: 1.4)) {
+                    animatedY = -110
+                    animatedOpacity = 0
+                }
+            }
     }
 }
 

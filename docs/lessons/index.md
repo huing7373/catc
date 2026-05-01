@@ -103,3 +103,4 @@
 | 2026-04-30 | [SwiftUI `onChange(of:)` Equatable 重放契约 + `Task.sleep` 重置 timer 必须 cancel](2026-04-30-swiftui-onchange-equatable-and-stale-task-cancel.md) | 2 | architecture | `<pending>` |
 | 2026-04-30 | [Real ViewModel 的派生字段必须 override hydrate 入口 & 空 Text overlay 是 VoiceOver 陷阱](2026-04-30-realhomeviewmodel-greeting-and-empty-text-overlay.md) | 2 | architecture, a11y, ui | `<pending>` |
 | 2026-04-30 | [`@Published` 派生字段必须订阅 publisher（hydrate 入口 override 不够覆盖 reset 路径）+ `@Published` 用 import 必须显式](2026-04-30-published-derived-state-needs-publisher-subscription.md) | 2 | architecture, dependency | `<pending>` |
+| 2026-04-30 | [SwiftUI 浮动动画必须由 @State position 变化驱动 + `.id()` 触发子视图重建（与 round 4 `.id(nil)` 共享 identity 陷阱不冲突）](2026-04-30-swiftui-floating-emoji-needs-state-driven-position.md) | 1 | ui-fidelity, architecture | `<pending>` |

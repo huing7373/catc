@@ -13,10 +13,16 @@
 //   - .idle == .idle → true
 //   - .flying(e1, id1) == .flying(e2, id2) → e1 == e2 && id1 == id2
 //   - 不同 UUID 即视为不同 value（即便 emoji 相同）—— 这是连点重放的核心保证.
+//
+// Story 37.7 codex round 5 [P2] fix：增加 `Hashable` conformance.
+//   原因：HomeView 用 `.id(state.interactionAnimation)` 让 SwiftUI 把每次新 .flying(_, UUID()) 视为
+//   不同 explicit identity → 重建 FloatingEmojiView → @State reset → 动画重放.
+//   `View.id<ID: Hashable>(_:)` 要求 ID: Hashable，关联值 String + UUID 都已 Hashable，编译器可自动合成.
+//   合成的 hash 实装与 Equatable 实装语义一致：相同 case + 相同关联值 → 相同 hash；不同 UUID → 不同 hash.
 
 import Foundation
 
-public enum AnimationState: Equatable {
+public enum AnimationState: Hashable {
     /// 静止态，不渲染浮动 emoji.
     case idle
 

@@ -246,4 +246,29 @@ final class HomeViewScaffoldTests: XCTestCase {
             "Story 37.7 codex round 4 [P3]: reset 后 greeting 必须回 placeholder（不残留旧 pet 名）"
         )
     }
+
+    // MARK: - case#11 type-level: Story 37.7 codex round 5 [P2] FloatingEmojiView 可构造
+
+    /// Story 37.7 codex round 5 [P2] guard test：catStage 浮层 emoji 子视图必须保持可构造.
+    ///
+    /// 背景：round 5 把内联 `Text(emoji).offset(y: -110).transition(.opacity)`
+    /// 重构成独立 `FloatingEmojiView` struct + `@State animatedY/animatedOpacity` + `.onAppear` 内
+    /// `withAnimation` 驱动 0 → -110 / 1 → 0 上升淡出动画；外层 `.id(state.interactionAnimation)` 让
+    /// 每次 .flying(_, UUID()) 重建子视图 → @State reset → onAppear 重跑 → 动画重放.
+    /// 旧实装把 emoji 直接落位 -110 + opacity transition：用户看到的是静止 emoji fade in/out，没有"升起"效果.
+    ///
+    /// 视觉断言被 ADR-0002 §3.1 禁用 → 本 case 仅做 type-level 守护：
+    ///   - 构造 `FloatingEmojiView(emoji:)` 不 crash（init 签名稳定）.
+    ///   - emoji 字段值正确（防未来重构误把字段改 private 或丢字段）.
+    /// 若未来有人删掉这个 view / 改名 / 改 init 签名，本 case 立刻编译 fail.
+    func testFloatingEmojiViewIsConstructableAtTypeLevel() {
+        let view = FloatingEmojiView(emoji: "🍥")
+        XCTAssertEqual(view.emoji, "🍥", "FloatingEmojiView 必须暴露 emoji 字段（type-level 契约）")
+
+        // 三个 actionRow emoji 都能构造（防字段类型误改成枚举或 enum-only 限制）.
+        let pet = FloatingEmojiView(emoji: "💕")
+        let play = FloatingEmojiView(emoji: "⭐")
+        XCTAssertEqual(pet.emoji, "💕")
+        XCTAssertEqual(play.emoji, "⭐")
+    }
 }
