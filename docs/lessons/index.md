@@ -109,4 +109,4 @@
 | 2026-04-30 | [Room host 名不得派生自 appState.currentPet（local 猫 ≠ room host 猫）](2026-04-30-room-host-name-must-not-derive-from-local-current-pet.md) | 1 | architecture | `4ee34b3` |
 | 2026-04-30 | [Real 子类 override abstract method 的"占位实装"必须 mutate state，不能只 log（37-7 lesson 复犯）](2026-04-30-real-viewmodel-override-placeholder-must-mutate-state.md) | 1 | architecture, swift, ui-state | `7094e69` |
 | 2026-04-30 | [Spec 边界灰区的 fallback 路径在 review 触发时必须立即兑现 epic AC](2026-04-30-spec-boundary-grey-area-fallback-must-honor-epic-ac-when-review-flags-it.md) | 1 | architecture, ui-fidelity, process | `b87d373` |
-| 2026-04-30 | [Real ViewModel transient state 必须在 appState reset 路径同步清回 defaults（不只重算派生字段）](2026-04-30-real-viewmodel-must-clear-transient-state-on-reset.md) | 1 | architecture | `<pending>` |
+| 2026-04-30 | [Real ViewModel transient state 必须在 appState reset 路径同步清回 defaults（不只重算派生字段）](2026-04-30-real-viewmodel-must-clear-transient-state-on-reset.md) | 1 | architecture | `2929d78` |
