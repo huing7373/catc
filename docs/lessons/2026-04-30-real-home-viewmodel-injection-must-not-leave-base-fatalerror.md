@@ -3,7 +3,7 @@ title: 引入 abstract method base class 时必须同步迁移所有 caller，�
 date: 2026-04-30
 severity: 1
 category: architecture, swift, refactor-discipline
-commit: <pending>
+commit: 5f439a4
 related_stories: [37-7-homeview-scaffold]
 ---
 

@@ -2,7 +2,7 @@
 date: 2026-04-30
 source_review: codex review (round 2) — file: /tmp/epic-loop-review-37-7-r2.md
 story: 37-7-homeview-scaffold
-commit: <pending>
+commit: e8bb0cb
 lesson_count: 2
 ---
 

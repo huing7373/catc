@@ -2,7 +2,7 @@
 date: 2026-04-30
 source_review: codex round 5 review of Story 37.7 (HomeView Scaffold) — file: /tmp/epic-loop-review-37-7-r5.md
 story: 37-7-homeview-scaffold
-commit: <pending>
+commit: 80d0ee6
 lesson_count: 1
 ---
 
