@@ -74,6 +74,17 @@ struct RootView: View {
     /// 用户点邀请/加入按钮即 crash.
     @StateObject private var friendsViewModel: FriendsViewModel = RealFriendsViewModel()
 
+    /// Story 37.11 AC5：ProfileScaffoldView 注入入口；与 homeViewModel / roomViewModel /
+    /// wardrobeViewModel / friendsViewModel 同模式 @StateObject 持有 + .environmentObject 注入子树.
+    /// 静态类型 `ProfileViewModel`（基类）让 SwiftUI `@StateObject` 老模式可用；AppState 通过
+    /// `.onAppear` 同步注入（与 RealRoomViewModel.bind / RealWardrobeViewModel.bind /
+    /// RealFriendsViewModel.bind 同精神，避免 launch-time race；Story 37.8 round 2 [P2] lesson 钦定路径）.
+    /// 实例类型 `RealProfileViewModel`（生产实装）—— Story 37.7 round 1 [P1] lesson 预防性应用,
+    /// 不能用裸基类 ProfileViewModel()：基类 5 个 abstract method（onWeChatCardTap /
+    /// onWeChatBindConfirmTap / onWeChatModalDismissTap / onMenuTap / onCollectionViewAllTap）
+    /// 是 fatalError，用户点任一按钮即 crash.
+    @StateObject private var profileViewModel: ProfileViewModel = RealProfileViewModel()
+
     /// Story 37.4 AC3：全局 AppState 单 source of truth；通过 `.environmentObject(appState)` 注入子树.
     /// 与 coordinator / homeViewModel 同级 @StateObject 持有；HomeViewModel.bind(appState:) 在 .task 内调
     /// 形成 weak 反向引用，让 applyHomeData(_:) 写入 AppState（不再写自身 homeData 字段）.
@@ -103,6 +114,7 @@ struct RootView: View {
                     roomViewModel: roomViewModel,
                     wardrobeViewModel: wardrobeViewModel,
                     friendsViewModel: friendsViewModel,
+                    profileViewModel: profileViewModel,
                     appState: appState,
                     currentTheme: currentTheme,
                     sessionStore: container.sessionStore,
@@ -166,6 +178,13 @@ struct RootView: View {
             // （按 Story 37.8 round 2 [P2] lesson 钦定路径，**不**放 `.task`）.
             if let realFriendsVM = friendsViewModel as? RealFriendsViewModel {
                 realFriendsVM.bind(appState: appState)
+            }
+            // Story 37.11 AC5 Task 5.4：与 RealRoomViewModel.bind / RealWardrobeViewModel.bind /
+            // RealFriendsViewModel.bind 同精神，`.onAppear` 同步路径让 RealProfileViewModel 在
+            // 第一次 paint 之前持有 AppState 引用（按 Story 37.8 round 2 [P2] lesson 钦定路径，
+            // **不**放 `.task`）.
+            if let realProfileVM = profileViewModel as? RealProfileViewModel {
+                realProfileVM.bind(appState: appState)
             }
             ensureLaunchStateMachineWired()
         }
@@ -316,6 +335,10 @@ private struct LaunchedContentView: View {
     /// FriendsView 通过 @EnvironmentObject var friendsViewModel: FriendsViewModel 取出后传给
     /// FriendsScaffoldView(state:) 子视图.
     let friendsViewModel: FriendsViewModel
+    /// Story 37.11 AC5：接收 RootView 的 ProfileViewModel，注入到 .ready 子树 environmentObject.
+    /// ProfileView 通过 @EnvironmentObject var profileViewModel: ProfileViewModel 取出后传给
+    /// ProfileScaffoldView(state:) 子视图.
+    let profileViewModel: ProfileViewModel
     /// Story 37.4 AC3：接收 RootView 的 AppState，注入到 .ready 子树 environmentObject.
     let appState: AppState
     /// Story 37.5 AC8: 接收 RootView 的 ThemeName，转 Theme 实例后注入 .ready 子树 environment(\.theme).
@@ -332,6 +355,7 @@ private struct LaunchedContentView: View {
         roomViewModel: RoomViewModel,
         wardrobeViewModel: WardrobeViewModel,
         friendsViewModel: FriendsViewModel,
+        profileViewModel: ProfileViewModel,
         appState: AppState,
         currentTheme: ThemeName,
         sessionStore: SessionStore?,
@@ -345,6 +369,7 @@ private struct LaunchedContentView: View {
         self.roomViewModel = roomViewModel
         self.wardrobeViewModel = wardrobeViewModel
         self.friendsViewModel = friendsViewModel
+        self.profileViewModel = profileViewModel
         self.appState = appState
         self.currentTheme = currentTheme
         self.sessionStore = sessionStore
@@ -366,6 +391,7 @@ private struct LaunchedContentView: View {
                     .environmentObject(roomViewModel)
                     .environmentObject(wardrobeViewModel)
                     .environmentObject(friendsViewModel)
+                    .environmentObject(profileViewModel)
                     .environmentObject(appState)
                     .environment(\.theme, currentTheme.theme)
                     .environment(\.sessionStore, sessionStore)

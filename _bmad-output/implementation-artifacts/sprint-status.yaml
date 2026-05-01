@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-04-30 (story 37-10 done)
+# last_updated: 2026-04-30 (story 37-11 review)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -103,7 +103,7 @@ development_status:
   37-8-roomview-scaffold: done
   37-9-wardrobeview-scaffold: done
   37-10-friendsview-scaffold: done
-  37-11-profileview-scaffold: backlog
+  37-11-profileview-scaffold: review
   37-12-joinroommodal-跨屏跳转: backlog
   37-13-accessibility-identifier-总表: backlog
   37-14-design-package-白名单: backlog

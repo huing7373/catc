@@ -249,6 +249,52 @@ final class HomeUITests: XCTestCase {
         )
     }
 
+    /// Story 37.11 AC8: ProfileScaffoldView 关键 a11y identifier 可定位验证.
+    /// 切到 Profile Tab 后验证主结构 + headerCard / statsCard / wechatCard / 4 个菜单 / Modal 触发链路可定位.
+    /// 与 Story 37.7 / 37.8 / 37.9 / 37.10 同模式.
+    func testProfileScaffoldShowsAllAnchors() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
+        app.launch()
+
+        let timeout: TimeInterval = 5
+
+        // 切到 Profile Tab
+        let profileTab = app.buttons["tab_profile"]
+        XCTAssertTrue(profileTab.waitForExistence(timeout: timeout), "tab_profile 未找到")
+        profileTab.tap()
+
+        // 验证主容器
+        XCTAssertTrue(
+            app.descendants(matching: .any)["profileView"].waitForExistence(timeout: 3),
+            "profileView 主容器未找到"
+        )
+
+        // 验证 5 区块关键锚
+        XCTAssertTrue(app.descendants(matching: .any)["profileHeaderCard"].exists, "profileHeaderCard 未找到")
+        XCTAssertTrue(app.descendants(matching: .any)["profileStatsCard"].exists, "profileStatsCard 未找到")
+        XCTAssertTrue(app.descendants(matching: .any)["profileWeChatCard"].exists, "profileWeChatCard（未绑定卡）未找到")
+
+        // 验证 4 个菜单项
+        for item in ["achievements", "messages", "favorites", "settings"] {
+            XCTAssertTrue(
+                app.descendants(matching: .any)["profileMenu_\(item)"].exists,
+                "profileMenu_\(item) 未找到"
+            )
+        }
+
+        // 验证 BindWechatModal 触发链路：点未绑定卡 → modal 出现
+        app.descendants(matching: .any)["profileWeChatCard"].firstMatch.tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["profileWeChatModal"].waitForExistence(timeout: 3),
+            "profileWeChatModal 未在 wechatCard tap 后出现"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["profileWeChatBindButton"].exists,
+            "profileWeChatBindButton 未在 modal 内找到"
+        )
+    }
+
     /// Story 2.8 round 2 fix：父容器 userInfoBar 在引入 ResetIdentityButton 后，
     /// `.accessibilityElement(children: .contain)` 必须仍保留 `.accessibilityLabel(nickname)`，
     /// 否则 VoiceOver 用户读 home_userInfo 时听不到 nickname summary（只听到子元素列表）。

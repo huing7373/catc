@@ -121,6 +121,8 @@ struct MainTabView_Previews: PreviewProvider {
             .environmentObject(MockWardrobeViewModel() as WardrobeViewModel)
             // Story 37.10 AC5 Task 5.5: FriendsView 子树需要 friendsViewModel；Preview 也注入 Mock.
             .environmentObject(MockFriendsViewModel() as FriendsViewModel)
+            // Story 37.11 AC5 Task 5.5: ProfileView 子树需要 profileViewModel；Preview 也注入 Mock.
+            .environmentObject(MockProfileViewModel() as ProfileViewModel)
     }
 }
 #endif
