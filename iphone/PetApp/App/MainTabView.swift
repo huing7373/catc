@@ -117,6 +117,8 @@ struct MainTabView_Previews: PreviewProvider {
             .environmentObject(AppCoordinator())
             .environmentObject(AppState())
             .environmentObject(MockHomeViewModel() as HomeViewModel)
+            // Story 37.9 AC6: WardrobeView 子树需要 wardrobeViewModel；Preview 也注入 Mock.
+            .environmentObject(MockWardrobeViewModel() as WardrobeViewModel)
     }
 }
 #endif

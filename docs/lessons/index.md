@@ -107,3 +107,4 @@
 | 2026-04-30 | [Real ViewModel 的占位 init 必须 seed UI Scaffold 全部字段（不能"等 sink 派发"）](2026-04-30-real-viewmodel-init-must-seed-scaffold-defaults.md) | 1 | architecture | `32a9d3c` |
 | 2026-04-30 | [RootView 持有的 ViewModel 必须在第一次 paint 之前同步 bind AppState](2026-04-30-onappear-vs-task-sync-bind-before-first-paint.md) | 1 | architecture | `7556329` |
 | 2026-04-30 | [Room host 名不得派生自 appState.currentPet（local 猫 ≠ room host 猫）](2026-04-30-room-host-name-must-not-derive-from-local-current-pet.md) | 1 | architecture | `4ee34b3` |
+| 2026-04-30 | [Real 子类 override abstract method 的"占位实装"必须 mutate state，不能只 log（37-7 lesson 复犯）](2026-04-30-real-viewmodel-override-placeholder-must-mutate-state.md) | 1 | architecture, swift, ui-state | `<pending>` |

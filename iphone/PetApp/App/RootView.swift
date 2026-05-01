@@ -56,6 +56,14 @@ struct RootView: View {
     /// 调 appState.setCurrentRoomId(nil) 切回 idle 不再 silent no-op.
     @StateObject private var roomViewModel: RoomViewModel = RealRoomViewModel()
 
+    /// Story 37.9 AC5：WardrobeScaffoldView 注入入口；与 homeViewModel / roomViewModel 同模式
+    /// @StateObject 持有 + .environmentObject 注入子树.
+    /// 静态类型 `WardrobeViewModel`（基类）让 SwiftUI `@StateObject` 老模式可用；AppState 通过
+    /// `.onAppear` 同步注入（与 RealRoomViewModel.bind 同精神，避免 launch-time race）.
+    /// 实例类型 `RealWardrobeViewModel`（生产实装）—— Story 37.7 round 1 [P1] lesson 预防性应用,
+    /// 不能用裸基类 WardrobeViewModel()：基类 onEquipTap 是 fatalError，用户点装备按钮即 crash.
+    @StateObject private var wardrobeViewModel: WardrobeViewModel = RealWardrobeViewModel()
+
     /// Story 37.4 AC3：全局 AppState 单 source of truth；通过 `.environmentObject(appState)` 注入子树.
     /// 与 coordinator / homeViewModel 同级 @StateObject 持有；HomeViewModel.bind(appState:) 在 .task 内调
     /// 形成 weak 反向引用，让 applyHomeData(_:) 写入 AppState（不再写自身 homeData 字段）.
@@ -83,6 +91,7 @@ struct RootView: View {
                     coordinator: coordinator,
                     homeViewModel: homeViewModel,
                     roomViewModel: roomViewModel,
+                    wardrobeViewModel: wardrobeViewModel,
                     appState: appState,
                     currentTheme: currentTheme,
                     sessionStore: container.sessionStore,
@@ -134,6 +143,12 @@ struct RootView: View {
             homeViewModel.bind(appState: appState)
             if let realRoomVM = roomViewModel as? RealRoomViewModel {
                 realRoomVM.bind(appState: appState)
+            }
+            // Story 37.9 AC5 Task 5.4：与 RealRoomViewModel.bind 同精神，
+            // `.onAppear` 同步路径让 RealWardrobeViewModel 在第一次 paint 之前持有 AppState 引用
+            // （按 Story 37.8 round 2 [P2] lesson 钦定路径，**不**放 `.task`）.
+            if let realWardrobeVM = wardrobeViewModel as? RealWardrobeViewModel {
+                realWardrobeVM.bind(appState: appState)
             }
             ensureLaunchStateMachineWired()
         }
@@ -276,6 +291,10 @@ private struct LaunchedContentView: View {
     /// Story 37.8 AC5：接收 RootView 的 RoomViewModel，注入到 .ready 子树 environmentObject.
     /// HomeContainerRoomViewBridge 通过 @EnvironmentObject var roomViewModel: RoomViewModel 取出.
     let roomViewModel: RoomViewModel
+    /// Story 37.9 AC5：接收 RootView 的 WardrobeViewModel，注入到 .ready 子树 environmentObject.
+    /// WardrobeView 通过 @EnvironmentObject var wardrobeViewModel: WardrobeViewModel 取出后传给
+    /// WardrobeScaffoldView(state:) 子视图.
+    let wardrobeViewModel: WardrobeViewModel
     /// Story 37.4 AC3：接收 RootView 的 AppState，注入到 .ready 子树 environmentObject.
     let appState: AppState
     /// Story 37.5 AC8: 接收 RootView 的 ThemeName，转 Theme 实例后注入 .ready 子树 environment(\.theme).
@@ -290,6 +309,7 @@ private struct LaunchedContentView: View {
         coordinator: AppCoordinator,
         homeViewModel: HomeViewModel,
         roomViewModel: RoomViewModel,
+        wardrobeViewModel: WardrobeViewModel,
         appState: AppState,
         currentTheme: ThemeName,
         sessionStore: SessionStore?,
@@ -301,6 +321,7 @@ private struct LaunchedContentView: View {
         self.coordinator = coordinator
         self.homeViewModel = homeViewModel
         self.roomViewModel = roomViewModel
+        self.wardrobeViewModel = wardrobeViewModel
         self.appState = appState
         self.currentTheme = currentTheme
         self.sessionStore = sessionStore
@@ -320,6 +341,7 @@ private struct LaunchedContentView: View {
                     .environmentObject(coordinator)
                     .environmentObject(homeViewModel)
                     .environmentObject(roomViewModel)
+                    .environmentObject(wardrobeViewModel)
                     .environmentObject(appState)
                     .environment(\.theme, currentTheme.theme)
                     .environment(\.sessionStore, sessionStore)

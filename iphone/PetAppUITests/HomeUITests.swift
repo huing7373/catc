@@ -129,6 +129,74 @@ final class HomeUITests: XCTestCase {
         )
     }
 
+    /// Story 37.9 AC8: WardrobeScaffoldView 关键 a11y identifier 可定位验证.
+    /// 切到 Wardrobe Tab 后验证主结构 + 5 个分类 Tab + 装备按钮 + 合成按钮可见.
+    /// 与 Story 37.7 testHomeScaffoldShowsAllSevenAnchors / Story 37.8 testRoomScaffoldShowsAllSevenAnchors 同模式.
+    /// 本 UITest case 不主动验证装备/卸下完整链路 / 切换分类后 grid 内容变化（属"完整流程"测试 — 节点 8/9 范围）；
+    /// 仅验证视觉锚存在让 Story 37.13 a11y 总表归并时有 baseline.
+    func testWardrobeScaffoldShowsAllAnchors() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
+        app.launch()
+
+        let timeout: TimeInterval = 5
+
+        // 切到 Wardrobe Tab
+        let wardrobeTab = app.buttons["tab_wardrobe"]
+        XCTAssertTrue(wardrobeTab.waitForExistence(timeout: timeout), "tab_wardrobe 未找到")
+        wardrobeTab.tap()
+
+        // 验证主容器
+        XCTAssertTrue(
+            app.descendants(matching: .any)["wardrobeView"].waitForExistence(timeout: 3),
+            "wardrobeView 主容器未找到"
+        )
+
+        // 验证钻石 + 合成入口
+        XCTAssertTrue(
+            app.descendants(matching: .any)["wardrobeDiamondCount"].exists,
+            "wardrobeDiamondCount 区块未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["wardrobeComposeEntry"].exists,
+            "wardrobeComposeEntry 按钮未找到"
+        )
+
+        // 验证 5 个分类 Tab
+        XCTAssertTrue(
+            app.descendants(matching: .any)["wardrobeCategory_hat"].exists,
+            "wardrobeCategory_hat 未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["wardrobeCategory_bow"].exists,
+            "wardrobeCategory_bow 未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["wardrobeCategory_scarf"].exists,
+            "wardrobeCategory_scarf 未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["wardrobeCategory_outfit"].exists,
+            "wardrobeCategory_outfit 未找到"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["wardrobeCategory_bg"].exists,
+            "wardrobeCategory_bg 未找到"
+        )
+
+        // 验证装备按钮
+        XCTAssertTrue(
+            app.descendants(matching: .any)["wardrobeEquipButton"].exists,
+            "wardrobeEquipButton 未找到"
+        )
+
+        // 验证 grid 至少有一个 wardrobeItem_*（默认 hat 分类应显示 h1 贝雷帽）
+        XCTAssertTrue(
+            app.descendants(matching: .any)["wardrobeItem_h1"].exists,
+            "默认 hat 分类应显示 wardrobeItem_h1"
+        )
+    }
+
     /// Story 2.8 round 2 fix：父容器 userInfoBar 在引入 ResetIdentityButton 后，
     /// `.accessibilityElement(children: .contain)` 必须仍保留 `.accessibilityLabel(nickname)`，
     /// 否则 VoiceOver 用户读 home_userInfo 时听不到 nickname summary（只听到子元素列表）。
