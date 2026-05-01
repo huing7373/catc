@@ -25,12 +25,27 @@
 //   生产用户永远看不到自己宠物名字. override 链路：先调 super.applyHomeData(data) 写 AppState +
 //   置 hasLoadedHome flag,再读 self.appState.currentPet.name 拼 greeting. AppState 在 super
 //   调用内已 hydrate,此处读为最新值.
+//
+// Story 37.7 codex round 4 [P3] fix：把 greeting 派生从 applyHomeData(_:) 一次性回调改成
+//   订阅 appState.$currentPet 的 Combine sink —— 解决 round 3 留下的 reset 后 greeting stale 问题.
+//   ResetIdentityViewModel.tap() → appState.reset() 把 currentPet 置 nil；老 round 3 实装只在
+//   applyHomeData 入口派生 greeting，reset 路径不经过 applyHomeData → header 仍显示旧 pet name 直到
+//   下一次 hydrate. round 4 改成 reactive sink：appState.$currentPet 任何变化（hydrate / reset /
+//   单独 mutate）都自动重新派生 greeting，不再依赖单一入口.
+//   sink 在 init(appState:) 与 bind(appState:) 两路 hookup（与 base bind 一次性短路同步）.
 
 import Foundation
+import Combine
 import os.log
 
 @MainActor
 public final class RealHomeViewModel: HomeViewModel {
+
+    /// Story 37.7 codex round 4 [P3] fix：订阅 appState.$currentPet 的 sink 句柄.
+    /// 仅本子类持有；基类 self.appState 是 private 不可见. sink hookup 时机：
+    ///   - init(appState:) 路径：构造完成后立即订阅
+    ///   - bind(appState:) 路径：override 内 super 注入完后订阅（仅首次生效，防多次 .task 重订阅）
+    private var greetingSubscription: AnyCancellable?
 
     /// Story 37.7 codex round 1 [P1] fix：parameterless init 让 RootView `@StateObject` 老模式可用.
     /// AppState 通过 `bind(appState:)` 在 `.task` 内异步注入（与 pingUseCase / loadHomeUseCase 同模式）.
@@ -44,6 +59,38 @@ public final class RealHomeViewModel: HomeViewModel {
     public init(appState: AppState) {
         super.init(appState: appState)
         configureMockDefaults()
+        // 构造路径已注入 AppState；立即订阅 currentPet 变化派生 greeting.
+        subscribeGreeting(to: appState)
+    }
+
+    /// Story 37.7 codex round 4 [P3] fix：override base bind(appState:) 在异步注入路径也 hookup sink.
+    /// 与 base 一次性 guard 同节奏（greetingSubscription == nil 表 sink 未建立 → 首次 bind 才订阅）.
+    public override func bind(appState: AppState) {
+        let alreadySubscribed = greetingSubscription != nil
+        super.bind(appState: appState)
+        guard !alreadySubscribed else { return }
+        subscribeGreeting(to: appState)
+    }
+
+    /// 订阅 appState.$currentPet —— 任何 hydrate / reset / 单独 mutate 都派生 greeting.
+    /// 派生公式：pet 有名字 → "{petName}，想你啦 ♥"；pet=nil 或空名 → 老 placeholder "想你啦 ♥".
+    /// 用 sink 而非 assign(to:on:)：sink closure 持 weak self 避免 AppState ↔ ViewModel 循环引用.
+    ///
+    /// **关键 timing 细节**：`@Published` projected publisher 发的是 *willSet* 时机的**新值参数**
+    /// （Apple docs 写 "The publisher emits before the value is changed." 但 closure 参数是 newValue,
+    /// 即将赋上去的值，可直接用. 见 swift-evolution SE-0258 / Combine.Published.publisher 文档）.
+    /// 所以这里直接用 `pet` 参数即可，不需要再 `receive(on:)` + 重读 self.appState.
+    /// 不加 receive(on:) 让 unit test 在同 runloop tick 内看到 greeting 更新（无 dispatch 异步缝隙）.
+    private func subscribeGreeting(to appState: AppState) {
+        greetingSubscription = appState.$currentPet
+            .sink { [weak self] pet in
+                guard let self else { return }
+                if let petName = pet?.name, !petName.isEmpty {
+                    self.greeting = "\(petName)，想你啦 ♥"
+                } else {
+                    self.greeting = "想你啦 ♥"
+                }
+            }
     }
 
     /// 视觉初值统一入口（两路 init 都调；避免分支漂移）.
@@ -84,19 +131,8 @@ public final class RealHomeViewModel: HomeViewModel {
         self.interactionAnimation = .flying(emoji: "⭐", id: UUID())
     }
 
-    // MARK: - Story 37.7 codex round 3 [P2-A] fix: greeting 从 hydrated AppState.currentPet.name 派生
-
-    /// 在基类 applyHomeData(_:) 写完 AppState 后,从 currentPet.name 拼 greeting.
-    /// 链路：bootstrap → ViewModel.applyHomeData(data) → super.applyHomeData(data) 写 self.appState
-    ///   + 置 hasLoadedHome=true → 本 override 读 self.appState?.currentPet?.name 派生 greeting.
-    /// 派生公式：pet 有名字 → "{petName}，想你啦 ♥"；无名字 / pet=nil → 老 placeholder "想你啦 ♥".
-    /// 见 docs/lessons/2026-04-30-realhomeviewmodel-greeting-derives-from-appstate.md.
-    public override func applyHomeData(_ data: HomeData) {
-        super.applyHomeData(data)
-        if let petName = data.pet?.name, !petName.isEmpty {
-            self.greeting = "\(petName)，想你啦 ♥"
-        } else {
-            self.greeting = "想你啦 ♥"
-        }
-    }
+    // Story 37.7 codex round 4 [P3] fix：移除老 round 3 override applyHomeData(_:).
+    // 老路径仅在 hydrate 入口派生 greeting → reset() 把 currentPet 置 nil 不经 applyHomeData →
+    // greeting 残留旧 pet 名. 改为 subscribeGreeting(to:) 订阅 currentPet 任何变化（含 reset → nil）,
+    // applyHomeData 入口的派生工作已被 sink 自动覆盖（applyHomeData 内 super 写 currentPet → sink 触发）.
 }

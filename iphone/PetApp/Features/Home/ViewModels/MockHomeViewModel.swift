@@ -6,8 +6,14 @@
 //   - override 5 个 abstract method 仅 print log（不调任何 UseCase / AppState mutation）
 //   - 暴露 `invocations: [Invocation]` 数组让单元测试断言点击触发
 //   - **不**依赖 AppState（Mock 路径走纯 ViewModel-only 数据）
+//
+// Story 37.7 codex round 4 [P0-hardening] fix：显式 `import Combine` —— 本文件用 `@Published`.
+// 当前 iOS SDK transitive import 让 `@Published` 编译 OK（基线 build 271/271 pass，[P0] codex 报误），
+// 但跨 SDK / 跨 module 不保证 transitive；显式 import 更 future-proof,
+// 与 Story 2.2 lesson docs/lessons/2026-04-25-swift-explicit-import-combine.md 同精神.
 
 import Foundation
+import Combine
 import os.log
 
 @MainActor

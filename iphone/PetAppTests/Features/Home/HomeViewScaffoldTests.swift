@@ -215,4 +215,35 @@ final class HomeViewScaffoldTests: XCTestCase {
         // 同时验证 super 链路也跑了：loadingState 应为 .loaded（基类 applyHomeData 必行）.
         XCTAssertEqual(vm.loadingState, .loaded, "super.applyHomeData 必须被调（loadingState 应转 .loaded）")
     }
+
+    // MARK: - case#10 happy: Story 37.7 codex round 4 [P3] reset 后 greeting 回 placeholder
+
+    /// Story 37.7 codex round 4 [P3] guard test：appState.reset() 把 currentPet 置 nil 后，
+    /// RealHomeViewModel.greeting 必须立即回 placeholder "想你啦 ♥"，不残留 hydrate 时的 pet 名.
+    ///
+    /// 老 round 3 bug：greeting 派生只在 applyHomeData(_:) 入口（一次性）；
+    /// ResetIdentityViewModel.tap() → appState.reset() 把 currentPet → nil 不经过 applyHomeData,
+    /// header 仍显示旧 pet name 直到下一次 hydrate.
+    /// round 4 修复：subscribeGreeting(to:) 订阅 appState.$currentPet，任何变化（含 reset → nil）
+    /// 都自动重派 greeting.
+    func testRealHomeViewModelGreetingFallsBackOnReset() {
+        let appState = AppState()
+        let vm = RealHomeViewModel(appState: appState)
+
+        // 1. hydrate：appState.currentPet 设为 "测试猫" → sink 触发 → greeting 应反映 pet.name.
+        appState.applyHomeData(makeSampleHomeData())
+        XCTAssertEqual(
+            vm.greeting,
+            "测试猫，想你啦 ♥",
+            "hydrate 后 sink 应自动重派 greeting"
+        )
+
+        // 2. reset：appState.reset() 把 currentPet 置 nil → sink 触发 → greeting 必须回 placeholder.
+        appState.reset()
+        XCTAssertEqual(
+            vm.greeting,
+            "想你啦 ♥",
+            "Story 37.7 codex round 4 [P3]: reset 后 greeting 必须回 placeholder（不残留旧 pet 名）"
+        )
+    }
 }

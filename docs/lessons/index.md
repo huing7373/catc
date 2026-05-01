@@ -102,3 +102,4 @@
 | 2026-04-30 | [引入 abstract method base class 时必须同步迁移所有 caller，不能留 fatalError 在 production 注入路径](2026-04-30-real-home-viewmodel-injection-must-not-leave-base-fatalerror.md) | 1 | architecture, swift, refactor-discipline | `5f439a4` |
 | 2026-04-30 | [SwiftUI `onChange(of:)` Equatable 重放契约 + `Task.sleep` 重置 timer 必须 cancel](2026-04-30-swiftui-onchange-equatable-and-stale-task-cancel.md) | 2 | architecture | `<pending>` |
 | 2026-04-30 | [Real ViewModel 的派生字段必须 override hydrate 入口 & 空 Text overlay 是 VoiceOver 陷阱](2026-04-30-realhomeviewmodel-greeting-and-empty-text-overlay.md) | 2 | architecture, a11y, ui | `<pending>` |
+| 2026-04-30 | [`@Published` 派生字段必须订阅 publisher（hydrate 入口 override 不够覆盖 reset 路径）+ `@Published` 用 import 必须显式](2026-04-30-published-derived-state-needs-publisher-subscription.md) | 2 | architecture, dependency | `<pending>` |
