@@ -30,6 +30,24 @@ public struct ProfileScaffoldView: View {
     /// Story 37.5: 主题 token 取值入口；RootView 注入 `.environment(\.theme, currentTheme.theme)`.
     @Environment(\.theme) private var theme
 
+    /// Story 37.11 round 4 codex review [P2] 修复：跟踪 sheet 关闭原因，分发 onDismiss 闭包行为.
+    ///
+    /// **背景**：SwiftUI `.sheet(isPresented:onDismiss:)` 在 sheet disappear 时**总是**跑 onDismiss 闭包，
+    /// 不区分关闭路径。round 3 修法（onDismiss 无脑调 `state.onWeChatModalDismissTap()`）在 3 个路径里有 2 个错：
+    ///   1. "稍后再说" 按钮 → 闭包先调 dismiss method（写 showBindModal=false）→ SwiftUI 跑 onDismiss → **再调一次 dismiss**（错：fired twice）
+    ///   2. "绑定微信" confirm 按钮 → 闭包调 confirm method（写 wechatBound=true + showBindModal=false）→ SwiftUI 跑 onDismiss → 错触发 dismiss path
+    ///   3. swipe-dismiss → SwiftUI 直接设 binding=false → onDismiss 调 dismiss method（这个对）
+    ///
+    /// **修法**：用 dismissReason state tag 在 onDismiss 闭包内分发；按钮路径不再直接调 ViewModel method，只设 reason + 关 sheet.
+    /// onDismiss 闭包成为唯一调 dismiss / confirm method 的地方，避免双触发.
+    /// lesson: 2026-05-02-sheet-onDismiss-fires-on-button-close-too.md
+    private enum DismissReason {
+        case confirm     // 用户点"绑定微信"
+        case declined    // 用户点"稍后再说"
+        // nil = swipe-dismiss
+    }
+    @State private var dismissReason: DismissReason?
+
     public init(state: ProfileViewModel) {
         self.state = state
     }
@@ -48,17 +66,31 @@ public struct ProfileScaffoldView: View {
         .background(theme.colors.pageBg.ignoresSafeArea())
         .accessibilityIdentifier("profileView")
         .overlay(alignment: .bottom) { toastOverlay }
-        // Story 37.11 round 3 codex review [P2-B] 修复：sheet swipe-dismiss 必须经 ViewModel seam.
-        // .sheet(isPresented:) 的 binding 在 swipe-dismiss 时 SwiftUI 直接把 binding 设 false，
-        // 不会调用任何 dismiss handler；改用 onDismiss 闭包让 ViewModel.onWeChatModalDismissTap()
-        // 在所有 dismiss 路径（按钮 + swipe + 编程关闭）都被调到，
-        // 防后续 epic（如 lastWechatPromptAt 持久化）silently skip swipe path.
-        // 实装内部对 showBindModal 的 mutation 是 idempotent —— SwiftUI 已先把 binding 设 false，
-        // ViewModel 再把它设 false 是 no-op，不会重复处理.
-        // lesson: 2026-05-01-sheet-swipe-dismiss-must-route-through-viewmodel-hook.md
+        // Story 37.11 round 4 codex review [P2] 修复：onDismiss 按 dismissReason 分发.
+        //
+        // 三路径行为：
+        //   - .confirm（"绑定微信"按钮按下）→ onDismiss 调 onWeChatBindConfirmTap()（让确认/绑定动作集中在 onDismiss）.
+        //     按钮闭包**只**设 reason + 让 SwiftUI 关 sheet；按钮不再直接调 ViewModel method.
+        //   - .declined（"稍后再说"按钮按下）→ onDismiss 调 onWeChatModalDismissTap() 一次.
+        //     按钮闭包**只**设 reason + 让 SwiftUI 关 sheet；按钮不再直接调 ViewModel method.
+        //   - nil（swipe-dismiss / 编程外部置 false）→ onDismiss 调 onWeChatModalDismissTap() 一次（与 round 3 同精神：所有 dismiss 路径都过 ViewModel seam）.
+        //
+        // 关键不变量：onDismiss 是唯一调 ViewModel method 的地方，杜绝按钮闭包 + onDismiss 双触发.
+        // dismissReason 在 onDismiss 末尾置回 nil，下一次 sheet 弹出 swipe-dismiss 路径仍走默认 nil 分支.
+        //
+        // round 3 lesson 不变：sheet swipe-dismiss 必须路由经 ViewModel hook，避免后续 epic（lastWechatPromptAt 持久化）silently skip.
+        // round 4 lesson: 2026-05-02-sheet-onDismiss-fires-on-button-close-too.md
         .sheet(
             isPresented: $state.showBindModal,
-            onDismiss: { state.onWeChatModalDismissTap() }
+            onDismiss: {
+                switch dismissReason {
+                case .confirm:
+                    state.onWeChatBindConfirmTap()
+                case .declined, .none:
+                    state.onWeChatModalDismissTap()
+                }
+                dismissReason = nil  // reset for next sheet showing
+            }
         ) {
             bindWechatSheet
         }
@@ -513,23 +545,55 @@ public struct ProfileScaffoldView: View {
 
     // MARK: - bindWechatSheet (profile.jsx:205-283 + wechat_binding.md §强制提醒浮窗)
 
+    /// Story 37.11 round 4 codex review [P2] 修复：用 closure 把"按钮意图"回传给 ProfileScaffoldView 设 dismissReason.
+    /// BindWechatModalView 不直接调 ViewModel method —— 真正调用集中在 .sheet(onDismiss:) 闭包，杜绝双触发.
     @ViewBuilder
     private var bindWechatSheet: some View {
         if #available(iOS 16.4, *) {
-            BindWechatModalView(state: state)
+            BindWechatModalView(
+                state: state,
+                onConfirmRequested: handleConfirmRequested,
+                onDeclineRequested: handleDeclineRequested
+            )
                 .presentationDetents([.fraction(0.85)])
                 .presentationCornerRadius(28)
         } else {
-            BindWechatModalView(state: state)
+            BindWechatModalView(
+                state: state,
+                onConfirmRequested: handleConfirmRequested,
+                onDeclineRequested: handleDeclineRequested
+            )
         }
+    }
+
+    /// "绑定微信"主按钮回调：标记意图 + 关 sheet → onDismiss 跑 onWeChatBindConfirmTap().
+    /// （round 4 P2 修：避免按钮闭包直接调 ViewModel method 导致 onDismiss 重复触发）
+    private func handleConfirmRequested() {
+        dismissReason = .confirm
+        state.showBindModal = false
+    }
+
+    /// "稍后再说"次按钮回调：标记意图 + 关 sheet → onDismiss 跑 onWeChatModalDismissTap() **一次**.
+    /// （round 4 P2 修：避免按钮闭包直接调 dismiss method + onDismiss 又调一次形成双触发）
+    private func handleDeclineRequested() {
+        dismissReason = .declined
+        state.showBindModal = false
     }
 }
 
 // MARK: - BindWechatModalView 子视图（同文件内；与 ProfileScaffoldView 共享 state）
 
 /// 微信绑定 Modal：警告插画 + 标题 + 正文（含红色高亮）+ 数据风险清单 4 行 + 按钮组.
+///
+/// Story 37.11 round 4 codex review [P2] 修复：按钮闭包**只**回调 onConfirmRequested / onDeclineRequested，
+/// 不直接调 state.onWeChatBindConfirmTap / state.onWeChatModalDismissTap.
+/// 真正的 ViewModel method 调用集中在 ProfileScaffoldView .sheet(onDismiss:) 闭包按 dismissReason 分发，避免双触发.
 private struct BindWechatModalView: View {
     @ObservedObject var state: ProfileViewModel
+    /// 用户按"绑定微信"主按钮：父视图设 dismissReason=.confirm + 关 sheet → onDismiss 触发 confirm method.
+    let onConfirmRequested: () -> Void
+    /// 用户按"稍后再说"次按钮：父视图设 dismissReason=.declined + 关 sheet → onDismiss 触发 dismiss method.
+    let onDeclineRequested: () -> Void
     @Environment(\.theme) private var theme
 
     var body: some View {
@@ -642,10 +706,13 @@ private struct BindWechatModalView: View {
     }
 
     /// 按钮组：主按钮（绑定微信，保护数据）+ 次按钮（稍后再说）.
+    ///
+    /// Story 37.11 round 4 codex review [P2] 修复：按钮**只**回调 onConfirmRequested / onDeclineRequested，
+    /// 由父视图设 dismissReason + 关 sheet → SwiftUI sheet onDismiss 闭包按 reason 分发到 ViewModel method，避免双触发.
     private var buttonGroup: some View {
         VStack(spacing: 10) {
             // 主按钮
-            Button(action: { state.onWeChatBindConfirmTap() }) {
+            Button(action: onConfirmRequested) {
                 HStack(spacing: 8) {
                     Image(systemName: Icons.symbol(for: "wechat"))
                         .font(.system(size: 18))
@@ -665,7 +732,7 @@ private struct BindWechatModalView: View {
             .accessibilityIdentifier("profileWeChatBindButton")
 
             // 次按钮
-            Button(action: { state.onWeChatModalDismissTap() }) {
+            Button(action: onDeclineRequested) {
                 Text("稍后再说（数据将不受保护）")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(theme.colors.inkMute)

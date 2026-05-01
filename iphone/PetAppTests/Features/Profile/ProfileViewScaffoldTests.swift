@@ -136,6 +136,64 @@ final class ProfileViewScaffoldTests: XCTestCase {
         XCTAssertEqual(vm.invocations, [.wechatModalDismissTap], "swipe-dismiss 路径必须记录 invocation")
     }
 
+    // MARK: - case#6d 守护 (round 4 [P2]): sheet onDismiss "稍后再说"路径只 dispatch .wechatModalDismissTap 一次（不双触发）
+
+    /// Story 37.11 round 4 codex review [P2] guard test:
+    /// 防 .sheet(isPresented:onDismiss:) 在按钮触发关闭后再跑 onDismiss 导致 ViewModel method 双触发.
+    /// 修法：按钮闭包**不**直接调 ViewModel method，只设 dismissReason + showBindModal=false；
+    /// onDismiss 闭包按 dismissReason 分发到唯一一次 ViewModel method 调用.
+    /// 测试模拟"稍后再说"路径：sheet 闭包语义等价于"onDismiss 调一次 onWeChatModalDismissTap()"
+    /// → invocations 必恰好 1 个 .wechatModalDismissTap（不是 2 个）.
+    /// lesson: 2026-05-02-sheet-onDismiss-fires-on-button-close-too.md
+    func testSheetDeclinePathDispatchesDismissOnce() {
+        let vm = MockProfileViewModel(showBindModal: true)
+        XCTAssertTrue(vm.showBindModal)
+
+        // 模拟 ProfileScaffoldView round 4 修法：
+        //   "稍后再说"按钮闭包：showBindModal = false（不调 ViewModel method）
+        //   onDismiss 闭包：按 dismissReason=.declined 分发到 onWeChatModalDismissTap()
+        vm.showBindModal = false  // SwiftUI binding 副作用（按钮闭包做的）
+        vm.onWeChatModalDismissTap()  // sheet onDismiss 唯一调用点
+
+        XCTAssertFalse(vm.showBindModal)
+        XCTAssertEqual(
+            vm.invocations,
+            [.wechatModalDismissTap],
+            "稍后再说路径必须仅 1 个 .wechatModalDismissTap（防 round 3 修法的双触发回归）"
+        )
+    }
+
+    // MARK: - case#6e 守护 (round 4 [P2]): sheet onDismiss "绑定微信"confirm 路径**不**dispatch .wechatModalDismissTap
+
+    /// Story 37.11 round 4 codex review [P2] guard test:
+    /// 防 confirm 路径 onDismiss 错误 fire .wechatModalDismissTap —— round 3 修法在这条路径上有 bug.
+    /// 修法：dismissReason=.confirm 时 onDismiss 调 onWeChatBindConfirmTap()，**不**调 onWeChatModalDismissTap().
+    /// 测试模拟"绑定微信"路径：sheet 闭包语义等价于"onDismiss 调一次 onWeChatBindConfirmTap()"
+    /// → invocations 仅 1 个 .wechatBindConfirmTap，**不**含 .wechatModalDismissTap.
+    /// lesson: 2026-05-02-sheet-onDismiss-fires-on-button-close-too.md
+    func testSheetConfirmPathDoesNotDispatchDismiss() {
+        let vm = MockProfileViewModel(showBindModal: true)
+        XCTAssertFalse(vm.wechatBound)
+
+        // 模拟 ProfileScaffoldView round 4 修法：
+        //   "绑定微信"按钮闭包：showBindModal = false（不调 ViewModel method）
+        //   onDismiss 闭包：按 dismissReason=.confirm 分发到 onWeChatBindConfirmTap()
+        vm.showBindModal = false  // SwiftUI binding 副作用（按钮闭包做的）
+        vm.onWeChatBindConfirmTap()  // sheet onDismiss 唯一调用点
+
+        XCTAssertTrue(vm.wechatBound, "confirm 路径仍 mutate wechatBound = true")
+        XCTAssertFalse(vm.showBindModal)
+        XCTAssertEqual(
+            vm.invocations,
+            [.wechatBindConfirmTap],
+            "confirm 路径必须仅 1 个 .wechatBindConfirmTap，**不**含 .wechatModalDismissTap（防 round 3 修法在 confirm 路径错触发 dismiss method）"
+        )
+        XCTAssertFalse(
+            vm.invocations.contains(.wechatModalDismissTap),
+            "confirm 路径绝不能 fire .wechatModalDismissTap（守护 round 4 P2 lesson 反例）"
+        )
+    }
+
     // MARK: - case#7 守护: RealProfileViewModel 构造注入 AppState 不 crash + override 不 fatalError + Real override 必 mutate state
 
     /// 防 RealProfileViewModel 漏 override 时本测试立刻 fail（fatalError 在测试中 → trap）.
