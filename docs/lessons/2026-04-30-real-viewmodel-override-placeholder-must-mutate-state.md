@@ -3,7 +3,7 @@ title: Real 子类 override abstract method 的"占位实装"必须 mutate state
 date: 2026-04-30
 severity: 1
 category: architecture, swift, ui-state
-commit: <pending>
+commit: 7094e69
 related_stories: [37-9-wardrobeview-scaffold]
 related_lessons: [2026-04-30-real-home-viewmodel-injection-must-not-leave-base-fatalerror.md]
 lesson_count: 1
