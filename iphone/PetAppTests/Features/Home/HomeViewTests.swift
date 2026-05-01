@@ -46,9 +46,11 @@ final class HomeViewTests: XCTestCase {
     }
 
     func testAccessibilityIdentifierNamingFollowsFeatureUnderscoreElement() {
-        // AC6：所有 a11y identifier 使用 <feature>_<element> 命名（小驼峰）
-        let identifiers = [
-            AccessibilityID.Home.userInfo,
+        // AC6：Home feature a11y id 应使用 home 前缀（snake_case `home_xxx` 主流；
+        //   Story 37.7 AC8 新锚使用 camelCase `homeXxx`，作为 ui_design 高保真区块锚兼容路径）.
+        // Story 37.7 codex round 3 [P2-B] fix：AccessibilityID.Home.userInfo 值从 "home_userInfo" 改
+        //   "homeStatusBar"（解 VoiceOver 空 Text overlay 卡顿；同时 AC8 UITest 字面量 "homeStatusBar" 自动命中）.
+        let snakeCaseIdentifiers = [
             AccessibilityID.Home.petArea,
             AccessibilityID.Home.stepBalance,
             AccessibilityID.Home.chestArea,
@@ -57,9 +59,15 @@ final class HomeViewTests: XCTestCase {
             AccessibilityID.Home.btnCompose,
             AccessibilityID.Home.versionLabel,
         ]
-        for id in identifiers {
-            XCTAssertTrue(id.hasPrefix("home_"), "Home feature a11y id 必须以 home_ 开头：\(id)")
+        for id in snakeCaseIdentifiers {
+            XCTAssertTrue(id.hasPrefix("home_"), "Home feature snake_case a11y id 必须以 home_ 开头：\(id)")
         }
+
+        // userInfo 单独验证（值已改 "homeStatusBar" —— camelCase，仍以 home 前缀维持 feature scope 可识别）.
+        XCTAssertTrue(
+            AccessibilityID.Home.userInfo.hasPrefix("home"),
+            "AccessibilityID.Home.userInfo 必须以 home 前缀维持 feature scope 可识别：\(AccessibilityID.Home.userInfo)"
+        )
     }
 
     // MARK: - case#2（edge）：不同尺寸下渲染不 crash

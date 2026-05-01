@@ -111,7 +111,9 @@ public struct HomeView<ChestSlot: View>: View {
     // MARK: - 区块 1: statusBar (home.jsx:21-38)
 
     /// 顶部状态栏：左侧 weather + greeting，右侧步数 capsule（含老 ResetIdentityButton 注入入口）.
-    /// a11y：父容器挂 `homeStatusBar` 新锚 + `AccessibilityID.Home.userInfo` 老锚（双 identifier 共存）.
+    /// a11y：父容器单 identifier `AccessibilityID.Home.userInfo`（值 = "homeStatusBar"）+ a11y label = nickname.
+    /// Story 37.7 codex round 3 [P2-B] fix：删除老的空 Text overlay（VoiceOver 把空 node 当 focusable 卡顿）;
+    /// 改 AccessibilityID.Home.userInfo 值 "home_userInfo" → "homeStatusBar" 同时满足新 / 老两条 UITest.
     private var statusBar: some View {
         HStack(alignment: .center) {
             // 左：weather + greeting (ui_design 钦定 22pt 800 大标题 + 12pt 600 副标题).
@@ -130,24 +132,12 @@ public struct HomeView<ChestSlot: View>: View {
             #endif
         }
         .padding(.top, 4)
-        // 双 a11y identifier 共存策略：
-        //   - 老 `home_userInfo`（Story 2.2 / 5.2 / 2.8 测试用）作为父容器主 identifier + 携带 nickname label
-        //     （保 Story 2.8 testUserInfoBarRetainsNicknameAccessibilityLabel：父级 a11y label 必须 = nickname）.
-        //   - 新 `homeStatusBar`（Story 37.7 AC8）作为兄弟节点透明 overlay,通过 `.background` 注入,
-        //     允许新老两条 UITest 同时定位（XCUITest 通过 descendants 跨子元素递归查 identifier）.
+        // 父容器单 identifier：值 = "homeStatusBar"（AccessibilityID.Home.userInfo 重定义后）.
+        // 老 UITest 用 enum 引用 → 自动兼容; 新 Story 37.7 AC8 UITest 用字面量 "homeStatusBar" → 也命中.
         // .accessibilityElement(children: .contain) 让子元素（stepBalance / btnResetIdentity）仍可独立定位.
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text(currentNicknameForA11y))
         .accessibilityIdentifier(AccessibilityID.Home.userInfo)
-        // 新 homeStatusBar 锚通过透明 overlay 子元素提供（与父级 home_userInfo 并存；
-        // SwiftUI 父容器 `.contain` 让子元素 a11y identifier 在 XCUITest descendants 内可定位）.
-        .overlay(
-            Text("")
-                .frame(width: 0, height: 0)
-                .accessibilityElement(children: .ignore)
-                .accessibilityIdentifier("homeStatusBar")
-                .accessibilityHidden(false)
-        )
     }
 
     /// statusBar 左侧 VStack: weather (12pt 600) + greeting (22pt 800).

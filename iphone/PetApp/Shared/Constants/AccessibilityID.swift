@@ -10,7 +10,13 @@ import Foundation
 
 public enum AccessibilityID {
     public enum Home {
-        public static let userInfo = "home_userInfo"
+        // Story 37.7 codex round 3 [P2-B] fix：值从 "home_userInfo" 改 "homeStatusBar".
+        //   原因：老方案在父 HStack 挂 home_userInfo + overlay 内挂空 Text("") 双 identifier 共存,
+        //   空 Text 让 VoiceOver 把 zero-sized node 当 focusable element → 用户滑过 statusBar 顶部
+        //   会卡在空白. 改为父级单 identifier "homeStatusBar"（既满 Story 37.7 AC8 新锚约定,
+        //   又自然兼容老 UITest —— 它们用的是 enum 引用 AccessibilityID.Home.userInfo, 值改了不破坏 caller）.
+        //   同精神 lesson: docs/lessons/2026-04-30-swiftui-empty-text-overlay-voiceover-trap.md.
+        public static let userInfo = "homeStatusBar"
         public static let petArea = "home_petArea"
         public static let stepBalance = "home_stepBalance"
         public static let chestArea = "home_chestArea"

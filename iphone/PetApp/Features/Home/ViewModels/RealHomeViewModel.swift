@@ -18,6 +18,13 @@
 //   注入（与 pingUseCase / loadHomeUseCase / appState 既有 bind() 模式一致）.
 //   注：`onCreateTap` 等 override 不依赖 self.appState 任何字段（仅写 self.showJoinModal /
 //   self.interactionAnimation）；bind(appState:) 时机晚也不会让 abstract method crash.
+//
+// Story 37.7 codex round 3 [P2-A] fix：override applyHomeData(_:) 让 greeting 从 hydrated AppState
+//   currentPet.name 派生 —— 老 configureMockDefaults 只设静态 placeholder "想你啦 ♥",
+//   bootstrap 注入 HomeData 后 RealHomeViewModel.greeting 仍 hardcode 不 propagate pet name,
+//   生产用户永远看不到自己宠物名字. override 链路：先调 super.applyHomeData(data) 写 AppState +
+//   置 hasLoadedHome flag,再读 self.appState.currentPet.name 拼 greeting. AppState 在 super
+//   调用内已 hydrate,此处读为最新值.
 
 import Foundation
 import os.log
@@ -75,5 +82,21 @@ public final class RealHomeViewModel: HomeViewModel {
     public override func onPlayTap() {
         os_log(.debug, "RealHomeViewModel.onPlayTap")
         self.interactionAnimation = .flying(emoji: "⭐", id: UUID())
+    }
+
+    // MARK: - Story 37.7 codex round 3 [P2-A] fix: greeting 从 hydrated AppState.currentPet.name 派生
+
+    /// 在基类 applyHomeData(_:) 写完 AppState 后,从 currentPet.name 拼 greeting.
+    /// 链路：bootstrap → ViewModel.applyHomeData(data) → super.applyHomeData(data) 写 self.appState
+    ///   + 置 hasLoadedHome=true → 本 override 读 self.appState?.currentPet?.name 派生 greeting.
+    /// 派生公式：pet 有名字 → "{petName}，想你啦 ♥"；无名字 / pet=nil → 老 placeholder "想你啦 ♥".
+    /// 见 docs/lessons/2026-04-30-realhomeviewmodel-greeting-derives-from-appstate.md.
+    public override func applyHomeData(_ data: HomeData) {
+        super.applyHomeData(data)
+        if let petName = data.pet?.name, !petName.isEmpty {
+            self.greeting = "\(petName)，想你啦 ♥"
+        } else {
+            self.greeting = "想你啦 ♥"
+        }
     }
 }

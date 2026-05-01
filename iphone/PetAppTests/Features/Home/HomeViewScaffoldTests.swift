@@ -184,4 +184,35 @@ final class HomeViewScaffoldTests: XCTestCase {
         vm.onCreateTap()
         // 走到此处说明 vtable 派发到 override 方法而非基类 fatalError；契约成立.
     }
+
+    // MARK: - case#9 happy: Story 37.7 codex round 3 [P2-A] greeting 派生守护
+
+    /// Story 37.7 codex round 3 [P2-A] guard test：RealHomeViewModel.applyHomeData(_:) 必须从
+    /// hydrated AppState.currentPet.name 派生 greeting；不能继续 hardcode "想你啦 ♥" placeholder.
+    ///
+    /// 老 bug：`configureMockDefaults()` 把 greeting hardcode "想你啦 ♥",
+    /// bootstrap 注入 HomeData 后 greeting 仍 placeholder, 生产用户永远看不到自己宠物名字.
+    /// 修复：override applyHomeData(_:),先 super.applyHomeData(data) 写 AppState,再读 data.pet?.name 拼.
+    /// 派生公式：pet 有名字 → "{petName}，想你啦 ♥"；pet=nil / name 空 → 老 placeholder "想你啦 ♥".
+    func testRealHomeViewModelGreetingDerivesFromHydratedPet() {
+        let appState = AppState()
+        let vm = RealHomeViewModel(appState: appState)
+
+        // hydrate 前 greeting 是 placeholder（configureMockDefaults 钦定）.
+        XCTAssertEqual(vm.greeting, "想你啦 ♥", "构造时 greeting 应是 placeholder（pet 还未注入）")
+
+        // 注入 HomeData（pet name = "测试猫"，由 makeSampleHomeData 钦定）.
+        let data = makeSampleHomeData()
+        vm.applyHomeData(data)
+
+        // 期望：override 把 pet.name "测试猫" 拼进 greeting.
+        XCTAssertEqual(
+            vm.greeting,
+            "测试猫，想你啦 ♥",
+            "Story 37.7 codex round 3 [P2-A]: hydrated AppState 后 greeting 必须反映 pet.name"
+        )
+
+        // 同时验证 super 链路也跑了：loadingState 应为 .loaded（基类 applyHomeData 必行）.
+        XCTAssertEqual(vm.loadingState, .loaded, "super.applyHomeData 必须被调（loadingState 应转 .loaded）")
+    }
 }

@@ -101,3 +101,4 @@
 | 2026-04-30 | [ViewModifier @State 跨 `.id` 重建幸存 + `.shadow` 投影到 children + fix-review 5 轮 cap 破例决议](2026-04-30-swiftui-state-survives-id-and-shadow-over-children.md) | 4 | architecture, ui-fidelity, process | `d7baa12` |
 | 2026-04-30 | [引入 abstract method base class 时必须同步迁移所有 caller，不能留 fatalError 在 production 注入路径](2026-04-30-real-home-viewmodel-injection-must-not-leave-base-fatalerror.md) | 1 | architecture, swift, refactor-discipline | `5f439a4` |
 | 2026-04-30 | [SwiftUI `onChange(of:)` Equatable 重放契约 + `Task.sleep` 重置 timer 必须 cancel](2026-04-30-swiftui-onchange-equatable-and-stale-task-cancel.md) | 2 | architecture | `<pending>` |
+| 2026-04-30 | [Real ViewModel 的派生字段必须 override hydrate 入口 & 空 Text overlay 是 VoiceOver 陷阱](2026-04-30-realhomeviewmodel-greeting-and-empty-text-overlay.md) | 2 | architecture, a11y, ui | `<pending>` |
