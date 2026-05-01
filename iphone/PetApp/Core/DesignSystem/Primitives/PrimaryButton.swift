@@ -22,6 +22,10 @@ public struct PrimaryButton: View {
     private let icon: String?       // SF Symbol 名（来自 Icons.symbol(for:)）；nil 时无 icon
     private let fullWidth: Bool
     private let isEnabled: Bool
+    /// Story 37.12 AC1：disabled 入口（与 isEnabled 互斥；任一为 disabled 即按钮 disabled）.
+    /// 默认 false 兼容老 caller；JoinRoomModal `confirm button` 走 `isDisabled: trimmedIsEmpty` 入口.
+    /// 设计：内部 `effectiveEnabled = isEnabled && !isDisabled` 统一驱动 .disabled / opacity.
+    private let isDisabled: Bool
     private let action: () -> Void
 
     public init(
@@ -30,6 +34,7 @@ public struct PrimaryButton: View {
         icon: String? = nil,
         fullWidth: Bool = false,
         isEnabled: Bool = true,
+        isDisabled: Bool = false,
         action: @escaping () -> Void
     ) {
         self.title = title
@@ -37,7 +42,13 @@ public struct PrimaryButton: View {
         self.icon = icon
         self.fullWidth = fullWidth
         self.isEnabled = isEnabled
+        self.isDisabled = isDisabled
         self.action = action
+    }
+
+    /// 综合 enabled 判定：isEnabled && !isDisabled.
+    private var effectiveEnabled: Bool {
+        isEnabled && !isDisabled
     }
 
     public var body: some View {
@@ -80,7 +91,7 @@ public struct PrimaryButton: View {
                     }
                 }
             )
-            .opacity(isEnabled ? 1.0 : 0.5)
+            .opacity(effectiveEnabled ? 1.0 : 0.5)
         }
         // 用 SwiftUI 钦定的 ButtonStyle / configuration.isPressed 路径处理按下视觉，
         // 而非自定义 simultaneousGesture(DragGesture) + @State isPressed.
@@ -90,7 +101,7 @@ public struct PrimaryButton: View {
         // 边界 case，是 SwiftUI 设计的标准路径.
         // 守护：fix-review round 3 / [P2-B].
         .buttonStyle(PressedOffsetButtonStyle())
-        .disabled(!isEnabled)
+        .disabled(!effectiveEnabled)
     }
 
     private var backgroundColor: Color {

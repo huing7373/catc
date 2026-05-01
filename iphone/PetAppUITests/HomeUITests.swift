@@ -380,4 +380,54 @@ final class HomeUITests: XCTestCase {
             "HomeView 在 LaunchingView 消失后应可见（home_userInfo 应可定位）"
         )
     }
+
+    // Story 37.12 AC6: JoinRoomModal 跨屏 join 链路 UITest.
+    // 验证完整链路：HomeView "加入队伍" 按钮 → modal 出现 → 输入房间号 → 确定加入 → modal dismiss + RoomView 渲染.
+    // epic AC line 4866 钦定路径.
+    func testJoinRoomModalCrossScreenJoinFlow() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
+        app.launch()
+
+        let timeout: TimeInterval = 5
+
+        // 1. 验证 HomeView TeamIdleCard "加入队伍" 按钮可见（Story 37.7 落地 a11y identifier `homeTeamIdleCard_join`）.
+        let joinButton = app.descendants(matching: .any)["homeTeamIdleCard_join"]
+        XCTAssertTrue(joinButton.waitForExistence(timeout: timeout), "homeTeamIdleCard_join 未找到")
+
+        // 2. 点 "加入队伍" → JoinRoomModal 出现.
+        joinButton.tap()
+        let modal = app.descendants(matching: .any)["joinRoomModal"]
+        XCTAssertTrue(modal.waitForExistence(timeout: 3), "joinRoomModal 未在 join button tap 后出现")
+
+        // 3. 验证 modal 5 视觉锚.
+        XCTAssertTrue(app.descendants(matching: .any)["joinRoomCloseButton"].exists, "joinRoomCloseButton 未找到")
+        XCTAssertTrue(app.descendants(matching: .any)["joinRoomInput"].exists, "joinRoomInput 未找到")
+        XCTAssertTrue(app.descendants(matching: .any)["joinRoomCancelButton"].exists, "joinRoomCancelButton 未找到")
+        XCTAssertTrue(app.descendants(matching: .any)["joinRoomConfirmButton"].exists, "joinRoomConfirmButton 未找到")
+
+        // 4. 输入房间号 "1234567".
+        let input = app.textFields["joinRoomInput"]
+        XCTAssertTrue(input.waitForExistence(timeout: 2), "joinRoomInput textField 未找到")
+        input.tap()
+        input.typeText("1234567")
+
+        // 5. 点 "确定加入" → modal dismiss.
+        let confirmButton = app.descendants(matching: .any)["joinRoomConfirmButton"]
+        confirmButton.tap()
+
+        XCTAssertTrue(
+            modal.waitForNonExistence(timeout: 3),
+            "joinRoomModal 在 confirm tap 后未 dismiss"
+        )
+
+        // 6. RoomScaffoldView 出现（验证跨屏跳转链路完整）.
+        //    HomeContainerView 互斥状态机检测 appState.currentRoomId 非 nil → 切到 RoomScaffoldView.
+        //    用 `returnButton` 作为 RoomScaffoldView 出现的标志（Story 37.8 钦定唯一 a11y identifier;
+        //    HomeView 路径无此标识，仅在 RoomScaffoldView 渲染时出现）.
+        XCTAssertTrue(
+            app.descendants(matching: .any)["returnButton"].waitForExistence(timeout: 3),
+            "RoomScaffoldView 未在 join confirm 后渲染（跨屏跳转链路断）"
+        )
+    }
 }

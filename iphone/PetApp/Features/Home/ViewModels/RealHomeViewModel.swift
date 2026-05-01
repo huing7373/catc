@@ -47,6 +47,12 @@ public final class RealHomeViewModel: HomeViewModel {
     ///   - bind(appState:) 路径：override 内 super 注入完后订阅（仅首次生效，防多次 .task 重订阅）
     private var greetingSubscription: AnyCancellable?
 
+    /// Story 37.12: 子类持有 appState 引用（基类的 appState 是 private 不可见 →
+    /// onJoinRoomConfirm 需要走 `appState?.setCurrentRoomId(roomId)` 规范入口）.
+    /// 与 RealFriendsViewModel.appState 同模式（基类 + 子类双持，子类负责自己使用的入口；
+    /// 基类 self.appState 仅 base class 内部 applyHomeData / sink 用）.
+    private var localAppState: AppState?
+
     /// Story 37.7 codex round 1 [P1] fix：parameterless init 让 RootView `@StateObject` 老模式可用.
     /// AppState 通过 `bind(appState:)` 在 `.task` 内异步注入（与 pingUseCase / loadHomeUseCase 同模式）.
     /// 不再持 `injectedAppState` 字段（基类已保 self.appState；本类无独立持有需求）.
@@ -59,6 +65,7 @@ public final class RealHomeViewModel: HomeViewModel {
     public init(appState: AppState) {
         super.init(appState: appState)
         configureMockDefaults()
+        self.localAppState = appState   // Story 37.12: 子类持有让 onJoinRoomConfirm 可访问
         // 构造路径已注入 AppState；立即订阅 currentPet 变化派生 greeting.
         subscribeGreeting(to: appState)
     }
@@ -68,6 +75,7 @@ public final class RealHomeViewModel: HomeViewModel {
     public override func bind(appState: AppState) {
         let alreadySubscribed = greetingSubscription != nil
         super.bind(appState: appState)
+        self.localAppState = appState   // Story 37.12: 异步注入路径也要更新子类持的引用
         guard !alreadySubscribed else { return }
         subscribeGreeting(to: appState)
     }
@@ -129,6 +137,31 @@ public final class RealHomeViewModel: HomeViewModel {
     public override func onPlayTap() {
         os_log(.debug, "RealHomeViewModel.onPlayTap")
         self.interactionAnimation = .flying(emoji: "⭐", id: UUID())
+    }
+
+    /// Story 37.12: JoinRoomModal "确定加入" 按钮 trigger.
+    /// round 1 P1 lesson `2026-04-30-real-viewmodel-override-placeholder-must-mutate-state.md`
+    /// 预防性应用：override 必须**本地 mutate** state 让 UI 立刻反馈，不能只 log.
+    /// 行为与 MockHomeViewModel.onJoinRoomConfirm 同语义：
+    ///   - 写 showJoinModal = false（关 sheet）
+    ///   - 调 appState?.setCurrentRoomId(roomId)（让 sink 派生 RoomScaffoldView /
+    ///     FriendsView.currentRoomId 等订阅了 currentRoomId 的兄弟 ViewModel 也同步）
+    /// **关键**：通过 appState 入口而非直接写 self —— 与 RealFriendsViewModel.onJoinFriendTap 同
+    /// 精神（Story 37.10 落地）；showJoinModal 是 Home 域 ViewModel-only state（关 sheet 不影响兄弟 sink）;
+    /// currentRoomId 必须走 appState 入口（兄弟 ViewModel 订阅 appState.$currentRoomId）.
+    /// **mutation 顺序**：先 showJoinModal = false（关 sheet），后 appState?.setCurrentRoomId(roomId)
+    /// （写 AppState 让兄弟 sink 派生）—— 避免 sheet 还在但底层 view 已切走的视觉错乱（不可反序）.
+    /// Story 12.7（节点 4 后）落地 JoinRoomUseCase 后改为：
+    ///   1) 调 JoinRoomUseCase.execute(roomId:)
+    ///   2) 成功后 server 推送 WS room.snapshot → setCurrentRoomId 由 server 端权威态写入
+    public override func onJoinRoomConfirm(roomId: String) {
+        os_log(
+            .debug,
+            "RealHomeViewModel.onJoinRoomConfirm %{public}@ (Story 12.7 will wire JoinRoomUseCase)",
+            roomId
+        )
+        showJoinModal = false
+        localAppState?.setCurrentRoomId(roomId)
     }
 
     // Story 37.7 codex round 4 [P3] fix：移除老 round 3 override applyHomeData(_:).

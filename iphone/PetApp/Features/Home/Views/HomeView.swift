@@ -47,6 +47,12 @@ public struct HomeView<ChestSlot: View>: View {
     /// 第一个 timer 在 t=1.4s 触发把 .idle 写入，第二个 emoji 提前消失（应当持续到 t=1.9s）.
     @State private var resetTask: Task<Void, Never>?
 
+    /// Story 37.12: JoinRoomModal 输入字段的 owner.
+    /// SwiftUI @State（**不**进 ViewModel）—— modal 输入是 view-local transient，不需要跨 view 触发,
+    /// 不需要单元测试断言（单元测试走 ViewModel 层断言 onJoinRoomConfirm 收到的 roomId 字符串）.
+    /// 详见 spec Dev Notes "joinRoomInput @State vs @Published 决策".
+    @State private var joinRoomInput: String = ""
+
     /// Story 37.7 AC3: 唯一 init —— 删除老 3 个重载，caller 漏改靠编译器报错驱动.
     /// 参数名 `state` 而非 `viewModel`（v2 提案钦定）.
     public init(
@@ -85,9 +91,30 @@ public struct HomeView<ChestSlot: View>: View {
                 .padding(.bottom, 100)     // 浮动 TabBar 让出空间
             }
         }
-        .sheet(isPresented: $state.showJoinModal) {
-            // Story 37.12 落地真实 JoinRoomModal；本期挂 placeholder（已存在 stub）
-            JoinRoomModalPlaceholder()
+        .sheet(
+            isPresented: $state.showJoinModal,
+            onDismiss: {
+                // Story 37.12: dismiss 后清空 transient 输入字段（防 swipe-down dismiss 后再次打开 modal
+                // 残留旧值；button-driven dismiss 走 onCancel/onConfirm 闭包内已可由 caller 决定关 sheet,
+                // 此 onDismiss 是兜底，覆盖 swipe-down dismiss 路径，按 lesson 8
+                // `2026-04-30-sheet-on-dismiss-button-vs-swipe-driven.md` 钦定路径预防性应用）.
+                joinRoomInput = ""
+            }
+        ) {
+            JoinRoomModal(
+                roomIdInput: $joinRoomInput,
+                onConfirm: { roomId in
+                    state.onJoinRoomConfirm(roomId: roomId)
+                    // 注：onJoinRoomConfirm override 内已设 showJoinModal = false（caller 不再重写）.
+                    //   onDismiss 闭包稍后被 SwiftUI 调用，自动清空 joinRoomInput.
+                },
+                onCancel: {
+                    state.showJoinModal = false
+                    // 注：onDismiss 闭包稍后被 SwiftUI 调用，自动清空 joinRoomInput.
+                }
+            )
+            .presentationDetents([.medium])
+            .presentationCornerRadius(28)
         }
         .onChange(of: state.interactionAnimation) { _, newValue in
             // floatUp 动画完成后自动重置回 idle（1.4s ≈ ui_design home.jsx 钦定 floatUp 时长）.

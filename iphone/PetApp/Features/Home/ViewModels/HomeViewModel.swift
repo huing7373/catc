@@ -421,4 +421,19 @@ public class HomeViewModel: ObservableObject {
     public func onPlayTap() {
         fatalError("HomeViewModel.onPlayTap must be overridden by subclass")
     }
+
+    /// Story 37.12: JoinRoomModal "确定加入" 按钮 trigger.
+    /// MockHomeViewModel: 写 showJoinModal = false（关 modal）+ 记录 invocation 含 roomId.
+    /// RealHomeViewModel（本 story 占位）: **本地 mutate** —— 写 showJoinModal = false + 调
+    ///   `appState?.setCurrentRoomId(roomId)`（让 sink 派生 RoomScaffoldView 渲染）.
+    ///   按 Story 37.9 round 1 P1 lesson `2026-04-30-real-viewmodel-override-placeholder-must-mutate-state.md`
+    ///   钦定路径：Real 子类 override 必须实装本 story 范围内能让 UI 视觉工作的最小 placeholder 行为；不能只 log.
+    /// Story 12.7（节点 4 后）落地真实 JoinRoomUseCase 后改为：
+    ///   1) 调 JoinRoomUseCase.execute(roomId:) 拉起 server 加入房间事务
+    ///   2) 成功后 server 推送 WS room.snapshot → setCurrentRoomId 由 server 端权威态写入
+    ///   3) 失败时弹 ErrorPresenter retry banner（与 LoadHome 失败路径同精神）
+    ///   本 story 不实装 server 调用，仅本地 mutate appState 占位.
+    public func onJoinRoomConfirm(roomId: String) {
+        fatalError("HomeViewModel.onJoinRoomConfirm must be overridden by subclass")
+    }
 }

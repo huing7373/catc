@@ -25,6 +25,7 @@ public final class MockHomeViewModel: HomeViewModel {
         case feedTap
         case petTap
         case playTap
+        case joinRoomConfirm(roomId: String)   // Story 37.12 新增
     }
 
     @Published public var invocations: [Invocation] = []
@@ -74,5 +75,12 @@ public final class MockHomeViewModel: HomeViewModel {
         os_log(.debug, "MockHomeViewModel.onPlayTap")
         invocations.append(.playTap)
         self.interactionAnimation = .flying(emoji: "⭐", id: UUID())
+    }
+
+    /// Story 37.12: JoinRoomModal "确定加入" 按钮 → 关 sheet + 记录 invocation 含 roomId.
+    public override func onJoinRoomConfirm(roomId: String) {
+        os_log(.debug, "MockHomeViewModel.onJoinRoomConfirm %{public}@", roomId)
+        invocations.append(.joinRoomConfirm(roomId: roomId))
+        showJoinModal = false   // 关 sheet（与 Real 同语义）
     }
 }

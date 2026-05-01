@@ -18,6 +18,7 @@
 		1002F227991553C5B8516E9F /* FriendsScaffoldDefaults.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1816AB75314267F9DF9FC373 /* FriendsScaffoldDefaults.swift */; };
 		11284C8878DA5220A2647A90 /* ErrorPresentationHostModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 037A03497312B6CC6305D89B /* ErrorPresentationHostModifier.swift */; };
 		127E15456CDC70992472BADE /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0356656CC2DBA0B7ED4D2B9A /* RootView.swift */; };
+		1454F0D64FD971B5C7FFF298 /* JoinRoomModal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27159F23CEAFE8C5C69ED14B /* JoinRoomModal.swift */; };
 		145A1D039DB3568BD8B5F4EE /* AppStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C01E320EF47547383B6178D7 /* AppStateTests.swift */; };
 		167C1170E9545C630AB52652 /* AsyncTestHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55E034E99B4679572E6ACB32 /* AsyncTestHelpers.swift */; };
 		16F26221EE8C1E95667CCD85 /* HomeEndpoints.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A9498ED4B7189FF05A4DFAC /* HomeEndpoints.swift */; };
@@ -98,6 +99,7 @@
 		8869825C3D8C60B931E7CA64 /* HomeResponse.swift in Sources */ = {isa = PBXBuildFile; fileRef = 873BE255FEE4A4D407B2E425 /* HomeResponse.swift */; };
 		886D70A781F0AB57F38AA13E /* ThemeSpacing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C0714D4EFFFDAE1112D45FB /* ThemeSpacing.swift */; };
 		8AF55882CCF571AE0AEA2533 /* PetAppApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45B537A9A913D964BB4F8494 /* PetAppApp.swift */; };
+		8B25ABD9ADCA3C4C2793F676 /* JoinRoomModalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1160453967A694DA125452CB /* JoinRoomModalTests.swift */; };
 		8CA0BD54EB51F3C870F11165 /* ResetKeychainUseCase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D0EF93763AA33775E634391 /* ResetKeychainUseCase.swift */; };
 		8D56E8840F2A3AB2AB0D879A /* AppContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 610995098BE9337A97B6BE1A /* AppContainer.swift */; };
 		8D75CEDB2E447E664C001C93 /* RoomViewScaffoldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 972FF916F8DB2CCEF03FB42C /* RoomViewScaffoldTests.swift */; };
@@ -198,6 +200,7 @@
 		08CA4F6139E7A05AAF87C850 /* AppLaunchStateMachine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLaunchStateMachine.swift; sourceTree = "<group>"; };
 		0B2ACBBE683A3060C031F2FD /* PingUseCaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PingUseCaseTests.swift; sourceTree = "<group>"; };
 		0D0D3A8E643482F02FAB64B6 /* MockKeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockKeychainStore.swift; sourceTree = "<group>"; };
+		1160453967A694DA125452CB /* JoinRoomModalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoinRoomModalTests.swift; sourceTree = "<group>"; };
 		1369A3F537485008A6066B8F /* RetryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RetryView.swift; sourceTree = "<group>"; };
 		1395FB63EFED053C4C4C497C /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		16A7900E6FA92AE5BDEED4D9 /* PetStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetStats.swift; sourceTree = "<group>"; };
@@ -214,6 +217,7 @@
 		24B9BE829456D609E1FEF2BA /* Avatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Avatar.swift; sourceTree = "<group>"; };
 		24EA253A0F2724428AFB87D5 /* KeychainUITestHookView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainUITestHookView.swift; sourceTree = "<group>"; };
 		25AC5E3AE3DB7FE8288D3B5A /* ThemeShadow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeShadow.swift; sourceTree = "<group>"; };
+		27159F23CEAFE8C5C69ED14B /* JoinRoomModal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoinRoomModal.swift; sourceTree = "<group>"; };
 		27D05E3B609A20DC41CE4A81 /* ErrorPresenterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorPresenterTests.swift; sourceTree = "<group>"; };
 		2D836DE136F5616109D4BA59 /* WardrobeViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WardrobeViewModel.swift; sourceTree = "<group>"; };
 		2E94000B196080C665C08550 /* ProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileView.swift; sourceTree = "<group>"; };
@@ -560,6 +564,7 @@
 			isa = PBXGroup;
 			children = (
 				623062285338DCC1079A46A9 /* ErrorHandling */,
+				EC1DCF01893EB86DC79D2199 /* Modals */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -682,6 +687,7 @@
 			children = (
 				09A0A22F88C2F6A2DA10DF35 /* Constants */,
 				400A308F90DACFB916D3D072 /* ErrorHandling */,
+				B1F8253D85F11493C85E42B2 /* Modals */,
 				3EA3AA5794D74E3B980BCE07 /* Testing */,
 			);
 			path = Shared;
@@ -967,6 +973,14 @@
 			path = Views;
 			sourceTree = "<group>";
 		};
+		B1F8253D85F11493C85E42B2 /* Modals */ = {
+			isa = PBXGroup;
+			children = (
+				27159F23CEAFE8C5C69ED14B /* JoinRoomModal.swift */,
+			);
+			path = Modals;
+			sourceTree = "<group>";
+		};
 		B3F774EEDFEFAC9A2C78DBC4 /* Views */ = {
 			isa = PBXGroup;
 			children = (
@@ -1106,6 +1120,14 @@
 				EC9A36487F19B2CECF5A3CBC /* Views */,
 			);
 			path = DevTools;
+			sourceTree = "<group>";
+		};
+		EC1DCF01893EB86DC79D2199 /* Modals */ = {
+			isa = PBXGroup;
+			children = (
+				1160453967A694DA125452CB /* JoinRoomModalTests.swift */,
+			);
+			path = Modals;
 			sourceTree = "<group>";
 		};
 		EC9A36487F19B2CECF5A3CBC /* Views */ = {
@@ -1299,6 +1321,7 @@
 				D1FA721D837E36CD0348DA8F /* HomeViewScaffoldTests.swift in Sources */,
 				6428DEB3D7C6776E8D94E3CE /* HomeViewTests.swift in Sources */,
 				9358925EDD48383D910B4246 /* InMemoryKeychainStoreTests.swift in Sources */,
+				8B25ABD9ADCA3C4C2793F676 /* JoinRoomModalTests.swift in Sources */,
 				C4A74F2241EDE99CAD987FAD /* KeychainServicesStoreTests.swift in Sources */,
 				FC6A77C277F0B24130DD19BA /* LaunchingViewTests.swift in Sources */,
 				6A15A03AC51444995B3AFBC7 /* LoadHomeUseCaseTests.swift in Sources */,
@@ -1387,6 +1410,7 @@
 				607D338E5D68CDDBFA7F02CC /* HomeView.swift in Sources */,
 				9284C5618CDC2E6CFD5CBD60 /* HomeViewModel.swift in Sources */,
 				A956B1C741D91F637971B37B /* Icons.swift in Sources */,
+				1454F0D64FD971B5C7FFF298 /* JoinRoomModal.swift in Sources */,
 				B5BA34C8B6B95C8532530FB5 /* JoinRoomModalPlaceholder.swift in Sources */,
 				93B6CD7DB27E7A0BC34E7E32 /* KeychainError.swift in Sources */,
 				7DDAECA090A44C9778FB7ABC /* KeychainKey.swift in Sources */,

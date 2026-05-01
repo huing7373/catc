@@ -113,3 +113,4 @@
 | 2026-05-01 | [Real ViewModel transient state 清理判据必须用「user 身份变化」而非仅「user == nil」（cold-start 路径不经 appState.reset()）](2026-05-01-real-viewmodel-transient-must-clear-on-any-identity-change.md) | 1 | architecture | `18c0860` |
 | 2026-05-01 | [Scaffold View 必须经 ViewModel method seam（按钮闭包 / sheet swipe-dismiss 都不能绕过）](2026-05-01-scaffold-bypass-viewmodel-seam.md) | 2 | architecture | `cc4d914` |
 | 2026-05-02 | [SwiftUI `.sheet(onDismiss:)` 在按钮触发关闭时也会跑，必须用 dismissReason tag 做意图分发](2026-05-02-sheet-onDismiss-fires-on-button-close-too.md) | 1 | architecture | `c3f52ab` |
+| 2026-04-30 | [UITest 自补 helper 与 XCTest SDK 方法 redeclaration](2026-04-30-uitest-helper-redeclares-sdk-method.md) | 1 | testing | `<pending>` |
