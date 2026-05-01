@@ -2,7 +2,7 @@
 date: 2026-05-01
 source_review: codex r2 review of Story 37.12 (file: /tmp/epic-loop-review-37-12-r2.md)
 story: 37-12-joinroommodal-跨屏跳转
-commit: <pending>
+commit: a65ae1b
 lesson_count: 1
 ---
 
