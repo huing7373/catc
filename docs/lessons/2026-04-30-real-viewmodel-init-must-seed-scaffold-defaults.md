@@ -2,7 +2,7 @@
 date: 2026-04-30
 source_review: codex review round 1 (file: /tmp/epic-loop-review-37-8-r1.md)
 story: 37-8-roomview-scaffold
-commit: <pending>
+commit: 32a9d3c
 lesson_count: 1
 ---
 

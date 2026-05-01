@@ -104,6 +104,6 @@
 | 2026-04-30 | [Real ViewModel 的派生字段必须 override hydrate 入口 & 空 Text overlay 是 VoiceOver 陷阱](2026-04-30-realhomeviewmodel-greeting-and-empty-text-overlay.md) | 2 | architecture, a11y, ui | `0b2df22` |
 | 2026-04-30 | [`@Published` 派生字段必须订阅 publisher（hydrate 入口 override 不够覆盖 reset 路径）+ `@Published` 用 import 必须显式](2026-04-30-published-derived-state-needs-publisher-subscription.md) | 2 | architecture, dependency | `a54481e` |
 | 2026-04-30 | [SwiftUI 浮动动画必须由 @State position 变化驱动 + `.id()` 触发子视图重建（与 round 4 `.id(nil)` 共享 identity 陷阱不冲突）](2026-04-30-swiftui-floating-emoji-needs-state-driven-position.md) | 1 | ui-fidelity, architecture | `80d0ee6` |
-| 2026-04-30 | [Real ViewModel 的占位 init 必须 seed UI Scaffold 全部字段（不能"等 sink 派发"）](2026-04-30-real-viewmodel-init-must-seed-scaffold-defaults.md) | 1 | architecture | `<pending>` |
-| 2026-04-30 | [RootView 持有的 ViewModel 必须在第一次 paint 之前同步 bind AppState](2026-04-30-onappear-vs-task-sync-bind-before-first-paint.md) | 1 | architecture | `<pending>` |
-| 2026-04-30 | [Room host 名不得派生自 appState.currentPet（local 猫 ≠ room host 猫）](2026-04-30-room-host-name-must-not-derive-from-local-current-pet.md) | 1 | architecture | `<pending>` |
+| 2026-04-30 | [Real ViewModel 的占位 init 必须 seed UI Scaffold 全部字段（不能"等 sink 派发"）](2026-04-30-real-viewmodel-init-must-seed-scaffold-defaults.md) | 1 | architecture | `32a9d3c` |
+| 2026-04-30 | [RootView 持有的 ViewModel 必须在第一次 paint 之前同步 bind AppState](2026-04-30-onappear-vs-task-sync-bind-before-first-paint.md) | 1 | architecture | `7556329` |
+| 2026-04-30 | [Room host 名不得派生自 appState.currentPet（local 猫 ≠ room host 猫）](2026-04-30-room-host-name-must-not-derive-from-local-current-pet.md) | 1 | architecture | `4ee34b3` |
