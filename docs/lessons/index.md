@@ -127,3 +127,4 @@
 | 2026-05-02 | [步数同步接口 1005 限频维度错配 与 3001 "粘性错误码" 误述](2026-05-02-step-sync-rate-limit-scope-and-3001-stickiness-myth.md) | 2 | docs | `<pending>` |
 | 2026-05-02 | [接口契约 story 必须连同时序图 + 数据库枚举一起锚定，不能只改 V1 接口文档](2026-05-02-cross-doc-contract-anchor-scope.md) | 2 | docs | `<pending>` |
 | 2026-05-02 | [step_account 示例数值不变量 & 同类已认证路由限频 scope 必须重复显式](2026-05-02-step-account-example-invariant-and-cross-section-rate-limit-scope.md) | 2 | docs | `<pending>` |
+| 2026-05-02 | [Story artifact 里的 AC 副本必须与主文档每轮 review fix 同步刷新](2026-05-02-story-artifact-ac-copy-must-mirror-doc-edits.md) | 3 | docs | `<pending>` |
