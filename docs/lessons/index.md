@@ -121,3 +121,4 @@
 | 2026-04-30 | [identifier helper 必须 source 自声明常量而非重新拼接（防 single-source-of-truth 静默 drift）](2026-04-30-identifier-helper-must-source-from-declared-constants.md) | 1 | architecture | `152c22b` |
 | 2026-04-30 | [白名单条目必须 cite「完整流程文档 / 真实渲染路径」而非只挂视觉壳入口](2026-04-30-whitelist-entry-must-cite-full-flow-doc-and-real-render-path.md) | 2 | docs | `<pending>` |
 | 2026-04-30 | [白名单 r2：deferred artifact 的位置必须落到「真实承载源」而非视觉壳入口（roomCode/JoinRoomModal 在 app.jsx；ui_design SVG vs SwiftUI cat.fill）](2026-04-30-whitelist-entry-must-cite-full-flow-doc-and-real-render-path-2.md) | 2 | docs | `<pending>` |
+| 2026-04-30 | [白名单 r3：未来 routing 必须 cite 真实 Story scope（不能把 3D spike 错挂 Story 30.x、不能把 SwiftUI 实装路径错写成 prototype 替换）](2026-04-30-whitelist-future-routing-must-cite-real-story-scope.md) | 2 | docs | `<pending>` |
