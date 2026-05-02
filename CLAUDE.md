@@ -55,6 +55,31 @@ bash scripts/build.sh --devtools           # 加 -tags devtools → build/catser
 
 写完或改完 Go 代码后跑 `bash scripts/build.sh --test` 验证。脚本契约来源：`_bmad-output/implementation-artifacts/decisions/0001-test-stack.md` §3.5 + `_bmad-output/implementation-artifacts/1-7-重做-scripts-build-sh.md`。
 
+## iOS UI 验证（必跑）
+
+**iOS UI / feature 改动必须用 `ios-simulator` MCP server 在模拟器里实跑验证**，不能只跑 `bash iphone/scripts/build.sh` 就报告 done —— xcodebuild 通过只验证 code 编译正确，不验证 UI / feature 行为正确（lesson：Story 37.x 多次出现 build pass 但视觉 bug / 交互 bug 漏到 review 阶段才发现）。
+
+工具集（已注册到 `.claude.json` 当前 project，见 `claude mcp list`）：
+
+- 看屏幕：`ui_view`（base64 JPEG，省 token，AI 自己看）/ `screenshot`（存文件）
+- 操作：`ui_tap` / `ui_swipe` / `ui_type`
+- 控制：`open_simulator` / `get_booted_sim_id` / `install_app` / `launch_app`（`terminate_running: true` 强制重启）
+- 探查：`ui_describe_all`（整屏 a11y 树）/ `ui_describe_point(x,y)` / `ui_find_element`
+- 录像：`record_video` / `stop_recording`
+
+标准 verify workflow：
+
+```
+1. bash iphone/scripts/build.sh                          # build → DerivedData/.../PetApp.app
+2. install_app(app_path: iphone/build/DerivedData/Build/Products/Debug-iphonesimulator/PetApp.app)
+3. launch_app(bundle_id: "com.zhuming.pet.app", terminate_running: true)
+4. ui_view                                                # 看 UI
+5. ui_tap / ui_swipe                                      # 触发交互
+6. ui_view + ui_describe_all                              # 验证视觉 + a11y 都对
+```
+
+iPhone 16 Pro 模拟器机器上没有（Xcode 26 默认 iPhone 17 系列）；用 `iPhone 17 Pro`（与 `iphone/scripts/build.sh` destination fallback 一致）。如需特定机型用 `xcrun simctl list devices | grep iPhone` 选 UDID 传 `udid` 参数。
+
 ## 节点 1 之后的目录形态（target）
 
 按 `docs/宠物互动App_Go项目结构与模块职责设计.md` §4：
