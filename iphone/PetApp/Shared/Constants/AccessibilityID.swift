@@ -100,7 +100,21 @@ public enum AccessibilityID {
         /// 关键设计：参数取 `String`（rawValue）而非 `AppTab` 类型 —— `AccessibilityID.swift` 通过
         /// project.yml line 67-69 同时编进 PetApp + PetAppUITests 两个 target；`AppTab` 类型仅在
         /// PetApp target 定义，UITest target 看不到 → 取 String 让本文件无 cross-target 类型依赖.
-        public static func identifier(for rawValue: String) -> String { "tab_\(rawValue)" }
+        ///
+        /// 关键不变量：返回值 **必须** 与同 enum 的声明 constants 字面量一致——
+        /// 防 AppTab.rawValue 改名时 runtime 拼出新字符串但 declared constants / UITests 仍用旧字符串造成 drift.
+        /// codex round 4 [P2] 修：从 `"tab_\(rawValue)"` 拼接改为 switch 到声明常量；未知 rawValue 走 assertionFailure（dev-time 抓）.
+        public static func identifier(for rawValue: String) -> String {
+            switch rawValue {
+            case "home":     return Tab.home       // "tab_home"
+            case "wardrobe": return Tab.wardrobe   // "tab_wardrobe"
+            case "friends":  return Tab.friends    // "tab_friends"
+            case "profile":  return Tab.profile    // "tab_profile"
+            default:
+                assertionFailure("AccessibilityID.Tab.identifier(for:) called with unknown rawValue: \(rawValue) — add new case here when AppTab adds a new tab")
+                return "tab_\(rawValue)"
+            }
+        }
     }
 
     /// Story 37.8 / 37.3 落地的 RoomScaffoldView + RoomViewPlaceholder a11y identifier.

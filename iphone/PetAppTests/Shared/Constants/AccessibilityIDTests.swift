@@ -25,6 +25,19 @@ final class AccessibilityIDTests: XCTestCase {
         XCTAssertEqual(AccessibilityID.Tab.identifier(for: AppTab.profile.rawValue), "tab_profile")
     }
 
+    // MARK: - case#1b: Tab.identifier(for:) 必须返回声明常量本身（防 codex round 4 [P2] drift）
+
+    /// 守护：`identifier(for: rawValue)` 返回的字符串必须 **逐字** 等于同 enum 声明常量；
+    /// 不能仅靠 `"tab_\(rawValue)"` 拼接——这种拼接会让未来 AppTab.rawValue 改名时
+    /// runtime 拼出新值但 declared constants / UITests 仍写旧值，refactor 想防的 drift 原地失效.
+    /// codex round 4 [P2] 修：identifier(for:) 改为 switch 到声明常量，本测试守护该不变量.
+    func testTabIdentifierHelperReturnsDeclaredConstants() {
+        XCTAssertEqual(AccessibilityID.Tab.identifier(for: "home"),     AccessibilityID.Tab.home)
+        XCTAssertEqual(AccessibilityID.Tab.identifier(for: "wardrobe"), AccessibilityID.Tab.wardrobe)
+        XCTAssertEqual(AccessibilityID.Tab.identifier(for: "friends"), AccessibilityID.Tab.friends)
+        XCTAssertEqual(AccessibilityID.Tab.identifier(for: "profile"),  AccessibilityID.Tab.profile)
+    }
+
     // MARK: - case#2: Room nested enum 全部常量 + member helper
 
     func testRoomIdentifiers() {
