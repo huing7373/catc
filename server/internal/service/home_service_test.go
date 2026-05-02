@@ -48,6 +48,11 @@ func (s *stubHomeStepAccountRepo) FindByUserID(ctx context.Context, userID uint6
 	return s.findByUserIDFn(ctx, userID)
 }
 
+// UpdateBalance Story 7.3 加：home_service 不调；保留以满足 interface。
+func (s *stubHomeStepAccountRepo) UpdateBalance(ctx context.Context, userID uint64, delta int32, expectedVersion uint64) error {
+	panic("stubHomeStepAccountRepo.UpdateBalance not configured (home_service should not call it)")
+}
+
 type stubHomeChestRepo struct {
 	findByUserIDFn func(ctx context.Context, userID uint64) (*mysql.UserChest, error)
 }

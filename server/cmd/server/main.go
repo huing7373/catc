@@ -188,6 +188,7 @@ func main() {
 		TxMgr:        txMgr,
 		Signer:       signer,
 		RateLimitCfg: cfg.RateLimit,
+		StepsCfg:     cfg.Steps, // Story 7.3 加：步数同步防作弊阈值
 	}
 	if err := bootstrap.Run(ctx, cfg, deps); err != nil {
 		slog.Error("server run failed", slog.Any("error", err))

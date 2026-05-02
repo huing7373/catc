@@ -24,10 +24,11 @@ import (
 // 字段 nil-tolerant：单元测试可传 Deps{} 零值（仅依赖 router 基础四件套 +
 // /ping / /version / /metrics 不消费 deps）。生产路径 main.go 必填。
 type Deps struct {
-	GormDB       *gorm.DB           // Story 4.2 加：MySQL gorm 句柄
-	TxMgr        tx.Manager         // Story 4.2 加：tx manager
-	Signer       *auth.Signer       // Story 4.4 加：JWT signer 单例
+	GormDB       *gorm.DB               // Story 4.2 加：MySQL gorm 句柄
+	TxMgr        tx.Manager             // Story 4.2 加：tx manager
+	Signer       *auth.Signer           // Story 4.4 加：JWT signer 单例
 	RateLimitCfg config.RateLimitConfig // Story 4.5 加：限频策略参数
+	StepsCfg     config.StepsConfig     // Story 7.3 加：步数同步防作弊阈值（dev/test 覆盖；prod 默认）
 }
 
 // NewRouter 构造挂好四件套中间件的 Gin engine。
@@ -123,12 +124,13 @@ func NewRouter(deps Deps) *gin.Engine {
 	// （登录前路径无 userID）。RateLimit 工厂在 NewRouter 调用期校验 cfg（PerKeyPerMin
 	// <= 0 → panic）；与 4.5 fail-fast 模式一致。
 	if deps.GormDB != nil && deps.TxMgr != nil && deps.Signer != nil {
-		// 5 个 mysql repo
+		// 6 个 mysql repo（Story 7.3 加 stepSyncLogRepo）
 		userRepo := mysql.NewUserRepo(deps.GormDB)
 		authBindingRepo := mysql.NewAuthBindingRepo(deps.GormDB)
 		petRepo := mysql.NewPetRepo(deps.GormDB)
 		stepAccountRepo := mysql.NewStepAccountRepo(deps.GormDB)
 		chestRepo := mysql.NewChestRepo(deps.GormDB)
+		stepSyncLogRepo := mysql.NewStepSyncLogRepo(deps.GormDB)
 
 		// auth service：5 repo + txMgr + signer
 		authSvc := service.NewAuthService(
@@ -149,6 +151,11 @@ func NewRouter(deps Deps) *gin.Engine {
 		homeSvc := service.NewHomeService(userRepo, petRepo, stepAccountRepo, chestRepo)
 		homeHandler := handler.NewHomeHandler(homeSvc)
 
+		// Story 7.3 加：step service + handler（事务内差值入账 + 防作弊；
+		// 复用 stepAccountRepo + 新 stepSyncLogRepo + txMgr）。
+		stepSvc := service.NewStepService(deps.TxMgr, stepAccountRepo, stepSyncLogRepo, deps.StepsCfg)
+		stepsHandler := handler.NewStepsHandler(stepSvc)
+
 		api := r.Group("/api/v1")
 
 		// /auth 子组：RateLimitByIP（V1 §4.1 行 218）
@@ -163,6 +170,7 @@ func NewRouter(deps Deps) *gin.Engine {
 			middleware.RateLimit(deps.RateLimitCfg, middleware.RateLimitByUserID),
 		)
 		authedGroup.GET("/home", homeHandler.LoadHome)
+		authedGroup.POST("/steps/sync", stepsHandler.PostSync) // Story 7.3 加
 	}
 
 	return r

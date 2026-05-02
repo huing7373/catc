@@ -75,6 +75,12 @@ func (s *stubStepAccountRepo) FindByUserID(ctx context.Context, userID uint64) (
 	panic("stubStepAccountRepo.FindByUserID not configured")
 }
 
+// UpdateBalance 默认 panic（auth_service 不调；Story 7.3 起 step_service 用，
+// 但 step_service 有独立 stub —— 本 stub 仅给 auth_service_test 用）。
+func (s *stubStepAccountRepo) UpdateBalance(ctx context.Context, userID uint64, delta int32, expectedVersion uint64) error {
+	panic("stubStepAccountRepo.UpdateBalance not configured (auth_service should not call it)")
+}
+
 type stubChestRepo struct {
 	createFn       func(ctx context.Context, c *mysql.UserChest) error
 	findByUserIDFn func(ctx context.Context, userID uint64) (*mysql.UserChest, error)

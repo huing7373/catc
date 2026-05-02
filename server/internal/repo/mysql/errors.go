@@ -58,4 +58,14 @@ var (
 	ErrPetNotFound            = errors.New("mysql: default pet not found")
 	ErrStepAccountNotFound    = errors.New("mysql: step_account not found")
 	ErrChestNotFound          = errors.New("mysql: chest not found")
+
+	// ErrStepSyncLogNotFound: StepSyncLogRepo.FindLatestByUserAndDate 查不到（合法：
+	// 用户当日首次同步）。**不**包成 1009 / 1003 错误：service 层会用 errors.Is 捕获后
+	// 走"首次同步 delta = clientTotalSteps"分支。Story 7.3 引入。
+	ErrStepSyncLogNotFound = errors.New("mysql: step_sync_log not found")
+
+	// ErrStepAccountVersionMismatch: StepAccountRepo.UpdateBalance 乐观锁失败
+	// （WHERE version = ? 不匹配 → rows affected = 0）。service 层包成 1009
+	// （节点 3 阶段无 retry；客户端下次主动 sync 时重试）。Story 7.3 引入。
+	ErrStepAccountVersionMismatch = errors.New("mysql: step_account version mismatch (optimistic lock conflict)")
 )

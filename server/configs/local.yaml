@@ -60,6 +60,16 @@ ratelimit:
   # 内存 bucket 数上限（防 IP 洪泛 OOM）。约 1MB 内存；节点 10+ 切 Redis 后此项废弃。
   buckets_limit: 10000
 
+# Story 7.3 引入：步数同步防作弊阈值（V1 §6.1.4 + GAP K）
+# 默认 single_sync_cap=5000 / daily_cap=50000；
+# **prod 部署必须用默认值**（契约一部分，跨端一致）；
+# **dev / test 环境**可覆盖（仅供单测 / 调试 / fixture）。
+# 默认值由 service 层兜底，本 yaml 默认**不写** —— 让"缺字段 = default"路径在 dev 验证。
+# 例（仅 dev / 单测覆盖）：
+# steps:
+#   single_sync_cap: 100   # 单测 fixture：让小 delta 也触发截断
+#   daily_cap: 500
+
 log:
   level: info
   # file: 日志同时写入的文件路径（追加模式 / O_APPEND，重启不覆盖）。

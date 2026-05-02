@@ -36,7 +36,7 @@ type StepAccount struct {
 func (StepAccount) TableName() string { return "user_step_accounts" }
 
 // StepAccountRepo 是 user_step_accounts 表的访问接口（节点 2 阶段 Create + FindByUserID；
-// 节点 3 步数 epic 才加 UpdateBalance 等）。
+// 节点 3 步数 epic 起加 UpdateBalance）。
 type StepAccountRepo interface {
 	// Create 插入一行 step_accounts。
 	//
@@ -50,6 +50,31 @@ type StepAccountRepo interface {
 	// NotFound → ErrStepAccountNotFound 哨兵；其他 DB 异常透传给 service。
 	// 节点 2 阶段调用方仅 home_service.LoadHome（Story 4.8）；节点 3 步数 epic 起 step_service 也消费。
 	FindByUserID(ctx context.Context, userID uint64) (*StepAccount, error)
+
+	// UpdateBalance 在事务内更新步数账户三档值（乐观锁 version + 1）。Story 7.3 引入。
+	//
+	// 实装：UPDATE user_step_accounts
+	//       SET total_steps = total_steps + ?, available_steps = available_steps + ?,
+	//           version = version + 1
+	//       WHERE user_id = ? AND version = ?
+	//
+	// **关键 1**：用 SQL 表达式 `total_steps + ?` 而非"读出来 +delta 再 UPDATE"——
+	// 避免 race condition；GORM 用 gorm.Expr("total_steps + ?", delta) 表达。
+	// **关键 2**：乐观锁 WHERE version = ? —— 若并发改动，rows affected = 0 →
+	// 返 ErrStepAccountVersionMismatch（service 层包成 1009）。
+	// **关键 3**：consumed_steps **不更新**（V1 §6.1.4 钦定 sync 接口仅加 total / available，
+	// consumed 由 future 开宝箱 / 等消费场景扣减）。
+	// **关键 4**：delta 类型 int32（与 sync_log.accepted_delta_steps 同；INT signed）。
+	//
+	// 参数：
+	//   - userID: 目标账户 PK
+	//   - delta: 本次入账增量（≥ 0；防作弊 service 层已截断 / 封顶为 0）
+	//   - expectedVersion: 当前 step_account 行的 version 值（service 层先 FindByUserID 拿到）
+	//
+	// 错误：
+	//   - ErrStepAccountVersionMismatch: 乐观锁失败（rows affected = 0）
+	//   - 其他 DB error 透传
+	UpdateBalance(ctx context.Context, userID uint64, delta int32, expectedVersion uint64) error
 }
 
 // stepAccountRepo 是 StepAccountRepo 的默认实装。
@@ -86,4 +111,27 @@ func (r *stepAccountRepo) FindByUserID(ctx context.Context, userID uint64) (*Ste
 		return nil, err
 	}
 	return &a, nil
+}
+
+// UpdateBalance 实装：UPDATE user_step_accounts SET total/available/version
+// WHERE user_id AND version；rows affected = 0 → ErrStepAccountVersionMismatch。
+//
+// 用 gorm.Expr 让 SQL 层做加法（race-free）；consumed_steps 不更新。
+func (r *stepAccountRepo) UpdateBalance(ctx context.Context, userID uint64, delta int32, expectedVersion uint64) error {
+	db := tx.FromContext(ctx, r.db)
+	res := db.WithContext(ctx).
+		Model(&StepAccount{}).
+		Where("user_id = ? AND version = ?", userID, expectedVersion).
+		Updates(map[string]interface{}{
+			"total_steps":     gorm.Expr("total_steps + ?", delta),
+			"available_steps": gorm.Expr("available_steps + ?", delta),
+			"version":         gorm.Expr("version + 1"),
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrStepAccountVersionMismatch
+	}
+	return nil
 }

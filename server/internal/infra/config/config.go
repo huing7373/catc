@@ -6,6 +6,7 @@ type Config struct {
 	Auth      AuthConfig      `yaml:"auth"`
 	RateLimit RateLimitConfig `yaml:"ratelimit"`
 	Log       LogConfig       `yaml:"log"`
+	Steps     StepsConfig     `yaml:"steps"` // Story 7.3 加
 }
 
 type ServerConfig struct {
@@ -161,6 +162,29 @@ type RateLimitConfig struct {
 	// "全部走 overflow shared limiter"，与"完全限频"不同，但这种极端配置应该
 	// 被默认值兜底而非 fail-fast，与既有 ≤0 → 兜底 10000 行为一致）。
 	BucketsLimit *int64 `yaml:"buckets_limit"`
+}
+
+// StepsConfig 是步数同步业务配置。Story 7.3 引入；契约 / 默认值 / 环境约束由
+// `docs/宠物互动App_V1接口设计.md` §6.1.4 + §1（节点 3 冻结）+ epics.md §Story 7.3 钦定。
+//
+// **关键**：默认值（5000 / 50000）属契约一部分；**prod 部署必须使用默认值**，
+// 不允许通过 YAML 覆盖（避免不同 prod 实例阈值漂移引发跨端契约不一致）。
+// **dev / test 环境**可通过 YAML 覆盖（仅供单测 / 调试 / fixture），**不**视为契约变更。
+//
+// 字段类型用 `int64`（不是 `*int64`）：与 RateLimitConfig 不同，本 struct
+// "缺字段" / "显式 0" 都视为"用默认值"——zero-value 兜底语义清晰，
+// 不存在"显式 0 = 禁用功能"的合法用法（cap=0 没有业务含义）。
+//
+// 字段不在 config 包做业务校验（无 Validate 方法）；service.NewStepService
+// 在启动期把 0 值兜底为 default* 常量，不 panic。
+type StepsConfig struct {
+	// SingleSyncCap 是单次 sync 的 delta 上限。
+	// 默认 5000（service 层 default 兜底）；YAML 显式正值覆盖；0 / 负值 = 用默认值。
+	SingleSyncCap int64 `yaml:"single_sync_cap"`
+
+	// DailyCap 是当日累计 accepted_delta_steps 封顶。
+	// 默认 50000（service 层 default 兜底）；YAML 显式正值覆盖；0 / 负值 = 用默认值。
+	DailyCap int64 `yaml:"daily_cap"`
 }
 
 type LogConfig struct {

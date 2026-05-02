@@ -89,3 +89,37 @@ func TestStepAccountRepo_FindByUserID_NotFound_ReturnsErrStepAccountNotFound(t *
 		t.Errorf("err = %v, want ErrStepAccountNotFound", err)
 	}
 }
+
+// TestStepAccountRepo_UpdateBalance_HappyPath: Story 7.3 加。
+//
+// UPDATE `user_step_accounts` SET total += ?, available += ?, version = version + 1
+// WHERE user_id=? AND version=? → RowsAffected=1 → repo 返 nil；
+// RowsAffected=0（乐观锁失败）→ 返 ErrStepAccountVersionMismatch。
+func TestStepAccountRepo_UpdateBalance_HappyPath(t *testing.T) {
+	t.Run("RowsAffected1", func(t *testing.T) {
+		gormDB, mock := newGormWithMock(t)
+		repo := NewStepAccountRepo(gormDB)
+
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE `user_step_accounts`")).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		err := repo.UpdateBalance(context.Background(), 1001, 100, 0)
+		if err != nil {
+			t.Fatalf("UpdateBalance: %v", err)
+		}
+	})
+
+	t.Run("RowsAffected0_ReturnsVersionMismatch", func(t *testing.T) {
+		gormDB, mock := newGormWithMock(t)
+		repo := NewStepAccountRepo(gormDB)
+
+		// rows affected = 0 → 乐观锁 WHERE version 不匹配
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE `user_step_accounts`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		err := repo.UpdateBalance(context.Background(), 1001, 100, 999)
+		if !stderrors.Is(err, ErrStepAccountVersionMismatch) {
+			t.Errorf("err = %v, want ErrStepAccountVersionMismatch (RowsAffected=0)", err)
+		}
+	})
+}
