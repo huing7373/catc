@@ -120,3 +120,4 @@
 | 2026-04-30 | [a11y coverage CI 脚本 window 算法 sound 性 (multi-control 同 view 的 sibling 顺势遮蔽 false negative)](2026-04-30-a11y-coverage-script-window-soundness.md) | 2 | testing | `4244c5f` |
 | 2026-04-30 | [identifier helper 必须 source 自声明常量而非重新拼接（防 single-source-of-truth 静默 drift）](2026-04-30-identifier-helper-must-source-from-declared-constants.md) | 1 | architecture | `152c22b` |
 | 2026-04-30 | [白名单条目必须 cite「完整流程文档 / 真实渲染路径」而非只挂视觉壳入口](2026-04-30-whitelist-entry-must-cite-full-flow-doc-and-real-render-path.md) | 2 | docs | `<pending>` |
+| 2026-04-30 | [白名单 r2：deferred artifact 的位置必须落到「真实承载源」而非视觉壳入口（roomCode/JoinRoomModal 在 app.jsx；ui_design SVG vs SwiftUI cat.fill）](2026-04-30-whitelist-entry-must-cite-full-flow-doc-and-real-render-path-2.md) | 2 | docs | `<pending>` |

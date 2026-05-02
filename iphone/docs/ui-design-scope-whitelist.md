@@ -87,8 +87,8 @@
 
 ### 8. 小猫 3D 模型（USDZ / RealityKit）
 
-- **位置（ui_design）**：`iphone/ui_design/source/screens/home.jsx` line 52（`<CatPlaceholder size={220} mood={mood} label="猫 3D 模型"/>` cat stage 视觉占位）+ `iphone/ui_design/source/components/cat-placeholder.jsx`（猫占位组件，97 行）
-- **理由**：Epic 37 Story 37.7 HomeView 视觉壳用 SF Symbol `cat.fill` 占位渲染。3D 模型需要美术资源 + RealityKit / SceneKit 集成 spike，属独立 spike 工作量；视觉效果升级，**不**改动产品规则。[Source: _bmad-output/planning-artifacts/epics.md#Story 37.7] [Source: _bmad-output/implementation-artifacts/37-7-homeview-scaffold.md]
+- **位置（ui_design）**：`iphone/ui_design/source/screens/home.jsx` line 52（`<CatPlaceholder size={220} mood={mood} label="猫 3D 模型"/>` cat stage 视觉占位）+ `iphone/ui_design/source/components/cat-placeholder.jsx`（猫占位组件，97 行，placeholder 为 SVG-based vector shape：line 18 `<svg viewBox=...>` + line 28-36 `<circle>` / `<path>` 头脸耳朵眼鼻嘴）
+- **理由**：本条目作用域是 **ui_design prototype** 的 placeholder 替换路径。ui_design 侧 placeholder 是 SVG-based `CatPlaceholder` 组件（vector 勾勒猫头）；当前 SwiftUI 实装侧（Story 37.7 HomeView 视觉壳）独立用 `Image(systemName: "cat.fill")` 占位渲染（两者不是同一份 placeholder）。3D 模型需要美术资源 + RealityKit / SceneKit 集成 spike，属独立 spike 工作量；视觉效果升级，**不**改动产品规则。节点 10 起 Story 30.x 落地 RealityKit / USDZ 3D model 替换的是 **SwiftUI 实装侧**的 `cat.fill` 占位（不是 ui_design prototype 的 SVG CatPlaceholder —— prototype 不上线、不需替换）。[Source: _bmad-output/planning-artifacts/epics.md#Story 37.7] [Source: _bmad-output/implementation-artifacts/37-7-homeview-scaffold.md]
 - **何时做**：美术资源就位后另起 spike（**非**节点 1-12 关键路径）。
 
 ### 9. 装扮道具 emoji 占位（仅本期 Scaffold 用）
@@ -99,7 +99,7 @@
 
 ### 10. K3M9P2 等美化别名（roomId 美化展示）
 
-- **位置（ui_design）**：`iphone/ui_design/source/screens/room.jsx` line 33-44（房间代码卡片，ui_design 内变量名仍是 `roomCode`，本期 SwiftUI 实装统一改为 `roomId`）+ `iphone/ui_design/source/screens/home.jsx` line 162-183（"加入队伍"输入框 + 创建队伍按钮）
+- **位置（ui_design）**：`iphone/ui_design/source/app.jsx` line 30 + 65（`roomCode` state，初值 `'7K3-P2'` / fallback `'9X2-L8'`）+ line 18 + 92（friends mock 数据 statusText `在房间 9X2-L8 中`）+ line 215-271（`JoinRoomModal` 定义，line 249 placeholder `例如 9X2-L8`，line 259 `房间代码格式：3 个字母 - 2 位数字` 格式说明）+ `iphone/ui_design/source/screens/home.jsx` line 173 + 183（"创建队伍" / "加入队伍" 按钮，触发 modal；该 range 不含 input field 本身）+ `iphone/ui_design/source/screens/room.jsx` line 33-44（房间代码卡片，line 6 `clipboard.writeText(roomCode)` 复制；ui_design 内变量名仍是 `roomCode`，本期 SwiftUI 实装统一改为 `roomId`）
 - **理由**：PRD §4 line 52 钦定「房间标识全程使用 **roomId 字符串**」「本期 MVP **不引入** K3M9P2 等美化别名」（依据 AR21 ID 字符串约定 + db rooms 表无 code 字段）。Epic 37 Story 37.8 进一步钦定 a11y 命名严格 `roomIdDisplay`，禁止旧名 `roomCodeDisplay`。UI 全屏直接显示 roomId 字符串（如「房间 1234567」），分享文案直白展示同样写法。[Source: _bmad-output/planning-artifacts/prd.md#§4 MVP 范围] [Source: _bmad-output/planning-artifacts/epics.md#Story 37.8]
 - **何时做**：未来若产品需要可在专门 spike 设计可逆契约（双向映射 roomId ↔ 美化别名 + 防 sender / receiver UX 闭环问题）；**非**节点 1-12 关键路径。
 
