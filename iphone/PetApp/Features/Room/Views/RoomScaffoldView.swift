@@ -54,7 +54,7 @@ public struct RoomScaffoldView: View {
                     leaveButton          // 区块 5: 底部"离开房间" PrimaryButton
                 }
                 .padding(.horizontal, theme.spacing.s20)
-                .padding(.top, 68)         // ui_design §iOS 设备规格: 状态栏 padding 68pt
+                .padding(.top, 8)          // safe area top 已自动 respect；只补呼吸空间. 详见 HomeView.swift:90 注释.
                 .padding(.bottom, 100)     // 浮动 TabBar 让出空间
             }
         }

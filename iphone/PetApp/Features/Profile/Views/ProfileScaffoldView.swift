@@ -157,7 +157,7 @@ public struct ProfileScaffoldView: View {
                 Spacer()
             }
         }
-        .padding(.top, 68)
+        .padding(.top, 8)          // safe area top 已自动 respect；只补呼吸空间. 详见 HomeView.swift:90 注释.
         .padding(.horizontal, 20)
         .padding(.bottom, 50)
         .background(

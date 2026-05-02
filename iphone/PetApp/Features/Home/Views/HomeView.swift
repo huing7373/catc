@@ -87,7 +87,7 @@ public struct HomeView<ChestSlot: View>: View {
                     versionFooter
                 }
                 .padding(.horizontal, theme.spacing.s20)
-                .padding(.top, 68)         // ui_design §iOS 设备规格: 状态栏 padding 68pt
+                .padding(.top, 8)          // SwiftUI ScrollView 已 respect safe area top（~59pt 含状态栏 / Dynamic Island）；只补 8pt 呼吸空间. 旧 68pt 是 jsx 时代假设无 safe area 的值，与 iOS safe area 叠加导致内容下沉至 y=127.
                 .padding(.bottom, 100)     // 浮动 TabBar 让出空间
             }
         }
