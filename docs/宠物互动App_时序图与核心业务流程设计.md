@@ -185,7 +185,7 @@ sequenceDiagram
     Client->>HealthKit: 读取当天累计步数
     HealthKit-->>Client: clientTotalSteps
     Client->>API: POST /api/v1/steps/sync
-    API->>Service: syncSteps(userId, syncDate, clientTotalSteps, motionState)
+    API->>Service: syncSteps(userId, syncDate, clientTotalSteps, motionState, clientTimestamp)
     Service->>MySQL: 查询 user_step_sync_logs 当天最近记录
     alt 首次同步
         Service->>Service: delta = clientTotalSteps

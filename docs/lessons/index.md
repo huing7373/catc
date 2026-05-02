@@ -125,3 +125,4 @@
 | 2026-04-30 | [白名单 r4：deferred 集合的"成员名 / 数量"必须以真实 code token 为准（theme set: candy/matcha/sky/dark 四套 vs 误写的 candy/dark/mono 三套）](2026-04-30-whitelist-deferred-set-must-mirror-real-code-tokens.md) | 1 | docs | `296ebca` |
 | 2026-05-02 | [步数同步接口的"封顶判断方向"与"输入硬上限语义"两类边界契约陷阱](2026-05-02-step-cap-boundary-and-input-bound-contract.md) | 2 | docs | `<pending>` |
 | 2026-05-02 | [步数同步接口 1005 限频维度错配 与 3001 "粘性错误码" 误述](2026-05-02-step-sync-rate-limit-scope-and-3001-stickiness-myth.md) | 2 | docs | `<pending>` |
+| 2026-05-02 | [接口契约 story 必须连同时序图 + 数据库枚举一起锚定，不能只改 V1 接口文档](2026-05-02-cross-doc-contract-anchor-scope.md) | 2 | docs | `<pending>` |
