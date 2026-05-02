@@ -119,3 +119,4 @@
 | 2026-05-02 | [ADR layering guard 必须 token-match 而非 `TypeName(` 构造调用 match](2026-05-02-static-guard-regex-must-token-match-not-constructor-call.md) | 1 | architecture | `331222b` |
 | 2026-04-30 | [a11y coverage CI 脚本 window 算法 sound 性 (multi-control 同 view 的 sibling 顺势遮蔽 false negative)](2026-04-30-a11y-coverage-script-window-soundness.md) | 2 | testing | `4244c5f` |
 | 2026-04-30 | [identifier helper 必须 source 自声明常量而非重新拼接（防 single-source-of-truth 静默 drift）](2026-04-30-identifier-helper-must-source-from-declared-constants.md) | 1 | architecture | `152c22b` |
+| 2026-04-30 | [白名单条目必须 cite「完整流程文档 / 真实渲染路径」而非只挂视觉壳入口](2026-04-30-whitelist-entry-must-cite-full-flow-doc-and-real-render-path.md) | 2 | docs | `<pending>` |
