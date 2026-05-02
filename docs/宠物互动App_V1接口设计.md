@@ -589,13 +589,13 @@ JSON 示例：
 |---|---|---|
 | 1001 | 未登录 / token 无效 | auth 中间件拦截（无 Bearer token / token 过期 / token 解析失败） |
 | 1002 | 参数错误 | `syncDate` 格式不符 `YYYY-MM-DD` / `clientTotalSteps` 缺失或为负数 / `motionState` 不在 {1,2,3} / `clientTimestamp` ≤ 0 / 任一字段缺失 |
-| 1005 | 操作过于频繁 | rate_limit 中间件拦截（同 IP 每分钟 > 60 次） |
+| 1005 | 操作过于频繁 | rate_limit 中间件拦截（**已认证路由**按 user_id 限频，每用户每分钟 > 60 次；按 Story 4.5 默认值，配置可调） |
 | 3001 | 步数同步数据异常 | 本次同步入账后当日 `accepted_delta_steps` 累计**将超过** 50000 上限（即 `prevAccepted + curDelta > 50000`），本次 delta 被强制 = 0（防作弊封顶；GAP K 修补） |
 | 1009 | 服务繁忙 | DB 异常 / 事务回滚 / 内部 panic（见 Story 7.3 service 实装） |
 
 **关键约束**：
 
-- 错误码 3001 与 1002 的语义差异**必须**明确：1002 是**参数本身**不合法（客户端错），3001 是**参数合法但触发服务端业务限制**（防作弊封顶，客户端可继续用，但当日 sync 不再入账）；客户端处理策略不同（1002 应停止重试；3001 当日剩余 sync 调用都会得到 3001，应静默接受 + 第二天再试）
+- 错误码 3001 与 1002 的语义差异**必须**明确：1002 是**参数本身**不合法（客户端错），3001 是**参数合法但触发服务端业务限制**（防作弊封顶，本次 delta 被强制 = 0）；客户端处理策略不同（1002 应停止重试并修正参数；3001 应静默接受本次返回 + UX 提示"今日步数已达上限"）。**注意**：3001**不是粘性错误码** —— 当日只要 `prevAccepted + curDelta > 50000` 触发条件成立才返 3001；若客户端后续 sync 是倒退（`clientTotalSteps < lastClientTotalSteps`）或重复（`clientTotalSteps == lastClientTotalSteps`），按"差值计算"步骤 delta 自然 = 0，**仍返 code = 0**，不会再次触发 3001。客户端**不应**假设当日首次 3001 后所有 sync 都失败而停止上报（仍需上报维持 sync_log 审计）
 - 单次截断（`delta > 5000`）**不**返回错误，仅 log warning + 截断；客户端从 `acceptedDeltaSteps` 字段感知实际入账值，**不**通过错误码感知截断（avoid false negative：真实跑步用户单次同步可能合法超 5000，体验上不应被错误码打断）
 
 ---
