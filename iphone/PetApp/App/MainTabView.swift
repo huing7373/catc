@@ -35,16 +35,32 @@ public struct MainTabView: View {
     public init() {}
 
     public var body: some View {
-        TabView(selection: $coordinator.currentTab) {
-            HomeContainerView().tag(AppTab.home)
-            WardrobeView().tag(AppTab.wardrobe)        // Story 37.9 实装真实内容；本 story 占位 stub
-            FriendsView().tag(AppTab.friends)          // Story 37.10 实装真实内容；本 story 占位 stub
-            ProfileView().tag(AppTab.profile)          // Story 37.11 实装真实内容；本 story 占位 stub
+        // 不用 SwiftUI `TabView` —— 旧路径 `TabView { ... }.toolbar(.hidden, for: .tabBar)`
+        // 在 iOS 26 仍渲染选中指示器 (system AXTabButton + 视觉 dot/glow)，从 FloatingTabBar
+        // 下方 14pt 缝隙漏出来，跟选中 tab 横向移动 (user-reported "底部 tab 下方阴影会跟选中移动").
+        // 改用 ZStack + opacity 路由：4 个 root view 全部 alive，靠 selection 切 opacity 与 hitTest.
+        // - state 保留：等价于 TabView "全部 alive" 语义.
+        // - 系统 TabView 不再存在，根除指示漏出.
+        // - selection 由 `coordinator.currentTab` 直接驱动，与原 `.tag(AppTab.xxx)` binding 等价.
+        ZStack {
+            HomeContainerView()
+                .opacity(coordinator.currentTab == .home ? 1 : 0)
+                .allowsHitTesting(coordinator.currentTab == .home)
+                .accessibilityHidden(coordinator.currentTab != .home)
+            WardrobeView()                              // Story 37.9 实装真实内容
+                .opacity(coordinator.currentTab == .wardrobe ? 1 : 0)
+                .allowsHitTesting(coordinator.currentTab == .wardrobe)
+                .accessibilityHidden(coordinator.currentTab != .wardrobe)
+            FriendsView()                               // Story 37.10 实装真实内容
+                .opacity(coordinator.currentTab == .friends ? 1 : 0)
+                .allowsHitTesting(coordinator.currentTab == .friends)
+                .accessibilityHidden(coordinator.currentTab != .friends)
+            ProfileView()                               // Story 37.11 实装真实内容
+                .opacity(coordinator.currentTab == .profile ? 1 : 0)
+                .allowsHitTesting(coordinator.currentTab == .profile)
+                .accessibilityHidden(coordinator.currentTab != .profile)
         }
-        // 隐藏 SwiftUI 默认 TabBar（自绘浮动 overlay 取代之）.
-        .toolbar(.hidden, for: .tabBar)
-        // 用 safeAreaInset 让 SwiftUI 自动为内容预留底部 safe area，
-        // 避免内容被浮动 TabBar 遮挡（Story 37.3 Dev Notes "iOS 17+ TabView API 偏差" 钦定路径）.
+        // 用 safeAreaInset 让 SwiftUI 自动为内容预留底部 safe area，避免内容被浮动 TabBar 遮挡.
         .safeAreaInset(edge: .bottom) {
             FloatingTabBar(selection: $coordinator.currentTab)
                 .padding(.horizontal, 12)
