@@ -123,3 +123,4 @@
 | 2026-04-30 | [白名单 r2：deferred artifact 的位置必须落到「真实承载源」而非视觉壳入口（roomCode/JoinRoomModal 在 app.jsx；ui_design SVG vs SwiftUI cat.fill）](2026-04-30-whitelist-entry-must-cite-full-flow-doc-and-real-render-path-2.md) | 2 | docs | `0e99f01` |
 | 2026-04-30 | [白名单 r3：未来 routing 必须 cite 真实 Story scope（不能把 3D spike 错挂 Story 30.x、不能把 SwiftUI 实装路径错写成 prototype 替换）](2026-04-30-whitelist-future-routing-must-cite-real-story-scope.md) | 2 | docs | `20aec06` |
 | 2026-04-30 | [白名单 r4：deferred 集合的"成员名 / 数量"必须以真实 code token 为准（theme set: candy/matcha/sky/dark 四套 vs 误写的 candy/dark/mono 三套）](2026-04-30-whitelist-deferred-set-must-mirror-real-code-tokens.md) | 1 | docs | `296ebca` |
+| 2026-05-02 | [步数同步接口的"封顶判断方向"与"输入硬上限语义"两类边界契约陷阱](2026-05-02-step-cap-boundary-and-input-bound-contract.md) | 2 | docs | `<pending>` |
