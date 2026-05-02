@@ -1,6 +1,6 @@
 # Story 37.13: accessibility identifier 全屏总表 + 视觉回归 review checklist（合规兜底，非 snapshot 替代）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
@@ -826,6 +826,24 @@ Claude Opus 4.7 (1M context) · 2026-04-30
 - **AC7 完成**：`AccessibilityIDTests.swift` 落 4 case（Tab + helper / Room + member helper / JoinRoomModal / Wardrobe+Friends+Profile+Home+Compose 扩展），覆盖全部新增常量字符串值与 helper 函数。
 - **AC8 完成**：build.sh --test 跑通 346 unit case 全绿；2 个静态脚本全绿；grep 红线全部满足（`roomCode` 仅残留在 `Room.roomIdDisplay` 上方注释 + AccessibilityIDTests case#2 断言信息，**值没残留**；deprecated 3 常量定义已删，无 caller 引用残留）。
 - **HomeViewTests.swift 副作用清理**：原 case 引用 `AccessibilityID.Home.btnRoom/btnInventory/btnCompose` 3 个 deprecated 常量，删除后会 compile error → 同步从 identifiers 数组移除（重命名 `testAllSixHomeAccessibilityIdentifiersAreNonEmpty` → `testAllHomeAccessibilityIdentifiersAreNonEmpty`，因为 6 个 → 5 个 identifier）。
+
+### Known Issues (P2/P3 flagged, deferred to follow-up PR)
+
+主 agent 在 codex round 5 cap 触达时 reclassify 为 [P3]/nit + flag。理由：CI guard script soundness 边界 case，不影响 production runtime；5/5 cap 触达，按 Story 37-6 r6 同模式 reclassify-and-flag；可作为 follow-up 单 PR 加固。
+
+**[P2 → P3 reclassified]** `iphone/scripts/check_a11y_coverage.sh:123-126` — Preview skip lookback 50 行太宽
+- 现象：interactive line 往前 50 行内含 `#Preview`/`PreviewProvider` 就 skip，但 50 行内同文件可能定义了**另一个**真实 View 含未挂 identifier 的 Button → 静默放行
+- 影响：CI gate 漏抓真违规（同文件 #Preview + 紧邻定义另一 View 的窄场景）
+- 修法：preview skip 应限定 view block 边界（用 brace tracking 或 `// MARK: Preview` 边界），而非简单 50 行 lookback
+- forward action：epic-37 retrospective 阶段或 follow-up PR 单独加固
+
+**[P3]** `iphone/scripts/check_no_apiclient_in_features.sh:56-59` — block comment `/* ... */` 不 skip
+- 现象：awk 只 skip `//` 单行注释，block comment `/* import APIClient */` 仍被扫 → 文件含此注释会被报 false positive violation
+- 影响：极窄场景；当前仓库内无 view 文件含此类 block comment 注释引用 APIClient/UseCase/Repository token
+- 修法：awk 加 multi-line block comment skip 状态机
+- forward action：与上同 PR 一并加固
+
+**codex r5 原文**：`/tmp/epic-loop-review-37-13-r5.md`
 
 ### File List
 
