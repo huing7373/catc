@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-04-30 (story 37-14 review)
+# last_updated: 2026-04-30 (story 37-14 done)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -106,7 +106,7 @@ development_status:
   37-11-profileview-scaffold: done
   37-12-joinroommodal-跨屏跳转: done
   37-13-accessibility-identifier-总表: done
-  37-14-design-package-白名单: review
+  37-14-design-package-白名单: done
   epic-37-retrospective: required
   # ===== Epic 37 ends =====
   epic-6: backlog
