@@ -71,7 +71,9 @@
       "Bash(bash iphone/scripts/check_no_apiclient_in_features.sh)",
       "Bash(bash iphone/scripts/check_a11y_coverage.sh)",
       "Bash(bash --version)",
-      "Bash(bash iphone/scripts/check_a11y_coverage.sh --self-test)"
+      "Bash(bash iphone/scripts/check_a11y_coverage.sh --self-test)",
+      "Bash(curl -s http://127.0.0.1:8080/ping)",
+      "Bash(curl -s http://127.0.0.1:8080/version)"
     ],
     "deny": [
       "Bash(rm -rf:*)",
