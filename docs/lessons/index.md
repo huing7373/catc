@@ -116,3 +116,4 @@
 | 2026-04-30 | [UITest 自补 helper 与 XCTest SDK 方法 redeclaration](2026-04-30-uitest-helper-redeclares-sdk-method.md) | 1 | testing | `c0d7165` |
 | 2026-05-01 | [单测复刻 view 内规则等于零守护：必须把规则下沉到纯函数 helper 与 view 共用](2026-05-01-test-must-share-helper-with-view-not-replicate-rules.md) | 1 | testing | `a65ae1b` |
 | 2026-04-30 | [a11y coverage CI 脚本盲区：SCAN_DIRS 缺 App/ + regex 不覆盖 custom wrapper](2026-04-30-a11y-coverage-script-blind-spots-scan-dirs-and-custom-wrapper-regex.md) | 2 | testing | `<pending>` |
+| 2026-05-02 | [ADR layering guard 必须 token-match 而非 `TypeName(` 构造调用 match](2026-05-02-static-guard-regex-must-token-match-not-constructor-call.md) | 1 | architecture | `<pending>` |

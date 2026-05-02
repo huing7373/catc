@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # iphone/scripts/check_no_apiclient_in_features.sh
-# Story 37.13 AC5 落地：静态校验 Features/{Home,Room,Wardrobe,Friends,Profile}/Views/ +
-# Shared/Modals/ + Core/DesignSystem/ 内 import / 直接 new APIClient / Repository / UseCase
-# 类型（除显式 RealViewModel wire 模式）.
+# Story 37.13 AC5 落地（r2 加固）：静态校验 Features/{Home,Room,Wardrobe,Friends,Profile}/Views/ +
+# Shared/Modals/ + Core/DesignSystem/ 内任何 APIClient / *Repository / *UseCase / Default*
+# 类型 token 出现（覆盖 import / 构造调用 / 属性类型 / 参数类型 / protocol 类型注解 / 具体实现引用）.
 #
 # 守护 ADR-0010 View ↔ ViewModel 解耦边界：
 #   - View 层 + Modal + DesignSystem 不直接调网络 / 持久化层；只持 ViewModel 引用.
@@ -11,7 +11,17 @@
 #
 # 已知边界：
 #   - 用 grep 文本匹配, 不解析 AST.
-#   - 显式列每个类型而非泛 regex 兜底（防误报）.
+#   - 启发式跳过纯 comment 行（`//` / `///` 开头）—— forward-reference 注释 / 文档字符串不算违规.
+#   - 不跨多行（多行 trailing closure 形参声明可能漏掉，但在 view body 内极罕见）.
+#
+# r2 加固背景：r1 版本仅匹配 `TypeName(` 构造调用（如 `LoadHomeUseCase(` / `HomeRepository(`），
+# 漏掉常见 view-layer regression 形式 ——
+#   - `let useCase: LoadHomeUseCaseProtocol`           (property type annotation)
+#   - `func wireUp(useCase: SomeRepository)`           (parameter type)
+#   - `var fallback: DefaultLoadHomeUseCase`           (concrete impl reference)
+#   - `import APIClient`（已覆盖）
+# r2 改为 token-level 广泛匹配（任何 `\b<Word>UseCase\b` / `\b<Word>Repository\b` / `\bAPIClient\b`），
+# 加 comment-line skip 排除 doc 引用.
 #
 # Usage: bash iphone/scripts/check_no_apiclient_in_features.sh
 
@@ -28,9 +38,13 @@ SCAN_DIRS=(
     "$REPO_ROOT/iphone/PetApp/Core/DesignSystem"
 )
 
-# 违规 pattern（合理写法是 ViewModel 持引用 + View 仅持 ViewModel）.
-# 显式列已落地的 Repository / UseCase 类型（防 view body 内出现 helper 名带 "Repository" 后缀的误报）.
-VIOLATION_PATTERN='(import APIClient|APIClient\(|APIClientProtocol|HomeRepository\(|AuthRepository\(|RoomRepository\(|WardrobeRepository\(|FriendsRepository\(|ProfileRepository\(|LoadHomeUseCase\(|JoinRoomUseCase\(|GuestLoginUseCase\(|PingUseCase\()'
+# 违规 token pattern（r2 加固）：
+#   - `[A-Z][A-Za-z0-9]*UseCase` 后可选 `Protocol` —— 覆盖 LoadHomeUseCase / LoadHomeUseCaseProtocol / DefaultLoadHomeUseCase
+#   - `[A-Z][A-Za-z0-9]*Repository` 后可选 `Protocol` —— 覆盖 HomeRepository / HomeRepositoryProtocol / DefaultHomeRepository
+#   - `APIClient` 后可选 `Protocol` —— 覆盖 APIClient / APIClientProtocol
+# `\b` 词边界防 helper 名内含子串误报（如 `myUseCaseHelper` 不会触发，因为前面无词边界 + 大写起始约束）.
+# 命名约定：所有相关类型必为 PascalCase 起始. 触发条件：行不是 `//` / `///` comment 起始.
+VIOLATION_PATTERN='\b([A-Z][A-Za-z0-9]*UseCase|[A-Z][A-Za-z0-9]*Repository|APIClient)(Protocol)?\b'
 
 violations=0
 
@@ -39,8 +53,10 @@ for dir in "${SCAN_DIRS[@]}"; do
         continue  # DesignSystem 等目录可能本期还未存在
     fi
     while IFS= read -r -d '' file; do
-        # grep -nE 输出违规行（含行号）
-        matches="$(grep -nE "$VIOLATION_PATTERN" "$file" || true)"
+        # 用 awk 跳过纯注释行（`//` / `///` 起始，允许前导空白），
+        # 然后 grep -nE 输出违规行（带原始行号）.
+        matches="$(awk '!/^[[:space:]]*\/\//{print NR":"$0}' "$file" \
+            | grep -E "$VIOLATION_PATTERN" || true)"
         if [ -n "$matches" ]; then
             while IFS= read -r match; do
                 [ -z "$match" ] && continue
@@ -54,7 +70,8 @@ done
 if [ "$violations" -gt 0 ]; then
     echo "" >&2
     echo "❌ Total violations: $violations" >&2
-    echo "Fix: 把 APIClient / Repository / UseCase 调用从 View / Modal / DesignSystem 移到对应的 ViewModel" >&2
+    echo "Fix: 把 APIClient / Repository / UseCase 调用 / 类型引用从 View / Modal / DesignSystem 移到对应的 ViewModel" >&2
+    echo "Hint: r2 加固后覆盖 property type / parameter type / protocol type / concrete impl 等所有 token 形式." >&2
     exit 1
 fi
 
