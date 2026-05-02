@@ -46,13 +46,13 @@
 ### 1. tweaks-panel.jsx（开发时主题切换调试面板）
 
 - **位置（ui_design）**：`iphone/ui_design/source/tweaks-panel.jsx`（整个文件，419 行）
-- **理由**：tweaks-panel 是 ui_design 内部 dev tool（开发时用浏览器实时切主题 token 调参），**不**属于 App 端用户可见 UI。Epic 37 Theme stub 已落地 candy / dark / mono 三套 token，但 dev tool 与 App 用户面 orthogonal。[Source: _bmad-output/implementation-artifacts/37-5-theme-design-tokens.md] [Source: _bmad-output/planning-artifacts/epics.md#Story 37.5]
+- **理由**：tweaks-panel 是 ui_design 内部 dev tool（开发时用浏览器实时切主题 token 调参），**不**属于 App 端用户可见 UI。Epic 37 Theme stub 已落地 candy / matcha / sky / dark 四套 token，但 dev tool 与 App 用户面 orthogonal。[Source: _bmad-output/implementation-artifacts/37-5-theme-design-tokens.md] [Source: _bmad-output/planning-artifacts/epics.md#Story 37.5]
 - **何时做**：永不实装。App 端不需要 dev tool；ui_design 内的 tweaks-panel 仅服务于 ui_design 本身的开发流。
 
 ### 2. 三主题切换 UI（用户可见的主题选择器）
 
 - **位置（ui_design）**：`iphone/ui_design/source/tweaks-panel.jsx`（dev tool 内的主题切换 UI，本期不映射到 App）；`iphone/ui_design/source/screens/profile.jsx`（视觉壳**不**含主题切换按钮）
-- **理由**：Epic 37 Story 37.5 落地的是 **Theme stub**（candy / dark / mono 三套 token，编译期可切，但 ProfileView 视觉壳**不**含用户可见的主题切换控件）。用户级主题切换 UI 不在 Epic 37 AC 内。[Source: _bmad-output/planning-artifacts/epics.md#Story 37.5] [Source: _bmad-output/planning-artifacts/epics.md#Story 37.11]
+- **理由**：Epic 37 Story 37.5 落地的是 **Theme stub**（candy / matcha / sky / dark 四套 token，编译期可切，但 ProfileView 视觉壳**不**含用户可见的主题切换控件）。用户级主题切换 UI 不在 Epic 37 AC 内。[Source: _bmad-output/planning-artifacts/epics.md#Story 37.5] [Source: _bmad-output/planning-artifacts/epics.md#Story 37.11]
 - **何时做**：后续 mini-epic（视产品优先级；非节点 1-12 关键路径）。
 
 ### 3. wechat_binding 真实 OAuth 流程

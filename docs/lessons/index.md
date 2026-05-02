@@ -122,3 +122,4 @@
 | 2026-04-30 | [白名单条目必须 cite「完整流程文档 / 真实渲染路径」而非只挂视觉壳入口](2026-04-30-whitelist-entry-must-cite-full-flow-doc-and-real-render-path.md) | 2 | docs | `<pending>` |
 | 2026-04-30 | [白名单 r2：deferred artifact 的位置必须落到「真实承载源」而非视觉壳入口（roomCode/JoinRoomModal 在 app.jsx；ui_design SVG vs SwiftUI cat.fill）](2026-04-30-whitelist-entry-must-cite-full-flow-doc-and-real-render-path-2.md) | 2 | docs | `<pending>` |
 | 2026-04-30 | [白名单 r3：未来 routing 必须 cite 真实 Story scope（不能把 3D spike 错挂 Story 30.x、不能把 SwiftUI 实装路径错写成 prototype 替换）](2026-04-30-whitelist-future-routing-must-cite-real-story-scope.md) | 2 | docs | `<pending>` |
+| 2026-04-30 | [白名单 r4：deferred 集合的"成员名 / 数量"必须以真实 code token 为准（theme set: candy/matcha/sky/dark 四套 vs 误写的 candy/dark/mono 三套）](2026-04-30-whitelist-deferred-set-must-mirror-real-code-tokens.md) | 1 | docs | `<pending>` |
