@@ -2,7 +2,7 @@
 date: 2026-04-30
 source_review: file:/tmp/epic-loop-review-37-14-r3.md (codex r3)
 story: 37-14-design-package-白名单
-commit: <pending>
+commit: 20aec06
 lesson_count: 2
 ---
 
