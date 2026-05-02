@@ -574,7 +574,7 @@ JSON 示例：
   "data": {
     "acceptedDeltaSteps": 120,
     "stepAccount": {
-      "totalSteps": 12560,
+      "totalSteps": 1140,
       "availableSteps": 840,
       "consumedSteps": 300
     }
@@ -611,7 +611,7 @@ JSON 示例：
 | HTTP Method | GET |
 | Path | /api/v1/steps/account |
 | 认证 | **需要** Bearer token（auth 中间件） |
-| 限频 | 默认 |
+| 限频 | **已认证路由**按 `user_id` 每分钟 60 次（按 Story 4.5 默认值，配置可调；与 §6.1 `POST /steps/sync` 同语义） |
 | 幂等 | 幂等（纯查询） |
 | 节点 | 节点 3（Epic 7 落地） |
 
@@ -634,7 +634,7 @@ JSON 示例：
   "code": 0,
   "message": "ok",
   "data": {
-    "totalSteps": 12560,
+    "totalSteps": 1140,
     "availableSteps": 840,
     "consumedSteps": 300
   },
@@ -644,7 +644,7 @@ JSON 示例：
 
 #### 服务端行为
 
-1. **认证 & 限频**：auth 中间件校验 Bearer token；rate_limit 默认配置
+1. **认证 & 限频**：auth 中间件校验 Bearer token；rate_limit 中间件按 `user_id` 限频（每用户每分钟 60 次，按 Story 4.5 默认值，配置可调；与 §6.1 `POST /steps/sync` 同 scope —— 已认证业务路由统一按 `user_id` 而非 IP）
 2. **查询**：SELECT `total_steps, available_steps, consumed_steps` FROM `user_step_accounts` WHERE `user_id` = ? (token 解析的用户)
 3. **响应**：返回三档值；理论上**所有**已登录用户都已在游客登录初始化事务（数据库设计 §8.1 + Story 4.6）创建 step_account 行，故**正常情况**下不会触发 1003
 4. **edge case**：如查询返回 0 行（理论不该发生，但作为兜底）→ 返回 1003 资源不存在
@@ -655,7 +655,7 @@ JSON 示例：
 |---|---|---|
 | 1001 | 未登录 / token 无效 | auth 中间件拦截 |
 | 1003 | 资源不存在 | step_account 行不存在（理论不该发生 —— 登录时由 Story 4.6 五表事务初始化；触发即数据 invariant 已损坏，应该 log error） |
-| 1005 | 操作过于频繁 | rate_limit 中间件拦截 |
+| 1005 | 操作过于频繁 | rate_limit 中间件拦截（**已认证路由**按 `user_id` 限频，每用户每分钟 > 60 次；按 Story 4.5 默认值，配置可调） |
 | 1009 | 服务繁忙 | DB 查询失败 |
 
 ---
