@@ -131,3 +131,4 @@
 | 2026-05-02 | [fix-review 修主文档时必须双向对齐"AC 副本 + 跨文档枚举注释"两类衍生文档](2026-05-02-fix-review-must-mirror-symmetric-edits-across-twin-files.md) | 2 | docs | `<pending>` |
 | 2026-05-02 | [契约冻结必须钉死 prod 阈值，跨文档枚举名必须 canonical 化](2026-05-02-contract-freeze-must-pin-prod-thresholds-and-canonicalize-enum-names.md) | 2 | docs | `<pending>` |
 | 2026-05-02 | [fix-review 跨文档扫描必须包含上游 planning artifact（不能只扫 docs/ + story file）](2026-05-02-cross-doc-fix-must-sweep-planning-artifacts.md) | 1 | docs | `<pending>` |
+| 2026-05-02 | [Story file 内部规则副本必须通过"标准答案表"全文核对（不能只看 review 指出的两条）](2026-05-02-story-file-internal-rule-copies-must-pass-standard-answer-table-sweep.md) | 2 | docs / process | `<pending>` |
