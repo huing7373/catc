@@ -129,3 +129,4 @@
 | 2026-05-02 | [step_account 示例数值不变量 & 同类已认证路由限频 scope 必须重复显式](2026-05-02-step-account-example-invariant-and-cross-section-rate-limit-scope.md) | 2 | docs | `<pending>` |
 | 2026-05-02 | [Story artifact 里的 AC 副本必须与主文档每轮 review fix 同步刷新](2026-05-02-story-artifact-ac-copy-must-mirror-doc-edits.md) | 3 | docs | `<pending>` |
 | 2026-05-02 | [fix-review 修主文档时必须双向对齐"AC 副本 + 跨文档枚举注释"两类衍生文档](2026-05-02-fix-review-must-mirror-symmetric-edits-across-twin-files.md) | 2 | docs | `<pending>` |
+| 2026-05-02 | [契约冻结必须钉死 prod 阈值，跨文档枚举名必须 canonical 化](2026-05-02-contract-freeze-must-pin-prod-thresholds-and-canonicalize-enum-names.md) | 2 | docs | `<pending>` |
