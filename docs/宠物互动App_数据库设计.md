@@ -766,7 +766,7 @@ CREATE TABLE emoji_configs (
 
 ```text
 1 = healthkit       # 客户端正常上报（POST /api/v1/steps/sync, 见 V1接口设计 §6.1）
-2 = admin_grant     # dev / 运营手动发放（POST /api/v1/dev/grant-steps, 见 Story 7.5）
+2 = admin_grant     # dev / 运营手动发放（POST /dev/grant-steps, 见 Story 7.5）
 ```
 
 ### 6.7 user_chests.status
