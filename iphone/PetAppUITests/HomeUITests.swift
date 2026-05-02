@@ -1,9 +1,11 @@
 // HomeUITests.swift
 // Story 2.2 AC5：UITest 启动模拟器 → 验证主界面 6 大占位区块的 a11y identifier 都可定位。
+//
+// Story 37.13: 全部 a11y identifier 字面量改用 AccessibilityID 常量引用（caller 表达方式收敛；
+// 运行时挂的字符串值不变 → UITest 行为契约不变）。
+// AccessibilityID.swift 通过 project.yml 直接作为 UITest target 的 source 引入，无需 @testable import。
 
 import XCTest
-// 注：AccessibilityID.swift 通过 project.yml 直接作为 UITest target 的 source 引入，
-// 不需要 @testable import PetApp（UI 测试以黑盒方式跑被测 App）。
 
 final class HomeUITests: XCTestCase {
 
@@ -54,13 +56,16 @@ final class HomeUITests: XCTestCase {
         let timeout: TimeInterval = 5
 
         XCTAssertTrue(
-            app.descendants(matching: .any)["homeStatusBar"].waitForExistence(timeout: timeout),
+            app.descendants(matching: .any)[AccessibilityID.Home.userInfo].waitForExistence(timeout: timeout),
             "homeStatusBar 区块未找到"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["homeCatStage"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Home.catStage].exists,
             "homeCatStage 区块未找到"
         )
+        // homeActionFeed / homeActionPet / homeActionPlay 是 Story 37.7 落地的 chestSlot/action 区块 a11y identifier，
+        // 由 caller view（HomeView 内 helper _chestSlotView(a11yId:) 等 callsite）传入变量，本 story 不收编进
+        // AccessibilityID enum（属 dynamic a11y 而非 inline 字符串收编范围；详见 Story 37.13 AC2 关键决策 1）.
         XCTAssertTrue(
             app.descendants(matching: .any)["homeActionFeed"].exists,
             "homeActionFeed 按钮未找到"
@@ -74,11 +79,11 @@ final class HomeUITests: XCTestCase {
             "homeActionPlay 按钮未找到"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["homeTeamIdleCard_create"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Home.teamIdleCardCreate].exists,
             "homeTeamIdleCard_create 按钮未找到"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["homeTeamIdleCard_join"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Home.teamIdleCardJoin].exists,
             "homeTeamIdleCard_join 按钮未找到"
         )
     }
@@ -96,35 +101,35 @@ final class HomeUITests: XCTestCase {
         let timeout: TimeInterval = 5
 
         XCTAssertTrue(
-            app.descendants(matching: .any)["returnButton"].waitForExistence(timeout: timeout),
+            app.descendants(matching: .any)[AccessibilityID.Room.returnButton].waitForExistence(timeout: timeout),
             "returnButton 区块未找到"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["roomIdDisplay"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Room.roomIdDisplay].exists,
             "roomIdDisplay 区块未找到"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["copyButton"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Room.copyButton].exists,
             "copyButton 区块未找到"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["roomMember_0"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Room.member(at: 0)].exists,
             "roomMember_0 区块未找到"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["roomMember_1"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Room.member(at: 1)].exists,
             "roomMember_1 区块未找到"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["roomMember_2"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Room.member(at: 2)].exists,
             "roomMember_2 区块未找到"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["roomMember_3"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Room.member(at: 3)].exists,
             "roomMember_3 区块未找到"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["leaveButton"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Room.leaveButton].exists,
             "leaveButton 区块未找到"
         )
     }
@@ -142,57 +147,57 @@ final class HomeUITests: XCTestCase {
         let timeout: TimeInterval = 5
 
         // 切到 Wardrobe Tab
-        let wardrobeTab = app.buttons["tab_wardrobe"]
+        let wardrobeTab = app.buttons[AccessibilityID.Tab.wardrobe]
         XCTAssertTrue(wardrobeTab.waitForExistence(timeout: timeout), "tab_wardrobe 未找到")
         wardrobeTab.tap()
 
         // 验证主容器
         XCTAssertTrue(
-            app.descendants(matching: .any)["wardrobeView"].waitForExistence(timeout: 3),
+            app.descendants(matching: .any)[AccessibilityID.Wardrobe.view].waitForExistence(timeout: 3),
             "wardrobeView 主容器未找到"
         )
 
         // 验证钻石 + 合成入口
         XCTAssertTrue(
-            app.descendants(matching: .any)["wardrobeDiamondCount"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Wardrobe.diamondCount].exists,
             "wardrobeDiamondCount 区块未找到"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["wardrobeComposeEntry"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Wardrobe.composeEntry].exists,
             "wardrobeComposeEntry 按钮未找到"
         )
 
         // 验证 5 个分类 Tab
         XCTAssertTrue(
-            app.descendants(matching: .any)["wardrobeCategory_hat"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Wardrobe.category("hat")].exists,
             "wardrobeCategory_hat 未找到"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["wardrobeCategory_bow"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Wardrobe.category("bow")].exists,
             "wardrobeCategory_bow 未找到"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["wardrobeCategory_scarf"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Wardrobe.category("scarf")].exists,
             "wardrobeCategory_scarf 未找到"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["wardrobeCategory_outfit"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Wardrobe.category("outfit")].exists,
             "wardrobeCategory_outfit 未找到"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["wardrobeCategory_bg"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Wardrobe.category("bg")].exists,
             "wardrobeCategory_bg 未找到"
         )
 
         // 验证装备按钮
         XCTAssertTrue(
-            app.descendants(matching: .any)["wardrobeEquipButton"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Wardrobe.equipButton].exists,
             "wardrobeEquipButton 未找到"
         )
 
         // 验证 grid 至少有一个 wardrobeItem_*（默认 hat 分类应显示 h1 贝雷帽）
         XCTAssertTrue(
-            app.descendants(matching: .any)["wardrobeItem_h1"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Wardrobe.item("h1")].exists,
             "默认 hat 分类应显示 wardrobeItem_h1"
         )
     }
@@ -210,41 +215,41 @@ final class HomeUITests: XCTestCase {
         let timeout: TimeInterval = 5
 
         // 切到 Friends Tab
-        let friendsTab = app.buttons["tab_friends"]
+        let friendsTab = app.buttons[AccessibilityID.Tab.friends]
         XCTAssertTrue(friendsTab.waitForExistence(timeout: timeout), "tab_friends 未找到")
         friendsTab.tap()
 
         // 验证主容器
         XCTAssertTrue(
-            app.descendants(matching: .any)["friendsView"].waitForExistence(timeout: 3),
+            app.descendants(matching: .any)[AccessibilityID.Friends.view].waitForExistence(timeout: 3),
             "friendsView 主容器未找到"
         )
 
         // 验证添加按钮
         XCTAssertTrue(
-            app.descendants(matching: .any)["friendsAddButton"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Friends.addButton].exists,
             "friendsAddButton 未找到"
         )
 
         // 验证 2 个 Tab
         XCTAssertTrue(
-            app.descendants(matching: .any)["friendsTab_online"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Friends.tab("online")].exists,
             "friendsTab_online 未找到"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["friendsTab_all"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Friends.tab("all")].exists,
             "friendsTab_all 未找到"
         )
 
         // 验证至少一个 FriendRow（具体 id 由 mock data 决定，验证 scaffold defaults 中第一个 inRoom 好友 u1）
         XCTAssertTrue(
-            app.descendants(matching: .any)["friendRow_u1"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Friends.row("u1")].exists,
             "friendRow_u1（夏夏 inRoom）未找到"
         )
 
         // 验证 inRoom 好友的"加入"按钮可定位
         XCTAssertTrue(
-            app.descendants(matching: .any)["friendActionButton_u1"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Friends.actionButton("u1")].exists,
             "friendActionButton_u1（夏夏加入按钮）未找到"
         )
     }
@@ -260,37 +265,37 @@ final class HomeUITests: XCTestCase {
         let timeout: TimeInterval = 5
 
         // 切到 Profile Tab
-        let profileTab = app.buttons["tab_profile"]
+        let profileTab = app.buttons[AccessibilityID.Tab.profile]
         XCTAssertTrue(profileTab.waitForExistence(timeout: timeout), "tab_profile 未找到")
         profileTab.tap()
 
         // 验证主容器
         XCTAssertTrue(
-            app.descendants(matching: .any)["profileView"].waitForExistence(timeout: 3),
+            app.descendants(matching: .any)[AccessibilityID.Profile.view].waitForExistence(timeout: 3),
             "profileView 主容器未找到"
         )
 
         // 验证 5 区块关键锚
-        XCTAssertTrue(app.descendants(matching: .any)["profileHeaderCard"].exists, "profileHeaderCard 未找到")
-        XCTAssertTrue(app.descendants(matching: .any)["profileStatsCard"].exists, "profileStatsCard 未找到")
-        XCTAssertTrue(app.descendants(matching: .any)["profileWeChatCard"].exists, "profileWeChatCard（未绑定卡）未找到")
+        XCTAssertTrue(app.descendants(matching: .any)[AccessibilityID.Profile.headerCard].exists, "profileHeaderCard 未找到")
+        XCTAssertTrue(app.descendants(matching: .any)[AccessibilityID.Profile.statsCard].exists, "profileStatsCard 未找到")
+        XCTAssertTrue(app.descendants(matching: .any)[AccessibilityID.Profile.weChatCard].exists, "profileWeChatCard（未绑定卡）未找到")
 
         // 验证 4 个菜单项
         for item in ["achievements", "messages", "favorites", "settings"] {
             XCTAssertTrue(
-                app.descendants(matching: .any)["profileMenu_\(item)"].exists,
+                app.descendants(matching: .any)[AccessibilityID.Profile.menu(item)].exists,
                 "profileMenu_\(item) 未找到"
             )
         }
 
         // 验证 BindWechatModal 触发链路：点未绑定卡 → modal 出现
-        app.descendants(matching: .any)["profileWeChatCard"].firstMatch.tap()
+        app.descendants(matching: .any)[AccessibilityID.Profile.weChatCard].firstMatch.tap()
         XCTAssertTrue(
-            app.descendants(matching: .any)["profileWeChatModal"].waitForExistence(timeout: 3),
+            app.descendants(matching: .any)[AccessibilityID.Profile.weChatModal].waitForExistence(timeout: 3),
             "profileWeChatModal 未在 wechatCard tap 后出现"
         )
         XCTAssertTrue(
-            app.descendants(matching: .any)["profileWeChatBindButton"].exists,
+            app.descendants(matching: .any)[AccessibilityID.Profile.weChatBindButton].exists,
             "profileWeChatBindButton 未在 modal 内找到"
         )
     }
@@ -392,28 +397,28 @@ final class HomeUITests: XCTestCase {
         let timeout: TimeInterval = 5
 
         // 1. 验证 HomeView TeamIdleCard "加入队伍" 按钮可见（Story 37.7 落地 a11y identifier `homeTeamIdleCard_join`）.
-        let joinButton = app.descendants(matching: .any)["homeTeamIdleCard_join"]
+        let joinButton = app.descendants(matching: .any)[AccessibilityID.Home.teamIdleCardJoin]
         XCTAssertTrue(joinButton.waitForExistence(timeout: timeout), "homeTeamIdleCard_join 未找到")
 
         // 2. 点 "加入队伍" → JoinRoomModal 出现.
         joinButton.tap()
-        let modal = app.descendants(matching: .any)["joinRoomModal"]
+        let modal = app.descendants(matching: .any)[AccessibilityID.JoinRoomModal.modal]
         XCTAssertTrue(modal.waitForExistence(timeout: 3), "joinRoomModal 未在 join button tap 后出现")
 
         // 3. 验证 modal 5 视觉锚.
-        XCTAssertTrue(app.descendants(matching: .any)["joinRoomCloseButton"].exists, "joinRoomCloseButton 未找到")
-        XCTAssertTrue(app.descendants(matching: .any)["joinRoomInput"].exists, "joinRoomInput 未找到")
-        XCTAssertTrue(app.descendants(matching: .any)["joinRoomCancelButton"].exists, "joinRoomCancelButton 未找到")
-        XCTAssertTrue(app.descendants(matching: .any)["joinRoomConfirmButton"].exists, "joinRoomConfirmButton 未找到")
+        XCTAssertTrue(app.descendants(matching: .any)[AccessibilityID.JoinRoomModal.closeButton].exists, "joinRoomCloseButton 未找到")
+        XCTAssertTrue(app.descendants(matching: .any)[AccessibilityID.JoinRoomModal.input].exists, "joinRoomInput 未找到")
+        XCTAssertTrue(app.descendants(matching: .any)[AccessibilityID.JoinRoomModal.cancelButton].exists, "joinRoomCancelButton 未找到")
+        XCTAssertTrue(app.descendants(matching: .any)[AccessibilityID.JoinRoomModal.confirmButton].exists, "joinRoomConfirmButton 未找到")
 
         // 4. 输入房间号 "1234567".
-        let input = app.textFields["joinRoomInput"]
+        let input = app.textFields[AccessibilityID.JoinRoomModal.input]
         XCTAssertTrue(input.waitForExistence(timeout: 2), "joinRoomInput textField 未找到")
         input.tap()
         input.typeText("1234567")
 
         // 5. 点 "确定加入" → modal dismiss.
-        let confirmButton = app.descendants(matching: .any)["joinRoomConfirmButton"]
+        let confirmButton = app.descendants(matching: .any)[AccessibilityID.JoinRoomModal.confirmButton]
         confirmButton.tap()
 
         XCTAssertTrue(
@@ -426,7 +431,7 @@ final class HomeUITests: XCTestCase {
         //    用 `returnButton` 作为 RoomScaffoldView 出现的标志（Story 37.8 钦定唯一 a11y identifier;
         //    HomeView 路径无此标识，仅在 RoomScaffoldView 渲染时出现）.
         XCTAssertTrue(
-            app.descendants(matching: .any)["returnButton"].waitForExistence(timeout: 3),
+            app.descendants(matching: .any)[AccessibilityID.Room.returnButton].waitForExistence(timeout: 3),
             "RoomScaffoldView 未在 join confirm 后渲染（跨屏跳转链路断）"
         )
     }

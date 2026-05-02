@@ -275,7 +275,7 @@ public struct HomeView<ChestSlot: View>: View {
             }
             .frame(height: 280)
         }
-        .accessibilityIdentifier("homeCatStage")
+        .accessibilityIdentifier(AccessibilityID.Home.catStage)
         .accessibilityElement(children: .contain)
     }
 
@@ -455,7 +455,7 @@ public struct HomeView<ChestSlot: View>: View {
                         fullWidth: true,
                         action: { state.onCreateTap() }
                     )
-                    .accessibilityIdentifier("homeTeamIdleCard_create")
+                    .accessibilityIdentifier(AccessibilityID.Home.teamIdleCardCreate)
 
                     PrimaryButton(
                         title: "加入队伍",
@@ -464,7 +464,7 @@ public struct HomeView<ChestSlot: View>: View {
                         fullWidth: true,
                         action: { state.onJoinTap() }
                     )
-                    .accessibilityIdentifier("homeTeamIdleCard_join")
+                    .accessibilityIdentifier(AccessibilityID.Home.teamIdleCardJoin)
                 }
             }
             .padding(18)

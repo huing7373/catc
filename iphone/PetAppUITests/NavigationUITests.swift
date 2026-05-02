@@ -10,8 +10,7 @@
 //     tap Tab → 验证对应 placeholder view 出现.
 //
 // AccessibilityID.swift 通过 project.yml 直接作为 UITest target 的 source 引入（Story 2.2 已落地）;
-// 4 Tab a11y identifier 本 story 走 inline 字符串路径（不加 AccessibilityID.Tab；Story 37.13 a11y
-// 总表归并时一并建立常量并替换）.
+// Story 37.13: 4 Tab + scaffold view a11y identifier 全部改用 AccessibilityID 常量引用.
 
 import XCTest
 
@@ -33,16 +32,16 @@ final class NavigationUITests: XCTestCase {
         app.launch()
 
         // FloatingTabBar 自绘 button → app.buttons 集合可定位.
-        let homeTab = app.buttons["tab_home"]
+        let homeTab = app.buttons[AccessibilityID.Tab.home]
         XCTAssertTrue(homeTab.waitForExistence(timeout: timeout), "tab_home 未找到")
 
-        let wardrobeTab = app.buttons["tab_wardrobe"]
+        let wardrobeTab = app.buttons[AccessibilityID.Tab.wardrobe]
         XCTAssertTrue(wardrobeTab.waitForExistence(timeout: timeout), "tab_wardrobe 未找到")
 
-        let friendsTab = app.buttons["tab_friends"]
+        let friendsTab = app.buttons[AccessibilityID.Tab.friends]
         XCTAssertTrue(friendsTab.waitForExistence(timeout: timeout), "tab_friends 未找到")
 
-        let profileTab = app.buttons["tab_profile"]
+        let profileTab = app.buttons[AccessibilityID.Tab.profile]
         XCTAssertTrue(profileTab.waitForExistence(timeout: timeout), "tab_profile 未找到")
     }
 
@@ -53,11 +52,11 @@ final class NavigationUITests: XCTestCase {
         app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app.launch()
 
-        let wardrobeTab = app.buttons["tab_wardrobe"]
+        let wardrobeTab = app.buttons[AccessibilityID.Tab.wardrobe]
         XCTAssertTrue(wardrobeTab.waitForExistence(timeout: timeout), "tab_wardrobe 未找到")
         wardrobeTab.tap()
 
-        let wardrobeView = app.descendants(matching: .any)["wardrobeView"]
+        let wardrobeView = app.descendants(matching: .any)[AccessibilityID.Wardrobe.view]
         XCTAssertTrue(wardrobeView.waitForExistence(timeout: timeout), "切到 Wardrobe Tab 后 wardrobeView 未出现")
     }
 
@@ -68,11 +67,11 @@ final class NavigationUITests: XCTestCase {
         app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app.launch()
 
-        let friendsTab = app.buttons["tab_friends"]
+        let friendsTab = app.buttons[AccessibilityID.Tab.friends]
         XCTAssertTrue(friendsTab.waitForExistence(timeout: timeout), "tab_friends 未找到")
         friendsTab.tap()
 
-        let friendsView = app.descendants(matching: .any)["friendsView"]
+        let friendsView = app.descendants(matching: .any)[AccessibilityID.Friends.view]
         XCTAssertTrue(friendsView.waitForExistence(timeout: timeout), "切到 Friends Tab 后 friendsView 未出现")
     }
 
@@ -83,11 +82,11 @@ final class NavigationUITests: XCTestCase {
         app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app.launch()
 
-        let profileTab = app.buttons["tab_profile"]
+        let profileTab = app.buttons[AccessibilityID.Tab.profile]
         XCTAssertTrue(profileTab.waitForExistence(timeout: timeout), "tab_profile 未找到")
         profileTab.tap()
 
-        let profileView = app.descendants(matching: .any)["profileView"]
+        let profileView = app.descendants(matching: .any)[AccessibilityID.Profile.view]
         XCTAssertTrue(profileView.waitForExistence(timeout: timeout), "切到 Profile Tab 后 profileView 未出现")
     }
 
@@ -104,15 +103,15 @@ final class NavigationUITests: XCTestCase {
         XCTAssertTrue(userInfo.waitForExistence(timeout: timeout), "初始 home_userInfo 未找到")
 
         // 2. 切到 wardrobe Tab → wardrobeView 出现
-        let wardrobeTab = app.buttons["tab_wardrobe"]
+        let wardrobeTab = app.buttons[AccessibilityID.Tab.wardrobe]
         XCTAssertTrue(wardrobeTab.waitForExistence(timeout: timeout), "tab_wardrobe 未找到")
         wardrobeTab.tap()
 
-        let wardrobeView = app.descendants(matching: .any)["wardrobeView"]
+        let wardrobeView = app.descendants(matching: .any)[AccessibilityID.Wardrobe.view]
         XCTAssertTrue(wardrobeView.waitForExistence(timeout: timeout), "wardrobeView 未出现")
 
         // 3. 切回 home Tab → home_userInfo 仍可定位
-        let homeTab = app.buttons["tab_home"]
+        let homeTab = app.buttons[AccessibilityID.Tab.home]
         XCTAssertTrue(homeTab.waitForExistence(timeout: timeout), "tab_home 未找到")
         homeTab.tap()
 

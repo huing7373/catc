@@ -41,7 +41,7 @@ public struct FriendsScaffoldView: View {
             friendsList           // 区块 4 + 5: 好友列表 + FriendRow（含三态按钮）
         }
         .background(theme.colors.pageBg.ignoresSafeArea())
-        .accessibilityIdentifier("friendsView")
+        .accessibilityIdentifier(AccessibilityID.Friends.view)
         .overlay(alignment: .bottom) { toastOverlay }   // 占位 toast
     }
 
@@ -83,7 +83,7 @@ public struct FriendsScaffoldView: View {
                     )
                     .overlay(Circle().stroke(theme.colors.border, lineWidth: 1))
             }
-            .accessibilityIdentifier("friendsAddButton")
+            .accessibilityIdentifier(AccessibilityID.Friends.addButton)
         }
         .padding(.top, 68)
         .padding(.horizontal, 20)
@@ -136,7 +136,7 @@ public struct FriendsScaffoldView: View {
                     fullWidth: true,
                     action: { state.onShareMyRoomTap() }
                 )
-                .accessibilityIdentifier("friendsMyRoomShareButton")
+                .accessibilityIdentifier(AccessibilityID.Friends.myRoomShareButton)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -152,7 +152,7 @@ public struct FriendsScaffoldView: View {
             .padding(.horizontal, 20)
             .padding(.top, 4)
             .padding(.bottom, 8)
-            .accessibilityIdentifier("friendsMyRoomCard")
+            .accessibilityIdentifier(AccessibilityID.Friends.myRoomCard)
         }
     }
 
@@ -190,7 +190,7 @@ public struct FriendsScaffoldView: View {
                     }
                 )
         }
-        .accessibilityIdentifier("friendsTab_\(tab.rawValue)")
+        .accessibilityIdentifier(AccessibilityID.Friends.tab(tab.rawValue))
     }
 
     // MARK: - 区块 4 + 5: friendsList + FriendRow (friends.jsx:60-126)
@@ -258,7 +258,7 @@ public struct FriendsScaffoldView: View {
                 )
         )
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(theme.colors.border, lineWidth: 1))
-        .accessibilityIdentifier("friendRow_\(f.id)")
+        .accessibilityIdentifier(AccessibilityID.Friends.row(f.id))
     }
 
     @ViewBuilder
@@ -277,7 +277,7 @@ public struct FriendsScaffoldView: View {
                 .foregroundColor(.white)
                 .background(RoundedRectangle(cornerRadius: 14).fill(theme.colors.accent))
             }
-            .accessibilityIdentifier("friendActionButton_\(f.id)")
+            .accessibilityIdentifier(AccessibilityID.Friends.actionButton(f.id))
         case .online:
             Button(action: { state.onInviteFriendTap(friend: f) }) {
                 Text("邀请")
@@ -287,7 +287,7 @@ public struct FriendsScaffoldView: View {
                     .foregroundColor(theme.colors.accentDeep)
                     .overlay(RoundedRectangle(cornerRadius: 14).stroke(theme.colors.accent, lineWidth: 1.5))
             }
-            .accessibilityIdentifier("friendActionButton_\(f.id)")
+            .accessibilityIdentifier(AccessibilityID.Friends.actionButton(f.id))
         case .offline:
             Text("离线")
                 .font(.system(size: 11, weight: .bold))
@@ -313,7 +313,7 @@ public struct FriendsScaffoldView: View {
                         .fill(Color.black.opacity(0.85))
                 )
                 .padding(.bottom, 120)  // 让出浮动 TabBar
-                .accessibilityIdentifier("friendsToast")
+                .accessibilityIdentifier(AccessibilityID.Friends.toast)
         }
     }
 }

@@ -13,16 +13,17 @@ import SwiftUI
 final class HomeViewTests: XCTestCase {
 
     // MARK: - case#1（happy）：a11y identifier 常量值不为空 + 两两不相等
+    //
+    // Story 37.13: deprecated `btnRoom` / `btnInventory` / `btnCompose` 3 常量从 AccessibilityID.Home
+    // 删除（Story 37.3 主入口已改 4 Tab IA, 3 CTA 按钮 view 已删, 常量保留无意义）；
+    // 本 case 同步从 identifiers 数组移除，避免 compile error.
 
-    func testAllSixHomeAccessibilityIdentifiersAreNonEmpty() {
+    func testAllHomeAccessibilityIdentifiersAreNonEmpty() {
         let identifiers = [
             AccessibilityID.Home.userInfo,
             AccessibilityID.Home.petArea,
             AccessibilityID.Home.stepBalance,
             AccessibilityID.Home.chestArea,
-            AccessibilityID.Home.btnRoom,
-            AccessibilityID.Home.btnInventory,
-            AccessibilityID.Home.btnCompose,
             AccessibilityID.Home.versionLabel,
         ]
         for id in identifiers {
@@ -36,9 +37,6 @@ final class HomeViewTests: XCTestCase {
             AccessibilityID.Home.petArea,
             AccessibilityID.Home.stepBalance,
             AccessibilityID.Home.chestArea,
-            AccessibilityID.Home.btnRoom,
-            AccessibilityID.Home.btnInventory,
-            AccessibilityID.Home.btnCompose,
             AccessibilityID.Home.versionLabel,
         ]
         let unique = Set(identifiers)
@@ -54,9 +52,6 @@ final class HomeViewTests: XCTestCase {
             AccessibilityID.Home.petArea,
             AccessibilityID.Home.stepBalance,
             AccessibilityID.Home.chestArea,
-            AccessibilityID.Home.btnRoom,
-            AccessibilityID.Home.btnInventory,
-            AccessibilityID.Home.btnCompose,
             AccessibilityID.Home.versionLabel,
         ]
         for id in snakeCaseIdentifiers {

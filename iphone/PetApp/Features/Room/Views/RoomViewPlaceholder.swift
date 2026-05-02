@@ -12,7 +12,7 @@ public struct RoomViewPlaceholder: View {
 
     public var body: some View {
         Text("Room Placeholder")
-            .accessibilityIdentifier("roomViewPlaceholder")
+            .accessibilityIdentifier(AccessibilityID.Room.viewPlaceholder)
     }
 }
 

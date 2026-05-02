@@ -446,6 +446,6 @@ private struct LaunchedContentView: View {
 struct ComposeSheetPlaceholder: View {
     var body: some View {
         Text("compose placeholder")
-            .accessibilityIdentifier("compose_placeholder")
+            .accessibilityIdentifier(AccessibilityID.Compose.placeholder)
     }
 }

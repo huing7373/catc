@@ -83,7 +83,7 @@ private struct FloatingTabBar: View {
             .frame(maxWidth: .infinity)
             .foregroundColor(selection == tab ? .accentColor : .secondary)
         }
-        .accessibilityIdentifier("tab_\(tab.rawValue)")
+        .accessibilityIdentifier(AccessibilityID.Tab.identifier(for: tab.rawValue))
     }
 
     private func iconName(for tab: AppTab) -> String {

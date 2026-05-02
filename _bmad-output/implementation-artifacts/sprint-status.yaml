@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-05-02 (story 37-12 done)
+# last_updated: 2026-04-30 (story 37-13 review)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-04-30  # Story 37.12 review
+last_updated: 2026-04-30  # Story 37.13 ready-for-dev
 # Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
 # 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
@@ -105,7 +105,7 @@ development_status:
   37-10-friendsview-scaffold: done
   37-11-profileview-scaffold: done
   37-12-joinroommodal-跨屏跳转: done
-  37-13-accessibility-identifier-总表: backlog
+  37-13-accessibility-identifier-总表: review
   37-14-design-package-白名单: backlog
   epic-37-retrospective: required
   # ===== Epic 37 ends =====

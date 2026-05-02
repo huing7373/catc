@@ -67,7 +67,7 @@ public struct JoinRoomModal: View {
         .padding(22)
         .background(theme.colors.surface)
         .clipShape(RoundedRectangle(cornerRadius: 28))
-        .accessibilityIdentifier("joinRoomModal")
+        .accessibilityIdentifier(AccessibilityID.JoinRoomModal.modal)
     }
 
     // MARK: - 5 视觉锚（详见 AC1 视觉契约表 + Dev Notes "5 视觉锚契约"）
@@ -88,7 +88,7 @@ public struct JoinRoomModal: View {
                             .fill(theme.colors.surface2)
                     )
             }
-            .accessibilityIdentifier("joinRoomCloseButton")
+            .accessibilityIdentifier(AccessibilityID.JoinRoomModal.closeButton)
         }
         .padding(.bottom, 14)
     }
@@ -112,7 +112,7 @@ public struct JoinRoomModal: View {
                         roomIdInput = normalized
                     }
                 }
-                .accessibilityIdentifier("joinRoomInput")
+                .accessibilityIdentifier(AccessibilityID.JoinRoomModal.input)
         }
         .padding(.vertical, 14)
         .padding(.horizontal, 16)
@@ -146,7 +146,7 @@ public struct JoinRoomModal: View {
                 fullWidth: true,
                 action: onCancel
             )
-            .accessibilityIdentifier("joinRoomCancelButton")
+            .accessibilityIdentifier(AccessibilityID.JoinRoomModal.cancelButton)
 
             PrimaryButton(
                 title: "确定加入",
@@ -155,7 +155,7 @@ public struct JoinRoomModal: View {
                 isDisabled: JoinRoomInputNormalizer.isSubmitDisabled(roomIdInput),
                 action: { onConfirm(JoinRoomInputNormalizer.normalize(roomIdInput)) }
             )
-            .accessibilityIdentifier("joinRoomConfirmButton")
+            .accessibilityIdentifier(AccessibilityID.JoinRoomModal.confirmButton)
         }
     }
 }

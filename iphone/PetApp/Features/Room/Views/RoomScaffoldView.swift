@@ -80,7 +80,7 @@ public struct RoomScaffoldView: View {
                         y: theme.shadow.sm.y
                     )
             }
-            .accessibilityIdentifier("returnButton")
+            .accessibilityIdentifier(AccessibilityID.Room.returnButton)
 
             Spacer()
 
@@ -117,7 +117,7 @@ public struct RoomScaffoldView: View {
                         .font(.system(size: 22, weight: .heavy, design: .monospaced))
                         .tracking(3)
                         .foregroundColor(theme.colors.accentDeep)
-                        .accessibilityIdentifier("roomIdDisplay")
+                        .accessibilityIdentifier(AccessibilityID.Room.roomIdDisplay)
                 }
                 Spacer()
                 copyButton
@@ -155,7 +155,7 @@ public struct RoomScaffoldView: View {
             )
             .animation(.easeInOut(duration: 0.2), value: copiedFeedback)
         }
-        .accessibilityIdentifier("copyButton")
+        .accessibilityIdentifier(AccessibilityID.Room.copyButton)
     }
 
     // MARK: - 区块 3: sharedStage (room.jsx:58-100)
@@ -222,7 +222,7 @@ public struct RoomScaffoldView: View {
             x: theme.shadow.md.x,
             y: theme.shadow.md.y
         )
-        .accessibilityIdentifier("sharedStage")
+        .accessibilityIdentifier(AccessibilityID.Room.sharedStage)
     }
 
     /// 4 个固定位 emoji 装饰（room.jsx:62-79）.
@@ -313,7 +313,7 @@ public struct RoomScaffoldView: View {
             x: theme.shadow.sm.x,
             y: theme.shadow.sm.y
         )
-        .accessibilityIdentifier("roomMember_\(index)")
+        .accessibilityIdentifier(AccessibilityID.Room.member(at: index))
     }
 
     /// 空位 dashed border 行（"+ 等待好友加入"）.
@@ -332,7 +332,7 @@ public struct RoomScaffoldView: View {
                     style: StrokeStyle(lineWidth: 2, dash: [6, 4])
                 )
         )
-        .accessibilityIdentifier("roomMember_\(index)")
+        .accessibilityIdentifier(AccessibilityID.Room.member(at: index))
     }
 
     // MARK: - 区块 5: leaveButton (room.jsx:139-147)
@@ -345,7 +345,7 @@ public struct RoomScaffoldView: View {
             fullWidth: true,
             action: { state.onLeaveTap() }
         )
-        .accessibilityIdentifier("leaveButton")
+        .accessibilityIdentifier(AccessibilityID.Room.leaveButton)
         .padding(.top, 4)
     }
 }

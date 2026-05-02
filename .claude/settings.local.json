@@ -65,7 +65,9 @@
       "Bash(python .claude/skills/bmad-distillator/scripts/analyze_sources.py _bmad-output/implementation-artifacts/decisions/0008-error-protocol.md)",
       "Bash(bash /Users/zhuming/fork/catc/iphone/scripts/build.sh --test)",
       "Bash(rg *)",
-      "Bash(python3 *)"
+      "Bash(python3 *)",
+      "Bash(bash /Users/zhuming/fork/catc/iphone/scripts/check_a11y_coverage.sh)",
+      "Bash(bash /Users/zhuming/fork/catc/iphone/scripts/check_no_apiclient_in_features.sh)"
     ],
     "deny": [
       "Bash(rm -rf:*)",

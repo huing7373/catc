@@ -40,7 +40,7 @@ public struct WardrobeScaffoldView: View {
             grid                  // 区块 4: 3 列 LazyVGrid 道具网格
         }
         .background(theme.colors.pageBg.ignoresSafeArea())
-        .accessibilityIdentifier("wardrobeView")
+        .accessibilityIdentifier(AccessibilityID.Wardrobe.view)
     }
 
     // MARK: - 区块 1: topCard (wardrobe.jsx:38-51)
@@ -84,7 +84,7 @@ public struct WardrobeScaffoldView: View {
                         )
                 )
                 .overlay(RoundedRectangle(cornerRadius: 16).stroke(theme.colors.border, lineWidth: 1))
-                .accessibilityIdentifier("wardrobeDiamondCount")
+                .accessibilityIdentifier(AccessibilityID.Wardrobe.diamondCount)
 
                 // 合成按钮（占位 — Story 33.1 落地 NavigationLink push）.
                 // 按 Story 37.9 spec 关键决策 2：内联 Button + os_log 而非进 ViewModel
@@ -112,7 +112,7 @@ public struct WardrobeScaffoldView: View {
                             )
                     )
                 }
-                .accessibilityIdentifier("wardrobeComposeEntry")
+                .accessibilityIdentifier(AccessibilityID.Wardrobe.composeEntry)
             }
         }
         .padding(.top, 68)
@@ -205,7 +205,7 @@ public struct WardrobeScaffoldView: View {
                 }
             }
         )
-        .accessibilityIdentifier("wardrobeEquipButton")
+        .accessibilityIdentifier(AccessibilityID.Wardrobe.equipButton)
     }
 
     // MARK: - 区块 3: categoryTabs (wardrobe.jsx:107-124)
@@ -253,7 +253,7 @@ public struct WardrobeScaffoldView: View {
                     .stroke(isSelected ? .clear : theme.colors.border, lineWidth: 1)
             )
         }
-        .accessibilityIdentifier("wardrobeCategory_\(category.rawValue)")
+        .accessibilityIdentifier(AccessibilityID.Wardrobe.category(category.rawValue))
     }
 
     // MARK: - 区块 4: grid (wardrobe.jsx:127-164)
@@ -329,7 +329,7 @@ public struct WardrobeScaffoldView: View {
             )
             .opacity(item.owned ? 1.0 : 0.55)
         }
-        .accessibilityIdentifier("wardrobeItem_\(item.id)")
+        .accessibilityIdentifier(AccessibilityID.Wardrobe.item(item.id))
     }
 }
 

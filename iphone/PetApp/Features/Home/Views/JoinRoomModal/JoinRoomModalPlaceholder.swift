@@ -11,7 +11,7 @@ public struct JoinRoomModalPlaceholder: View {
 
     public var body: some View {
         Text("Join Room Modal Placeholder")
-            .accessibilityIdentifier("joinRoomModalPlaceholder")
+            .accessibilityIdentifier(AccessibilityID.JoinRoomModal.modalPlaceholder)
     }
 }
 

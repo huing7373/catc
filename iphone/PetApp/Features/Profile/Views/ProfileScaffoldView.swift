@@ -64,7 +64,7 @@ public struct ProfileScaffoldView: View {
             .padding(.bottom, 100)    // 让出浮动 TabBar 空间
         }
         .background(theme.colors.pageBg.ignoresSafeArea())
-        .accessibilityIdentifier("profileView")
+        .accessibilityIdentifier(AccessibilityID.Profile.view)
         .overlay(alignment: .bottom) { toastOverlay }
         // Story 37.11 round 4 codex review [P2] 修复：onDismiss 按 dismissReason 分发.
         //
@@ -165,7 +165,7 @@ public struct ProfileScaffoldView: View {
                 endPoint: .bottom
             )
         )
-        .accessibilityIdentifier("profileHeaderCard")
+        .accessibilityIdentifier(AccessibilityID.Profile.headerCard)
     }
 
     /// headerCard 右上角圆形 IconButton（bell / settings）.
@@ -210,7 +210,7 @@ public struct ProfileScaffoldView: View {
         )
         .padding(.horizontal, 20)
         .padding(.top, -34)   // 覆盖头图底部
-        .accessibilityIdentifier("profileStatsCard")
+        .accessibilityIdentifier(AccessibilityID.Profile.statsCard)
     }
 
     private func statColumn(label: String, value: String, iconKey: String) -> some View {
@@ -314,7 +314,7 @@ public struct ProfileScaffoldView: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 20)
         .padding(.top, 14)
-        .accessibilityIdentifier("profileWeChatCard")
+        .accessibilityIdentifier(AccessibilityID.Profile.weChatCard)
     }
 
     /// 已绑定卡：surface 背景 + wechat 浅绿底 icon + 主标题 + 已保护角标 + 副标题 + 右 shield icon.
@@ -372,7 +372,7 @@ public struct ProfileScaffoldView: View {
         )
         .padding(.horizontal, 20)
         .padding(.top, 14)
-        .accessibilityIdentifier("profileWeChatCardBound")
+        .accessibilityIdentifier(AccessibilityID.Profile.weChatCardBound)
     }
 
     // MARK: - 区块 4: recentCollections (profile.jsx:136-162)
@@ -394,7 +394,7 @@ public struct ProfileScaffoldView: View {
                     }
                     .foregroundColor(theme.colors.accentDeep)
                 }
-                .accessibilityIdentifier("profileCollectionViewAll")
+                .accessibilityIdentifier(AccessibilityID.Profile.collectionViewAll)
             }
 
             // 横向滑窗
@@ -446,7 +446,7 @@ public struct ProfileScaffoldView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 16).stroke(theme.colors.border, lineWidth: 1)
         )
-        .accessibilityIdentifier("profileCollectionCell_\(rc.id)")
+        .accessibilityIdentifier(AccessibilityID.Profile.collectionCell(rc.id))
     }
 
     // MARK: - 区块 5: menuList (profile.jsx:164-192)
@@ -520,7 +520,7 @@ public struct ProfileScaffoldView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityIdentifier("profileMenu_\(item.rawValue)")
+        .accessibilityIdentifier(AccessibilityID.Profile.menu(item.rawValue))
     }
 
     // MARK: - toastOverlay (与 Story 37.10 同精神)
@@ -539,7 +539,7 @@ public struct ProfileScaffoldView: View {
                         .fill(Color.black.opacity(0.85))
                 )
                 .padding(.bottom, 120)  // 让出浮动 TabBar
-                .accessibilityIdentifier("profileToast")
+                .accessibilityIdentifier(AccessibilityID.Profile.toast)
         }
     }
 
@@ -628,7 +628,7 @@ private struct BindWechatModalView: View {
         }
         .frame(maxWidth: .infinity)
         .background(theme.colors.surface)
-        .accessibilityIdentifier("profileWeChatModal")
+        .accessibilityIdentifier(AccessibilityID.Profile.weChatModal)
     }
 
     /// 警告插画：88x88 圆 44 黄色渐变 + warn icon（不实装外圈装饰旋转虚线圆环 —— spec 略）.
@@ -729,7 +729,7 @@ private struct BindWechatModalView: View {
                 )
             }
             .buttonStyle(.plain)
-            .accessibilityIdentifier("profileWeChatBindButton")
+            .accessibilityIdentifier(AccessibilityID.Profile.weChatBindButton)
 
             // 次按钮
             Button(action: onDeclineRequested) {
@@ -740,7 +740,7 @@ private struct BindWechatModalView: View {
                     .frame(height: 40)
             }
             .buttonStyle(.plain)
-            .accessibilityIdentifier("profileWeChatCancelButton")
+            .accessibilityIdentifier(AccessibilityID.Profile.weChatCancelButton)
         }
     }
 }
