@@ -2,10 +2,14 @@
 // +build integration
 
 // Story 4.3 集成测试：用 dockertest 起真实 mysql:8.0 容器跑 4 条 case：
-//   1. happy: migrate Up → 5 张表存在 → migrate Down → 5 张表全消失（仅 schema_migrations）
+//   1. happy: migrate Up → 6 张表存在 → migrate Down → 6 张表全消失（仅 schema_migrations）
 //   2. edge: 重复 migrate Up → ErrNoChange 被吞 → 返 nil（幂等）
 //   3. happy: Up 后通过 INFORMATION_SCHEMA 抽样验关键索引 / 字段类型 / 主键约束
-//   4. edge: Up 后 Status 返回 (version=5, dirty=false, nil)
+//   4. edge: Up 后 Status 返回 (version=6, dirty=false, nil)
+//
+// Story 7.2 扩展：把 4 条 case 的断言从 5 张表扩展到 6 张表
+//   （新增 user_step_sync_logs：日志表，含 idx_user_date / idx_user_created_at；
+//    特殊点：sync_date DATE / accepted_delta_steps INT signed / 无 updated_at / PK = id）
 //
 // build tag `integration` 隔离 → 默认 `bash scripts/build.sh --test` 不跑这些；
 // 只在 `bash scripts/build.sh --integration`（即 `go test -tags=integration`）触发。
@@ -104,8 +108,8 @@ func migrationsPath(t *testing.T) string {
 	return abs
 }
 
-// TestMigrateIntegration_UpThenDown 起容器 → migrate Up → 5 张表存在 →
-// migrate Down → 5 张表全消失（仅 schema_migrations）。
+// TestMigrateIntegration_UpThenDown 起容器 → migrate Up → 6 张表存在 →
+// migrate Down → 6 张表全消失（仅 schema_migrations）。
 func TestMigrateIntegration_UpThenDown(t *testing.T) {
 	dsn, cleanup := startMySQL(t)
 	defer cleanup()
@@ -130,7 +134,7 @@ func TestMigrateIntegration_UpThenDown(t *testing.T) {
 	}
 	defer sqlDB.Close()
 
-	expectedTables := []string{"users", "user_auth_bindings", "pets", "user_step_accounts", "user_chests"}
+	expectedTables := []string{"users", "user_auth_bindings", "pets", "user_step_accounts", "user_chests", "user_step_sync_logs"}
 	for _, table := range expectedTables {
 		var count int
 		err := sqlDB.QueryRowContext(ctx, `
@@ -198,21 +202,23 @@ func TestMigrateIntegration_UpTwice_Idempotent(t *testing.T) {
 	err = sqlDB.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM information_schema.tables
 		WHERE table_schema = 'cat_test' AND table_name IN
-		('users', 'user_auth_bindings', 'pets', 'user_step_accounts', 'user_chests')`).Scan(&tableCount)
+		('users', 'user_auth_bindings', 'pets', 'user_step_accounts', 'user_chests', 'user_step_sync_logs')`).Scan(&tableCount)
 	if err != nil {
 		t.Fatalf("count tables: %v", err)
 	}
-	if tableCount != 5 {
-		t.Errorf("after two Up calls, table count = %d, want 5", tableCount)
+	if tableCount != 6 {
+		t.Errorf("after two Up calls, table count = %d, want 6", tableCount)
 	}
 }
 
-// TestMigrateIntegration_TablesPresent_AfterUp 验证 5 张表的关键 schema 元素：
+// TestMigrateIntegration_TablesPresent_AfterUp 验证 6 张表的关键 schema 元素：
 //   - users.id BIGINT UNSIGNED + uk_guest_uid + idx_current_room_id + idx_created_at
 //   - user_auth_bindings.uk_auth_type_identifier + idx_user_id
 //   - pets.uk_user_default_pet + idx_user_id
 //   - user_step_accounts: PK = user_id（不是自增 id）
 //   - user_chests.uk_user_id + idx_status_unlock_at
+//   - user_step_sync_logs: PK = id + idx_user_date + idx_user_created_at + 字段类型 +
+//     无 updated_at（日志表 append-only）—— Story 7.2 扩展
 //   - 所有 created_at / updated_at 类型 = datetime(3)
 func TestMigrateIntegration_TablesPresent_AfterUp(t *testing.T) {
 	dsn, cleanup := startMySQL(t)
@@ -251,6 +257,8 @@ func TestMigrateIntegration_TablesPresent_AfterUp(t *testing.T) {
 		{"pets", "idx_user_id"},
 		{"user_chests", "uk_user_id"},
 		{"user_chests", "idx_status_unlock_at"},
+		{"user_step_sync_logs", "idx_user_date"},
+		{"user_step_sync_logs", "idx_user_created_at"},
 	}
 	for _, c := range indexCases {
 		var count int
@@ -317,6 +325,7 @@ func TestMigrateIntegration_TablesPresent_AfterUp(t *testing.T) {
 		{"pets", "updated_at"},
 		{"user_step_accounts", "created_at"},
 		{"user_chests", "updated_at"},
+		{"user_step_sync_logs", "created_at"},
 	}
 	for _, c := range timeCols {
 		var ct string
@@ -347,9 +356,71 @@ func TestMigrateIntegration_TablesPresent_AfterUp(t *testing.T) {
 			t.Errorf("%s.version column_type = %q, want 'bigint unsigned'", table, ct)
 		}
 	}
+
+	// Story 7.2: user_step_sync_logs 字段类型逐项验证（严格对齐 §5.5）
+	//   - id / user_id / client_total_steps / client_ts: bigint unsigned
+	//   - sync_date: data_type=date（不是 datetime）
+	//   - accepted_delta_steps: int（signed，不是 unsigned；§5.5 钦定保留 signed 让未来可能的负向修正可用）
+	//   - motion_state / source: tinyint
+	//   - created_at: datetime(3)（已在 timeCols 验过；这里是字段级一致性兜底）
+	syncLogCols := []struct {
+		col          string
+		wantDataType string
+		wantColType  string
+	}{
+		{"id", "bigint", "bigint unsigned"},
+		{"user_id", "bigint", "bigint unsigned"},
+		{"sync_date", "date", "date"},
+		{"client_total_steps", "bigint", "bigint unsigned"},
+		{"accepted_delta_steps", "int", "int"},
+		{"motion_state", "tinyint", "tinyint"},
+		{"source", "tinyint", "tinyint"},
+		{"client_ts", "bigint", "bigint unsigned"},
+	}
+	for _, c := range syncLogCols {
+		var dt, ct string
+		err := sqlDB.QueryRowContext(ctx, `
+			SELECT data_type, column_type FROM information_schema.columns
+			WHERE table_schema = 'cat_test' AND table_name = 'user_step_sync_logs' AND column_name = ?`,
+			c.col).Scan(&dt, &ct)
+		if err != nil {
+			t.Errorf("query user_step_sync_logs.%s type: %v", c.col, err)
+			continue
+		}
+		if dt != c.wantDataType {
+			t.Errorf("user_step_sync_logs.%s data_type = %q, want %q", c.col, dt, c.wantDataType)
+		}
+		if ct != c.wantColType {
+			t.Errorf("user_step_sync_logs.%s column_type = %q, want %q", c.col, ct, c.wantColType)
+		}
+	}
+
+	// Story 7.2: user_step_sync_logs 是日志表（append-only），§5.5 钦定不含 updated_at 列
+	var updatedAtCount int
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema = 'cat_test' AND table_name = 'user_step_sync_logs' AND column_name = 'updated_at'`).Scan(&updatedAtCount)
+	if err != nil {
+		t.Errorf("query user_step_sync_logs.updated_at column existence: %v", err)
+	}
+	if updatedAtCount != 0 {
+		t.Errorf("user_step_sync_logs.updated_at unexpectedly present (column count=%d, want 0; this table is append-only per §5.5)", updatedAtCount)
+	}
+
+	// Story 7.2: user_step_sync_logs PK = id（自增），与 user_step_accounts PK = user_id 不同
+	var syncLogPK string
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT column_name FROM information_schema.key_column_usage
+		WHERE table_schema = 'cat_test' AND table_name = 'user_step_sync_logs' AND constraint_name = 'PRIMARY'`).Scan(&syncLogPK)
+	if err != nil {
+		t.Errorf("query user_step_sync_logs PK: %v", err)
+	} else if syncLogPK != "id" {
+		t.Errorf("user_step_sync_logs PK column = %q, want 'id'", syncLogPK)
+	}
 }
 
-// TestMigrateIntegration_StatusAfterUp 验证 Up 完成后 Status 返回 (version=5, dirty=false, nil)。
+// TestMigrateIntegration_StatusAfterUp 验证 Up 完成后 Status 返回 (version=6, dirty=false, nil)。
+// Story 7.2 扩展：从 5 改 6（多了 0006_init_user_step_sync_logs）
 func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	dsn, cleanup := startMySQL(t)
 	defer cleanup()
@@ -380,8 +451,8 @@ func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status after Up: %v", err)
 	}
-	if v != 5 {
-		t.Errorf("Status version = %d, want 5", v)
+	if v != 6 {
+		t.Errorf("Status version = %d, want 6", v)
 	}
 	if dirty {
 		t.Errorf("Status dirty = true, want false")
