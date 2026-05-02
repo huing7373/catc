@@ -116,9 +116,11 @@ public struct ProfileScaffoldView: View {
                     headerIconButton(iconKey: "bell") {
                         state.onBellTap()
                     }
+                    .accessibilityIdentifier(AccessibilityID.Profile.bellButton)
                     headerIconButton(iconKey: "settings") {
                         state.onSettingsTap()
                     }
+                    .accessibilityIdentifier(AccessibilityID.Profile.settingsButton)
                 }
             }
             .padding(.bottom, 14)

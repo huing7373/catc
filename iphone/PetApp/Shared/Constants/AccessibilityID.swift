@@ -148,6 +148,11 @@ public enum AccessibilityID {
     public enum Profile {
         public static let view = "profileView"
         public static let headerCard = "profileHeaderCard"
+        // Story 37.13 fix-review round 3：headerIconButton(bell/settings) callsite
+        // 之前漏挂 a11y identifier（被旧版 check_a11y_coverage.sh 算法 bug 漏检），
+        // 本轮收紧 window 算法暴露 → 给 helper callsite 各加专属 identifier.
+        public static let bellButton = "profileBellButton"
+        public static let settingsButton = "profileSettingsButton"
         public static let statsCard = "profileStatsCard"
         public static let weChatCard = "profileWeChatCard"
         public static let weChatCardBound = "profileWeChatCardBound"

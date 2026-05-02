@@ -115,5 +115,6 @@
 | 2026-05-02 | [SwiftUI `.sheet(onDismiss:)` 在按钮触发关闭时也会跑，必须用 dismissReason tag 做意图分发](2026-05-02-sheet-onDismiss-fires-on-button-close-too.md) | 1 | architecture | `c3f52ab` |
 | 2026-04-30 | [UITest 自补 helper 与 XCTest SDK 方法 redeclaration](2026-04-30-uitest-helper-redeclares-sdk-method.md) | 1 | testing | `c0d7165` |
 | 2026-05-01 | [单测复刻 view 内规则等于零守护：必须把规则下沉到纯函数 helper 与 view 共用](2026-05-01-test-must-share-helper-with-view-not-replicate-rules.md) | 1 | testing | `a65ae1b` |
-| 2026-04-30 | [a11y coverage CI 脚本盲区：SCAN_DIRS 缺 App/ + regex 不覆盖 custom wrapper](2026-04-30-a11y-coverage-script-blind-spots-scan-dirs-and-custom-wrapper-regex.md) | 2 | testing | `<pending>` |
+| 2026-04-30 | [a11y coverage CI 脚本盲区：SCAN_DIRS 缺 App/ + regex 不覆盖 custom wrapper](2026-04-30-a11y-coverage-script-blind-spots-scan-dirs-and-custom-wrapper-regex.md) | 2 | testing | `ac6eb46` |
 | 2026-05-02 | [ADR layering guard 必须 token-match 而非 `TypeName(` 构造调用 match](2026-05-02-static-guard-regex-must-token-match-not-constructor-call.md) | 1 | architecture | `331222b` |
+| 2026-04-30 | [a11y coverage CI 脚本 window 算法 sound 性 (multi-control 同 view 的 sibling 顺势遮蔽 false negative)](2026-04-30-a11y-coverage-script-window-soundness.md) | 2 | testing | `<pending>` |

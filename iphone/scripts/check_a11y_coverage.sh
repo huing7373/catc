@@ -50,6 +50,23 @@ PREVIEW_LOOKBACK_LINES=50
 
 violations=0
 
+# Story 37.13 fix-review round 3 修法（codex 指出的 algorithm soundness bug）：
+# 旧算法对每个 interactive line 取固定 80 行 window 检查 accessibilityIdentifier(.
+# 当多个 control 在同一 view 内且首个 control 漏挂时，由于下方 sibling control 的
+# identifier 在同一 80 行 window 内会被错误判 OK → CI gate bypassed.
+#
+# 新算法：每 interactive line 的 window 上限收紧为
+# `min(line + A11Y_WINDOW_LINES, next_interactive_line - 1)`.
+# 这样首个 control 的 window 在到达下一个 control 之前就截止 → 多 control 同 view 时
+# 每个 control 各管自己的 body / modifier 链；首 control 漏挂不会被 sibling 顺势遮蔽.
+#
+# 边界 case（已知漏报，需要 swift-syntax AST 才能彻底解决）:
+#   - 首个 interactive 与下个 interactive 之间夹一个由 helper 调用产生的 sibling
+#     accessibilityIdentifier (例如 `.accessibilityIdentifier(...)` 出现在两个 Button
+#     行之间但归属上一个 Button) → 仍可能 false negative；这种结构罕见但请人评.
+#   - 同一行内多个 .accessibilityIdentifier 调用（跨多个 control）—— 不构造此类代码.
+#
+# 守护测试见末尾 fixture 验证（fixture 在 iphone/scripts/check_a11y_coverage.fixture/）.
 scan_file() {
     local file="$1"
     # 抓所有交互元素行号（grep -n 输出 `line_num:content`）.
@@ -59,10 +76,44 @@ scan_file() {
         return
     fi
 
+    # 把所有 interactive 行号按 ascending 序写入临时文件，便于 awk 取下一个 line_num.
+    local nums_file
+    nums_file="$(mktemp -t a11y_nums.XXXXXX)"
+    echo "$interactive_lines" | awk -F: '{print $1}' | sort -n > "$nums_file"
+
     while IFS=: read -r line_num content; do
         [ -z "$line_num" ] && continue
-        # 检查该行往后 A11Y_WINDOW_LINES 行内是否有 accessibilityIdentifier(
-        local end=$((line_num + A11Y_WINDOW_LINES))
+        # 跳过注释行（`//` / `///` / `/*` / `*` 起首）—— pattern 在注释里出现是误报
+        # （例如 `/// - 加回 ... PrimaryButton(variant: .secondary)`）.
+        local stripped
+        stripped="$(printf '%s' "$content" | sed 's/^[[:space:]]*//')"
+        case "$stripped" in
+            '//'*|'///'*|'/*'*|'*'*) continue ;;
+        esac
+        # 跳过 Swift function 声明行 —— 这些行只是定义 helper 而不是 callsite，
+        # 真正的 callsite 会在别处单独命中 INTERACTIVE_PATTERN 并自带检查.
+        # 例：`private func headerIconButton(iconKey: ...) -> some View {`.
+        case "$content" in
+            *' func '*'('*) continue ;;
+        esac
+        # 算 window 上限：min(line_num + A11Y_WINDOW_LINES, next_interactive_line - 1).
+        local cap_end=$((line_num + A11Y_WINDOW_LINES))
+        local next_line
+        next_line="$(awk -v cur="$line_num" '$1 > cur { print $1; exit }' "$nums_file")"
+        local end
+        if [ -n "$next_line" ]; then
+            local natural_end=$((next_line - 1))
+            if [ "$natural_end" -lt "$cap_end" ]; then
+                end=$natural_end
+            else
+                end=$cap_end
+            fi
+        else
+            end=$cap_end
+        fi
+        # window 起点也截到当前 control 自己 (line_num) 之后 — 不允许往前看（防 helper
+        # callsite 的 .accessibilityIdentifier 反向覆盖到 helper 内部 Button false OK，
+        # 反向覆盖路径靠 INTERACTIVE_PATTERN 把 helper 名加进 pattern 处理）.
         local tail_window
         tail_window="$(awk -v start="$line_num" -v end="$end" 'NR >= start && NR <= end' "$file")"
         if echo "$tail_window" | grep -q 'accessibilityIdentifier('; then
@@ -79,7 +130,50 @@ scan_file() {
         echo "VIOLATION: $file:$line_num: $content" >&2
         violations=$((violations + 1))
     done <<< "$interactive_lines"
+
+    rm -f "$nums_file"
 }
+
+# --- Self-test mode -----------------------------------------------------------
+# Story 37.13 r3: 守护算法 sound 性的 fixture 测试.
+# 用 `bash check_a11y_coverage.sh --self-test` 触发：构造一个含「漏挂 Button +
+# sibling 已挂 Button」的 fixture，跑 scan_file 应当报 1 个 violation.
+# 若回归（violation 计数 ≠ 1）则脚本退出 != 0，提示算法又被 bug 污染.
+if [ "${1:-}" = "--self-test" ]; then
+    fixture_dir="$(mktemp -d -t a11y_selftest.XXXXXX)"
+    cat > "$fixture_dir/Adversarial.swift" <<'FIXTURE'
+import SwiftUI
+
+struct AdversarialView: View {
+    var body: some View {
+        VStack {
+            // 第 1 个 Button：故意漏挂 a11y identifier.
+            Button(action: { print("first") }) {
+                Text("first")
+            }
+
+            // 第 2 个 Button：挂了 a11y identifier.
+            // sound 算法应当只把下面 identifier 算给第 2 个 Button，第 1 个仍报 violation.
+            Button(action: { print("second") }) {
+                Text("second")
+            }
+            .accessibilityIdentifier("second")
+        }
+    }
+}
+FIXTURE
+    scan_file "$fixture_dir/Adversarial.swift"
+    rm -rf "$fixture_dir"
+    if [ "$violations" -eq 1 ]; then
+        echo "✅ self-test passed: sound algorithm catches missing identifier on first sibling Button"
+        exit 0
+    else
+        echo "❌ self-test FAILED: expected 1 violation, got $violations" >&2
+        echo "   Algorithm regression — first-sibling-missing should NOT be masked by next-sibling identifier" >&2
+        exit 1
+    fi
+fi
+# ------------------------------------------------------------------------------
 
 for dir in "${SCAN_DIRS[@]}"; do
     if [ ! -d "$dir" ]; then

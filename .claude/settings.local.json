@@ -68,7 +68,10 @@
       "Bash(python3 *)",
       "Bash(bash /Users/zhuming/fork/catc/iphone/scripts/check_a11y_coverage.sh)",
       "Bash(bash /Users/zhuming/fork/catc/iphone/scripts/check_no_apiclient_in_features.sh)",
-      "Bash(bash iphone/scripts/check_no_apiclient_in_features.sh)"
+      "Bash(bash iphone/scripts/check_no_apiclient_in_features.sh)",
+      "Bash(bash iphone/scripts/check_a11y_coverage.sh)",
+      "Bash(bash --version)",
+      "Bash(bash iphone/scripts/check_a11y_coverage.sh --self-test)"
     ],
     "deny": [
       "Bash(rm -rf:*)",
