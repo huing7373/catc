@@ -2,7 +2,7 @@
 date: 2026-04-30
 source_review: codex round 4 review of Story 37.13 a11y identifier 总表 (file: /tmp/epic-loop-review-37-13-r4.md)
 story: 37-13-accessibility-identifier-总表
-commit: <pending>
+commit: 152c22b
 lesson_count: 1
 ---
 
