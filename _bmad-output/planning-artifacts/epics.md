@@ -1383,11 +1383,11 @@ So that 我的可用步数与现实步数同步增长，可用于开宝箱等消
 - 返回 acceptedDeltaSteps + 最新账户
 **And** 接口要求 auth（带 Bearer token），无 token 返回 1001
 **And** **syncDate 由 client 提供（按 client 时区算"今天"），server 直接采用不二次转换**（避免跨时区漂移）—— GAP E 修补
-**And** **步数防作弊阈值（GAP K 修补）**：
+**And** **步数防作弊阈值（GAP K 修补；契约语义对齐 Story 7.1 / V1 接口设计 §1 + §6.1）**：
 - 单次 sync 的 `delta` > **5000** → 视为可疑（log warning）+ delta 截断为 5000（不彻底拒绝，避免误伤真实跑步用户）
-- 单日（同 sync_date）累计 `accepted_delta_steps` 总和 > **50000** → 当日后续 sync 一律 delta=0 + log warning + 返回 3001 步数同步数据异常
-- 阈值通过配置 `steps.daily_cap` / `steps.single_sync_cap` 可调
-- **单元测试**新增 case：单次 delta=10000 → 实际入账 5000 + log warning；单日累计已达 50000 后再 sync → delta=0 + 3001
+- 当日封顶（**非粘性**语义）：仅当本次同步入账后**将超过** 50000 上限（即 `prevAccepted + curDelta > 50000`，含本次截断后 delta）→ 当次 delta 强制 = 0 + log warning + **返回 3001 步数同步数据异常**；若客户端后续 sync 是**倒退**（`clientTotalSteps < lastClientTotalSteps`）或**重复**（`clientTotalSteps == lastClientTotalSteps`），按"差值计算"步骤 delta 自然 = 0，**仍返 code = 0**，**不**再次触发 3001（即 3001 不是粘性错误码；详 V1 §6.1 line 598 + 关键约束段）
+- 阈值通过配置 key `steps.single_sync_cap`（默认 5000）/ `steps.daily_cap`（默认 50000）暴露，**但 prod 部署必须使用默认值，不允许通过配置文件覆盖**（否则不同 prod 实例会在不同阈值上 truncate / 返 3001，重新引入契约漂移；详 V1 §1 line 28 节点 3 冻结声明）；**dev / test 环境**可通过配置文件覆盖默认值（仅用于单测 / 调试 / fixture），**不**视为契约变更
+- **单元测试**新增 case：单次 delta=10000 → 实际入账 5000 + log warning；prev=49000 + cur=4000（越界 sync）→ delta=0 + 3001；prev=50000 后**重复 / 倒退** sync → delta=0 + code=0（**非** 3001，验证非粘性语义）
 - 该限制仅 server 端实施，iOS 端不加限制（server 是权威）
 **And** **单元测试覆盖**（≥6 case，mocked repo）:
 - happy: 首次同步（无历史记录）→ delta = clientTotalSteps
@@ -1431,7 +1431,7 @@ So that demo 时不必真走 1000 步就能演示开宝箱.
 **Given** Epic 1 Story 1.6 Dev Tools 框架已就绪 + Story 7.3 步数 service 可用
 **When** 仅在 `BUILD_DEV=true` 模式调用 `POST /dev/grant-steps {userId: int64, steps: int}`
 **Then** service 直接增加 `user_step_accounts.total_steps += steps, available_steps += steps`
-**And** 同时写一条 sync_log（source=admin_grant，标识来源是 dev）
+**And** 同时写一条 sync_log（`source=2`（admin_grant），见数据库设计 §6.6；标识来源是 dev）
 **And** 生产构建（BUILD_DEV=false）下访问该端点返回 404
 **And** 接口**不**要求 auth（因为是 dev 内部用）
 **And** **单元测试覆盖**（≥4 case）:
