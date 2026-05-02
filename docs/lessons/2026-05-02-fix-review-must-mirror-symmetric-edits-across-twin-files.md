@@ -2,7 +2,7 @@
 date: 2026-05-02
 source_review: codex review r6 of Story 7-1 接口契约最终化
 story: 7-1-接口契约最终化
-commit: <pending>
+commit: 284fa42
 lesson_count: 2
 ---
 

@@ -2,7 +2,7 @@
 date: 2026-05-02
 source_review: file:/tmp/epic-loop-review-7-1-r3.md (codex review round 3 of Story 7.1)
 story: 7-1-接口契约最终化
-commit: <pending>
+commit: abbfa30
 lesson_count: 2
 ---
 

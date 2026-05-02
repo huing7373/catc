@@ -123,12 +123,12 @@
 | 2026-04-30 | [白名单 r2：deferred artifact 的位置必须落到「真实承载源」而非视觉壳入口（roomCode/JoinRoomModal 在 app.jsx；ui_design SVG vs SwiftUI cat.fill）](2026-04-30-whitelist-entry-must-cite-full-flow-doc-and-real-render-path-2.md) | 2 | docs | `0e99f01` |
 | 2026-04-30 | [白名单 r3：未来 routing 必须 cite 真实 Story scope（不能把 3D spike 错挂 Story 30.x、不能把 SwiftUI 实装路径错写成 prototype 替换）](2026-04-30-whitelist-future-routing-must-cite-real-story-scope.md) | 2 | docs | `20aec06` |
 | 2026-04-30 | [白名单 r4：deferred 集合的"成员名 / 数量"必须以真实 code token 为准（theme set: candy/matcha/sky/dark 四套 vs 误写的 candy/dark/mono 三套）](2026-04-30-whitelist-deferred-set-must-mirror-real-code-tokens.md) | 1 | docs | `296ebca` |
-| 2026-05-02 | [步数同步接口的"封顶判断方向"与"输入硬上限语义"两类边界契约陷阱](2026-05-02-step-cap-boundary-and-input-bound-contract.md) | 2 | docs | `<pending>` |
-| 2026-05-02 | [步数同步接口 1005 限频维度错配 与 3001 "粘性错误码" 误述](2026-05-02-step-sync-rate-limit-scope-and-3001-stickiness-myth.md) | 2 | docs | `<pending>` |
-| 2026-05-02 | [接口契约 story 必须连同时序图 + 数据库枚举一起锚定，不能只改 V1 接口文档](2026-05-02-cross-doc-contract-anchor-scope.md) | 2 | docs | `<pending>` |
-| 2026-05-02 | [step_account 示例数值不变量 & 同类已认证路由限频 scope 必须重复显式](2026-05-02-step-account-example-invariant-and-cross-section-rate-limit-scope.md) | 2 | docs | `<pending>` |
-| 2026-05-02 | [Story artifact 里的 AC 副本必须与主文档每轮 review fix 同步刷新](2026-05-02-story-artifact-ac-copy-must-mirror-doc-edits.md) | 3 | docs | `<pending>` |
-| 2026-05-02 | [fix-review 修主文档时必须双向对齐"AC 副本 + 跨文档枚举注释"两类衍生文档](2026-05-02-fix-review-must-mirror-symmetric-edits-across-twin-files.md) | 2 | docs | `<pending>` |
-| 2026-05-02 | [契约冻结必须钉死 prod 阈值，跨文档枚举名必须 canonical 化](2026-05-02-contract-freeze-must-pin-prod-thresholds-and-canonicalize-enum-names.md) | 2 | docs | `<pending>` |
-| 2026-05-02 | [fix-review 跨文档扫描必须包含上游 planning artifact（不能只扫 docs/ + story file）](2026-05-02-cross-doc-fix-must-sweep-planning-artifacts.md) | 1 | docs | `<pending>` |
-| 2026-05-02 | [Story file 内部规则副本必须通过"标准答案表"全文核对（不能只看 review 指出的两条）](2026-05-02-story-file-internal-rule-copies-must-pass-standard-answer-table-sweep.md) | 2 | docs / process | `<pending>` |
+| 2026-05-02 | [步数同步接口的"封顶判断方向"与"输入硬上限语义"两类边界契约陷阱](2026-05-02-step-cap-boundary-and-input-bound-contract.md) | 2 | docs | `848abd9` |
+| 2026-05-02 | [步数同步接口 1005 限频维度错配 与 3001 "粘性错误码" 误述](2026-05-02-step-sync-rate-limit-scope-and-3001-stickiness-myth.md) | 2 | docs | `98283f9` |
+| 2026-05-02 | [接口契约 story 必须连同时序图 + 数据库枚举一起锚定，不能只改 V1 接口文档](2026-05-02-cross-doc-contract-anchor-scope.md) | 2 | docs | `abbfa30` |
+| 2026-05-02 | [step_account 示例数值不变量 & 同类已认证路由限频 scope 必须重复显式](2026-05-02-step-account-example-invariant-and-cross-section-rate-limit-scope.md) | 2 | docs | `5b68aef` |
+| 2026-05-02 | [Story artifact 里的 AC 副本必须与主文档每轮 review fix 同步刷新](2026-05-02-story-artifact-ac-copy-must-mirror-doc-edits.md) | 3 | docs | `4cda156` |
+| 2026-05-02 | [fix-review 修主文档时必须双向对齐"AC 副本 + 跨文档枚举注释"两类衍生文档](2026-05-02-fix-review-must-mirror-symmetric-edits-across-twin-files.md) | 2 | docs | `284fa42` |
+| 2026-05-02 | [契约冻结必须钉死 prod 阈值，跨文档枚举名必须 canonical 化](2026-05-02-contract-freeze-must-pin-prod-thresholds-and-canonicalize-enum-names.md) | 2 | docs | `472cf3e` |
+| 2026-05-02 | [fix-review 跨文档扫描必须包含上游 planning artifact（不能只扫 docs/ + story file）](2026-05-02-cross-doc-fix-must-sweep-planning-artifacts.md) | 1 | docs | `e844220` |
+| 2026-05-02 | [Story file 内部规则副本必须通过"标准答案表"全文核对（不能只看 review 指出的两条）](2026-05-02-story-file-internal-rule-copies-must-pass-standard-answer-table-sweep.md) | 2 | docs / process | `030647f` |

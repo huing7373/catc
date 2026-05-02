@@ -2,7 +2,7 @@
 date: 2026-05-02
 source_review: codex review r9 (epic-loop sub-agent) of Story 7.1 — /tmp/epic-loop-review-7-1-r9.md
 story: 7-1-接口契约最终化
-commit: <pending>
+commit: 030647f
 lesson_count: 2
 ---
 

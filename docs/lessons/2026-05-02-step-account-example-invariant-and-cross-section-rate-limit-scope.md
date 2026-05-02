@@ -2,7 +2,7 @@
 date: 2026-05-02
 source_review: codex review (epic-loop r4) — /tmp/epic-loop-review-7-1-r4.md
 story: 7-1-接口契约最终化
-commit: <pending>
+commit: 5b68aef
 lesson_count: 2
 ---
 
