@@ -2,7 +2,7 @@
 date: 2026-05-03
 source_review: codex review of Story 7.3 r3 (`/tmp/epic-loop-review-7-3-r3.md`)
 story: 7-3-post-steps-sync-接口-累计差值入账-service
-commit: <pending>
+commit: 5f3794b
 lesson_count: 1
 ---
 

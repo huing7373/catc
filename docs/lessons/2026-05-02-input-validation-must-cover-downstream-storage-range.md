@@ -2,7 +2,7 @@
 date: 2026-05-02
 source_review: codex review r4 of Story 7-3 (POST /steps/sync 累计差值入账 service)
 story: 7-3-post-steps-sync-接口-累计差值入账-service
-commit: <pending>
+commit: 6f41b27
 lesson_count: 1
 ---
 
