@@ -161,16 +161,42 @@ func (h *StepsHandler) PostSync(c *gin.Context) {
 	response.Success(c, postSyncResponseDTO(out), "ok")
 }
 
-// isValidYYYYMMDD 校验字符串是否为合法 YYYY-MM-DD（有效月日 / 闰年）。
+// isValidYYYYMMDD 校验字符串是否为合法 YYYY-MM-DD（有效月日 / 闰年 + MySQL DATE 范围）。
 //
 // 实装用 time.Parse 走纯字符串校验（不引入 time.Local / DSN loc 任何耦合）。
 // caller 已校验 len == 10。
 //
-// time.Parse 默认 loc=UTC；本函数只看 err（合法性），**不**把返回的 time 实例
+// time.Parse 默认 loc=UTC；本函数只看 err（合法性）+ 年份范围，**不**把返回的 time 实例
 // 往下传 → 完全无 loc 语义。日期合法性（如闰年 / 月日范围）不依赖 loc。
+//
+// **MySQL DATE range 校验（Story 7.3 review r4 [P2]）**：
+// time.Parse 接受 "0999-12-31" 这类 pre-1000 日期，但 MySQL DATE 列只接受
+// `1000-01-01` ~ `9999-12-31`（参 https://dev.mysql.com/doc/refman/8.0/en/datetime.html）。
+// 若 handler 不拦，request 会跳过 1002 参数校验直接走到 DB → mysql driver 拒 →
+// repo 返 ErrServiceBusy → client 看到 1009（"服务繁忙"）而非预期的 1002（"参数错误"）。
+//
+// 解法：在格式校验通过后追加一道年份范围校验 [1000, 9999]。**不**加业务上界
+// （如 ≤ 当前年）—— syncDate 应该是"今天"附近的日期，但 client 时钟漂移 / 跨日 race 会
+// 让"未来日期"也偶发合法；保守只用 MySQL DATE 物理范围作为入口拦截，业务侧合理性
+// 由 service 层（如 rate-limit / 跨日去重）兜底。
+//
+// **不**加下界 ≥ 1970（Unix epoch）或 ≥ 2020（业务上线年）—— 同样属于"业务上界"语义，
+// 走 service 层而不是 handler 入口。
+//
+// 反例（r4 之前）：只 `time.Parse` → "0999-12-31" 通过 → DB error → 1009。
 func isValidYYYYMMDD(s string) bool {
-	_, err := time.Parse("2006-01-02", s)
-	return err == nil
+	parsed, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return false
+	}
+	// MySQL DATE 物理范围 1000-01-01 ~ 9999-12-31。
+	// time.Parse("2006-01-02") 已隐式拒掉 5 位年份（如 "10000-01-01"）—— 字符长度不符；
+	// 此处只需补 pre-1000 下界。上界保险写一遍，防御未来 layout 调整。
+	year := parsed.Year()
+	if year < 1000 || year > 9999 {
+		return false
+	}
+	return true
 }
 
 // postSyncResponseDTO 把 service 输出转成 V1 §6.1.5 wire 格式。

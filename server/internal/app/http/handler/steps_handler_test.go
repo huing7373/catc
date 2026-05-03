@@ -414,3 +414,79 @@ func TestStepsHandler_PostSync_ClientTimestampMissing_Returns1002(t *testing.T) 
 		t.Errorf("envelope.message = %q, want 包含 clientTimestamp 定位字段", env.Message)
 	}
 }
+
+// ============================================================
+// Story 7.3 review r4 [P2]：syncDate 必须用 MySQL DATE 物理范围 [1000-01-01, 9999-12-31]
+// 在 handler 拦截，避免下游 driver 报错把 1002 误转 1009。
+// ============================================================
+
+// runSyncDateRangeCase 是下方 4 个 boundary case 的共享 driver。
+//
+// 期望逻辑：
+//   - wantInvalid=true  → service 不应被调用，envelope.code=1002（ErrInvalidParam），HTTP 200
+//   - wantInvalid=false → service 应被调用一次，envelope.code=0，HTTP 200
+//
+// 不真起 mysql；只验 handler 入口对 syncDate 的判定。
+func runSyncDateRangeCase(t *testing.T, syncDate string, wantInvalid bool) {
+	t.Helper()
+	uid := uint64(1001)
+	called := false
+	svc := &stubStepService{
+		syncStepsFn: func(ctx context.Context, in service.SyncStepsInput) (*service.SyncStepsOutput, error) {
+			called = true
+			return &service.SyncStepsOutput{AcceptedDeltaSteps: 0, StepAccount: service.StepAccountBrief{}}, nil
+		},
+	}
+	r := newStepsHandlerRouter(svc, &uid)
+
+	body := `{"syncDate":"` + syncDate + `","clientTotalSteps":100,"motionState":2,"clientTimestamp":1714560000000}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/steps/sync", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	env := decodeStepsEnvelope(t, w.Body.Bytes())
+	if wantInvalid {
+		if called {
+			t.Errorf("syncDate=%q: service should NOT be called (out of MySQL DATE range)", syncDate)
+		}
+		if env.Code != apperror.ErrInvalidParam {
+			t.Errorf("syncDate=%q: envelope.code = %d, want %d (1002)", syncDate, env.Code, apperror.ErrInvalidParam)
+		}
+	} else {
+		if !called {
+			t.Errorf("syncDate=%q: service should be called (within MySQL DATE range)", syncDate)
+		}
+		if env.Code != 0 {
+			t.Errorf("syncDate=%q: envelope.code = %d, want 0 (within range)", syncDate, env.Code)
+		}
+	}
+}
+
+// 12. SyncDatePre1000_Returns1002:
+// "0999-12-31" 是 Go time.Parse 接受的合法日期，但 MySQL DATE 不接受（< 1000-01-01）。
+// 必须在 handler 拦掉 → 1002，**不**让它走到 DB 然后被 driver 拒（那会变成 1009）。
+func TestStepsHandler_PostSync_SyncDatePre1000_Returns1002(t *testing.T) {
+	runSyncDateRangeCase(t, "0999-12-31", true /* wantInvalid */)
+}
+
+// 13. SyncDateFiveDigitYear_Returns1002:
+// "10000-01-01" 长度 = 11 ≠ 10 → 被现有 len 校验拦掉 → 1002。
+// 即便绕过 len 校验（如未来某次重构），time.Parse("2006-01-02") 解析 5 位年份会失败 →
+// isValidYYYYMMDD 返 false → 仍 1002。本 case 锁死 5 位年份永不放行。
+func TestStepsHandler_PostSync_SyncDateFiveDigitYear_Returns1002(t *testing.T) {
+	runSyncDateRangeCase(t, "10000-01-01", true /* wantInvalid */)
+}
+
+// 14. SyncDateMinBoundary_Allowed:
+// "1000-01-01" 是 MySQL DATE 物理下界，应通过 isValidYYYYMMDD → service 被调。
+func TestStepsHandler_PostSync_SyncDateMinBoundary_Allowed(t *testing.T) {
+	runSyncDateRangeCase(t, "1000-01-01", false /* wantInvalid */)
+}
+
+// 15. SyncDateMaxBoundary_Allowed:
+// "9999-12-31" 是 MySQL DATE 物理上界，应通过 isValidYYYYMMDD → service 被调。
+// 业务上不会真有这种日期，但 handler 应只校验物理范围，不加业务上界。
+func TestStepsHandler_PostSync_SyncDateMaxBoundary_Allowed(t *testing.T) {
+	runSyncDateRangeCase(t, "9999-12-31", false /* wantInvalid */)
+}
