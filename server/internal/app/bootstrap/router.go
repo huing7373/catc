@@ -29,6 +29,10 @@ type Deps struct {
 	Signer       *auth.Signer           // Story 4.4 加：JWT signer 单例
 	RateLimitCfg config.RateLimitConfig // Story 4.5 加：限频策略参数
 	StepsCfg     config.StepsConfig     // Story 7.3 加：步数同步防作弊阈值（dev/test 覆盖；prod 默认）
+	// EnvName 是部署环境名（main.go 从 CAT_ENV env var 读取，默认 "prod"）。
+	// Story 7.3 review r6 [P2] 加：传给 service.NewStepService 强制 prod 必须用默认 cap。
+	// 未注入 / 不识别值时 service 按 prod 严格策略（safe-by-default）。
+	EnvName string
 }
 
 // NewRouter 构造挂好四件套中间件的 Gin engine。
@@ -153,7 +157,7 @@ func NewRouter(deps Deps) *gin.Engine {
 
 		// Story 7.3 加：step service + handler（事务内差值入账 + 防作弊；
 		// 复用 stepAccountRepo + 新 stepSyncLogRepo + txMgr）。
-		stepSvc := service.NewStepService(deps.TxMgr, stepAccountRepo, stepSyncLogRepo, deps.StepsCfg)
+		stepSvc := service.NewStepService(deps.TxMgr, stepAccountRepo, stepSyncLogRepo, deps.StepsCfg, deps.EnvName)
 		stepsHandler := handler.NewStepsHandler(stepSvc)
 
 		api := r.Group("/api/v1")

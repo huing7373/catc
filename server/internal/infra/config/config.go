@@ -171,12 +171,17 @@ type RateLimitConfig struct {
 // 不允许通过 YAML 覆盖（避免不同 prod 实例阈值漂移引发跨端契约不一致）。
 // **dev / test 环境**可通过 YAML 覆盖（仅供单测 / 调试 / fixture），**不**视为契约变更。
 //
+// **prod gate 强制**（Story 7.3 review r6 [P2]）：service.NewStepService 接受 envName
+// 参数（main.go 从 env var `CAT_ENV` 读，默认 "prod"），prod 严格策略下任何正值 cap → panic。
+// dev/staging/test 显式 export CAT_ENV 才允许覆盖。详见 service 层 NewStepService 注释 +
+// configs/local.yaml `# Story 7.3 引入` 段顶部说明。
+//
 // 字段类型用 `int64`（不是 `*int64`）：与 RateLimitConfig 不同，本 struct
 // "缺字段" / "显式 0" 都视为"用默认值"——zero-value 兜底语义清晰，
 // 不存在"显式 0 = 禁用功能"的合法用法（cap=0 没有业务含义）。
 //
 // 字段不在 config 包做业务校验（无 Validate 方法）；service.NewStepService
-// 在启动期把 0 值兜底为 default* 常量，不 panic。
+// 在启动期处理：dev/staging/test 把 0 值兜底为 default* 常量；prod 任意正值 panic。
 type StepsConfig struct {
 	// SingleSyncCap 是单次 sync 的 delta 上限。
 	// 默认 5000（service 层 default 兜底）；YAML 显式正值覆盖；0 / 负值 = 用默认值。

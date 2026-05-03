@@ -100,12 +100,15 @@ func (s *stubStepTxMgr) WithTx(ctx context.Context, fn func(txCtx context.Contex
 }
 
 // buildStepService 用 stub repo 构造 StepService。每个 case 独立设置 fn。
+//
+// envName 默认 "dev"：单测用任意 SingleSyncCap / DailyCap 值（含 0 / 默认值）都允许；
+// 验"prod env 拒绝 YAML cap 覆盖"语义请直接调 `service.NewStepService(..., "prod")`。
 func buildStepService(
 	accRepo mysql.StepAccountRepo,
 	logRepo mysql.StepSyncLogRepo,
 	cfg config.StepsConfig,
 ) service.StepService {
-	return service.NewStepService(&stubStepTxMgr{}, accRepo, logRepo, cfg)
+	return service.NewStepService(&stubStepTxMgr{}, accRepo, logRepo, cfg, "dev")
 }
 
 // fixedSyncDate 给所有 case 共用一个固定 syncDate string（YYYY-MM-DD）。
@@ -510,6 +513,7 @@ func TestStepService_NewStepService_OversizedSingleSyncCap_Panics(t *testing.T) 
 		&stubStepStepAccountRepo{},
 		&stubStepSyncLogRepo{},
 		config.StepsConfig{SingleSyncCap: int64(math.MaxInt32) + 1},
+		"dev", // envName: dev 允许任何正值；本 case 验 MaxInt32+1 越界（独立于 prod gate）
 	)
 }
 
@@ -527,6 +531,7 @@ func TestStepService_NewStepService_NegativeSingleSyncCap_Panics(t *testing.T) {
 		&stubStepStepAccountRepo{},
 		&stubStepSyncLogRepo{},
 		config.StepsConfig{SingleSyncCap: -1},
+		"dev",
 	)
 }
 
@@ -544,6 +549,7 @@ func TestStepService_NewStepService_NegativeDailyCap_Panics(t *testing.T) {
 		&stubStepStepAccountRepo{},
 		&stubStepSyncLogRepo{},
 		config.StepsConfig{DailyCap: -1},
+		"dev",
 	)
 }
 
@@ -561,6 +567,7 @@ func TestStepService_NewStepService_MaxInt32SingleSyncCap_OK(t *testing.T) {
 		&stubStepStepAccountRepo{},
 		&stubStepSyncLogRepo{},
 		config.StepsConfig{SingleSyncCap: int64(math.MaxInt32)},
+		"dev",
 	)
 }
 
@@ -764,36 +771,38 @@ func TestStepService_SyncSteps_OutOfOrderSync_SumCapPreventsRepeatedAccrual(t *t
 	}
 }
 
-// 16. TruncationPlusOutOfOrder_MaxReportedClampPreventsOverAccrual:
-// **Story 7.3 review r5 [P1] 反例 case**：截断 + 乱序组合下，r3 的 SUM 兜底单层防御失效，
-// 必须叠加 maxReported clamp 才能正确处理。
+// 16. KnownLimitation_TruncationPlusOutOfOrder_MayOverAccrue_ByDesign:
+// **Story 7.3 review r6 [P1] 选 reset 优先后引入的 known limitation 哨兵**。
 //
-// 场景（与 integration test TruncationPlusOutOfOrder 镜像）：
+// 决策史 r3 → r5 → r6（详见 docs/lessons/2026-05-04-*-r6-reset-vs-ooo-tradeoff.md）：
+//   - r3：基线 id DESC + SUM 兜底 → reset 正确，但"截断 + 乱序"小幅多算
+//   - r5：基线改 MAX(reported) clamp 修了"截断 + 乱序"，但 reset 永久卡死历史高水位
+//   - r6：reset 与"截断+乱序"在概念上无法用单一规则同时满足；选 **reset 优先** 路径
+//     （回到 r3 状态），接受"截断+乱序"小幅多算作为 known limitation
 //
-//   - sync A: clientTotal=10000 → rawDelta=10000 → 截断 5000 → accepted=5000；
-//     DB 落 client_total_steps=10000 / accepted=5000；prevAccepted=5000；maxReported=10000
+// **本 case 不是 regression sentinel —— 是 by-design 行为锁定**：
+// 若未来谁再加 maxReported clamp（重蹈 r5 覆辙），accepted 会从 4000 变 2000，本 case
+// 立即挂，提示 "r6 决策被无意改回 r5 路径"。
 //
-//   - sync B: clientTotal=8000（旧报告延迟到达）→ maxReported=10000；
-//     8000 ≤ 10000 → rawDelta=0 → accepted=0；DB 落 client_total=8000 / accepted=0；
-//     prevAccepted=5000；maxReported=10000（不变）
+// 场景：
+//   - sync A: clientTotal=10000 → rawDelta=10000 → 截断 5000 → accepted=5000;
+//     DB 落 client_total=10000 / accepted=5000; prevAccepted=5000
+//   - sync B: clientTotal=8000（旧报告延迟到达）→ 8000 < latest(10000) → rawDelta=0 → accepted=0;
+//     DB 落 client_total=8000 / accepted=0; prevAccepted 仍 5000; latest 现在 = sync B（id DESC = 8000）
+//   - sync C (本测试 mock 状态): clientTotal=12000;
+//     - latest = sync B（client_total=8000）
+//     - r6 (latest 当基线): rawDelta = 12000 - 8000 = 4000
+//     - SUM 兜底: 5000 + 4000 = 9000 < 12000 → **不触发**
+//     - 单次截断: 4000 < 5000 → 不触发
+//     - delta = 4000 (**多算了 2000**: 实际客户端只新增 2000 步 10000→12000)
 //
-//   - sync C (本测试 mock 状态): clientTotal=12000；
-//     - latest = sync B（最近 INSERT，client_total=8000）
-//     - maxReported = 10000（仍是 sync A 报的；sync B 的 8000 没超过 10000）
-//     - prevAccepted = 5000（A 入账 5000 + B 入账 0）
-//     - r5 maxReported clamp：12000 > 10000 → rawDelta = 12000 - 10000 = 2000
-//     - SUM 兜底：5000 + 2000 = 7000 < 12000 → 不触发
-//     - 单次截断：2000 < 5000 → 不触发
-//     - delta = 2000；accepted=2000；总 accepted = 5000 + 0 + 2000 = 7000 ✓
+// **损失上限**：单次 ≤ single_sync_cap=5000；当日 SUM ≤ daily_cap=50000；
+// 触发概率极低（要 5000+ 步突发被截断 + 恰好乱序到达）；接受作为 known limitation。
 //
-// **r3 反例（单层 SUM 兜底失效）**：
-//   - 若 service 用 latest.ClientTotalSteps=8000 当基线 → rawDelta = 12000 - 8000 = 4000
-//   - SUM 兜底：5000 + 4000 = 9000 < 12000 → **不触发**
-//   - delta = 4000；accepted=4000；总 accepted = 5000 + 0 + 4000 = 9000
-//   - 实际从 sync A 到 sync C 客户端只新增了 2000 步（10000 → 12000），但服务多入账了 2000 步
-//
-// 本 case 锁定"maxReported clamp 必须存在"语义：若 service 退化到 r3 单层防御 → accepted=4000。
-func TestStepService_SyncSteps_TruncationPlusOutOfOrder_MaxReportedClampPreventsOverAccrual(t *testing.T) {
+// **若未来要修这个 limitation**：必须同时保留 reset 修复 —— 唯一路径是引入"区分 reset 与
+// 乱序"的额外信号（如 client 提交 sync_seq 或 device_id）；不要再尝试纯 server 端的
+// MAX/SUM 单一规则微调。
+func TestStepService_SyncSteps_KnownLimitation_TruncationPlusOutOfOrder_MayOverAccrue_ByDesign(t *testing.T) {
 	accRepo := &stubStepStepAccountRepo{
 		findByUserIDFn: func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
 			// 当前账户：sync A 入账 5000 + sync B 入账 0 = total 5000
@@ -802,19 +811,15 @@ func TestStepService_SyncSteps_TruncationPlusOutOfOrder_MaxReportedClampPrevents
 	}
 	logRepo := &stubStepSyncLogRepo{
 		findLatestFn: func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
-			// latest = sync B（最近 INSERT，client_total=8000）—— r5 之后只用于 latest != nil 判断
+			// latest = sync B（最近 INSERT，id DESC，client_total=8000）—— r6 用此作为基线
 			return &mysql.StepSyncLog{ClientTotalSteps: 8000}, nil
 		},
 		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
 			// 历史 SUM = sync A 入账 5000 + sync B 入账 0 = 5000
 			return 5000, nil
 		},
-		// **关键 mock**：maxReported = 10000（sync A 报的；sync B 的 8000 < 10000，MAX 不变）。
-		// 这是 r5 修复之所以工作的核心 —— maxReported ≠ latest.ClientTotalSteps，
-		// 也 ≠ prevAccepted；它是"已报告过的最大累计"，独立于截断 / 入账状态。
-		maxReportedFn: func(ctx context.Context, userID uint64, syncDate string) (uint64, error) {
-			return 10000, nil
-		},
+		// 注：r6 service 不再调 MaxClientTotalStepsByUserAndDate（repo 方法保留供未来用），
+		// 故本 case 不设 maxReportedFn（默认返 0）。
 	}
 
 	svc := buildStepService(accRepo, logRepo, config.StepsConfig{})
@@ -822,25 +827,156 @@ func TestStepService_SyncSteps_TruncationPlusOutOfOrder_MaxReportedClampPrevents
 		UserID: 1001, SyncDate: fixedSyncDate, ClientTotalSteps: 12000, MotionState: 2, ClientTimestamp: 1714560200000,
 	})
 	if err != nil {
-		t.Fatalf("SyncSteps truncation+OOO: %v", err)
+		t.Fatalf("SyncSteps truncation+OOO known limitation: %v", err)
 	}
 
-	// 关键断言：accepted = 2000（不是 r3 单层防御下的 4000）
-	if out.AcceptedDeltaSteps != 2000 {
-		t.Errorf("AcceptedDeltaSteps = %d, want 2000 (r5 maxReported clamp = 12000-10000)；"+
-			"若 = 4000 → 退化到 r3 单层 SUM 兜底（latest 当基线），maxReported clamp regression", out.AcceptedDeltaSteps)
+	// **关键断言（by-design known limitation）**：accepted = 4000（不是 r5 maxReported clamp 下的 2000）
+	// 若改回 maxReported clamp（r5）→ accepted=2000，此 case 立即挂，提示重蹈 r5 覆辙
+	if out.AcceptedDeltaSteps != 4000 {
+		t.Errorf("AcceptedDeltaSteps = %d, want 4000 (r6 by-design known limitation: 12000-latest(8000)=4000)；"+
+			"若 = 2000 → 重新引入 r5 maxReported clamp（破坏 reset 修复），违反 r6 决策", out.AcceptedDeltaSteps)
 	}
-	if accRepo.lastUpdateDelta != 2000 {
-		t.Errorf("UpdateBalance delta = %d, want 2000", accRepo.lastUpdateDelta)
+	if accRepo.lastUpdateDelta != 4000 {
+		t.Errorf("UpdateBalance delta = %d, want 4000", accRepo.lastUpdateDelta)
 	}
-	if logRepo.lastCreated.AcceptedDeltaSteps != 2000 {
-		t.Errorf("sync_log.AcceptedDeltaSteps = %d, want 2000", logRepo.lastCreated.AcceptedDeltaSteps)
+	if logRepo.lastCreated.AcceptedDeltaSteps != 4000 {
+		t.Errorf("sync_log.AcceptedDeltaSteps = %d, want 4000", logRepo.lastCreated.AcceptedDeltaSteps)
 	}
-	// total = 5000 (现状) + 2000 = 7000
-	if out.StepAccount.TotalSteps != 7000 {
-		t.Errorf("TotalSteps = %d, want 7000 (5000 + 2000)", out.StepAccount.TotalSteps)
+	// total = 5000 (现状) + 4000 = 9000（多算 2000，by-design）
+	if out.StepAccount.TotalSteps != 9000 {
+		t.Errorf("TotalSteps = %d, want 9000 (5000 + 4000，by-design known limitation)", out.StepAccount.TotalSteps)
 	}
 	if logRepo.lastCreated.ClientTotalSteps != 12000 {
 		t.Errorf("sync_log.ClientTotalSteps = %d, want 12000", logRepo.lastCreated.ClientTotalSteps)
+	}
+}
+
+// 17. NewStepService_ProdEnv_RejectsYAMLCapOverride:
+// **Story 7.3 review r6 [P2]**：prod 环境必须用契约钦定的默认值（5000/50000）。
+// envName="prod" + 任何正值 cap → panic（"prod env must use default caps"）。
+//
+// 反例（旧版无 prod gate）：运维误把 dev YAML（含 single_sync_cap: 100 fixture）推到 prod
+// → server 启动正常，但当日封顶从 50000 降到自定义值 → 跨实例契约漂移、用户步数体验异常。
+func TestStepService_NewStepService_ProdEnv_RejectsYAMLCapOverride(t *testing.T) {
+	t.Run("ProdEnv_PositiveSingleSyncCap_Panics", func(t *testing.T) {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("NewStepService 应 panic（prod env + cfg.SingleSyncCap > 0）；实际未 panic")
+			}
+			msg, ok := r.(string)
+			if !ok {
+				t.Fatalf("panic 值不是 string: %T", r)
+			}
+			if !strings.Contains(msg, "prod env") || !strings.Contains(msg, "default caps") {
+				t.Errorf("panic msg 不含 prod env 提示: %q", msg)
+			}
+		}()
+		_ = service.NewStepService(
+			&stubStepTxMgr{},
+			&stubStepStepAccountRepo{},
+			&stubStepSyncLogRepo{},
+			config.StepsConfig{SingleSyncCap: 100},
+			"prod",
+		)
+	})
+
+	t.Run("ProdEnv_PositiveDailyCap_Panics", func(t *testing.T) {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("NewStepService 应 panic（prod env + cfg.DailyCap > 0）；实际未 panic")
+			}
+		}()
+		_ = service.NewStepService(
+			&stubStepTxMgr{},
+			&stubStepStepAccountRepo{},
+			&stubStepSyncLogRepo{},
+			config.StepsConfig{DailyCap: 500},
+			"prod",
+		)
+	})
+
+	t.Run("ProdEnv_BothZero_OK", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("NewStepService 不应 panic（prod env + 全部 zero-value，走默认）: %v", r)
+			}
+		}()
+		_ = service.NewStepService(
+			&stubStepTxMgr{},
+			&stubStepStepAccountRepo{},
+			&stubStepSyncLogRepo{},
+			config.StepsConfig{},
+			"prod",
+		)
+	})
+
+	t.Run("EmptyEnv_DefaultsToProdStrict_Panics", func(t *testing.T) {
+		// safe-by-default：envName 空 / 未注入 CAT_ENV → 按 prod 严格策略
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("NewStepService 应 panic（envName='' 按 prod 严格策略 + cfg.SingleSyncCap > 0）；实际未 panic")
+			}
+		}()
+		_ = service.NewStepService(
+			&stubStepTxMgr{},
+			&stubStepStepAccountRepo{},
+			&stubStepSyncLogRepo{},
+			config.StepsConfig{SingleSyncCap: 100},
+			"",
+		)
+	})
+
+	t.Run("UnknownEnv_DefaultsToProdStrict_Panics", func(t *testing.T) {
+		// 不识别的 envName（拼写错 / 历史值）→ 按 prod 严格策略（safe-by-default）
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("NewStepService 应 panic（unknown envName 按 prod 严格策略 + cfg.DailyCap > 0）；实际未 panic")
+			}
+		}()
+		_ = service.NewStepService(
+			&stubStepTxMgr{},
+			&stubStepStepAccountRepo{},
+			&stubStepSyncLogRepo{},
+			config.StepsConfig{DailyCap: 500},
+			"unknown-env-name",
+		)
+	})
+
+	t.Run("ProductionAlias_StrictSameAsProd_Panics", func(t *testing.T) {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("NewStepService 应 panic（envName='production' 与 prod 同语义 + cfg.SingleSyncCap > 0）；实际未 panic")
+			}
+		}()
+		_ = service.NewStepService(
+			&stubStepTxMgr{},
+			&stubStepStepAccountRepo{},
+			&stubStepSyncLogRepo{},
+			config.StepsConfig{SingleSyncCap: 100},
+			"production",
+		)
+	})
+
+	for _, env := range []string{"dev", "DEV", "Dev", "staging", "test"} {
+		env := env
+		t.Run("Env_"+env+"_AllowsOverride", func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("NewStepService 不应 panic（envName=%q 允许 YAML cap 覆盖）: %v", env, r)
+				}
+			}()
+			_ = service.NewStepService(
+				&stubStepTxMgr{},
+				&stubStepStepAccountRepo{},
+				&stubStepSyncLogRepo{},
+				config.StepsConfig{SingleSyncCap: 100, DailyCap: 500},
+				env,
+			)
+		})
 	}
 }

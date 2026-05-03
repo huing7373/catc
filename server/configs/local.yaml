@@ -65,7 +65,16 @@ ratelimit:
 # **prod 部署必须用默认值**（契约一部分，跨端一致）；
 # **dev / test 环境**可覆盖（仅供单测 / 调试 / fixture）。
 # 默认值由 service 层兜底，本 yaml 默认**不写** —— 让"缺字段 = default"路径在 dev 验证。
-# 例（仅 dev / 单测覆盖）：
+#
+# **prod gate 强制**（Story 7.3 review r6 [P2]）：
+# service.NewStepService 启动期检查 env var `CAT_ENV`：
+#   - 未注入 / "prod" / "production" / 不识别值 → prod 严格策略；
+#     此时若 YAML 提供任何正值 cap → **panic**（"prod env must use default caps"）
+#   - "dev" / "DEV" / "Dev" / "staging" / "test" → 接受 YAML 任何正值覆盖（fixture）
+# 部署侧只需在 dev/staging/test export CAT_ENV=dev|staging|test 即可允许覆盖；
+# 漏配视为 prod（safe-by-default，避免 dev YAML 流到 prod 静默漂移）。
+#
+# 例（仅 dev / 单测覆盖；先 export CAT_ENV=dev 再启动）：
 # steps:
 #   single_sync_cap: 100   # 单测 fixture：让小 delta 也触发截断
 #   daily_cap: 500

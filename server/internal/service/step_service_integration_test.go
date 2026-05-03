@@ -61,7 +61,8 @@ func buildStepServiceIntegration(t *testing.T, stepsCfg config.StepsConfig) (svc
 	stepAccountRepo := mysql.NewStepAccountRepo(gormDB)
 	stepSyncLogRepo := mysql.NewStepSyncLogRepo(gormDB)
 
-	svc = service.NewStepService(txMgr, stepAccountRepo, stepSyncLogRepo, stepsCfg)
+	// envName="dev" → 允许 YAML cap 覆盖（集成测试需要 SingleSyncCap=5000 / DailyCap=200 等显式 fixture）
+	svc = service.NewStepService(txMgr, stepAccountRepo, stepSyncLogRepo, stepsCfg, "dev")
 
 	rawDB, err := gormDB.DB()
 	if err != nil {
@@ -496,27 +497,34 @@ func TestStepServiceIntegration_HealthKitReset_AccrualResumesNotPermanentlyBlock
 }
 
 // ============================================================
-// AC10.6: 截断 + 乱序组合反例（Story 7.3 review r5 [P1]）
+// AC10.6: 截断 + 乱序组合 known limitation 哨兵（Story 7.3 review r6 [P1]）
 //
-// **r3 单层 SUM 兜底失效场景**：
+// **决策史 r3 → r5 → r6**（详见 docs/lessons/2026-05-04-*-r6-reset-vs-ooo-tradeoff.md）：
+//   - r3：基线 id DESC + SUM 兜底 → reset 正确，"截断+乱序"小幅多算
+//   - r5：基线改 MAX(reported) clamp → 修了"截断+乱序"，但 reset 永久卡死
+//   - r6：reset 与"截断+乱序"无法用单一规则同时满足；选 **reset 优先**，接受
+//     "截断+乱序"小幅多算作为 known limitation
+//
+// **本 case 不是 regression sentinel —— 是 by-design 行为锁定**：
+// 若未来谁再加 maxReported clamp（重蹈 r5 覆辙），accepted 会从 4000 变 2000，
+// 本 case 立即挂，提示 "r6 决策被无意改回 r5 路径"。
+//
+// 场景：
 //   - sync A: clientTotal=10000 → 截断为 5000；DB 写 client_total=10000 / accepted=5000
-//   - sync B: clientTotal=8000 (delayed 乱序到达) → 8000 ≤ maxReported(10000) → accepted=0；
-//     DB 写 client_total=8000 / accepted=0
+//   - sync B: clientTotal=8000 (delayed 乱序到达) → 倒退 → accepted=0；
+//     DB 写 client_total=8000 / accepted=0；latest 现在 = sync B
 //   - sync C: clientTotal=12000；
-//     - r5 maxReported = MAX(10000, 8000) = 10000 → rawDelta = 12000-10000 = 2000 → accepted=2000
-//     - r3 退化路径（latest 当基线）：rawDelta = 12000-8000 = 4000 → SUM 兜底 5000+4000=9000<12000 → 不触发 → accepted=4000（**bug**）
+//     - r6 (latest 当基线): rawDelta = 12000 - 8000 = 4000；SUM 5000+4000=9000<12000 不触发；
+//       不截断；delta=4000 (**多算了 2000**)；total=5000+4000=9000
 //
-// **正确总账**：从 sync A 到 sync C 客户端只新增 2000 步（10000→12000）；
-// 服务端 accepted = 5000 (A 截断) + 0 (B 旧) + 2000 (C 新增) = 7000，
-// 等于 client_total=12000 减 sync A 截断丢的 5000，符合"截断丢的步数永久丢"语义。
+// **多算 2000 的产品权衡**：实际客户端只新增 2000 步 (10000→12000)，server 入账 4000；
+// 损失上限 = single_sync_cap=5000 (单次) / daily_cap=50000 (当日)；
+// 触发概率极低 (要 5000+ 步突发被截断 + 恰好乱序到达)；接受作为 known limitation
+// 以换取 reset 修复正确。
 //
 // 配 single_sync_cap=5000 / daily_cap=50000（本场景 daily 不会触发）。
-//
-// **regression sentinel**：sync C accepted=4000 → r5 maxReported clamp 失效；
-//                          sync C accepted=12000-8000=4000 → 同样信号；
-//                          sync C accepted=2000 → 修复正确。
 // ============================================================
-func TestStepServiceIntegration_TruncationPlusOutOfOrder_MaxReportedClampPreventsOverAccrual(t *testing.T) {
+func TestStepServiceIntegration_KnownLimitation_TruncationPlusOutOfOrder_MayOverAccrue_ByDesign(t *testing.T) {
 	svc, sqlDB, cleanup := buildStepServiceIntegration(t, config.StepsConfig{
 		SingleSyncCap: 5000, // 显式默认值（本场景 sync A 必触发）
 		DailyCap:      50000,
@@ -541,7 +549,7 @@ func TestStepServiceIntegration_TruncationPlusOutOfOrder_MaxReportedClampPrevent
 		t.Errorf("A AcceptedDeltaSteps = %d, want 5000 (截断)", outA.AcceptedDeltaSteps)
 	}
 
-	// sync B: clientTotal=8000 (旧报告延迟到达) → maxReported(10000) ≥ 8000 → rawDelta=0 → accepted=0
+	// sync B: clientTotal=8000 (旧报告延迟到达) → 8000 < latest(10000) → rawDelta=0 → accepted=0
 	outB, err := svc.SyncSteps(ctx, service.SyncStepsInput{
 		UserID: userID, SyncDate: syncDate, ClientTotalSteps: 8000, MotionState: 2, ClientTimestamp: 1714559900000,
 	})
@@ -549,7 +557,7 @@ func TestStepServiceIntegration_TruncationPlusOutOfOrder_MaxReportedClampPrevent
 		t.Fatalf("sync B (delayed): %v", err)
 	}
 	if outB.AcceptedDeltaSteps != 0 {
-		t.Errorf("B AcceptedDeltaSteps = %d, want 0 (8000 ≤ maxReported=10000；旧/重复)", outB.AcceptedDeltaSteps)
+		t.Errorf("B AcceptedDeltaSteps = %d, want 0 (8000 < latest=10000；倒退)", outB.AcceptedDeltaSteps)
 	}
 	total, _, _, _ := fetchStepAccount(t, sqlDB, userID)
 	if total != 5000 {
@@ -557,29 +565,30 @@ func TestStepServiceIntegration_TruncationPlusOutOfOrder_MaxReportedClampPrevent
 	}
 
 	// sync C: clientTotal=12000
-	//   - latest = sync B (client_total=8000)；maxReported = MAX(10000, 8000) = 10000
-	//   - r5：rawDelta = 12000 - 10000 = 2000；SUM 5000+2000=7000<12000 不触发；不截断
-	//   - delta=2000；total=5000+2000=7000
+	//   - latest = sync B (client_total=8000)
+	//   - r6: rawDelta = 12000 - 8000 = 4000；SUM 5000+4000=9000<12000 不触发；不截断
+	//   - delta=4000 (by-design 多算 2000)；total=5000+4000=9000
 	//
-	// **regression sentinel**：sync C accepted=4000 → r5 maxReported clamp 失效；
-	// 必须返回 2000 才证明两层防御正确叠加。
+	// **by-design 行为锁定**：sync C accepted=4000 → r6 reset 优先路径正确；
+	// 若 = 2000 → 重新引入 r5 maxReported clamp（破坏 reset 修复），违反 r6 决策。
 	outC, err := svc.SyncSteps(ctx, service.SyncStepsInput{
 		UserID: userID, SyncDate: syncDate, ClientTotalSteps: 12000, MotionState: 2, ClientTimestamp: 1714560200000,
 	})
 	if err != nil {
 		t.Fatalf("sync C: %v", err)
 	}
-	if outC.AcceptedDeltaSteps != 2000 {
-		t.Errorf("C AcceptedDeltaSteps = %d, want 2000 (r5 maxReported clamp = 12000-10000)；"+
-			"若 = 4000 → r3 退化（latest 当基线 + SUM 兜底失效）", outC.AcceptedDeltaSteps)
+	if outC.AcceptedDeltaSteps != 4000 {
+		t.Errorf("C AcceptedDeltaSteps = %d, want 4000 (r6 by-design known limitation: 12000-latest(8000)=4000)；"+
+			"若 = 2000 → 重新引入 r5 maxReported clamp（破坏 reset 修复），违反 r6 决策", outC.AcceptedDeltaSteps)
 	}
 	total, _, _, _ = fetchStepAccount(t, sqlDB, userID)
-	if total != 7000 {
-		t.Errorf("after C: total = %d, want 7000 (5000 + 2000)", total)
+	if total != 9000 {
+		t.Errorf("after C: total = %d, want 9000 (5000 + 4000，by-design known limitation)", total)
 	}
 	if got := countSyncLogs(t, sqlDB, userID, syncDate); got != 3 {
 		t.Errorf("after C: log count = %d, want 3", got)
 	}
 
-	// 总账校验：client 报的最高 = 12000；server 入账总额 = 7000；丢失 5000 步 = 截断丢的，符合契约。
+	// 总账校验：client 报的最高 = 12000；server 入账总额 = 9000（多算 2000）；这是 by-design known limitation
+	// 以换取 reset 修复正确。详见 lesson 文档。
 }

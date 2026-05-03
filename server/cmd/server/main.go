@@ -183,12 +183,22 @@ func main() {
 
 	// Story 4.5：bootstrap.Run 签名收敛为 Deps struct（替代之前 5 个平铺参数）。
 	// 后续 Story 4.6 / 4.8 / Epic 5+ 加共享依赖时只改 Deps 字段，不再改 Run 签名。
+	//
+	// **EnvName**（Story 7.3 review r6 [P2]）：从 `CAT_ENV` env 读取，默认 "prod"。
+	// 用于 service.NewStepService 强制 prod 必须用默认 cap（5000/50000，跨端契约一部分）。
+	// 部署侧只需在 dev / staging / test 显式 `export CAT_ENV=dev|staging|test` 即可允许 YAML 覆盖；
+	// 漏配 / prod 部署直接走严格分支（safe-by-default，反向纠偏比要求"运维记得配"更可靠）。
+	envName := os.Getenv("CAT_ENV")
+	if envName == "" {
+		envName = "prod"
+	}
 	deps := bootstrap.Deps{
 		GormDB:       gormDB,
 		TxMgr:        txMgr,
 		Signer:       signer,
 		RateLimitCfg: cfg.RateLimit,
 		StepsCfg:     cfg.Steps, // Story 7.3 加：步数同步防作弊阈值
+		EnvName:      envName,   // Story 7.3 review r6 [P2] 加：prod cap override 强制
 	}
 	if err := bootstrap.Run(ctx, cfg, deps); err != nil {
 		slog.Error("server run failed", slog.Any("error", err))

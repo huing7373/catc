@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 
 	"github.com/huing/cat/server/internal/infra/config"
 	apperror "github.com/huing/cat/server/internal/pkg/errors"
@@ -35,15 +36,20 @@ const (
 type StepService interface {
 	// SyncSteps 处理 POST /api/v1/steps/sync 业务。
 	//
-	// 流程（数据库设计 §8.2 + V1 §6.1.4 + Story 7.3 review r3/r5 [P1] 三层防御）：
-	//  1. 在事务内：FindLatestByUserAndDate(userID, syncDate) → lastClientTotalSteps（用于"基线跟得上 reset"）
-	//  2. **MAX-Reported clamp**（Story 7.3 review r5 [P1] 修复"截断 + 乱序"反例）：
-	//     maxReported = MAX(client_total_steps) of today；
-	//     - if clientTotalSteps <= maxReported → rawDelta = 0（旧 / 重复 sync，已报告过）
-	//     - else → rawDelta = clientTotalSteps - maxReported（**不**用 latest.ClientTotalSteps 当基线，
-	//       因为 latest 在乱序场景下可能比 maxReported 小，让 rawDelta 算多；用 max 才能 + SUM 兜底叠加防御）
-	//  3. **SUM 兜底**（保留 r3 的第二层防御 —— 即使 maxReported 当前为 0，SUM 也能拦多次"低高低高"乱序）：
-	//     SumAccepted(today) + rawDelta > clientTotalSteps → rawDelta = max(0, clientTotalSteps - SumAccepted)
+	// 流程（数据库设计 §8.2 + V1 §6.1.4 + Story 7.3 review r3/r6 双层防御）：
+	//  1. 在事务内：FindLatestByUserAndDate(userID, syncDate) → 基线 lastClientTotalSteps
+	//     （**latest 必须由 id DESC 取最近 INSERT 行；不是 MAX(client_total_steps)**——
+	//      reset 场景必须让基线跟最近 sync 走，否则永久卡死历史高水位）
+	//  2. **基线减法 + 倒退削成 0**：
+	//     - latest == nil → 首次 sync：rawDelta = clientTotalSteps
+	//     - clientTotalSteps > latest.ClientTotalSteps → rawDelta = clientTotalSteps - latest.ClientTotalSteps
+	//     - 否则（≤）→ rawDelta = 0（倒退 / 重复 / 乱序到达均归 0）
+	//  3. **SUM 兜底**（r3 第二层防御）：
+	//     SumAccepted(today) + rawDelta > clientTotalSteps
+	//       → rawDelta = max(0, clientTotalSteps - SumAccepted)
+	//     这是当前唯一的乱序兜底；不彻底（"截断+乱序"组合下仍可能小幅多算），
+	//     与 single_sync_cap=5000 / daily_cap=50000 联合兜底为"接受的 known limitation"，
+	//     详见步骤 (3) 实装注释 + docs/lessons/2026-05-04-*-r6-reset-vs-ooo-tradeoff.md
 	//  4. 防作弊单次截断：if rawDelta > singleSyncCap → delta = singleSyncCap + log warning
 	//  5. 防作弊当日封顶：if SumAccepted(userID, syncDate) + delta > dailyCap → delta = 0 + log warning + ErrStepSyncInvalid
 	//  6. FindByUserID(userID) 取 step_account 当前 version
@@ -98,8 +104,21 @@ type stepServiceImpl struct {
 
 // NewStepService 构造 StepService。
 //
-// cfg 是配置侧的 StepsConfig（dev / test 可覆盖默认值；prod 必须用 0 让兜底接管）；
-// 兜底逻辑：cfg.SingleSyncCap == 0 → 用 defaultStepsSingleSyncCap；DailyCap 同理。
+// envName 是部署环境名（"prod" / "staging" / "dev" / "test"，默认 "prod"），
+// 由 main.go 从环境变量 `CAT_ENV` 读取传入；用于"prod 必须用默认值"契约**强制**：
+//   - envName == "prod"（含空 / 不识别值，按 prod 严格策略）+ cfg.SingleSyncCap > 0
+//     → panic（"prod env must use default caps; got single_sync_cap=X"）
+//   - envName == "prod" + cfg.DailyCap > 0 → panic
+//   - envName ∈ {"dev", "staging", "test"} → 接受 YAML 任何正值覆盖（仅供单测 / 调试 / fixture）
+//
+// **fail-fast 设计**：契约文档（V1 §6.1.4 + Story 7.3）钦定 prod 必须 5000/50000，
+// 旧版无机制实施这个钦定（仅依靠"开发者读文档"）—— 一旦运维误把 dev YAML 推到 prod
+// 或 prod YAML 被改，会出现"跨实例阈值漂移引发跨端契约不一致"且**无声**。
+// 现在启动期就 panic，与 db.Open / auth.New 同 fail-fast 模式（CLAUDE.md
+// "No Backup Fallback" + ADR-0006 钦定）。
+//
+// cfg 是配置侧的 StepsConfig；兜底逻辑：cfg.SingleSyncCap == 0 → 用
+// defaultStepsSingleSyncCap；DailyCap 同理。
 //
 // **fail-fast 范围校验**（Story 7.3 review r1 [P2]）：
 //   - cfg.SingleSyncCap > math.MaxInt32 → panic（返回值要 cast 回 int32 写
@@ -111,13 +130,12 @@ type stepServiceImpl struct {
 // 反例（旧版无范围校验）：YAML `single_sync_cap: 5000000000` → int64→int32 cast
 // wrap 为负 → service 层 `delta > cap` 永远命中 → delta 被截断为负数 →
 // UpdateBalance / accepted_delta_steps 写入负值 → **余额被减少而非封顶**。
-//
-// **不**在本 service 内做"prod 环境检测拒绝覆盖"—— config 文档侧已声明（V1 §1）。
 func NewStepService(
 	txMgr tx.Manager,
 	stepAccountRepo mysql.StepAccountRepo,
 	stepSyncLogRepo mysql.StepSyncLogRepo,
 	cfg config.StepsConfig,
+	envName string,
 ) StepService {
 	if cfg.SingleSyncCap < 0 {
 		panic(fmt.Sprintf("step service: single_sync_cap=%d 不能为负数", cfg.SingleSyncCap))
@@ -128,6 +146,20 @@ func NewStepService(
 	if cfg.DailyCap < 0 {
 		panic(fmt.Sprintf("step service: daily_cap=%d 不能为负数", cfg.DailyCap))
 	}
+
+	// **prod 配置覆盖强制**（Story 7.3 review r6 [P2]）：
+	// envName 归一化为小写；只有显式 "dev" / "staging" / "test" 才允许 cap 覆盖。
+	// **空 / 未知 / "prod" / "production"** 全部按 prod 严格策略（safe-by-default：
+	// 未注入 CAT_ENV 或 typo 都视为 prod，避免 dev YAML 静默流到 prod 引发跨实例契约漂移）。
+	envLower := strings.ToLower(strings.TrimSpace(envName))
+	isOverrideAllowed := envLower == "dev" || envLower == "staging" || envLower == "test"
+	if !isOverrideAllowed && (cfg.SingleSyncCap > 0 || cfg.DailyCap > 0) {
+		panic(fmt.Sprintf(
+			"step service: prod env (CAT_ENV=%q) must use default caps; got single_sync_cap=%d daily_cap=%d (V1 §6.1.4 钦定 5000/50000；dev/test 覆盖必须 export CAT_ENV=dev|staging|test)",
+			envName, cfg.SingleSyncCap, cfg.DailyCap,
+		))
+	}
+
 	singleSyncCap := int64(defaultStepsSingleSyncCap)
 	if cfg.SingleSyncCap > 0 {
 		singleSyncCap = cfg.SingleSyncCap
@@ -158,63 +190,56 @@ func (s *stepServiceImpl) SyncSteps(ctx context.Context, in SyncStepsInput) (*Sy
 	// 因此用闭包外的 capExceeded flag：fn 内只在真 DB 错误时 return error；封顶场景
 	// 让 fn 返 nil 让事务 commit，再在事务外用 capExceeded 判定后产 *AppError。
 	err := s.txMgr.WithTx(ctx, func(txCtx context.Context) error {
-		// (1) 查最近 sync_log（同 user 同 sync_date）—— 仅作"是否首次"判断；基线**不**从这里取（见 (2)）
+		// (1) 查最近 sync_log（同 user 同 sync_date）—— **作基线**：rawDelta 用 latest.ClientTotalSteps 算
 		latest, err := s.stepSyncLogRepo.FindLatestByUserAndDate(txCtx, in.UserID, in.SyncDate)
 		if err != nil && !stderrors.Is(err, mysql.ErrStepSyncLogNotFound) {
 			return apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
 		}
 
-		// (2) **MAX-Reported clamp**（Story 7.3 review r5 [P1] 修复"截断 + 乱序"反例）
+		// (2) **基线减法 + 倒退削成 0**（Story 7.3 review r6 [P1]：回退到 r3 状态）
 		//
-		// **背景**（r1 → r2 → r3 → r5 决策史；详见 step_sync_log_repo.go interface doc）：
+		// **决策史**（详见 step_sync_log_repo.go interface doc + lessons 2026-05-04 r6）：
 		//   - r1 基线 id DESC（最近 INSERT）—— 乱序到达让旧 sync 成新基线 → 重复入账
 		//   - r2 基线 max(client_total_steps)—— 乱序 OK 但 HealthKit reset 永久卡死
-		//   - r3 基线 id DESC + service 层 SUM 兜底 —— 解决 r1/r2 二选一，但**截断 + 乱序**
-		//     组合反例下仍能多入账（见 r5 反例）
-		//   - r5 综合方案：基线**改用 maxReported**（不是 latest.ClientTotalSteps），
-		//     因为 latest 在乱序场景下可能 < maxReported，让 rawDelta 算多。
-		//     SUM 兜底保留作为**第二层防御**（应对未来更复杂的乱序模式）
+		//   - r3 基线 id DESC + service 层 SUM 兜底 —— 解决 reset 与常规乱序，但
+		//     "截断 + 乱序"组合下 SUM 兜底失效，可能小幅多算（见 r5 review）
+		//   - r5 maxReported clamp（基线改用 MAX(client_total_steps)）—— 修了"截断 + 乱序"
+		//     但**重新破坏 reset 修复**：reset 后用户走的步数永远 < 历史高水位 → 永久 0 入账（r6 review）
+		//   - **r6 当前**：选 **reset 优先** 路径 —— 回到 r3 状态，接受"截断 + 乱序"小幅多算作为
+		//     **known limitation**（已被 single_sync_cap=5000 + daily_cap=50000 兜底，损失有限）
 		//
-		// **r5 反例验证**：
-		//   - sync A: clientTotal=10000，maxReported=0 → rawDelta=10000 → 截断 5000 → accepted=5000；
-		//     DB 写 client_total=10000 (即使 accepted 被截，client_total_steps 落库就是用户报的 10000)
-		//   - sync B: clientTotal=8000 (delayed)，maxReported=10000 → 8000 ≤ 10000 → rawDelta=0 → accepted=0
-		//   - sync C: clientTotal=12000，maxReported=10000 → 12000 > 10000 → rawDelta=2000 → accepted=2000
-		//   - 总 accepted = 5000 + 0 + 2000 = 7000；正确（A 截断丢的 5000 永久丢，但不会被 C 重复入账）
-		//
-		// **不**回退到老的"latest.ClientTotalSteps 当基线"路径：r5 之后 latest 的角色仅
-		// 限于"是否首次同步"判断（latest == nil → 首次）和审计调试。
+		// **产品权衡**（reset vs 截断+乱序，二选一）：
+		//   - reset 是 HealthKit 常见 correction 场景，永久少算几千步会让用户当日体验严重退化
+		//     （看到步数停滞）→ **必须**正确处理
+		//   - "截断+乱序"组合是少见 corner case（要先 5000+ 步突发被截断，又恰好乱序到达）
+		//     → 多算几百步对用户是"占小便宜"无感知，对系统是有限的安全损失（cap 兜底）
+		//   - 选 reset 优先（产品 UX > 小幅多算）。详见 docs/lessons/2026-05-04-*-r6-*.md
 		//
 		// 中间用 int64 避免 uint64 减法 overflow。
 		var rawDelta int64
-		maxReported, err := s.stepSyncLogRepo.MaxClientTotalStepsByUserAndDate(txCtx, in.UserID, in.SyncDate)
-		if err != nil {
-			return apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
-		}
 		if latest == nil {
-			// 首次同步：maxReported 一定是 0（COALESCE 兜底）；rawDelta = clientTotalSteps
+			// 首次同步：rawDelta = clientTotalSteps
 			rawDelta = int64(in.ClientTotalSteps)
-		} else if in.ClientTotalSteps > maxReported {
-			// 新高 → delta = clientTotalSteps - maxReported
-			rawDelta = int64(in.ClientTotalSteps - maxReported)
+		} else if in.ClientTotalSteps > latest.ClientTotalSteps {
+			// 新高 → delta = clientTotalSteps - latest（**latest 必须是 id DESC 取的最近 INSERT 行**——
+			// reset 场景靠"基线跟最近 sync 走"，不能用 MAX 锁死历史高水位）
+			rawDelta = int64(in.ClientTotalSteps - latest.ClientTotalSteps)
 		} else {
-			// clientTotalSteps <= maxReported → 旧 / 重复 / 乱序到达，全部 rawDelta=0
+			// clientTotalSteps <= latest.ClientTotalSteps → 倒退 / 重复 / 乱序到达，全部 rawDelta=0
 			// （DB 仍写 sync_log 行做审计，accepted_delta_steps=0）
 			rawDelta = 0
 		}
 
-		// (3) 当日 SUM 兜底（保留 r3 的第二层防御 —— 即使 maxReported 漏判，SUM 也能拦）
-		//
-		// **为什么 r5 后还保留**：
-		//   - maxReported clamp 已经在大多数场景下让 rawDelta 不会算多；
-		//   - 但 SUM 兜底是**入账总额**视角的硬约束："今日 accepted 总和 + 本次 ≤ client 当日累计"；
-		//   - 两层防御独立，叠加更安全（防御纵深 / defense-in-depth）；
-		//   - 在"无截断"场景下 SUM 兜底是**冗余**的（maxReported 已削过），但**不会改变**结果；
-		//   - 在"有截断"场景下 SUM(prevAccepted) < maxReported（prevAccepted 漏掉了被截断的部分），
-		//     SUM 兜底反而比 maxReported clamp 更**宽松**，主防御还是 maxReported clamp。
+		// (3) 当日 SUM 兜底（r3 的第二层防御 —— 防绝大多数乱序到达场景下"基线偏小 → rawDelta 算多"）
 		//
 		// **顺序关键**：必须在单次截断之前 / 当日封顶之前算 prevAccepted —— 否则截断
 		// 后的小 delta 会跑进封顶判断，但兜底失效；且兜底削回必须以 rawDelta 为基础。
+		//
+		// **known limitation**（r6 接受）：当用户**先**有 sync 被 single_sync_cap 截断（导致 SUM(accepted) < MAX(client_total)），
+		// **再**有旧 sync 乱序到达（拉低 latest），**再**有新高 sync —— 此时 prevAccepted + rawDelta 可能
+		// 仍 < clientTotalSteps（因为 prevAccepted 漏掉了被截断的部分），SUM 兜底不触发，多算 = (latest_drop * 1)。
+		// 单次损失上限 = 5000 步（被 single_sync_cap 兜住）；当日上限 = 50000 步（被 daily_cap 兜住）；
+		// 触发概率极低（要 5000+ 步突发 + 恰好乱序）。详见 lessons 2026-05-04 r6。
 		prevAccepted, err := s.stepSyncLogRepo.SumAcceptedDeltaByUserAndDate(txCtx, in.UserID, in.SyncDate)
 		if err != nil {
 			return apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])

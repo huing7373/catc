@@ -58,11 +58,13 @@ func (StepSyncLog) TableName() string { return "user_step_sync_logs" }
 
 // StepSyncLogRepo 是 user_step_sync_logs 表的访问接口。
 //
-// **本 story 实装四个方法**（Story 7.3 review r5 [P1] 增加 MaxClientTotalStepsByUserAndDate）：
+// **本 story 实装四个方法**：
 //   - Create（事务内插入一行）
 //   - FindLatestByUserAndDate（差值计算依据 / 基线 = 最近 INSERT）
 //   - SumAcceptedDeltaByUserAndDate（防作弊当日封顶判断）
-//   - MaxClientTotalStepsByUserAndDate（Story 7.3 review r5 [P1] 防"截断 + 乱序"组合漏洞）
+//   - MaxClientTotalStepsByUserAndDate（**r6 service 暂未调用** —— r5 曾用作 maxReported clamp，
+//     r6 review 选 reset 优先路径回退到 r3，本方法保留供未来"区分 reset 与乱序"额外信号
+//     接入时复用；详见下方 method doc 与 docs/lessons/2026-05-04-*-r6-reset-vs-ooo-tradeoff.md）
 //
 // future Story 7.5 dev grant 复用 Create；future 审计 query 可能加 ListByUser。
 //
@@ -115,32 +117,24 @@ type StepSyncLogRepo interface {
 
 	// MaxClientTotalStepsByUserAndDate 当日已报告的最大 client_total_steps（**不**管是否被截断 / 入账）。
 	//
-	// **背景**（Story 7.3 review r5 [P1] 综合方案）：
+	// **r6 当前 service 不调用此方法**（保留供未来用 —— 详见下方决策史）。
+	// **保留理由**：未来若引入 client 端 sync_seq / device_id 等额外信号区分 "reset" 与 "乱序"，
+	// 本方法是修 "截断+乱序"小幅多算 known limitation 的关键 query；删了再加成本更高。
 	//
-	//   r3 给出"基线 = id DESC + service 层 SUM 兜底"综合方案，但 r5 抓出"截断 + 乱序"
-	//   组合反例：
-	//     - sync A: clientTotal=10000 → 截断 5000（accepted=5000，prevAccepted=5000）
-	//     - sync B: clientTotal=8000（延迟到达）→ 倒退 rawDelta=0，accepted=0，prevAccepted=5000
-	//     - sync C: clientTotal=12000 → 基线=8000（最近行）→ rawDelta=4000；
-	//       SUM 兜底：5000 + 4000 = 9000 < 12000 → **不触发** → accepted=4000
-	//     - 实际从 A→C 只新增 2000 步，但服务入账了 5000+4000=9000
+	// **决策史 r3 → r5 → r6**（详见 docs/lessons/2026-05-04-*-r6-reset-vs-ooo-tradeoff.md）：
 	//
-	//   根因：SUM 兜底用 prevAccepted（"已入账"总和），但 sync A 截断丢了 5000 步，
-	//   prevAccepted ≠ "已报告的最大累计步数"。
+	//   - **r3**：service 用 latest 当基线 + SUM 兜底
+	//     - reset 正确（基线跟最近 sync 走）
+	//     - "截断+乱序"组合下小幅多算（SUM 兜底失效）
 	//
-	//   修复方向：再叠加一道"max client_total_steps clamp"：
+	//   - **r5**：service 改用 maxReported 当基线（即调本方法）
+	//     - "截断+乱序"修复（maxReported 不被乱序拉低）
+	//     - **重新破坏 reset**：reset 后用户走的步数永远 < 历史高水位 → 永久 0 入账
 	//
-	//     maxReported := MAX(client_total_steps)  // **不**管 accepted_delta_steps 是否 0
-	//     if clientTotalSteps <= maxReported:
-	//         rawDelta = 0  // 旧 / 重复 sync，已经报告过
-	//     else:
-	//         rawDelta = clientTotalSteps - maxReported
-	//
-	//   反例验证（修复后）：
-	//     - sync A: maxReported=0 → rawDelta=10000 → 截断 5000 → accepted=5000；DB 写 client_total=10000
-	//     - sync B: maxReported=10000 → 8000≤10000 → rawDelta=0 → accepted=0
-	//     - sync C: maxReported=10000 → 12000>10000 → rawDelta=2000 → 不触发截断 → accepted=2000
-	//     - 总 accepted = 7000 = clientTotal 12000 - sync A 截断丢的 5000 ✓
+	//   - **r6**：reset 与"截断+乱序"无法用单一规则同时满足；选 **reset 优先** 路径
+	//     （回到 r3 状态），接受"截断+乱序"小幅多算作为 known limitation
+	//     - reset 是常见场景（HealthKit correction）→ 永久少算几千步严重退化用户体验
+	//     - "截断+乱序"组合是少见 corner case，损失上限被 single_sync_cap=5000 / daily_cap=50000 兜住
 	//
 	// 实装：SELECT COALESCE(MAX(client_total_steps), 0) FROM user_step_sync_logs
 	//       WHERE user_id = ? AND sync_date = ?
@@ -207,7 +201,7 @@ func (r *stepSyncLogRepo) SumAcceptedDeltaByUserAndDate(ctx context.Context, use
 
 // MaxClientTotalStepsByUserAndDate 实装：SELECT COALESCE(MAX(client_total_steps), 0)。
 //
-// Story 7.3 review r5 [P1]：见 interface doc 关于"截断 + 乱序"反例与修复方向的说明。
+// **r6 service 暂不调用**（保留供未来用，见 interface doc）。
 func (r *stepSyncLogRepo) MaxClientTotalStepsByUserAndDate(ctx context.Context, userID uint64, syncDate string) (uint64, error) {
 	db := tx.FromContext(ctx, r.db)
 	var max uint64
