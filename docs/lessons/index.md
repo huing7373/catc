@@ -138,3 +138,4 @@
 | 2026-05-02 | [输入校验边界必须考虑下游存储真实约束（time.Parse 接受不代表 MySQL DATE 接受）](2026-05-02-input-validation-must-cover-downstream-storage-range.md) | 1 | error-handling / input-validation | `<pending>` |
 | 2026-05-03 | [步数 sync 第三层防御：截断 + 乱序组合下 SUM 兜底仍漏，需叠加 max-reported clamp](2026-05-03-step-sync-truncation-plus-ooo-needs-max-reported-clamp.md) | 1 | architecture | `<pending>` |
 | 2026-05-04 | [步数 sync r6：reset 与"截断+乱序"二选一的产品权衡 + prod 配置覆盖必须靠 env var 强制](2026-05-04-step-sync-r6-reset-vs-ooo-tradeoff-and-prod-env-gate.md) | 2 | architecture / config | `<pending>` |
+| 2026-05-03 | [信任客户端 syncDate 的 anti-cheat 漏洞 + ±N 天容忍窗口的 trade-off](2026-05-03-step-sync-syncdate-rotation-attack-tolerance-window.md) | 2 | security / docs | `<pending>` |

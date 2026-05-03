@@ -11,6 +11,15 @@ import (
 	"github.com/huing/cat/server/internal/service"
 )
 
+// syncDateToleranceDays 是 syncDate 相对 server today 的允许偏差天数（±N）。
+//
+// = 2：覆盖跨时区合理场景（含极端 PST↔JST 17 小时差跨日界线）+ 客户端时钟轻微漂移；
+// 同时把"旋转日期重复入账攻击"窗口压到 5 天（5×daily_cap=250000 步上限）。
+//
+// 详见 PostSync 中 syncDate 范围校验段注释 + V1 §6.1.2 GAP E 后续条款 +
+// docs/lessons/2026-05-03-step-sync-syncdate-rotation-attack-tolerance-window.md。
+const syncDateToleranceDays = 2
+
 // StepsHandler 是 /api/v1/steps/* 路由的 handler 集合。
 //
 // 节点 3 阶段：PostSync（POST /steps/sync，Story 7.3）；
@@ -112,6 +121,42 @@ func (h *StepsHandler) PostSync(c *gin.Context) {
 	// time.ParseInLocation 不依赖 loc 校验日期合法性）。
 	if !isValidYYYYMMDD(req.SyncDate) {
 		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "syncDate 格式不符 YYYY-MM-DD"))
+		return
+	}
+
+	// === syncDate 范围校验（Story 7.3 review r7 [P1] anti-cheat）===
+	//
+	// 攻击面：V1 §6.1.2 GAP E "client 本机时区算今天 / server 直接采用不二次转换"
+	// 完全信任客户端提交的日期。若 server 不加任何范围限制，恶意客户端可旋转日期
+	// 重复入账：
+	//   - sync syncDate=2026-05-01, clientTotalSteps=1000 → 入账 1000（first sync of day）
+	//   - sync syncDate=2026-05-02, clientTotalSteps=1000 → 又入账 1000（new day baseline=0）
+	//   - sync syncDate=2026-05-03, clientTotalSteps=1000 → 又入账 1000
+	//   - 旋转 N 天 → N×1000，且每天独立 50000 daily_cap，等效完全绕过封顶。
+	//
+	// 修复方向（review r7 推荐选项 A）：保留 GAP E 信任客户端时区的语义，但加
+	// server-side syncDate 范围校验：syncDate 必须在 [server today - 2 days,
+	// server today + 2 days] 范围内（±2 天覆盖跨时区合理场景，包括极端 PST↔JST
+	// 17 小时差跨日界线 + 客户端时钟轻微漂移）。
+	//
+	// **trade-off（已知 known limitation）**：±2 天窗口仍允许"在小窗口内绕过
+	// 5×daily_cap"——5 天独立账本 = 250000 步上限，但不再是无限累积。完全防御
+	// 需要 server-side trusted time + device id 绑定（未来 epic 升级方向，
+	// 见 lessons 2026-05-04 r7）。
+	//
+	// **未来引入 clock interface 时**：替换 time.Now() 调用以便测试可控时钟；
+	// 当前 service 层未引入 clock，handler 直接 time.Now() + UTC 即可
+	// （UTC 比 time.Local 稳定；server 部署 loc 不应影响业务逻辑）。
+	parsed, _ := time.Parse("2006-01-02", req.SyncDate) // 此处 err 已被 isValidYYYYMMDD 校验
+	serverNow := time.Now().UTC()
+	serverToday := time.Date(serverNow.Year(), serverNow.Month(), serverNow.Day(), 0, 0, 0, 0, time.UTC)
+	earliest := serverToday.AddDate(0, 0, -syncDateToleranceDays)
+	latest := serverToday.AddDate(0, 0, syncDateToleranceDays)
+	if parsed.Before(earliest) || parsed.After(latest) {
+		_ = c.Error(apperror.New(
+			apperror.ErrInvalidParam,
+			"syncDate 必须在 server today ± 2 天范围内（跨时区容忍窗口；防止恶意客户端旋转日期重复入账）",
+		))
 		return
 	}
 

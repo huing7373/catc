@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -64,6 +65,16 @@ func decodeStepsEnvelope(t *testing.T, body []byte) response.Envelope {
 // 6 个 case
 // ============================================================
 
+// dynamicValidSyncDate 返回当前 server today（UTC）的 YYYY-MM-DD string，
+// 必落在 r7 引入的 ±2 天容忍窗口内。
+//
+// 所有"需要让 syncDate 通过校验"的 case **必须**用这个函数构造 body，
+// 而非硬编码 "2026-05-01"——硬编码在系统真实时间漂离 2026-05-02±2 后会破。
+func dynamicValidSyncDate() string {
+	now := time.Now().UTC()
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+}
+
 // 1. HappyPath_ReturnsCorrectSchema:
 // 合法 request → 200 + envelope.code=0 + data.acceptedDeltaSteps + data.stepAccount.{total/available/consumed}
 func TestStepsHandler_PostSync_HappyPath_ReturnsCorrectSchema(t *testing.T) {
@@ -90,7 +101,7 @@ func TestStepsHandler_PostSync_HappyPath_ReturnsCorrectSchema(t *testing.T) {
 	}
 	r := newStepsHandlerRouter(svc, &uid)
 
-	body := `{"syncDate":"2026-05-01","clientTotalSteps":100,"motionState":2,"clientTimestamp":1714560000000}`
+	body := `{"syncDate":"` + dynamicValidSyncDate() + `","clientTotalSteps":100,"motionState":2,"clientTimestamp":1714560000000}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/steps/sync", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -168,7 +179,7 @@ func TestStepsHandler_PostSync_MotionStateOutOfRange_Returns1002(t *testing.T) {
 	}
 	r := newStepsHandlerRouter(svc, &uid)
 
-	body := `{"syncDate":"2026-05-01","clientTotalSteps":100,"motionState":5,"clientTimestamp":1714560000000}`
+	body := `{"syncDate":"` + dynamicValidSyncDate() + `","clientTotalSteps":100,"motionState":5,"clientTimestamp":1714560000000}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/steps/sync", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -191,7 +202,7 @@ func TestStepsHandler_PostSync_ServiceReturns3001_HandlerForwardsAsCode3001_HTTP
 	}
 	r := newStepsHandlerRouter(svc, &uid)
 
-	body := `{"syncDate":"2026-05-01","clientTotalSteps":53000,"motionState":2,"clientTimestamp":1714560000000}`
+	body := `{"syncDate":"` + dynamicValidSyncDate() + `","clientTotalSteps":53000,"motionState":2,"clientTimestamp":1714560000000}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/steps/sync", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -218,7 +229,7 @@ func TestStepsHandler_PostSync_ServiceReturnsBusyErr_Forwards1009(t *testing.T) 
 	}
 	r := newStepsHandlerRouter(svc, &uid)
 
-	body := `{"syncDate":"2026-05-01","clientTotalSteps":100,"motionState":2,"clientTimestamp":1714560000000}`
+	body := `{"syncDate":"` + dynamicValidSyncDate() + `","clientTotalSteps":100,"motionState":2,"clientTimestamp":1714560000000}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/steps/sync", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -245,7 +256,7 @@ func TestStepsHandler_PostSync_MissingUserIDInContext_Returns1009(t *testing.T) 
 	// mockUserID = nil → 不挂 mock auth middleware
 	r := newStepsHandlerRouter(svc, nil)
 
-	body := `{"syncDate":"2026-05-01","clientTotalSteps":100,"motionState":2,"clientTimestamp":1714560000000}`
+	body := `{"syncDate":"` + dynamicValidSyncDate() + `","clientTotalSteps":100,"motionState":2,"clientTimestamp":1714560000000}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/steps/sync", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -288,7 +299,8 @@ func TestStepsHandler_PostSync_SyncDatePassedAsStringToService_TZIndependent(t *
 	}
 	r := newStepsHandlerRouter(svc, &uid)
 
-	body := `{"syncDate":"2026-05-01","clientTotalSteps":100,"motionState":2,"clientTimestamp":1714560000000}`
+	wantSyncDate := dynamicValidSyncDate()
+	body := `{"syncDate":"` + wantSyncDate + `","clientTotalSteps":100,"motionState":2,"clientTimestamp":1714560000000}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/steps/sync", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -298,8 +310,8 @@ func TestStepsHandler_PostSync_SyncDatePassedAsStringToService_TZIndependent(t *
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 	// 字符串原样透传（不 parse 不 format，与时区无关）
-	if captured != "2026-05-01" {
-		t.Errorf("captured SyncDate = %q, want %q", captured, "2026-05-01")
+	if captured != wantSyncDate {
+		t.Errorf("captured SyncDate = %q, want %q", captured, wantSyncDate)
 	}
 }
 
@@ -317,7 +329,7 @@ func TestStepsHandler_PostSync_ClientTotalStepsMissing_Returns1002(t *testing.T)
 	r := newStepsHandlerRouter(svc, &uid)
 
 	// 故意省略 clientTotalSteps 字段
-	body := `{"syncDate":"2026-05-01","motionState":2,"clientTimestamp":1714560000000}`
+	body := `{"syncDate":"` + dynamicValidSyncDate() + `","motionState":2,"clientTimestamp":1714560000000}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/steps/sync", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -349,7 +361,7 @@ func TestStepsHandler_PostSync_ClientTotalStepsExplicitZero_AllowedThrough(t *te
 	}
 	r := newStepsHandlerRouter(svc, &uid)
 
-	body := `{"syncDate":"2026-05-01","clientTotalSteps":0,"motionState":2,"clientTimestamp":1714560000000}`
+	body := `{"syncDate":"` + dynamicValidSyncDate() + `","clientTotalSteps":0,"motionState":2,"clientTimestamp":1714560000000}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/steps/sync", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -374,7 +386,7 @@ func TestStepsHandler_PostSync_MotionStateMissing_Returns1002(t *testing.T) {
 	}
 	r := newStepsHandlerRouter(svc, &uid)
 
-	body := `{"syncDate":"2026-05-01","clientTotalSteps":100,"clientTimestamp":1714560000000}`
+	body := `{"syncDate":"` + dynamicValidSyncDate() + `","clientTotalSteps":100,"clientTimestamp":1714560000000}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/steps/sync", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -400,7 +412,7 @@ func TestStepsHandler_PostSync_ClientTimestampMissing_Returns1002(t *testing.T) 
 	}
 	r := newStepsHandlerRouter(svc, &uid)
 
-	body := `{"syncDate":"2026-05-01","clientTotalSteps":100,"motionState":2}`
+	body := `{"syncDate":"` + dynamicValidSyncDate() + `","clientTotalSteps":100,"motionState":2}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/steps/sync", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -478,15 +490,116 @@ func TestStepsHandler_PostSync_SyncDateFiveDigitYear_Returns1002(t *testing.T) {
 	runSyncDateRangeCase(t, "10000-01-01", true /* wantInvalid */)
 }
 
-// 14. SyncDateMinBoundary_Allowed:
-// "1000-01-01" 是 MySQL DATE 物理下界，应通过 isValidYYYYMMDD → service 被调。
-func TestStepsHandler_PostSync_SyncDateMinBoundary_Allowed(t *testing.T) {
-	runSyncDateRangeCase(t, "1000-01-01", false /* wantInvalid */)
+// 14. SyncDateMinBoundary_PassesFormatButRejectedByToleranceWindow:
+// "1000-01-01" 通过 isValidYYYYMMDD（MySQL DATE 物理下界 ok），但被 r7 引入的
+// ±2 天容忍窗口拒（远离 server today）→ 仍 1002。本 case 锁死 r4+r7 双校验组合：
+//   - r4：物理范围 [1000-01-01, 9999-12-31] 通过
+//   - r7：实际再被 [server today - 2, server today + 2] 拦截
+//
+// 注：本 case 只验"被拒"，不强求拒的是哪一层（实装中 r7 在 r4 之后，所以 r7 拦掉）。
+func TestStepsHandler_PostSync_SyncDateMinBoundary_PassesFormatButRejectedByToleranceWindow(t *testing.T) {
+	runSyncDateRangeCase(t, "1000-01-01", true /* wantInvalid: r7 容忍窗口拦截 */)
 }
 
-// 15. SyncDateMaxBoundary_Allowed:
-// "9999-12-31" 是 MySQL DATE 物理上界，应通过 isValidYYYYMMDD → service 被调。
-// 业务上不会真有这种日期，但 handler 应只校验物理范围，不加业务上界。
-func TestStepsHandler_PostSync_SyncDateMaxBoundary_Allowed(t *testing.T) {
-	runSyncDateRangeCase(t, "9999-12-31", false /* wantInvalid */)
+// 15. SyncDateMaxBoundary_PassesFormatButRejectedByToleranceWindow:
+// "9999-12-31" 同 case 14：物理范围通过、容忍窗口拒。
+func TestStepsHandler_PostSync_SyncDateMaxBoundary_PassesFormatButRejectedByToleranceWindow(t *testing.T) {
+	runSyncDateRangeCase(t, "9999-12-31", true /* wantInvalid: r7 容忍窗口拦截 */)
+}
+
+// ============================================================
+// Story 7.3 review r7 [P1]：syncDate 必须 ∈ [server today - 2, server today + 2]
+// 防止恶意客户端旋转日期重复入账绕过 daily_cap。
+// 所有 case 用 server today 相对偏移构造（避免硬编码日期跑到未来失效）。
+// ============================================================
+
+// formatRelativeDate 把 server today 加上 offset 天数，返回 YYYY-MM-DD string。
+// offsetDays = 0 → server today（UTC）；正数 = 未来；负数 = 过去。
+func formatRelativeDate(offsetDays int) string {
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	return today.AddDate(0, 0, offsetDays).Format("2006-01-02")
+}
+
+// 16. SyncDateEqualsServerToday_Allowed:
+// offset = 0 → 必通过（中心点）。
+func TestStepsHandler_PostSync_SyncDateEqualsServerToday_Allowed(t *testing.T) {
+	runSyncDateRangeCase(t, formatRelativeDate(0), false /* wantInvalid: 在窗口内 */)
+}
+
+// 17. SyncDateMinusTwoDays_Allowed:
+// offset = -2 → 窗口下界，必通过。
+func TestStepsHandler_PostSync_SyncDateMinusTwoDays_Allowed(t *testing.T) {
+	runSyncDateRangeCase(t, formatRelativeDate(-2), false /* wantInvalid: 下界含 */)
+}
+
+// 18. SyncDatePlusTwoDays_Allowed:
+// offset = +2 → 窗口上界，必通过。
+func TestStepsHandler_PostSync_SyncDatePlusTwoDays_Allowed(t *testing.T) {
+	runSyncDateRangeCase(t, formatRelativeDate(2), false /* wantInvalid: 上界含 */)
+}
+
+// 19. SyncDateMinusThreeDays_Returns1002:
+// offset = -3 → 窗口外，必拒。
+func TestStepsHandler_PostSync_SyncDateMinusThreeDays_Returns1002(t *testing.T) {
+	runSyncDateRangeCase(t, formatRelativeDate(-3), true /* wantInvalid: 越出下界 */)
+}
+
+// 20. SyncDatePlusThreeDays_Returns1002:
+// offset = +3 → 窗口外，必拒。
+func TestStepsHandler_PostSync_SyncDatePlusThreeDays_Returns1002(t *testing.T) {
+	runSyncDateRangeCase(t, formatRelativeDate(3), true /* wantInvalid: 越出上界 */)
+}
+
+// 21. SyncDateRotationAttack_AllNearbyDatesPass_FarRejected:
+// 模拟 review r7 描述的旋转攻击场景（在容忍窗口内允许；窗口外拒）。
+//   - server today, today-1, today+1, today-2, today+2 → 全通过（窗口内）
+//   - today-7, today+7 → 全拒（远超窗口）
+//
+// 这道 case 锁死"窗口大小是 ±2 天而非 ±7 天"——若未来误把窗口扩大成 ±7，本 case 会破。
+func TestStepsHandler_PostSync_SyncDateRotationAttack_AllNearbyDatesPass_FarRejected(t *testing.T) {
+	// 窗口内：今 / 昨 / 前 / 明 / 后 → 全通过
+	for _, off := range []int{-2, -1, 0, 1, 2} {
+		runSyncDateRangeCase(t, formatRelativeDate(off), false /* wantInvalid */)
+	}
+	// 窗口外：±7 天 → 全拒
+	for _, off := range []int{-7, 7} {
+		runSyncDateRangeCase(t, formatRelativeDate(off), true /* wantInvalid */)
+	}
+}
+
+// 22. SyncDateRejectMessageContainsToleranceHint:
+// 拒绝消息必须包含"server today" / "天"等关键字方便 iOS debug。
+// 不强求精确字符串，只校"包含中文'天'+ '范围'"，避免 i18n 微调破测。
+func TestStepsHandler_PostSync_SyncDateRejectMessageContainsToleranceHint(t *testing.T) {
+	uid := uint64(1001)
+	called := false
+	svc := &stubStepService{
+		syncStepsFn: func(ctx context.Context, in service.SyncStepsInput) (*service.SyncStepsOutput, error) {
+			called = true
+			return &service.SyncStepsOutput{}, nil
+		},
+	}
+	r := newStepsHandlerRouter(svc, &uid)
+
+	body := `{"syncDate":"` + formatRelativeDate(-10) + `","clientTotalSteps":100,"motionState":2,"clientTimestamp":1714560000000}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/steps/sync", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if called {
+		t.Errorf("service should NOT be called for out-of-window syncDate")
+	}
+	env := decodeStepsEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrInvalidParam {
+		t.Errorf("envelope.code = %d, want %d (1002)", env.Code, apperror.ErrInvalidParam)
+	}
+	// 关键关键字：让 iOS 端读到错误消息能定位到"是 syncDate 范围越界"
+	if !strings.Contains(env.Message, "syncDate") {
+		t.Errorf("envelope.message = %q, 缺少 syncDate 关键字（iOS debug 不友好）", env.Message)
+	}
+	if !strings.Contains(env.Message, "范围") && !strings.Contains(env.Message, "天") {
+		t.Errorf("envelope.message = %q, 缺少范围/天 提示词（让 client 知道是窗口越界，不是格式错）", env.Message)
+	}
 }
