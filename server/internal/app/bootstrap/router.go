@@ -114,8 +114,9 @@ func NewRouter(deps Deps) *gin.Engine {
 	r.GET("/version", handler.VersionHandler)
 	r.GET("/metrics", gin.WrapH(metrics.Handler()))
 
-	// dev 模式下挂 /dev/* 路由组；未启用时本调用完全透明。
-	devtools.Register(r)
+	// Story 7.5 加：dev 业务 handler；提前声明 nil，deps 完整时在 if 块内填充；
+	// devtools.Register 留 if 块外（IsEnabled() 不依赖 deps，单测 Deps{} 场景仍要挂 ping-dev）。
+	var devStepsHandler *handler.DevStepsHandler
 
 	// Story 4.6 wire：仅当 deps 完整时挂业务路由。
 	//
@@ -160,6 +161,12 @@ func NewRouter(deps Deps) *gin.Engine {
 		stepSvc := service.NewStepService(deps.TxMgr, stepAccountRepo, stepSyncLogRepo, deps.StepsCfg, deps.EnvName)
 		stepsHandler := handler.NewStepsHandler(stepSvc)
 
+		// Story 7.5 加：dev step service + handler。即便 BUILD_DEV=false 也构造（开销可忽略），
+		// 由 devtools.Register 内部 IsEnabled() 决定是否真注册路由 —— 决策集中在 devtools 包。
+		// 复用 7.3 / 4.6 已 wire 的 userRepo / stepAccountRepo / stepSyncLogRepo / txMgr。
+		devStepSvc := service.NewDevStepService(deps.TxMgr, userRepo, stepAccountRepo, stepSyncLogRepo)
+		devStepsHandler = handler.NewDevStepsHandler(devStepSvc)
+
 		api := r.Group("/api/v1")
 
 		// /auth 子组：RateLimitByIP（V1 §4.1 行 218）
@@ -176,6 +183,19 @@ func NewRouter(deps Deps) *gin.Engine {
 		authedGroup.GET("/home", homeHandler.LoadHome)
 		authedGroup.POST("/steps/sync", stepsHandler.PostSync)    // Story 7.3 加
 		authedGroup.GET("/steps/account", stepsHandler.GetAccount) // Story 7.4 加
+	}
+
+	// dev 模式下挂 /dev/* 路由组；未启用时本调用完全透明。
+	// devStepsHandler 在 deps 完整时由 if 块内填充，否则保持 nil（Register 内部跳过 grant-steps 路由）。
+	//
+	// **关键 Go 接口 nil 陷阱**：直接传 `*handler.DevStepsHandler(nil)` 给 `devtools.DevStepsHandler`
+	// interface，interface header 是 (type=*handler.DevStepsHandler, value=nil) → **非 nil interface**，
+	// Register 内 `if devStepsHandler != nil` 判定会通过 → 调 PostGrantSteps 时 nil receiver panic。
+	// 显式分支确保 nil 指针 → nil interface。
+	if devStepsHandler == nil {
+		devtools.Register(r, nil)
+	} else {
+		devtools.Register(r, devStepsHandler) // Story 7.5 修改：透传 dev handler
 	}
 
 	return r

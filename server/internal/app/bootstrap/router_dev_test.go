@@ -162,3 +162,30 @@ func TestRouter_DevOnlyMiddleware_FallbackPath_LogsCanonicalErrorCode(t *testing
 		t.Errorf("http_request.error_code = %v, want 1003 （envelope.code 与日志 error_code 必须一致）", code)
 	}
 }
+
+// TestRouter_DevGrantSteps_NilHandlerSkipsRoute 验证 Story 7.5 dev grant 端点的 wire 链路（nil-tolerant 路径）：
+//   - BUILD_DEV=true + Deps{} 零值 → bootstrap 不构造 devStepsHandler → 保持 nil →
+//     devtools.Register 跳过 /dev/grant-steps 路由 → POST 返 Gin NoRoute 404
+//   - 同时 /dev/ping-dev 仍正常注册（框架自带，不依赖 devStepsHandler）
+//
+// 真实 wire 链路（dev handler 真被调）由 dev_steps_handler_test 单测 + dev_step_service_integration_test
+// 集成测试覆盖；本 case 仅锁住 "Deps{} 零值时不崩"。
+func TestRouter_DevGrantSteps_NilHandlerSkipsRoute(t *testing.T) {
+	t.Setenv("BUILD_DEV", "true")
+	gin.SetMode(gin.TestMode)
+	r := NewRouter(Deps{}) // 零值 deps → devStepsHandler 保持 nil
+
+	// /dev/ping-dev 应该正常注册（Register 内 ping-dev 不依赖 devStepsHandler）
+	wPing := httptest.NewRecorder()
+	r.ServeHTTP(wPing, httptest.NewRequest(http.MethodGet, "/dev/ping-dev", nil))
+	if wPing.Code != http.StatusOK {
+		t.Errorf("/dev/ping-dev should be 200 when BUILD_DEV=true; got %d body=%s", wPing.Code, wPing.Body.String())
+	}
+
+	// /dev/grant-steps 应该跳过注册（devStepsHandler nil） → Gin NoRoute 404
+	wGrant := httptest.NewRecorder()
+	r.ServeHTTP(wGrant, httptest.NewRequest(http.MethodPost, "/dev/grant-steps", bytes.NewReader([]byte(`{"userId":1,"steps":5000}`))))
+	if wGrant.Code != http.StatusNotFound {
+		t.Errorf("/dev/grant-steps with nil handler should be 404 (Gin NoRoute); got %d body=%s", wGrant.Code, wGrant.Body.String())
+	}
+}
