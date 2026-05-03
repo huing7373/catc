@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-05-02  # Story 7.4 done (review → done; story-done 收官)
+last_updated: 2026-05-02  # Story 7.5 done (review → done; story-done 落地)
 # Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
 # 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
@@ -119,7 +119,7 @@ development_status:
   7-2-user_step_sync_logs-migration: done
   7-3-post-steps-sync-接口-累计差值入账-service: done
   7-4-get-steps-account-接口: done
-  7-5-dev-端点-post-dev-grant-steps: backlog
+  7-5-dev-端点-post-dev-grant-steps: done
   epic-7-retrospective: optional
   epic-8: backlog
   8-1-healthkit-接入: backlog
