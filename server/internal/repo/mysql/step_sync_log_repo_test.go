@@ -20,10 +20,10 @@ func TestStepSyncLogRepo_Create_HappyPath_GeneratesInsertSQL(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO `user_step_sync_logs`")).
 		WillReturnResult(sqlmock.NewResult(101, 1))
 
-	syncDate := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	// SyncDate 是 string YYYY-MM-DD（Story 7.3 review r2 [P2]：repo 全程不走 time.Time）
 	log := &StepSyncLog{
 		UserID:             1001,
-		SyncDate:           syncDate,
+		SyncDate:           "2026-05-01",
 		ClientTotalSteps:   100,
 		AcceptedDeltaSteps: 100,
 		MotionState:        2,
@@ -36,13 +36,17 @@ func TestStepSyncLogRepo_Create_HappyPath_GeneratesInsertSQL(t *testing.T) {
 }
 
 // TestStepSyncLogRepo_FindLatestByUserAndDate_HappyPath:
-// SELECT * FROM `user_step_sync_logs` WHERE user_id=? AND sync_date=? ORDER BY id DESC LIMIT 1
+// SELECT * FROM `user_step_sync_logs` WHERE user_id=? AND sync_date=?
+// ORDER BY client_total_steps DESC, id DESC LIMIT 1
 // → 1 行 → 验证返回字段完整。
+//
+// **ORDER BY**（Story 7.3 review r2 [P1]）：基线必须按 max(client_total_steps)
+// 取，**不**按 INSERT 时序（id DESC）。详见 step_sync_log_repo.go interface doc。
 func TestStepSyncLogRepo_FindLatestByUserAndDate_HappyPath(t *testing.T) {
 	gormDB, mock := newGormWithMock(t)
 	repo := NewStepSyncLogRepo(gormDB)
 
-	syncDate := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	const syncDate = "2026-05-01"
 	rows := sqlmock.NewRows([]string{
 		"id", "user_id", "sync_date", "client_total_steps",
 		"accepted_delta_steps", "motion_state", "source", "client_ts", "created_at",
@@ -75,18 +79,40 @@ func TestStepSyncLogRepo_FindLatestByUserAndDate_HappyPath(t *testing.T) {
 	}
 }
 
+// TestStepSyncLogRepo_FindLatestByUserAndDate_OrderByClientTotalSteps_BaselineSQLAssertion:
+// 验证 SQL 包含 `ORDER BY client_total_steps DESC, id DESC`（Story 7.3 review r2
+// [P1]）。这是"乱序到达不破基线"的根因防护：sqlmock 用正则严格匹 SQL 文本，
+// regression 把 ORDER BY 改回 `id DESC` 时本 case 立刻挂。
+func TestStepSyncLogRepo_FindLatestByUserAndDate_OrderByClientTotalSteps_BaselineSQLAssertion(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewStepSyncLogRepo(gormDB)
+
+	const syncDate = "2026-05-01"
+	rows := sqlmock.NewRows([]string{
+		"id", "user_id", "sync_date", "client_total_steps",
+		"accepted_delta_steps", "motion_state", "source", "client_ts", "created_at",
+	}).AddRow(101, 1001, syncDate, 250, 50, 2, 1, 1714560000000, time.Now())
+
+	// 关键 SQL 片段断言：必须包含 client_total_steps DESC（防 regression）
+	mock.ExpectQuery(regexp.QuoteMeta("ORDER BY client_total_steps DESC,")).
+		WillReturnRows(rows)
+
+	if _, err := repo.FindLatestByUserAndDate(context.Background(), 1001, syncDate); err != nil {
+		t.Fatalf("FindLatestByUserAndDate: %v", err)
+	}
+}
+
 // TestStepSyncLogRepo_FindLatestByUserAndDate_NotFound_ReturnsErrStepSyncLogNotFound:
 // 0 行 → repo 必须翻译 gorm.ErrRecordNotFound → ErrStepSyncLogNotFound 哨兵。
 func TestStepSyncLogRepo_FindLatestByUserAndDate_NotFound_ReturnsErrStepSyncLogNotFound(t *testing.T) {
 	gormDB, mock := newGormWithMock(t)
 	repo := NewStepSyncLogRepo(gormDB)
 
-	syncDate := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 	rows := sqlmock.NewRows([]string{"id"}) // 0 行 → GORM First 抛 ErrRecordNotFound
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `user_step_sync_logs`")).
 		WillReturnRows(rows)
 
-	got, err := repo.FindLatestByUserAndDate(context.Background(), 9999, syncDate)
+	got, err := repo.FindLatestByUserAndDate(context.Background(), 9999, "2026-05-01")
 	if got != nil {
 		t.Errorf("got = %+v, want nil on NotFound", got)
 	}
@@ -103,12 +129,11 @@ func TestStepSyncLogRepo_SumAcceptedDeltaByUserAndDate_HappyPath(t *testing.T) {
 		gormDB, mock := newGormWithMock(t)
 		repo := NewStepSyncLogRepo(gormDB)
 
-		syncDate := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 		rows := sqlmock.NewRows([]string{"sum"}).AddRow(49000)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(SUM(accepted_delta_steps), 0)")).
 			WillReturnRows(rows)
 
-		got, err := repo.SumAcceptedDeltaByUserAndDate(context.Background(), 1001, syncDate)
+		got, err := repo.SumAcceptedDeltaByUserAndDate(context.Background(), 1001, "2026-05-01")
 		if err != nil {
 			t.Fatalf("SumAcceptedDeltaByUserAndDate: %v", err)
 		}
@@ -121,13 +146,12 @@ func TestStepSyncLogRepo_SumAcceptedDeltaByUserAndDate_HappyPath(t *testing.T) {
 		gormDB, mock := newGormWithMock(t)
 		repo := NewStepSyncLogRepo(gormDB)
 
-		syncDate := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 		// COALESCE 兜底场景：当日无任何 sync_log → SQL 仍返 1 行 sum=0
 		rows := sqlmock.NewRows([]string{"sum"}).AddRow(0)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(SUM(accepted_delta_steps), 0)")).
 			WillReturnRows(rows)
 
-		got, err := repo.SumAcceptedDeltaByUserAndDate(context.Background(), 9999, syncDate)
+		got, err := repo.SumAcceptedDeltaByUserAndDate(context.Background(), 9999, "2026-05-01")
 		if err != nil {
 			t.Fatalf("SumAcceptedDeltaByUserAndDate: %v", err)
 		}

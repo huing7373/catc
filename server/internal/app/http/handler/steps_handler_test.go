@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -261,21 +260,23 @@ func TestStepsHandler_PostSync_MissingUserIDInContext_Returns1009(t *testing.T) 
 	}
 }
 
-// 7. SyncDateParsedInLocalLocation_TZSafeRegression:
-// 验证 handler 用 time.ParseInLocation(time.Local) 而非 time.Parse；
-// 这样 mysql driver 在 loc=Local DSN 下序列化到 DATE 列时不会"飘日"。
+// 7. SyncDatePassedAsStringToService_TZIndependent:
+// 验证 handler 把 syncDate 作为 **string** 透传给 service（Story 7.3 review r2 [P2]）；
+// 全程不走 time.Time，无 time.Local / DSN loc 耦合。
 //
-// 反例（旧 time.Parse）：返回 UTC 0:00；负偏移服务器把 2026-05-01 → DATE 写
-// 2026-04-30。详见 docs/lessons/2026-05-02-mysql-date-gorm-time-tz-pitfall.md。
+// 反例（r1 旧版）：handler 用 time.ParseInLocation(time.Local)，依赖 DSN loc=Local
+// 才正确；DSN loc=UTC 时仍漂日。本轮根治：service.SyncStepsInput.SyncDate
+// 字段类型 = string，repo `WHERE sync_date = ?` 直传 string，driver 走
+// VARCHAR→DATE 隐式转换，**完全无时区语义**。
+//
+// 详见 docs/lessons/2026-05-02-mysql-date-string-transit.md（接力上一轮
+// 2026-05-02-mysql-date-gorm-time-tz-pitfall.md 的递进根治）。
 //
 // **本 case 不真起 mysql**（那是 step_service_integration_test 的事），只在
-// service stub 里捕获 in.SyncDate 验证：
-//   - Location() == time.Local（与 DSN loc=Local 锁同步）
-//   - Year/Month/Day 与请求 syncDate 字符串一致（不被 parse 时区漂移影响）
-//   - 时分秒 == 0（midnight）
-func TestStepsHandler_PostSync_SyncDateParsedInLocalLocation_TZSafeRegression(t *testing.T) {
+// service stub 里捕获 in.SyncDate 验证字符串原样透传。
+func TestStepsHandler_PostSync_SyncDatePassedAsStringToService_TZIndependent(t *testing.T) {
 	uid := uint64(1001)
-	var captured time.Time
+	var captured string
 	svc := &stubStepService{
 		syncStepsFn: func(ctx context.Context, in service.SyncStepsInput) (*service.SyncStepsOutput, error) {
 			captured = in.SyncDate
@@ -296,22 +297,120 @@ func TestStepsHandler_PostSync_SyncDateParsedInLocalLocation_TZSafeRegression(t 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
-	// Location 必须 == time.Local（不是 time.UTC）：与 DSN loc=Local 锁同步。
-	if captured.Location() != time.Local {
-		t.Errorf("syncDate.Location() = %v, want time.Local（防 mysql DATE 时区漂移）", captured.Location())
+	// 字符串原样透传（不 parse 不 format，与时区无关）
+	if captured != "2026-05-01" {
+		t.Errorf("captured SyncDate = %q, want %q", captured, "2026-05-01")
 	}
-	// Year/Month/Day 必须 == 请求字符串（不能被 parse 转换 UTC 漂离）。
-	if got := captured.Year(); got != 2026 {
-		t.Errorf("syncDate.Year() = %d, want 2026", got)
+}
+
+// 8. ClientTotalStepsMissing_Returns1002:
+// Story 7.3 review r2 [P2]：clientTotalSteps 字段在 JSON 中缺失（pointer = nil）→ 1002。
+// 反例：r1 用 int64 值类型，缺失绑定为 0 与显式 0 无法区分。
+func TestStepsHandler_PostSync_ClientTotalStepsMissing_Returns1002(t *testing.T) {
+	uid := uint64(1001)
+	svc := &stubStepService{
+		syncStepsFn: func(ctx context.Context, in service.SyncStepsInput) (*service.SyncStepsOutput, error) {
+			t.Errorf("service should NOT be called when clientTotalSteps missing")
+			return nil, nil
+		},
 	}
-	if got := captured.Month(); got != time.May {
-		t.Errorf("syncDate.Month() = %v, want May", got)
+	r := newStepsHandlerRouter(svc, &uid)
+
+	// 故意省略 clientTotalSteps 字段
+	body := `{"syncDate":"2026-05-01","motionState":2,"clientTimestamp":1714560000000}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/steps/sync", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	env := decodeStepsEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrInvalidParam {
+		t.Errorf("envelope.code = %d, want %d (1002)", env.Code, apperror.ErrInvalidParam)
 	}
-	if got := captured.Day(); got != 1 {
-		t.Errorf("syncDate.Day() = %d, want 1", got)
+	if !strings.Contains(env.Message, "clientTotalSteps") {
+		t.Errorf("envelope.message = %q, want 包含 clientTotalSteps 定位字段", env.Message)
 	}
-	// 时分秒必须为 0（midnight）。
-	if h, m, s := captured.Clock(); h != 0 || m != 0 || s != 0 {
-		t.Errorf("syncDate clock = %02d:%02d:%02d, want 00:00:00", h, m, s)
+}
+
+// 9. ClientTotalStepsExplicitZero_AllowedThrough:
+// Story 7.3 review r2 [P2]：clientTotalSteps 显式传 0 是合法（首次同步当日 0 步），
+// 应进入 service。区别于 case 8 的"缺失"。
+func TestStepsHandler_PostSync_ClientTotalStepsExplicitZero_AllowedThrough(t *testing.T) {
+	uid := uint64(1001)
+	called := false
+	svc := &stubStepService{
+		syncStepsFn: func(ctx context.Context, in service.SyncStepsInput) (*service.SyncStepsOutput, error) {
+			called = true
+			if in.ClientTotalSteps != 0 {
+				t.Errorf("service.ClientTotalSteps = %d, want 0 (显式 0 透传)", in.ClientTotalSteps)
+			}
+			return &service.SyncStepsOutput{AcceptedDeltaSteps: 0, StepAccount: service.StepAccountBrief{}}, nil
+		},
+	}
+	r := newStepsHandlerRouter(svc, &uid)
+
+	body := `{"syncDate":"2026-05-01","clientTotalSteps":0,"motionState":2,"clientTimestamp":1714560000000}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/steps/sync", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if !called {
+		t.Fatal("service should be called when clientTotalSteps=0 (显式 0 合法)")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// 10. MotionStateMissing_Returns1002:
+func TestStepsHandler_PostSync_MotionStateMissing_Returns1002(t *testing.T) {
+	uid := uint64(1001)
+	svc := &stubStepService{
+		syncStepsFn: func(ctx context.Context, in service.SyncStepsInput) (*service.SyncStepsOutput, error) {
+			t.Errorf("service should NOT be called when motionState missing")
+			return nil, nil
+		},
+	}
+	r := newStepsHandlerRouter(svc, &uid)
+
+	body := `{"syncDate":"2026-05-01","clientTotalSteps":100,"clientTimestamp":1714560000000}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/steps/sync", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	env := decodeStepsEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrInvalidParam {
+		t.Errorf("envelope.code = %d, want %d (1002)", env.Code, apperror.ErrInvalidParam)
+	}
+	if !strings.Contains(env.Message, "motionState") {
+		t.Errorf("envelope.message = %q, want 包含 motionState 定位字段", env.Message)
+	}
+}
+
+// 11. ClientTimestampMissing_Returns1002:
+func TestStepsHandler_PostSync_ClientTimestampMissing_Returns1002(t *testing.T) {
+	uid := uint64(1001)
+	svc := &stubStepService{
+		syncStepsFn: func(ctx context.Context, in service.SyncStepsInput) (*service.SyncStepsOutput, error) {
+			t.Errorf("service should NOT be called when clientTimestamp missing")
+			return nil, nil
+		},
+	}
+	r := newStepsHandlerRouter(svc, &uid)
+
+	body := `{"syncDate":"2026-05-01","clientTotalSteps":100,"motionState":2}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/steps/sync", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	env := decodeStepsEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrInvalidParam {
+		t.Errorf("envelope.code = %d, want %d (1002)", env.Code, apperror.ErrInvalidParam)
+	}
+	if !strings.Contains(env.Message, "clientTimestamp") {
+		t.Errorf("envelope.message = %q, want 包含 clientTimestamp 定位字段", env.Message)
 	}
 }

@@ -133,3 +133,4 @@
 | 2026-05-02 | [fix-review 跨文档扫描必须包含上游 planning artifact（不能只扫 docs/ + story file）](2026-05-02-cross-doc-fix-must-sweep-planning-artifacts.md) | 1 | docs | `e844220` |
 | 2026-05-02 | [Story file 内部规则副本必须通过"标准答案表"全文核对（不能只看 review 指出的两条）](2026-05-02-story-file-internal-rule-copies-must-pass-standard-answer-table-sweep.md) | 2 | docs / process | `030647f` |
 | 2026-05-02 | [MySQL DATE 列 + GORM time.Time 的时区陷阱 & 配置 int64→int32 narrowing 静默扣款](2026-05-02-mysql-date-gorm-time-tz-pitfall.md) | 2 | architecture / config | `<pending>` |
+| 2026-05-02 | [步数 sync 基线必须单调 + required 字段必须用指针 + DATE 列必须 string 透传](2026-05-02-step-sync-baseline-monotonic-required-pointer-and-date-string-transit.md) | 3 | architecture / error-handling | `<pending>` |

@@ -86,8 +86,9 @@ func fetchStepAccount(t *testing.T, sqlDB *sql.DB, userID uint64) (total, availa
 	return
 }
 
-// countSyncLogs 当日 sync_log 行数。
-func countSyncLogs(t *testing.T, sqlDB *sql.DB, userID uint64, syncDate time.Time) int64 {
+// countSyncLogs 当日 sync_log 行数。syncDate 是 string YYYY-MM-DD（与
+// mysql.StepSyncLog 同 type；driver 走 VARCHAR→DATE 隐式转换，无时区耦合）。
+func countSyncLogs(t *testing.T, sqlDB *sql.DB, userID uint64, syncDate string) int64 {
 	t.Helper()
 	var n int64
 	row := sqlDB.QueryRow(`SELECT COUNT(*) FROM user_step_sync_logs WHERE user_id = ? AND sync_date = ?`, userID, syncDate)
@@ -97,12 +98,19 @@ func countSyncLogs(t *testing.T, sqlDB *sql.DB, userID uint64, syncDate time.Tim
 	return n
 }
 
-// latestSyncLogAcceptedDelta 当日最近一条 sync_log 的 accepted_delta_steps。
-func latestSyncLogAcceptedDelta(t *testing.T, sqlDB *sql.DB, userID uint64, syncDate time.Time) int32 {
+// latestSyncLogAcceptedDelta 当日最大 client_total_steps 那行的 accepted_delta_steps。
+//
+// **ORDER BY**：与 repo 的基线查询（`ORDER BY client_total_steps DESC, id DESC`）
+// 同序，便于断言"基线行"对应的 accepted_delta_steps（Story 7.3 review r2 [P1]）。
+//
+// 与 r1 用 `id DESC` 不同：本辅助函数不再返回"最新 INSERT 行"，而是"基线行"
+// （即 max client_total_steps）。这样 integration test 断言"上一次成功 sync 的
+// accepted_delta"能稳定命中，不被乱序 INSERT 干扰。
+func latestSyncLogAcceptedDelta(t *testing.T, sqlDB *sql.DB, userID uint64, syncDate string) int32 {
 	t.Helper()
 	var d int32
 	row := sqlDB.QueryRow(
-		`SELECT accepted_delta_steps FROM user_step_sync_logs WHERE user_id = ? AND sync_date = ? ORDER BY id DESC LIMIT 1`,
+		`SELECT accepted_delta_steps FROM user_step_sync_logs WHERE user_id = ? AND sync_date = ? ORDER BY client_total_steps DESC, id DESC LIMIT 1`,
 		userID, syncDate,
 	)
 	if err := row.Scan(&d); err != nil {
@@ -122,7 +130,7 @@ func TestStepServiceIntegration_FirstAndSecondSync_HappyPath(t *testing.T) {
 	insertUser(t, sqlDB, userID, "uid-step-1", "用户1", "")
 	insertStepAccount(t, sqlDB, userID, 0, 0, 0)
 
-	syncDate := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	const syncDate = "2026-05-01" // string YYYY-MM-DD（无时区耦合；详见 mysql.StepSyncLog doc）
 	ctx := context.Background()
 
 	// 第一次 sync clientTotal=100 → delta=100
@@ -203,7 +211,7 @@ func TestStepServiceIntegration_SingleCapTruncation(t *testing.T) {
 	insertUser(t, sqlDB, userID, "uid-step-cap", "用户1", "")
 	insertStepAccount(t, sqlDB, userID, 0, 0, 0)
 
-	syncDate := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	const syncDate = "2026-05-01" // string YYYY-MM-DD（无时区耦合；详见 mysql.StepSyncLog doc）
 	ctx := context.Background()
 
 	out, err := svc.SyncSteps(ctx, service.SyncStepsInput{
@@ -242,7 +250,7 @@ func TestStepServiceIntegration_DailyCapExceeded_Returns3001(t *testing.T) {
 	insertUser(t, sqlDB, userID, "uid-step-daily", "用户1", "")
 	insertStepAccount(t, sqlDB, userID, 0, 0, 0)
 
-	syncDate := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	const syncDate = "2026-05-01" // string YYYY-MM-DD（无时区耦合；详见 mysql.StepSyncLog doc）
 	ctx := context.Background()
 
 	// 第一次 sync 150
@@ -301,5 +309,80 @@ func TestStepServiceIntegration_DailyCapExceeded_Returns3001(t *testing.T) {
 	}
 	if got := countSyncLogs(t, sqlDB, userID, syncDate); got != 3 {
 		t.Errorf("after third: log count = %d, want 3", got)
+	}
+}
+
+// ============================================================
+// AC10.4: 乱序到达不破基线（Story 7.3 review r2 [P1]）
+//
+// 场景：手机端 sync 因网络重试 / 串行错乱，让"旧 total" INSERT 在"新 total"之后。
+//   - sync A: clientTotal=250 → delta=250 (首次)，落库 id=1
+//   - sync B: clientTotal=200（旧报告延迟到达）→ delta=0（200 < 250）、落库 id=2
+//   - sync C: clientTotal=260 → 基线必须是 250（max client_total_steps）→ delta=10
+//
+// 反例（r1 旧实装，ORDER BY id DESC）：sync C 的基线取 id=2（最近 INSERT，
+// client_total_steps=200）→ delta=260-200=60 → 重复入账 50 步。
+//
+// 修复（r2，ORDER BY client_total_steps DESC, id DESC）：sync C 的基线取 max
+// client_total_steps=250（id=1）→ delta=10。
+// ============================================================
+func TestStepServiceIntegration_OutOfOrderSync_BaselineUsesMaxClientTotalSteps(t *testing.T) {
+	svc, sqlDB, cleanup := buildStepServiceIntegration(t, config.StepsConfig{})
+	defer cleanup()
+
+	const userID = uint64(1)
+	insertUser(t, sqlDB, userID, "uid-step-ooo", "用户1", "")
+	insertStepAccount(t, sqlDB, userID, 0, 0, 0)
+
+	const syncDate = "2026-05-01"
+	ctx := context.Background()
+
+	// sync A: clientTotal=250 (首次) → delta=250
+	outA, err := svc.SyncSteps(ctx, service.SyncStepsInput{
+		UserID: userID, SyncDate: syncDate, ClientTotalSteps: 250, MotionState: 2, ClientTimestamp: 1714560000000,
+	})
+	if err != nil {
+		t.Fatalf("sync A: %v", err)
+	}
+	if outA.AcceptedDeltaSteps != 250 {
+		t.Errorf("A AcceptedDeltaSteps = %d, want 250", outA.AcceptedDeltaSteps)
+	}
+
+	// sync B: clientTotal=200 (旧报告延迟到达) → delta=0 (200 < 250；倒退处理)
+	outB, err := svc.SyncSteps(ctx, service.SyncStepsInput{
+		UserID: userID, SyncDate: syncDate, ClientTotalSteps: 200, MotionState: 2, ClientTimestamp: 1714559900000,
+	})
+	if err != nil {
+		t.Fatalf("sync B (delayed): %v", err)
+	}
+	if outB.AcceptedDeltaSteps != 0 {
+		t.Errorf("B AcceptedDeltaSteps = %d, want 0 (倒退/延迟)", outB.AcceptedDeltaSteps)
+	}
+	// 关键：B 是最近 INSERT 的行（id=2），client_total_steps=200。
+	total, _, _, _ := fetchStepAccount(t, sqlDB, userID)
+	if total != 250 {
+		t.Errorf("after B: total = %d, want 250 (不变)", total)
+	}
+
+	// sync C: clientTotal=260 → 基线 = max(client_total_steps) = 250 (id=1) → delta=10
+	//
+	// **regression sentinel**：若 repo 改回 `ORDER BY id DESC`，基线取 id=2 的 200 →
+	// delta=260-200=60 → 余额暴涨 60；本断言立刻挂。
+	outC, err := svc.SyncSteps(ctx, service.SyncStepsInput{
+		UserID: userID, SyncDate: syncDate, ClientTotalSteps: 260, MotionState: 2, ClientTimestamp: 1714560100000,
+	})
+	if err != nil {
+		t.Fatalf("sync C: %v", err)
+	}
+	if outC.AcceptedDeltaSteps != 10 {
+		t.Errorf("C AcceptedDeltaSteps = %d, want 10 (基线 = max=250；260-250=10)；"+
+			"若 = 60 → repo ORDER BY 退化为 id DESC（regression）", outC.AcceptedDeltaSteps)
+	}
+	total, _, _, _ = fetchStepAccount(t, sqlDB, userID)
+	if total != 260 {
+		t.Errorf("after C: total = %d, want 260 (250 + 10)", total)
+	}
+	if got := countSyncLogs(t, sqlDB, userID, syncDate); got != 3 {
+		t.Errorf("after C: log count = %d, want 3", got)
 	}
 }

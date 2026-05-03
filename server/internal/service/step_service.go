@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"time"
 
 	"github.com/huing/cat/server/internal/infra/config"
 	apperror "github.com/huing/cat/server/internal/pkg/errors"
@@ -55,9 +54,14 @@ type StepService interface {
 }
 
 // SyncStepsInput 是 service 层 DTO（**不是** wire DTO；handler 转换）。
+//
+// **SyncDate 用 string 而非 time.Time**（Story 7.3 review r2 [P2]）：
+// handler 已校验过 len==10 + 合法 YYYY-MM-DD；service 直接透传到 repo / mysql
+// driver 走"VARCHAR → DATE"隐式转换，**完全无时区耦合，不依赖 DSN loc 配置**。
+// 详见 mysql.StepSyncLog 与 steps_handler 的注释 + lessons 2026-05-02 string-transit。
 type SyncStepsInput struct {
 	UserID           uint64
-	SyncDate         time.Time // handler 已 parse YYYY-MM-DD → time.Time（midnight time.Local，与 DSN loc=Local 锁同步；详见 steps_handler.go ParseInLocation 注释）
+	SyncDate         string // YYYY-MM-DD；handler 已校验
 	ClientTotalSteps uint64
 	MotionState      int8
 	ClientTimestamp  uint64 // ms
@@ -175,7 +179,7 @@ func (s *stepServiceImpl) SyncSteps(ctx context.Context, in SyncStepsInput) (*Sy
 		delta := rawDelta
 		if delta > s.singleSyncCap {
 			slog.WarnContext(txCtx, "step sync single cap truncated",
-				"user_id", in.UserID, "sync_date", in.SyncDate.Format("2006-01-02"),
+				"user_id", in.UserID, "sync_date", in.SyncDate,
 				"raw_delta", rawDelta, "truncated_to", s.singleSyncCap)
 			delta = s.singleSyncCap
 		}
@@ -189,7 +193,7 @@ func (s *stepServiceImpl) SyncSteps(ctx context.Context, in SyncStepsInput) (*Sy
 		capExceeded = false
 		if prevAccepted+delta > s.dailyCap {
 			slog.WarnContext(txCtx, "step sync daily cap exceeded",
-				"user_id", in.UserID, "sync_date", in.SyncDate.Format("2006-01-02"),
+				"user_id", in.UserID, "sync_date", in.SyncDate,
 				"prev_accepted", prevAccepted, "cur_delta", delta, "daily_cap", s.dailyCap)
 			delta = 0
 			capExceeded = true

@@ -6,7 +6,6 @@ import (
 	"math"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/huing/cat/server/internal/infra/config"
 	apperror "github.com/huing/cat/server/internal/pkg/errors"
@@ -49,8 +48,8 @@ func (s *stubStepStepAccountRepo) UpdateBalance(ctx context.Context, userID uint
 }
 
 type stubStepSyncLogRepo struct {
-	findLatestFn  func(ctx context.Context, userID uint64, syncDate time.Time) (*mysql.StepSyncLog, error)
-	sumAcceptedFn func(ctx context.Context, userID uint64, syncDate time.Time) (int64, error)
+	findLatestFn  func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error)
+	sumAcceptedFn func(ctx context.Context, userID uint64, syncDate string) (int64, error)
 	createFn      func(ctx context.Context, log *mysql.StepSyncLog) error
 	createCalls   int
 	lastCreated   *mysql.StepSyncLog
@@ -65,14 +64,14 @@ func (s *stubStepSyncLogRepo) Create(ctx context.Context, log *mysql.StepSyncLog
 	return s.createFn(ctx, log)
 }
 
-func (s *stubStepSyncLogRepo) FindLatestByUserAndDate(ctx context.Context, userID uint64, syncDate time.Time) (*mysql.StepSyncLog, error) {
+func (s *stubStepSyncLogRepo) FindLatestByUserAndDate(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
 	if s.findLatestFn == nil {
 		return nil, mysql.ErrStepSyncLogNotFound
 	}
 	return s.findLatestFn(ctx, userID, syncDate)
 }
 
-func (s *stubStepSyncLogRepo) SumAcceptedDeltaByUserAndDate(ctx context.Context, userID uint64, syncDate time.Time) (int64, error) {
+func (s *stubStepSyncLogRepo) SumAcceptedDeltaByUserAndDate(ctx context.Context, userID uint64, syncDate string) (int64, error) {
 	if s.sumAcceptedFn == nil {
 		return 0, nil
 	}
@@ -95,8 +94,11 @@ func buildStepService(
 	return service.NewStepService(&stubStepTxMgr{}, accRepo, logRepo, cfg)
 }
 
-// fixedSyncDate 给所有 case 共用一个固定 syncDate（避免 time.Now 不稳）。
-var fixedSyncDate = time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+// fixedSyncDate 给所有 case 共用一个固定 syncDate string（YYYY-MM-DD）。
+//
+// **string 而非 time.Time**（Story 7.3 review r2 [P2]）：service / repo 全程
+// string 透传，无时区耦合；详见 mysql.StepSyncLog 与 service.SyncStepsInput doc。
+const fixedSyncDate = "2026-05-01"
 
 // ============================================================
 // 9 个 case
@@ -165,10 +167,10 @@ func TestStepService_SyncSteps_SecondSync_DeltaEqualsDifference(t *testing.T) {
 		},
 	}
 	logRepo := &stubStepSyncLogRepo{
-		findLatestFn: func(ctx context.Context, userID uint64, syncDate time.Time) (*mysql.StepSyncLog, error) {
+		findLatestFn: func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
 			return &mysql.StepSyncLog{ID: 100, UserID: 1001, SyncDate: syncDate, ClientTotalSteps: 100, AcceptedDeltaSteps: 100}, nil
 		},
-		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate time.Time) (int64, error) {
+		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
 			return 100, nil
 		},
 	}
@@ -207,10 +209,10 @@ func TestStepService_SyncSteps_Backward_DeltaIsZero_LogStillWritten(t *testing.T
 		},
 	}
 	logRepo := &stubStepSyncLogRepo{
-		findLatestFn: func(ctx context.Context, userID uint64, syncDate time.Time) (*mysql.StepSyncLog, error) {
+		findLatestFn: func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
 			return &mysql.StepSyncLog{ClientTotalSteps: 200}, nil
 		},
-		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate time.Time) (int64, error) {
+		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
 			return 200, nil
 		},
 	}
@@ -251,7 +253,7 @@ func TestStepService_SyncSteps_Duplicate_DeltaIsZero_LogStillWritten(t *testing.
 		},
 	}
 	logRepo := &stubStepSyncLogRepo{
-		findLatestFn: func(ctx context.Context, userID uint64, syncDate time.Time) (*mysql.StepSyncLog, error) {
+		findLatestFn: func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
 			return &mysql.StepSyncLog{ClientTotalSteps: 200}, nil
 		},
 	}
@@ -284,7 +286,7 @@ func TestStepService_SyncSteps_CrossDay_NoLatestForNewDate(t *testing.T) {
 		// 新一天首次 → 默认返 ErrStepSyncLogNotFound
 	}
 
-	newDay := fixedSyncDate.Add(24 * time.Hour)
+	const newDay = "2026-05-02" // fixedSyncDate + 1 day（string YYYY-MM-DD）
 	svc := buildStepService(accRepo, logRepo, config.StepsConfig{})
 	out, err := svc.SyncSteps(context.Background(), service.SyncStepsInput{
 		UserID: 1001, SyncDate: newDay, ClientTotalSteps: 50, MotionState: 2, ClientTimestamp: 1714560000000,
@@ -376,10 +378,10 @@ func TestStepService_SyncSteps_DailyCapExceeded_DeltaZero_Returns3001(t *testing
 		},
 	}
 	logRepo := &stubStepSyncLogRepo{
-		findLatestFn: func(ctx context.Context, userID uint64, syncDate time.Time) (*mysql.StepSyncLog, error) {
+		findLatestFn: func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
 			return &mysql.StepSyncLog{ClientTotalSteps: 49000}, nil
 		},
-		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate time.Time) (int64, error) {
+		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
 			return 49000, nil
 		},
 	}
@@ -423,10 +425,10 @@ func TestStepService_SyncSteps_DailyCapNonSticky_PrevAt50000_DeltaZero_Returns0(
 		},
 	}
 	logRepo := &stubStepSyncLogRepo{
-		findLatestFn: func(ctx context.Context, userID uint64, syncDate time.Time) (*mysql.StepSyncLog, error) {
+		findLatestFn: func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
 			return &mysql.StepSyncLog{ClientTotalSteps: 60000}, nil // 上次报 60000，已被截断为 5000
 		},
-		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate time.Time) (int64, error) {
+		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
 			return 50000, nil // 当日已累计 50000（封顶）
 		},
 	}
