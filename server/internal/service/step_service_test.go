@@ -50,6 +50,7 @@ func (s *stubStepStepAccountRepo) UpdateBalance(ctx context.Context, userID uint
 type stubStepSyncLogRepo struct {
 	findLatestFn  func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error)
 	sumAcceptedFn func(ctx context.Context, userID uint64, syncDate string) (int64, error)
+	maxReportedFn func(ctx context.Context, userID uint64, syncDate string) (uint64, error) // Story 7.3 review r5 [P1]
 	createFn      func(ctx context.Context, log *mysql.StepSyncLog) error
 	createCalls   int
 	lastCreated   *mysql.StepSyncLog
@@ -76,6 +77,19 @@ func (s *stubStepSyncLogRepo) SumAcceptedDeltaByUserAndDate(ctx context.Context,
 		return 0, nil
 	}
 	return s.sumAcceptedFn(ctx, userID, syncDate)
+}
+
+// MaxClientTotalStepsByUserAndDate 默认返 0（首次 sync 场景）。
+// 有 latest 行的 case 必须显式 set maxReportedFn —— 反映真实 SQL MAX 行为。
+//
+// **与 sumAcceptedFn 的关系**：sumAcceptedFn 返"已入账总和"，maxReportedFn 返
+// "已报告的最大累计"；在被截断 / 乱序场景下两者会**不相等**，是 r5 综合方案
+// 之所以需要叠加 maxReported clamp + SUM 兜底两层防御的根本原因。
+func (s *stubStepSyncLogRepo) MaxClientTotalStepsByUserAndDate(ctx context.Context, userID uint64, syncDate string) (uint64, error) {
+	if s.maxReportedFn == nil {
+		return 0, nil
+	}
+	return s.maxReportedFn(ctx, userID, syncDate)
 }
 
 // stubStepTxMgr 直接调 fn（不真起事务）；事务边界由集成测试覆盖。
@@ -173,6 +187,10 @@ func TestStepService_SyncSteps_SecondSync_DeltaEqualsDifference(t *testing.T) {
 		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
 			return 100, nil
 		},
+		// Story 7.3 review r5 [P1]：maxReported = 100（与 latest.ClientTotalSteps 一致；无截断、无乱序场景下相等）
+		maxReportedFn: func(ctx context.Context, userID uint64, syncDate string) (uint64, error) {
+			return 100, nil
+		},
 	}
 
 	svc := buildStepService(accRepo, logRepo, config.StepsConfig{})
@@ -215,6 +233,10 @@ func TestStepService_SyncSteps_Backward_DeltaIsZero_LogStillWritten(t *testing.T
 		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
 			return 200, nil
 		},
+		// r5：maxReported = 200；clientTotal=100 ≤ 200 → rawDelta=0（倒退分支）
+		maxReportedFn: func(ctx context.Context, userID uint64, syncDate string) (uint64, error) {
+			return 200, nil
+		},
 	}
 
 	svc := buildStepService(accRepo, logRepo, config.StepsConfig{})
@@ -255,6 +277,10 @@ func TestStepService_SyncSteps_Duplicate_DeltaIsZero_LogStillWritten(t *testing.
 	logRepo := &stubStepSyncLogRepo{
 		findLatestFn: func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
 			return &mysql.StepSyncLog{ClientTotalSteps: 200}, nil
+		},
+		// r5：maxReported = 200；clientTotal=200 ≤ 200 → rawDelta=0（重复分支）
+		maxReportedFn: func(ctx context.Context, userID uint64, syncDate string) (uint64, error) {
+			return 200, nil
 		},
 	}
 
@@ -384,6 +410,10 @@ func TestStepService_SyncSteps_DailyCapExceeded_DeltaZero_Returns3001(t *testing
 		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
 			return 49000, nil
 		},
+		// r5：maxReported = 49000；clientTotal=53000 > 49000 → rawDelta = 4000
+		maxReportedFn: func(ctx context.Context, userID uint64, syncDate string) (uint64, error) {
+			return 49000, nil
+		},
 	}
 
 	svc := buildStepService(accRepo, logRepo, config.StepsConfig{})
@@ -430,6 +460,10 @@ func TestStepService_SyncSteps_DailyCapNonSticky_PrevAt50000_DeltaZero_Returns0(
 		},
 		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
 			return 50000, nil // 当日已累计 50000（封顶）
+		},
+		// r5：maxReported = 60000（已经报告过的最大）；clientTotal=60000 ≤ 60000 → rawDelta=0（重复 sync）
+		maxReportedFn: func(ctx context.Context, userID uint64, syncDate string) (uint64, error) {
+			return 60000, nil
 		},
 	}
 
@@ -571,6 +605,10 @@ func TestStepService_SyncSteps_HealthKitReset_BaselineFollowsLatestNotMax_Deltas
 			sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
 				return 250, nil
 			},
+			// r5：maxReported = 250（reset 前的最大）；clientTotal=105 ≤ 250 → rawDelta=0
+			maxReportedFn: func(ctx context.Context, userID uint64, syncDate string) (uint64, error) {
+				return 250, nil
+			},
 		}
 
 		svc := buildStepService(accRepo, logRepo, config.StepsConfig{})
@@ -580,7 +618,7 @@ func TestStepService_SyncSteps_HealthKitReset_BaselineFollowsLatestNotMax_Deltas
 		if err != nil {
 			t.Fatalf("SyncSteps after reset: %v", err)
 		}
-		// 倒退（105 < 250）→ rawDelta = 0；SUM 兜底也是 0（max(0, 105-250)=0）
+		// 倒退（105 < maxReported=250）→ rawDelta = 0；SUM 兜底也是 0
 		if out.AcceptedDeltaSteps != 0 {
 			t.Errorf("AcceptedDeltaSteps = %d, want 0 (reset 倒退场景)", out.AcceptedDeltaSteps)
 		}
@@ -598,12 +636,16 @@ func TestStepService_SyncSteps_HealthKitReset_BaselineFollowsLatestNotMax_Deltas
 		}
 		logRepo := &stubStepSyncLogRepo{
 			findLatestFn: func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
-				// **关键**：基线 = 105（最近一次 sync，按 id DESC）。
-				// 若 repo 退回 r2 的 `client_total_steps DESC`，会取 250 → 本 case 行为退化。
+				// 基线（latest）= 105（最近一次 sync，按 id DESC）—— r5 之后这只用于 latest != nil 判断
 				return &mysql.StepSyncLog{ClientTotalSteps: 105}, nil
 			},
 			sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
 				// SUM 累计 = 250（reset 前）+ 0（reset 后第一次） = 250
+				return 250, nil
+			},
+			// r5：maxReported = 250（仍是 reset 前的高水位；reset 后的 105 < 250）
+			// clientTotal=110 ≤ maxReported=250 → rawDelta=0（不需要 SUM 兜底削回，r5 已经在 maxReported clamp 阶段直接削成 0）
+			maxReportedFn: func(ctx context.Context, userID uint64, syncDate string) (uint64, error) {
 				return 250, nil
 			},
 		}
@@ -615,10 +657,9 @@ func TestStepService_SyncSteps_HealthKitReset_BaselineFollowsLatestNotMax_Deltas
 		if err != nil {
 			t.Fatalf("SyncSteps second after reset: %v", err)
 		}
-		// rawDelta = 110 - 105 = 5；SUM 兜底：250+5=255 > 110 → adjusted = 0
-		// 关键：此处入账 0（SUM 兜底削回），但**基线**已跟新（不会永久卡死最大值）。
+		// r5：maxReported clamp 直接削回 0（旧/重复 sync 分支）；SUM 兜底冗余但不改变结果
 		if out.AcceptedDeltaSteps != 0 {
-			t.Errorf("AcceptedDeltaSteps = %d, want 0 (SUM 兜底削回)", out.AcceptedDeltaSteps)
+			t.Errorf("AcceptedDeltaSteps = %d, want 0 (r5 maxReported clamp)", out.AcceptedDeltaSteps)
 		}
 	})
 
@@ -635,10 +676,14 @@ func TestStepService_SyncSteps_HealthKitReset_BaselineFollowsLatestNotMax_Deltas
 		}
 		logRepo := &stubStepSyncLogRepo{
 			findLatestFn: func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
-				// 基线 = 110（最近 sync）。
+				// latest = 110（最近 sync）。
 				return &mysql.StepSyncLog{ClientTotalSteps: 110}, nil
 			},
 			sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
+				return 250, nil
+			},
+			// r5：maxReported = 250（仍是历史高水位）；clientTotal=270 > 250 → rawDelta = 20
+			maxReportedFn: func(ctx context.Context, userID uint64, syncDate string) (uint64, error) {
 				return 250, nil
 			},
 		}
@@ -650,9 +695,9 @@ func TestStepService_SyncSteps_HealthKitReset_BaselineFollowsLatestNotMax_Deltas
 		if err != nil {
 			t.Fatalf("SyncSteps after reset > historical max: %v", err)
 		}
-		// rawDelta = 270 - 110 = 160；SUM 兜底：250+160=410 > 270 → adjusted = max(0, 270-250) = 20
+		// r5：rawDelta = 270 - maxReported(250) = 20；SUM 兜底：250+20=270 不>270 → 不触发；delta=20
 		if out.AcceptedDeltaSteps != 20 {
-			t.Errorf("AcceptedDeltaSteps = %d, want 20 (SUM 兜底 adjusted=270-250)", out.AcceptedDeltaSteps)
+			t.Errorf("AcceptedDeltaSteps = %d, want 20 (r5 maxReported clamp = 270-250)", out.AcceptedDeltaSteps)
 		}
 		if out.StepAccount.TotalSteps != 270 {
 			t.Errorf("TotalSteps = %d, want 270 (250 + 20)", out.StepAccount.TotalSteps)
@@ -682,11 +727,16 @@ func TestStepService_SyncSteps_OutOfOrderSync_SumCapPreventsRepeatedAccrual(t *t
 	}
 	logRepo := &stubStepSyncLogRepo{
 		findLatestFn: func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
-			// 基线 = sync B = 200（最近 INSERT，id DESC）
+			// latest = sync B = 200（最近 INSERT，id DESC）—— r5 之后只用于 latest != nil 判断
 			return &mysql.StepSyncLog{ClientTotalSteps: 200}, nil
 		},
 		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
 			// 历史 SUM = sync A 入账 250 + sync B 入账 0 = 250
+			return 250, nil
+		},
+		// r5：maxReported = 250（sync A 报的）；clientTotal=260 > 250 → rawDelta = 260 - 250 = 10
+		// SUM 兜底：250 + 10 = 260 不 > 260 → 不触发；delta = 10
+		maxReportedFn: func(ctx context.Context, userID uint64, syncDate string) (uint64, error) {
 			return 250, nil
 		},
 	}
@@ -698,9 +748,10 @@ func TestStepService_SyncSteps_OutOfOrderSync_SumCapPreventsRepeatedAccrual(t *t
 	if err != nil {
 		t.Fatalf("SyncSteps OOO: %v", err)
 	}
-	// 关键断言：rawDelta=60 被 SUM 兜底削到 10
+	// r5：maxReported clamp 直接削到 10（rawDelta=260-250=10）；若退化到 r3 的 latest 基线
+	// 会得 60 → 然后 SUM 兜底削到 10；本 case 任一层防御失效都立即挂。
 	if out.AcceptedDeltaSteps != 10 {
-		t.Errorf("AcceptedDeltaSteps = %d, want 10 (SUM 兜底削回；若 = 60 → SUM 兜底失效 regression)", out.AcceptedDeltaSteps)
+		t.Errorf("AcceptedDeltaSteps = %d, want 10 (r5 maxReported clamp + SUM 兜底叠加；若 = 60 → 防御失效 regression)", out.AcceptedDeltaSteps)
 	}
 	if out.StepAccount.TotalSteps != 260 {
 		t.Errorf("TotalSteps = %d, want 260 (250 + 10)", out.StepAccount.TotalSteps)
@@ -710,5 +761,86 @@ func TestStepService_SyncSteps_OutOfOrderSync_SumCapPreventsRepeatedAccrual(t *t
 	}
 	if logRepo.lastCreated.AcceptedDeltaSteps != 10 {
 		t.Errorf("sync_log.AcceptedDeltaSteps = %d, want 10", logRepo.lastCreated.AcceptedDeltaSteps)
+	}
+}
+
+// 16. TruncationPlusOutOfOrder_MaxReportedClampPreventsOverAccrual:
+// **Story 7.3 review r5 [P1] 反例 case**：截断 + 乱序组合下，r3 的 SUM 兜底单层防御失效，
+// 必须叠加 maxReported clamp 才能正确处理。
+//
+// 场景（与 integration test TruncationPlusOutOfOrder 镜像）：
+//
+//   - sync A: clientTotal=10000 → rawDelta=10000 → 截断 5000 → accepted=5000；
+//     DB 落 client_total_steps=10000 / accepted=5000；prevAccepted=5000；maxReported=10000
+//
+//   - sync B: clientTotal=8000（旧报告延迟到达）→ maxReported=10000；
+//     8000 ≤ 10000 → rawDelta=0 → accepted=0；DB 落 client_total=8000 / accepted=0；
+//     prevAccepted=5000；maxReported=10000（不变）
+//
+//   - sync C (本测试 mock 状态): clientTotal=12000；
+//     - latest = sync B（最近 INSERT，client_total=8000）
+//     - maxReported = 10000（仍是 sync A 报的；sync B 的 8000 没超过 10000）
+//     - prevAccepted = 5000（A 入账 5000 + B 入账 0）
+//     - r5 maxReported clamp：12000 > 10000 → rawDelta = 12000 - 10000 = 2000
+//     - SUM 兜底：5000 + 2000 = 7000 < 12000 → 不触发
+//     - 单次截断：2000 < 5000 → 不触发
+//     - delta = 2000；accepted=2000；总 accepted = 5000 + 0 + 2000 = 7000 ✓
+//
+// **r3 反例（单层 SUM 兜底失效）**：
+//   - 若 service 用 latest.ClientTotalSteps=8000 当基线 → rawDelta = 12000 - 8000 = 4000
+//   - SUM 兜底：5000 + 4000 = 9000 < 12000 → **不触发**
+//   - delta = 4000；accepted=4000；总 accepted = 5000 + 0 + 4000 = 9000
+//   - 实际从 sync A 到 sync C 客户端只新增了 2000 步（10000 → 12000），但服务多入账了 2000 步
+//
+// 本 case 锁定"maxReported clamp 必须存在"语义：若 service 退化到 r3 单层防御 → accepted=4000。
+func TestStepService_SyncSteps_TruncationPlusOutOfOrder_MaxReportedClampPreventsOverAccrual(t *testing.T) {
+	accRepo := &stubStepStepAccountRepo{
+		findByUserIDFn: func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+			// 当前账户：sync A 入账 5000 + sync B 入账 0 = total 5000
+			return &mysql.StepAccount{UserID: 1001, TotalSteps: 5000, AvailableSteps: 5000, Version: 2}, nil
+		},
+	}
+	logRepo := &stubStepSyncLogRepo{
+		findLatestFn: func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
+			// latest = sync B（最近 INSERT，client_total=8000）—— r5 之后只用于 latest != nil 判断
+			return &mysql.StepSyncLog{ClientTotalSteps: 8000}, nil
+		},
+		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
+			// 历史 SUM = sync A 入账 5000 + sync B 入账 0 = 5000
+			return 5000, nil
+		},
+		// **关键 mock**：maxReported = 10000（sync A 报的；sync B 的 8000 < 10000，MAX 不变）。
+		// 这是 r5 修复之所以工作的核心 —— maxReported ≠ latest.ClientTotalSteps，
+		// 也 ≠ prevAccepted；它是"已报告过的最大累计"，独立于截断 / 入账状态。
+		maxReportedFn: func(ctx context.Context, userID uint64, syncDate string) (uint64, error) {
+			return 10000, nil
+		},
+	}
+
+	svc := buildStepService(accRepo, logRepo, config.StepsConfig{})
+	out, err := svc.SyncSteps(context.Background(), service.SyncStepsInput{
+		UserID: 1001, SyncDate: fixedSyncDate, ClientTotalSteps: 12000, MotionState: 2, ClientTimestamp: 1714560200000,
+	})
+	if err != nil {
+		t.Fatalf("SyncSteps truncation+OOO: %v", err)
+	}
+
+	// 关键断言：accepted = 2000（不是 r3 单层防御下的 4000）
+	if out.AcceptedDeltaSteps != 2000 {
+		t.Errorf("AcceptedDeltaSteps = %d, want 2000 (r5 maxReported clamp = 12000-10000)；"+
+			"若 = 4000 → 退化到 r3 单层 SUM 兜底（latest 当基线），maxReported clamp regression", out.AcceptedDeltaSteps)
+	}
+	if accRepo.lastUpdateDelta != 2000 {
+		t.Errorf("UpdateBalance delta = %d, want 2000", accRepo.lastUpdateDelta)
+	}
+	if logRepo.lastCreated.AcceptedDeltaSteps != 2000 {
+		t.Errorf("sync_log.AcceptedDeltaSteps = %d, want 2000", logRepo.lastCreated.AcceptedDeltaSteps)
+	}
+	// total = 5000 (现状) + 2000 = 7000
+	if out.StepAccount.TotalSteps != 7000 {
+		t.Errorf("TotalSteps = %d, want 7000 (5000 + 2000)", out.StepAccount.TotalSteps)
+	}
+	if logRepo.lastCreated.ClientTotalSteps != 12000 {
+		t.Errorf("sync_log.ClientTotalSteps = %d, want 12000", logRepo.lastCreated.ClientTotalSteps)
 	}
 }

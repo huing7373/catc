@@ -136,3 +136,4 @@
 | 2026-05-02 | [步数 sync 基线必须单调 + required 字段必须用指针 + DATE 列必须 string 透传](2026-05-02-step-sync-baseline-monotonic-required-pointer-and-date-string-transit.md) | 3 | architecture / error-handling | `<pending>` |
 | 2026-05-03 | [步数 sync 基线综合方案：id DESC + SUM 兜底，而非"乱序 vs reset 二选一"](2026-05-03-step-sync-baseline-sum-cap-not-max-order-by.md) | 1 | architecture | `<pending>` |
 | 2026-05-02 | [输入校验边界必须考虑下游存储真实约束（time.Parse 接受不代表 MySQL DATE 接受）](2026-05-02-input-validation-must-cover-downstream-storage-range.md) | 1 | error-handling / input-validation | `<pending>` |
+| 2026-05-03 | [步数 sync 第三层防御：截断 + 乱序组合下 SUM 兜底仍漏，需叠加 max-reported clamp](2026-05-03-step-sync-truncation-plus-ooo-needs-max-reported-clamp.md) | 1 | architecture | `<pending>` |

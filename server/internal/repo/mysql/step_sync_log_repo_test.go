@@ -131,6 +131,52 @@ func TestStepSyncLogRepo_FindLatestByUserAndDate_NotFound_ReturnsErrStepSyncLogN
 	}
 }
 
+// TestStepSyncLogRepo_MaxClientTotalStepsByUserAndDate_HappyPath:
+// **Story 7.3 review r5 [P1]**：SELECT COALESCE(MAX(client_total_steps), 0) → 验返 uint64。
+//
+// 包含两个 case：
+//   - HasMax12000：max=12000；验返 12000
+//   - ZeroFallback：当日无任何 sync_log → COALESCE 兜底返 0
+//
+// **关键 SQL 形态**：必须包含 `COALESCE(MAX(client_total_steps), 0)` —— 防止
+// regression 改成 `MAX(client_total_steps)` 直返 NULL（驱动 / Scan 链可能 panic）。
+func TestStepSyncLogRepo_MaxClientTotalStepsByUserAndDate_HappyPath(t *testing.T) {
+	t.Run("HasMax12000", func(t *testing.T) {
+		gormDB, mock := newGormWithMock(t)
+		repo := NewStepSyncLogRepo(gormDB)
+
+		rows := sqlmock.NewRows([]string{"max"}).AddRow(12000)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(client_total_steps), 0)")).
+			WillReturnRows(rows)
+
+		got, err := repo.MaxClientTotalStepsByUserAndDate(context.Background(), 1001, "2026-05-01")
+		if err != nil {
+			t.Fatalf("MaxClientTotalStepsByUserAndDate: %v", err)
+		}
+		if got != 12000 {
+			t.Errorf("got = %d, want 12000", got)
+		}
+	})
+
+	t.Run("ZeroFallback", func(t *testing.T) {
+		gormDB, mock := newGormWithMock(t)
+		repo := NewStepSyncLogRepo(gormDB)
+
+		// 当日无任何 sync_log → SQL 仍返 1 行 max=0（COALESCE 兜底）
+		rows := sqlmock.NewRows([]string{"max"}).AddRow(0)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(client_total_steps), 0)")).
+			WillReturnRows(rows)
+
+		got, err := repo.MaxClientTotalStepsByUserAndDate(context.Background(), 9999, "2026-05-01")
+		if err != nil {
+			t.Fatalf("MaxClientTotalStepsByUserAndDate: %v", err)
+		}
+		if got != 0 {
+			t.Errorf("got = %d, want 0 (COALESCE 兜底)", got)
+		}
+	})
+}
+
 // TestStepSyncLogRepo_SumAcceptedDeltaByUserAndDate_HappyPath:
 // SELECT COALESCE(SUM(accepted_delta_steps), 0) → mock 返 sum=49000；验返 int64(49000)。
 // 同时验证 0 行（mock 返 sum=0 模拟 COALESCE 兜底）→ 返 0。

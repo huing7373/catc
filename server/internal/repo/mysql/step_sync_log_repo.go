@@ -58,10 +58,11 @@ func (StepSyncLog) TableName() string { return "user_step_sync_logs" }
 
 // StepSyncLogRepo 是 user_step_sync_logs 表的访问接口。
 //
-// **本 story 只实装三个方法**：
+// **本 story 实装四个方法**（Story 7.3 review r5 [P1] 增加 MaxClientTotalStepsByUserAndDate）：
 //   - Create（事务内插入一行）
-//   - FindLatestByUserAndDate（差值计算依据）
+//   - FindLatestByUserAndDate（差值计算依据 / 基线 = 最近 INSERT）
 //   - SumAcceptedDeltaByUserAndDate（防作弊当日封顶判断）
+//   - MaxClientTotalStepsByUserAndDate（Story 7.3 review r5 [P1] 防"截断 + 乱序"组合漏洞）
 //
 // future Story 7.5 dev grant 复用 Create；future 审计 query 可能加 ListByUser。
 //
@@ -111,6 +112,46 @@ type StepSyncLogRepo interface {
 	//
 	// **关键**：sum 必须**包含**当前正要写入的行**之外**的历史 —— 即调用 SumAccepted 时**还没**写本次 sync_log。
 	SumAcceptedDeltaByUserAndDate(ctx context.Context, userID uint64, syncDate string) (int64, error)
+
+	// MaxClientTotalStepsByUserAndDate 当日已报告的最大 client_total_steps（**不**管是否被截断 / 入账）。
+	//
+	// **背景**（Story 7.3 review r5 [P1] 综合方案）：
+	//
+	//   r3 给出"基线 = id DESC + service 层 SUM 兜底"综合方案，但 r5 抓出"截断 + 乱序"
+	//   组合反例：
+	//     - sync A: clientTotal=10000 → 截断 5000（accepted=5000，prevAccepted=5000）
+	//     - sync B: clientTotal=8000（延迟到达）→ 倒退 rawDelta=0，accepted=0，prevAccepted=5000
+	//     - sync C: clientTotal=12000 → 基线=8000（最近行）→ rawDelta=4000；
+	//       SUM 兜底：5000 + 4000 = 9000 < 12000 → **不触发** → accepted=4000
+	//     - 实际从 A→C 只新增 2000 步，但服务入账了 5000+4000=9000
+	//
+	//   根因：SUM 兜底用 prevAccepted（"已入账"总和），但 sync A 截断丢了 5000 步，
+	//   prevAccepted ≠ "已报告的最大累计步数"。
+	//
+	//   修复方向：再叠加一道"max client_total_steps clamp"：
+	//
+	//     maxReported := MAX(client_total_steps)  // **不**管 accepted_delta_steps 是否 0
+	//     if clientTotalSteps <= maxReported:
+	//         rawDelta = 0  // 旧 / 重复 sync，已经报告过
+	//     else:
+	//         rawDelta = clientTotalSteps - maxReported
+	//
+	//   反例验证（修复后）：
+	//     - sync A: maxReported=0 → rawDelta=10000 → 截断 5000 → accepted=5000；DB 写 client_total=10000
+	//     - sync B: maxReported=10000 → 8000≤10000 → rawDelta=0 → accepted=0
+	//     - sync C: maxReported=10000 → 12000>10000 → rawDelta=2000 → 不触发截断 → accepted=2000
+	//     - 总 accepted = 7000 = clientTotal 12000 - sync A 截断丢的 5000 ✓
+	//
+	// 实装：SELECT COALESCE(MAX(client_total_steps), 0) FROM user_step_sync_logs
+	//       WHERE user_id = ? AND sync_date = ?
+	//
+	// **返回**：当日已报告的最大 client_total_steps（uint64，与列 type 一致）。
+	// 当日无任何 sync_log（首次同步） → COALESCE 兜底返 0。
+	//
+	// ctx 必须是 txCtx（与 FindLatest / SumAccepted 同语义；事务内一致视图）。
+	//
+	// **关键**：max 必须**包含**当前正要写入的行**之外**的历史 —— 即调用时本次 sync_log 还没 INSERT。
+	MaxClientTotalStepsByUserAndDate(ctx context.Context, userID uint64, syncDate string) (uint64, error)
 }
 
 // stepSyncLogRepo 是 StepSyncLogRepo 的默认实装。
@@ -162,4 +203,21 @@ func (r *stepSyncLogRepo) SumAcceptedDeltaByUserAndDate(ctx context.Context, use
 		return 0, err
 	}
 	return sum, nil
+}
+
+// MaxClientTotalStepsByUserAndDate 实装：SELECT COALESCE(MAX(client_total_steps), 0)。
+//
+// Story 7.3 review r5 [P1]：见 interface doc 关于"截断 + 乱序"反例与修复方向的说明。
+func (r *stepSyncLogRepo) MaxClientTotalStepsByUserAndDate(ctx context.Context, userID uint64, syncDate string) (uint64, error) {
+	db := tx.FromContext(ctx, r.db)
+	var max uint64
+	err := db.WithContext(ctx).
+		Model(&StepSyncLog{}).
+		Where("user_id = ? AND sync_date = ?", userID, syncDate).
+		Select("COALESCE(MAX(client_total_steps), 0)").
+		Scan(&max).Error
+	if err != nil {
+		return 0, err
+	}
+	return max, nil
 }

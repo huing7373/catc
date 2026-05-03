@@ -494,3 +494,92 @@ func TestStepServiceIntegration_HealthKitReset_AccrualResumesNotPermanentlyBlock
 		t.Errorf("log count = %d, want 4", got)
 	}
 }
+
+// ============================================================
+// AC10.6: 截断 + 乱序组合反例（Story 7.3 review r5 [P1]）
+//
+// **r3 单层 SUM 兜底失效场景**：
+//   - sync A: clientTotal=10000 → 截断为 5000；DB 写 client_total=10000 / accepted=5000
+//   - sync B: clientTotal=8000 (delayed 乱序到达) → 8000 ≤ maxReported(10000) → accepted=0；
+//     DB 写 client_total=8000 / accepted=0
+//   - sync C: clientTotal=12000；
+//     - r5 maxReported = MAX(10000, 8000) = 10000 → rawDelta = 12000-10000 = 2000 → accepted=2000
+//     - r3 退化路径（latest 当基线）：rawDelta = 12000-8000 = 4000 → SUM 兜底 5000+4000=9000<12000 → 不触发 → accepted=4000（**bug**）
+//
+// **正确总账**：从 sync A 到 sync C 客户端只新增 2000 步（10000→12000）；
+// 服务端 accepted = 5000 (A 截断) + 0 (B 旧) + 2000 (C 新增) = 7000，
+// 等于 client_total=12000 减 sync A 截断丢的 5000，符合"截断丢的步数永久丢"语义。
+//
+// 配 single_sync_cap=5000 / daily_cap=50000（本场景 daily 不会触发）。
+//
+// **regression sentinel**：sync C accepted=4000 → r5 maxReported clamp 失效；
+//                          sync C accepted=12000-8000=4000 → 同样信号；
+//                          sync C accepted=2000 → 修复正确。
+// ============================================================
+func TestStepServiceIntegration_TruncationPlusOutOfOrder_MaxReportedClampPreventsOverAccrual(t *testing.T) {
+	svc, sqlDB, cleanup := buildStepServiceIntegration(t, config.StepsConfig{
+		SingleSyncCap: 5000, // 显式默认值（本场景 sync A 必触发）
+		DailyCap:      50000,
+	})
+	defer cleanup()
+
+	const userID = uint64(1)
+	insertUser(t, sqlDB, userID, "uid-step-trunc-ooo", "用户1", "")
+	insertStepAccount(t, sqlDB, userID, 0, 0, 0)
+
+	const syncDate = "2026-05-01"
+	ctx := context.Background()
+
+	// sync A: clientTotal=10000 → 截断 5000 → accepted=5000
+	outA, err := svc.SyncSteps(ctx, service.SyncStepsInput{
+		UserID: userID, SyncDate: syncDate, ClientTotalSteps: 10000, MotionState: 3, ClientTimestamp: 1714560000000,
+	})
+	if err != nil {
+		t.Fatalf("sync A: %v", err)
+	}
+	if outA.AcceptedDeltaSteps != 5000 {
+		t.Errorf("A AcceptedDeltaSteps = %d, want 5000 (截断)", outA.AcceptedDeltaSteps)
+	}
+
+	// sync B: clientTotal=8000 (旧报告延迟到达) → maxReported(10000) ≥ 8000 → rawDelta=0 → accepted=0
+	outB, err := svc.SyncSteps(ctx, service.SyncStepsInput{
+		UserID: userID, SyncDate: syncDate, ClientTotalSteps: 8000, MotionState: 2, ClientTimestamp: 1714559900000,
+	})
+	if err != nil {
+		t.Fatalf("sync B (delayed): %v", err)
+	}
+	if outB.AcceptedDeltaSteps != 0 {
+		t.Errorf("B AcceptedDeltaSteps = %d, want 0 (8000 ≤ maxReported=10000；旧/重复)", outB.AcceptedDeltaSteps)
+	}
+	total, _, _, _ := fetchStepAccount(t, sqlDB, userID)
+	if total != 5000 {
+		t.Errorf("after B: total = %d, want 5000 (不变)", total)
+	}
+
+	// sync C: clientTotal=12000
+	//   - latest = sync B (client_total=8000)；maxReported = MAX(10000, 8000) = 10000
+	//   - r5：rawDelta = 12000 - 10000 = 2000；SUM 5000+2000=7000<12000 不触发；不截断
+	//   - delta=2000；total=5000+2000=7000
+	//
+	// **regression sentinel**：sync C accepted=4000 → r5 maxReported clamp 失效；
+	// 必须返回 2000 才证明两层防御正确叠加。
+	outC, err := svc.SyncSteps(ctx, service.SyncStepsInput{
+		UserID: userID, SyncDate: syncDate, ClientTotalSteps: 12000, MotionState: 2, ClientTimestamp: 1714560200000,
+	})
+	if err != nil {
+		t.Fatalf("sync C: %v", err)
+	}
+	if outC.AcceptedDeltaSteps != 2000 {
+		t.Errorf("C AcceptedDeltaSteps = %d, want 2000 (r5 maxReported clamp = 12000-10000)；"+
+			"若 = 4000 → r3 退化（latest 当基线 + SUM 兜底失效）", outC.AcceptedDeltaSteps)
+	}
+	total, _, _, _ = fetchStepAccount(t, sqlDB, userID)
+	if total != 7000 {
+		t.Errorf("after C: total = %d, want 7000 (5000 + 2000)", total)
+	}
+	if got := countSyncLogs(t, sqlDB, userID, syncDate); got != 3 {
+		t.Errorf("after C: log count = %d, want 3", got)
+	}
+
+	// 总账校验：client 报的最高 = 12000；server 入账总额 = 7000；丢失 5000 步 = 截断丢的，符合契约。
+}
