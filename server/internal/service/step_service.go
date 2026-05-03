@@ -35,15 +35,17 @@ const (
 type StepService interface {
 	// SyncSteps 处理 POST /api/v1/steps/sync 业务。
 	//
-	// 流程（数据库设计 §8.2 + V1 §6.1.4）：
+	// 流程（数据库设计 §8.2 + V1 §6.1.4 + Story 7.3 review r3 [P1] SUM 兜底）：
 	//  1. 在事务内：FindLatestByUserAndDate(userID, syncDate) → lastClientTotalSteps
-	//  2. 计算 delta：无 last → delta = clientTotalSteps；有 last → delta = max(0, clientTotalSteps - lastClientTotalSteps)
-	//  3. 防作弊截断：if delta > singleSyncCap → delta = singleSyncCap + log warning
-	//  4. 防作弊封顶：if SumAccepted(userID, syncDate) + delta > dailyCap → delta = 0 + log warning + ErrStepSyncInvalid
-	//  5. FindByUserID(userID) 取 step_account 当前 version
-	//  6. UpdateBalance(userID, delta, version) → 乐观锁 +delta
-	//  7. Create(StepSyncLog{...}) 写日志（含 source=1 healthkit / accepted_delta_steps=delta）
-	//  8. 返回 SyncStepsOutput{AcceptedDeltaSteps: delta, StepAccount: 三档值}
+	//  2. 计算 rawDelta：无 last → rawDelta = clientTotalSteps；有 last → rawDelta = max(0, clientTotalSteps - lastClientTotalSteps)
+	//  3. **SUM 兜底**：SumAccepted(today) + rawDelta > clientTotalSteps → rawDelta = max(0, clientTotalSteps - SumAccepted)
+	//     （捕获乱序到达把基线带低导致 rawDelta 算多的场景；详见 step_sync_log_repo 关于 r1→r2→r3 的决策史）
+	//  4. 防作弊单次截断：if rawDelta > singleSyncCap → delta = singleSyncCap + log warning
+	//  5. 防作弊当日封顶：if SumAccepted(userID, syncDate) + delta > dailyCap → delta = 0 + log warning + ErrStepSyncInvalid
+	//  6. FindByUserID(userID) 取 step_account 当前 version
+	//  7. UpdateBalance(userID, delta, version) → 乐观锁 +delta
+	//  8. Create(StepSyncLog{...}) 写日志（含 source=1 healthkit / accepted_delta_steps=delta）
+	//  9. 返回 SyncStepsOutput{AcceptedDeltaSteps: delta, StepAccount: 三档值}
 	//
 	// 错误约定（ADR-0006 三层映射）：
 	//   - 当日封顶触发 → apperror.New(ErrStepSyncInvalid, "...")（业务码 3001）
@@ -175,7 +177,39 @@ func (s *stepServiceImpl) SyncSteps(ctx context.Context, in SyncStepsInput) (*Sy
 			}
 		}
 
-		// (3) 防作弊单次截断
+		// (3) 当日 SUM 兜底（Story 7.3 review r3 [P1]）—— 必须在单次截断**之前**算
+		//
+		// **背景**（r1 → r2 → r3 决策史）：
+		//   - r1 基线按 id DESC 取（最近 INSERT），乱序到达让旧 sync 成新基线 →
+		//     重复入账（A=250, B 延迟=200, C=260 → C 算 60 而非 10）
+		//   - r2 基线改 max(client_total_steps)，乱序解决但 HealthKit reset/correction
+		//     场景永久卡死（最大值锁定基线，后续真实步数永远 rawDelta=0）
+		//   - r3 基线退回 id DESC + 本兜底逻辑：
+		//     "今日所有 accepted_delta 之和 + 本次 rawDelta 不能超过 client 报告的当日累计"
+		//
+		// 因为 client_total_steps 是健康源累计值（SUM(deltas) 上界）；若 SUM+rawDelta
+		// 超过 clientTotalSteps，说明乱序到达把基线带低了 → rawDelta 算多 → 削回。
+		//
+		// **顺序关键**：必须在单次截断之前 / 当日封顶之前算 prevAccepted —— 否则截断
+		// 后的小 delta 会跑进封顶判断，但兜底失效；且兜底削回必须以 rawDelta 为基础
+		// （单次截断、当日封顶都是基于"最终入账值"的进一步约束）。
+		prevAccepted, err := s.stepSyncLogRepo.SumAcceptedDeltaByUserAndDate(txCtx, in.UserID, in.SyncDate)
+		if err != nil {
+			return apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+		}
+		if latest != nil && prevAccepted+rawDelta > int64(in.ClientTotalSteps) {
+			adjusted := int64(in.ClientTotalSteps) - prevAccepted
+			if adjusted < 0 {
+				adjusted = 0
+			}
+			slog.WarnContext(txCtx, "step sync sum cap adjusted",
+				"user_id", in.UserID, "sync_date", in.SyncDate,
+				"prev_accepted", prevAccepted, "raw_delta", rawDelta,
+				"client_total_steps", in.ClientTotalSteps, "adjusted_to", adjusted)
+			rawDelta = adjusted
+		}
+
+		// (4) 防作弊单次截断
 		delta := rawDelta
 		if delta > s.singleSyncCap {
 			slog.WarnContext(txCtx, "step sync single cap truncated",
@@ -184,11 +218,7 @@ func (s *stepServiceImpl) SyncSteps(ctx context.Context, in SyncStepsInput) (*Sy
 			delta = s.singleSyncCap
 		}
 
-		// (4) 防作弊当日封顶（**入账后越界判断**：prevAccepted + curDelta > dailyCap → 拒绝）
-		prevAccepted, err := s.stepSyncLogRepo.SumAcceptedDeltaByUserAndDate(txCtx, in.UserID, in.SyncDate)
-		if err != nil {
-			return apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
-		}
+		// (5) 防作弊当日封顶（**入账后越界判断**：prevAccepted + curDelta > dailyCap → 拒绝）
 		// 重置为本次事务的判定结果（防上次调用残留）
 		capExceeded = false
 		if prevAccepted+delta > s.dailyCap {
@@ -199,18 +229,18 @@ func (s *stepServiceImpl) SyncSteps(ctx context.Context, in SyncStepsInput) (*Sy
 			capExceeded = true
 		}
 
-		// (5) 取 step_account 当前 version
+		// (6) 取 step_account 当前 version
 		account, err := s.stepAccountRepo.FindByUserID(txCtx, in.UserID)
 		if err != nil {
 			return apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
 		}
 
-		// (6) UpdateBalance —— 即便 delta=0 也走，保持事务边界一致；version + 1 仍递增。
+		// (7) UpdateBalance —— 即便 delta=0 也走，保持事务边界一致；version + 1 仍递增。
 		if err := s.stepAccountRepo.UpdateBalance(txCtx, in.UserID, int32(delta), account.Version); err != nil {
 			return apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
 		}
 
-		// (7) 写 sync_log（**含**倒退 / 重复 / 截断 / 封顶场景；append-only 审计纪律）
+		// (8) 写 sync_log（**含**倒退 / 重复 / 截断 / 封顶场景；append-only 审计纪律）
 		log := &mysql.StepSyncLog{
 			UserID:             in.UserID,
 			SyncDate:           in.SyncDate,
@@ -224,7 +254,7 @@ func (s *stepServiceImpl) SyncSteps(ctx context.Context, in SyncStepsInput) (*Sy
 			return apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
 		}
 
-		// (8) 拼装 output —— 用更新**之后**的余额（account.X + delta）
+		// (9) 拼装 output —— 用更新**之后**的余额（account.X + delta）
 		out = SyncStepsOutput{
 			AcceptedDeltaSteps: int32(delta),
 			StepAccount: StepAccountBrief{

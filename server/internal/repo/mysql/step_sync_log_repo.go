@@ -76,17 +76,22 @@ type StepSyncLogRepo interface {
 
 	// FindLatestByUserAndDate 查"基线" sync_log（用 idx_user_date 复合索引最左前缀）。
 	//
-	// **排序**：ORDER BY client_total_steps DESC, id DESC LIMIT 1
+	// **排序**：ORDER BY id DESC LIMIT 1（最近 INSERT 的一行）
 	//
-	// **关键**（Story 7.3 review r2 [P1]）：基线**必须**是当日历史 client_total_steps
-	// 的最大值，**不是**最近 INSERT 的那一行。理由：
-	//   - 步数累计本身**单调非降**（健康源永远递增；倒退只可能是源系统重置）
-	//   - 手机端 sync 可能因网络重试 / 串行错乱让"旧 total" INSERT 在"新 total"之后
-	//   - 若按 id DESC（INSERT 时序）取，会让旧 sync (200) 成为新 sync (250) 之后的
-	//     基线 → 下次 sync (260) 算成 260-200=60 而非 260-250=10 → **重复入账 50 步**
-	//   - 按 client_total_steps DESC 取最大值，乱序到达不影响基线正确性
-	//   - id DESC 作为第二排序键：两次同 client_total_steps 写入时取后一次（**不**影响业务，
-	//     避免 GORM First 在 ties 上的非确定行为）
+	// **历史**（Story 7.3 review r1 → r2 → r3 三轮决策）：
+	//   - r1 用 `id DESC`（最近 INSERT 行）—— 但乱序到达场景重复入账（旧 sync 成新基线）
+	//   - r2 改 `client_total_steps DESC, id DESC`（最大累计行）—— 解决了乱序，但
+	//     在 HealthKit reset/correction 真实场景下永久卡死：若 client_total_steps
+	//     出现真实下降（device reset / data correction），最大值会**永远**作为基线，
+	//     用户当日剩余时间所有步数都被算成 rawDelta=0（永久少算）
+	//   - r3 退回 `id DESC`（最近 INSERT 行）+ service 层加 SUM 兜底校验
+	//
+	// **r3 综合方案**：基线 = 最近一次 sync（id DESC），乱序到达由 service 层
+	// **SUM 兜底**捕获：`if SumAccepted(today) + rawDelta > clientTotalSteps then
+	// rawDelta = max(0, clientTotalSteps - SumAccepted)`。
+	//   - 乱序到达：被 SUM 兜底捕获（旧 sync 把基线带低 → rawDelta 算多 → SUM 兜底削回）
+	//   - HealthKit reset/correction：基线自然跟最新 sync 走，不会卡死
+	//   - 详见 docs/lessons/2026-05-02-step-sync-baseline-sum-cap-not-max-order-by.md
 	//
 	// **NotFound 语义**：当日首次 sync → 返 ErrStepSyncLogNotFound（service 层捕获走"首次"分支）；
 	//                    其他 DB 异常透传给 service 包成 1009
@@ -124,14 +129,16 @@ func (r *stepSyncLogRepo) Create(ctx context.Context, log *StepSyncLog) error {
 	return db.WithContext(ctx).Create(log).Error
 }
 
-// FindLatestByUserAndDate 实装：WHERE + ORDER BY client_total_steps DESC, id DESC LIMIT 1
-// + NotFound 翻译（见 interface doc 关于"基线 = 最大累计步数"的根因解释）。
+// FindLatestByUserAndDate 实装：WHERE + ORDER BY id DESC LIMIT 1 + NotFound 翻译。
+//
+// 排序选 `id DESC`（最近 INSERT 行）见 interface doc 关于 r1→r2→r3 三轮决策的解释；
+// 乱序到达由 service 层 SUM 兜底处理，本 repo 只取"最近一次"。
 func (r *stepSyncLogRepo) FindLatestByUserAndDate(ctx context.Context, userID uint64, syncDate string) (*StepSyncLog, error) {
 	db := tx.FromContext(ctx, r.db)
 	var log StepSyncLog
 	err := db.WithContext(ctx).
 		Where("user_id = ? AND sync_date = ?", userID, syncDate).
-		Order("client_total_steps DESC, id DESC").
+		Order("id DESC").
 		First(&log).Error
 	if err != nil {
 		if stderrors.Is(err, gorm.ErrRecordNotFound) {

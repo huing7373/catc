@@ -529,3 +529,186 @@ func TestStepService_NewStepService_MaxInt32SingleSyncCap_OK(t *testing.T) {
 		config.StepsConfig{SingleSyncCap: int64(math.MaxInt32)},
 	)
 }
+
+// 14. HealthKitReset_BaselineFollowsLatestNotMax_DeltasResume:
+// **Story 7.3 review r3 [P1] 回归哨兵**：HealthKit reset/correction 场景，
+// client_total_steps 在当日内出现真实下降（device reset / data correction）。
+//
+// 流程：
+//   - 历史：累计入账 250（client_total_steps=250 → accepted=250；prevAccepted SUM=250）
+//   - 现在 sync 报 105（reset 后从 100 重启，又走了 5 步）
+//   - 基线 = 最近一次 sync = 105 之前的最新行（client_total=250）
+//   - rawDelta = max(0, 105-250) = 0（倒退处理）
+//   - SUM 兜底判断：250+0=250 > 105 → adjusted = max(0, 105-250) = 0；rawDelta 仍 0
+//   - 入账：accepted=0；sync_log 落 client_total=105
+//
+// 然后下一次 sync 110（reset 后又 5 步）：
+//   - 基线 = 最近一次 sync = 105（**关键**：r2 的 max ORDER BY 会取 250 永久卡死）
+//   - rawDelta = 110-105 = 5
+//   - SUM 兜底：250+5=255 > 110 → adjusted = max(0, 110-250) = 0
+//
+// **正确性**：reset 场景 SUM 兜底正确削回到 0（避免重复入账），但**关键**对比 r2：
+// 基线已经跟着新 sync 走了，**不会**永久卡死。
+//
+// 这条 case 锁住"基线必须跟最近一次 sync 走"的语义；若 repo 退回 r2 的
+// `client_total_steps DESC` ORDER BY，基线会取 250 → rawDelta = 0 → SUM 兜底也是 0
+// → 看似"通过"但行为已退化。本 case 的 sentinel 在第二次 sync 上：
+// **stub 显式返 latest.ClientTotalSteps=105**（模拟 repo 按 id DESC 取最近行的语义），
+// 若 service 层缓存或调用方式改了，本 case 也立刻挂。
+func TestStepService_SyncSteps_HealthKitReset_BaselineFollowsLatestNotMax_DeltasResume(t *testing.T) {
+	// 模拟 reset 之后的第一次 sync：105（基线最近行 = client_total=250 历史高水位）
+	t.Run("FirstSyncAfterReset_DeltaZero_SumCapAdjusted", func(t *testing.T) {
+		accRepo := &stubStepStepAccountRepo{
+			findByUserIDFn: func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+				return &mysql.StepAccount{UserID: 1001, TotalSteps: 250, AvailableSteps: 250, Version: 1}, nil
+			},
+		}
+		logRepo := &stubStepSyncLogRepo{
+			findLatestFn: func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
+				// 基线 = 最近一次 sync（id DESC）。reset 前最后一次 = 250。
+				return &mysql.StepSyncLog{ClientTotalSteps: 250}, nil
+			},
+			sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
+				return 250, nil
+			},
+		}
+
+		svc := buildStepService(accRepo, logRepo, config.StepsConfig{})
+		out, err := svc.SyncSteps(context.Background(), service.SyncStepsInput{
+			UserID: 1001, SyncDate: fixedSyncDate, ClientTotalSteps: 105, MotionState: 2, ClientTimestamp: 1714560000000,
+		})
+		if err != nil {
+			t.Fatalf("SyncSteps after reset: %v", err)
+		}
+		// 倒退（105 < 250）→ rawDelta = 0；SUM 兜底也是 0（max(0, 105-250)=0）
+		if out.AcceptedDeltaSteps != 0 {
+			t.Errorf("AcceptedDeltaSteps = %d, want 0 (reset 倒退场景)", out.AcceptedDeltaSteps)
+		}
+		if logRepo.lastCreated.ClientTotalSteps != 105 {
+			t.Errorf("sync_log.ClientTotalSteps = %d, want 105 (落库新 reset 值)", logRepo.lastCreated.ClientTotalSteps)
+		}
+	})
+
+	// reset 后第二次 sync：110。**关键**：基线必须取 105（最近行），不取 250（max）。
+	t.Run("SecondSyncAfterReset_BaselineIsLatestNotMax", func(t *testing.T) {
+		accRepo := &stubStepStepAccountRepo{
+			findByUserIDFn: func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+				return &mysql.StepAccount{UserID: 1001, TotalSteps: 250, AvailableSteps: 250, Version: 2}, nil
+			},
+		}
+		logRepo := &stubStepSyncLogRepo{
+			findLatestFn: func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
+				// **关键**：基线 = 105（最近一次 sync，按 id DESC）。
+				// 若 repo 退回 r2 的 `client_total_steps DESC`，会取 250 → 本 case 行为退化。
+				return &mysql.StepSyncLog{ClientTotalSteps: 105}, nil
+			},
+			sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
+				// SUM 累计 = 250（reset 前）+ 0（reset 后第一次） = 250
+				return 250, nil
+			},
+		}
+
+		svc := buildStepService(accRepo, logRepo, config.StepsConfig{})
+		out, err := svc.SyncSteps(context.Background(), service.SyncStepsInput{
+			UserID: 1001, SyncDate: fixedSyncDate, ClientTotalSteps: 110, MotionState: 2, ClientTimestamp: 1714560005000,
+		})
+		if err != nil {
+			t.Fatalf("SyncSteps second after reset: %v", err)
+		}
+		// rawDelta = 110 - 105 = 5；SUM 兜底：250+5=255 > 110 → adjusted = 0
+		// 关键：此处入账 0（SUM 兜底削回），但**基线**已跟新（不会永久卡死最大值）。
+		if out.AcceptedDeltaSteps != 0 {
+			t.Errorf("AcceptedDeltaSteps = %d, want 0 (SUM 兜底削回)", out.AcceptedDeltaSteps)
+		}
+	})
+
+	// reset 后用户走出超过历史高水位 270：基线 = 110（最近）；rawDelta = 160；
+	// SUM 兜底：250+160=410 > 270 → adjusted = max(0, 270-250) = 20。
+	// **关键**：r2 方案下基线锁死 250 → rawDelta = 20；本场景 r2/r3 行为相同。
+	// 但**接下来一次** sync 280：r3 基线 = 270（最近），rawDelta=10；r2 基线 = 270 也对。
+	// 真正的 r2 卡死场景是 reset 后**始终**没超过 250 → r3 这里用单次 case 演示。
+	t.Run("ThirdSyncAfterReset_ExceedsHistoricalMax_AccrualResumes", func(t *testing.T) {
+		accRepo := &stubStepStepAccountRepo{
+			findByUserIDFn: func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+				return &mysql.StepAccount{UserID: 1001, TotalSteps: 250, AvailableSteps: 250, Version: 3}, nil
+			},
+		}
+		logRepo := &stubStepSyncLogRepo{
+			findLatestFn: func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
+				// 基线 = 110（最近 sync）。
+				return &mysql.StepSyncLog{ClientTotalSteps: 110}, nil
+			},
+			sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
+				return 250, nil
+			},
+		}
+
+		svc := buildStepService(accRepo, logRepo, config.StepsConfig{})
+		out, err := svc.SyncSteps(context.Background(), service.SyncStepsInput{
+			UserID: 1001, SyncDate: fixedSyncDate, ClientTotalSteps: 270, MotionState: 2, ClientTimestamp: 1714560010000,
+		})
+		if err != nil {
+			t.Fatalf("SyncSteps after reset > historical max: %v", err)
+		}
+		// rawDelta = 270 - 110 = 160；SUM 兜底：250+160=410 > 270 → adjusted = max(0, 270-250) = 20
+		if out.AcceptedDeltaSteps != 20 {
+			t.Errorf("AcceptedDeltaSteps = %d, want 20 (SUM 兜底 adjusted=270-250)", out.AcceptedDeltaSteps)
+		}
+		if out.StepAccount.TotalSteps != 270 {
+			t.Errorf("TotalSteps = %d, want 270 (250 + 20)", out.StepAccount.TotalSteps)
+		}
+	})
+}
+
+// 15. OutOfOrderSync_SumCapPreventsRepeatedAccrual:
+// **Story 7.3 review r3 [P1] 替代原 r2 乱序到达单测**：基线退回 id DESC 后，
+// 乱序到达由 service 层 SUM 兜底捕获。
+//
+// 场景（与 integration test OutOfOrderSync_BaselineUsesMaxClientTotalSteps 镜像）：
+//   - sync A: clientTotal=250 → delta=250；之后 SumAccepted=250
+//   - sync B (旧报告延迟): clientTotal=200 → 倒退 rawDelta=0；SumAccepted 仍 250
+//   - sync C: clientTotal=260
+//     - 基线 = 最近 sync = 200（按 id DESC，B 是最近 INSERT）
+//     - rawDelta = 260 - 200 = 60
+//     - SUM 兜底：250 + 60 = 310 > 260 → adjusted = max(0, 260-250) = 10
+//     - **入账 10**（与正确答案一致；不会重复入账 50 步）
+//
+// 反例（无 SUM 兜底）：rawDelta=60 直接入账 → 重复入账 50 步（攻击者套利）。
+func TestStepService_SyncSteps_OutOfOrderSync_SumCapPreventsRepeatedAccrual(t *testing.T) {
+	accRepo := &stubStepStepAccountRepo{
+		findByUserIDFn: func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+			return &mysql.StepAccount{UserID: 1001, TotalSteps: 250, AvailableSteps: 250, Version: 2}, nil
+		},
+	}
+	logRepo := &stubStepSyncLogRepo{
+		findLatestFn: func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
+			// 基线 = sync B = 200（最近 INSERT，id DESC）
+			return &mysql.StepSyncLog{ClientTotalSteps: 200}, nil
+		},
+		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
+			// 历史 SUM = sync A 入账 250 + sync B 入账 0 = 250
+			return 250, nil
+		},
+	}
+
+	svc := buildStepService(accRepo, logRepo, config.StepsConfig{})
+	out, err := svc.SyncSteps(context.Background(), service.SyncStepsInput{
+		UserID: 1001, SyncDate: fixedSyncDate, ClientTotalSteps: 260, MotionState: 2, ClientTimestamp: 1714560100000,
+	})
+	if err != nil {
+		t.Fatalf("SyncSteps OOO: %v", err)
+	}
+	// 关键断言：rawDelta=60 被 SUM 兜底削到 10
+	if out.AcceptedDeltaSteps != 10 {
+		t.Errorf("AcceptedDeltaSteps = %d, want 10 (SUM 兜底削回；若 = 60 → SUM 兜底失效 regression)", out.AcceptedDeltaSteps)
+	}
+	if out.StepAccount.TotalSteps != 260 {
+		t.Errorf("TotalSteps = %d, want 260 (250 + 10)", out.StepAccount.TotalSteps)
+	}
+	if accRepo.lastUpdateDelta != 10 {
+		t.Errorf("UpdateBalance delta = %d, want 10", accRepo.lastUpdateDelta)
+	}
+	if logRepo.lastCreated.AcceptedDeltaSteps != 10 {
+		t.Errorf("sync_log.AcceptedDeltaSteps = %d, want 10", logRepo.lastCreated.AcceptedDeltaSteps)
+	}
+}

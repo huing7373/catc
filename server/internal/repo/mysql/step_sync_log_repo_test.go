@@ -37,11 +37,12 @@ func TestStepSyncLogRepo_Create_HappyPath_GeneratesInsertSQL(t *testing.T) {
 
 // TestStepSyncLogRepo_FindLatestByUserAndDate_HappyPath:
 // SELECT * FROM `user_step_sync_logs` WHERE user_id=? AND sync_date=?
-// ORDER BY client_total_steps DESC, id DESC LIMIT 1
+// ORDER BY id DESC LIMIT 1
 // → 1 行 → 验证返回字段完整。
 //
-// **ORDER BY**（Story 7.3 review r2 [P1]）：基线必须按 max(client_total_steps)
-// 取，**不**按 INSERT 时序（id DESC）。详见 step_sync_log_repo.go interface doc。
+// **ORDER BY**（Story 7.3 review r3 [P1]）：基线 = 最近 INSERT（id DESC），乱序到达
+// 由 service 层 SUM 兜底处理。r2 用 client_total_steps DESC 在 HealthKit reset 场景
+// 下永久卡死，已退回。详见 step_sync_log_repo.go interface doc r1→r2→r3 决策史。
 func TestStepSyncLogRepo_FindLatestByUserAndDate_HappyPath(t *testing.T) {
 	gormDB, mock := newGormWithMock(t)
 	repo := NewStepSyncLogRepo(gormDB)
@@ -79,11 +80,19 @@ func TestStepSyncLogRepo_FindLatestByUserAndDate_HappyPath(t *testing.T) {
 	}
 }
 
-// TestStepSyncLogRepo_FindLatestByUserAndDate_OrderByClientTotalSteps_BaselineSQLAssertion:
-// 验证 SQL 包含 `ORDER BY client_total_steps DESC, id DESC`（Story 7.3 review r2
-// [P1]）。这是"乱序到达不破基线"的根因防护：sqlmock 用正则严格匹 SQL 文本，
-// regression 把 ORDER BY 改回 `id DESC` 时本 case 立刻挂。
-func TestStepSyncLogRepo_FindLatestByUserAndDate_OrderByClientTotalSteps_BaselineSQLAssertion(t *testing.T) {
+// TestStepSyncLogRepo_FindLatestByUserAndDate_OrderByIDDesc_BaselineSQLAssertion:
+// 验证 SQL 包含 `ORDER BY id DESC`（Story 7.3 review r3 [P1]）。
+//
+// **r1→r2→r3 决策史**：
+//   - r1 ORDER BY id DESC（最近 INSERT）—— 乱序场景重复入账
+//   - r2 ORDER BY client_total_steps DESC, id DESC（最大累计）—— HealthKit
+//     reset/correction 永久卡死
+//   - r3 退回 ORDER BY id DESC + service 层 SUM 兜底（详见 step_service.go
+//     SyncSteps 步骤 (3)）
+//
+// 本断言锁住"基线 = 最近 INSERT"语义，防 regression 改回 `client_total_steps DESC`。
+// 同时 service 层有专门 SUM 兜底单测覆盖乱序场景（step_service_test.go 14/15）。
+func TestStepSyncLogRepo_FindLatestByUserAndDate_OrderByIDDesc_BaselineSQLAssertion(t *testing.T) {
 	gormDB, mock := newGormWithMock(t)
 	repo := NewStepSyncLogRepo(gormDB)
 
@@ -93,8 +102,9 @@ func TestStepSyncLogRepo_FindLatestByUserAndDate_OrderByClientTotalSteps_Baselin
 		"accepted_delta_steps", "motion_state", "source", "client_ts", "created_at",
 	}).AddRow(101, 1001, syncDate, 250, 50, 2, 1, 1714560000000, time.Now())
 
-	// 关键 SQL 片段断言：必须包含 client_total_steps DESC（防 regression）
-	mock.ExpectQuery(regexp.QuoteMeta("ORDER BY client_total_steps DESC,")).
+	// 关键 SQL 片段断言：必须包含 ORDER BY `id` DESC（防 regression 改回 client_total_steps）
+	// GORM 会把列名 quote 成反引号；正则匹两种形式以兼容 GORM 版本差异。
+	mock.ExpectQuery("ORDER BY (`id`|id) DESC").
 		WillReturnRows(rows)
 
 	if _, err := repo.FindLatestByUserAndDate(context.Background(), 1001, syncDate); err != nil {
