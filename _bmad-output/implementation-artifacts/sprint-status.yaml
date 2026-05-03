@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-04-30 (story 37-14 done)
+# last_updated: 2026-05-03 (story 7-3 done)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -117,7 +117,7 @@ development_status:
   epic-7: in-progress
   7-1-接口契约最终化: done
   7-2-user_step_sync_logs-migration: done
-  7-3-post-steps-sync-接口-累计差值入账-service: review
+  7-3-post-steps-sync-接口-累计差值入账-service: done
   7-4-get-steps-account-接口: backlog
   7-5-dev-端点-post-dev-grant-steps: backlog
   epic-7-retrospective: optional
