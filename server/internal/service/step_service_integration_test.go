@@ -592,3 +592,58 @@ func TestStepServiceIntegration_KnownLimitation_TruncationPlusOutOfOrder_MayOver
 	// 总账校验：client 报的最高 = 12000；server 入账总额 = 9000（多算 2000）；这是 by-design known limitation
 	// 以换取 reset 修复正确。详见 lesson 文档。
 }
+
+// ============================================================
+// Story 7.4 AC6: GetAccount 单查 + sync 联动
+//
+// 验证：
+//  1. INSERT 非零 step_account → svc.GetAccount 返三档值正确独立读出
+//  2. 调一次 SyncSteps → step_account.total/available 各 +200
+//  3. 再 GetAccount → 三档值跟随更新（total / available 各 +200，consumed 不变）
+//
+// **不**测 NotFound 分支：理论不该发生（数据 invariant），单测已用 stub 覆盖；
+// 集成测试再造一次"故意不 INSERT step_account"成本 > 收益。
+// ============================================================
+func TestStepServiceIntegration_GetAccount_ReturnsLatestBalances(t *testing.T) {
+	svc, sqlDB, cleanup := buildStepServiceIntegration(t, config.StepsConfig{})
+	defer cleanup()
+
+	const userID = uint64(1)
+	insertUser(t, sqlDB, userID, "uid-step-get-1", "用户GET", "")
+	// 初始化为非零三档值，验证三个字段正确独立读出
+	insertStepAccount(t, sqlDB, userID, 500, 400, 100)
+
+	ctx := context.Background()
+
+	// 1. 初始查询 → 验三档值正确
+	out, err := svc.GetAccount(ctx, userID)
+	if err != nil {
+		t.Fatalf("GetAccount initial: %v", err)
+	}
+	if out == nil {
+		t.Fatal("out = nil, want non-nil")
+	}
+	if out.TotalSteps != 500 || out.AvailableSteps != 400 || out.ConsumedSteps != 100 {
+		t.Errorf("GetAccount initial: total=%d available=%d consumed=%d, want 500/400/100",
+			out.TotalSteps, out.AvailableSteps, out.ConsumedSteps)
+	}
+
+	// 2. 联动：sync 一次（clientTotal=200，首次同步当日 → delta=200）
+	const syncDate = "2026-05-01"
+	_, err = svc.SyncSteps(ctx, service.SyncStepsInput{
+		UserID: userID, SyncDate: syncDate, ClientTotalSteps: 200, MotionState: 2, ClientTimestamp: 1714560000000,
+	})
+	if err != nil {
+		t.Fatalf("SyncSteps: %v", err)
+	}
+
+	// 3. 再查 GetAccount → 三档值跟随更新（total / available +200；consumed 不变）
+	out2, err := svc.GetAccount(ctx, userID)
+	if err != nil {
+		t.Fatalf("GetAccount after sync: %v", err)
+	}
+	if out2.TotalSteps != 700 || out2.AvailableSteps != 600 || out2.ConsumedSteps != 100 {
+		t.Errorf("GetAccount after sync: total=%d available=%d consumed=%d, want 700/600/100",
+			out2.TotalSteps, out2.AvailableSteps, out2.ConsumedSteps)
+	}
+}

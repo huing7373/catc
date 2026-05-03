@@ -980,3 +980,151 @@ func TestStepService_NewStepService_ProdEnv_RejectsYAMLCapOverride(t *testing.T)
 		})
 	}
 }
+
+// ============================================================
+// Story 7.4: GetAccount 3 case（service 层单测，复用 stub repo + stub txMgr）
+//
+// 关键约束（详见 Story 7.4 AC4）：
+//   - NotFound → 1003 (ErrResourceNotFound)，**不**是 1009（V1 §6.2.6 钦定）
+//   - 复用 StepAccountBrief（home_service.go 已定义；不新建 GetAccountOutput）
+//   - 不调 stepSyncLogRepo（GET 不读 sync_log）—— stub 三个方法主动 t.Errorf
+//   - 不接事务（GET 纯读；stubStepTxMgr 仍需注入因 NewStepService 签名要求）
+// ============================================================
+
+// failOnSyncLogStub 返回一个 stubStepSyncLogRepo，其中三个查询方法被调用都会 t.Errorf（GET 不应触达 sync_log）。
+//
+// 与 7.3 stub 默认行为不同：7.3 的 stubStepSyncLogRepo 默认返回 ErrStepSyncLogNotFound 等"无害"值，
+// 让 SyncSteps case 不显式 set fn 也能跑过；本 helper 强制让"被调"=fail，更醒目地哨兵 GET 路径
+// 不应触达 sync_log（详见 step_service.go GetAccount godoc：「不调 stepSyncLogRepo」）。
+func failOnSyncLogStub(t *testing.T) *stubStepSyncLogRepo {
+	t.Helper()
+	return &stubStepSyncLogRepo{
+		findLatestFn: func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error) {
+			t.Errorf("GetAccount should NOT call FindLatestByUserAndDate")
+			return nil, mysql.ErrStepSyncLogNotFound
+		},
+		sumAcceptedFn: func(ctx context.Context, userID uint64, syncDate string) (int64, error) {
+			t.Errorf("GetAccount should NOT call SumAcceptedDeltaByUserAndDate")
+			return 0, nil
+		},
+		maxReportedFn: func(ctx context.Context, userID uint64, syncDate string) (uint64, error) {
+			t.Errorf("GetAccount should NOT call MaxClientTotalStepsByUserAndDate")
+			return 0, nil
+		},
+		createFn: func(ctx context.Context, log *mysql.StepSyncLog) error {
+			t.Errorf("GetAccount should NOT call Create (sync_log)")
+			return nil
+		},
+	}
+}
+
+// 1. HappyPath: stepAccountRepo.FindByUserID 返三档非零值 → service 返 *StepAccountBrief 完整透传
+func TestStepService_GetAccount_HappyPath_ReturnsThreeBalances(t *testing.T) {
+	accRepo := &stubStepStepAccountRepo{
+		findByUserIDFn: func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+			if userID != 1001 {
+				t.Errorf("FindByUserID userID = %d, want 1001 (透传校验)", userID)
+			}
+			return &mysql.StepAccount{
+				UserID: 1001, TotalSteps: 1140, AvailableSteps: 840, ConsumedSteps: 300, Version: 5,
+			}, nil
+		},
+	}
+	logRepo := failOnSyncLogStub(t)
+
+	svc := buildStepService(accRepo, logRepo, config.StepsConfig{})
+	out, err := svc.GetAccount(context.Background(), 1001)
+	if err != nil {
+		t.Fatalf("GetAccount: %v", err)
+	}
+	if out == nil {
+		t.Fatal("out = nil, want non-nil")
+	}
+	if out.TotalSteps != 1140 {
+		t.Errorf("TotalSteps = %d, want 1140", out.TotalSteps)
+	}
+	if out.AvailableSteps != 840 {
+		t.Errorf("AvailableSteps = %d, want 840", out.AvailableSteps)
+	}
+	if out.ConsumedSteps != 300 {
+		t.Errorf("ConsumedSteps = %d, want 300", out.ConsumedSteps)
+	}
+	// 哨兵：UpdateBalance 不应被调（GET 纯读）
+	if accRepo.updateCalls != 0 {
+		t.Errorf("UpdateBalance calls = %d, want 0 (GET 纯读)", accRepo.updateCalls)
+	}
+}
+
+// 2. AccountNotFound: stepAccountRepo.FindByUserID 返 ErrStepAccountNotFound → service 翻译为 1003
+//    （**非** 1009；V1 §6.2.6 钦定）
+func TestStepService_GetAccount_AccountNotFound_Returns1003(t *testing.T) {
+	accRepo := &stubStepStepAccountRepo{
+		findByUserIDFn: func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+			return nil, mysql.ErrStepAccountNotFound
+		},
+	}
+	logRepo := failOnSyncLogStub(t)
+
+	svc := buildStepService(accRepo, logRepo, config.StepsConfig{})
+	out, err := svc.GetAccount(context.Background(), 1001)
+	if out != nil {
+		t.Errorf("out = %+v, want nil on error path", out)
+	}
+	var appErr *apperror.AppError
+	if !stderrors.As(err, &appErr) {
+		t.Fatalf("err is not *AppError: %T (%v)", err, err)
+	}
+	if appErr.Code != apperror.ErrResourceNotFound {
+		t.Errorf("appErr.Code = %d, want %d (1003 ErrResourceNotFound)；若 = 1009 → 错把 NotFound 包成 ServiceBusy（违反 V1 §6.2.6）", appErr.Code, apperror.ErrResourceNotFound)
+	}
+	// err 链必须含 ErrStepAccountNotFound 哨兵（apperror.Wrap 应保留 cause）
+	if !stderrors.Is(err, mysql.ErrStepAccountNotFound) {
+		t.Errorf("err 链不含 ErrStepAccountNotFound; err = %v", err)
+	}
+}
+
+// 3. AllZero (新用户场景): stepAccountRepo.FindByUserID 返 0/0/0 → service 返 *StepAccountBrief{0,0,0}, err=nil
+//    （验证 0 不被误特殊处理为 NotFound）
+func TestStepService_GetAccount_AllZero_NewUser_ReturnsZeros(t *testing.T) {
+	accRepo := &stubStepStepAccountRepo{
+		findByUserIDFn: func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+			return &mysql.StepAccount{UserID: 1001, TotalSteps: 0, AvailableSteps: 0, ConsumedSteps: 0, Version: 0}, nil
+		},
+	}
+	logRepo := failOnSyncLogStub(t)
+
+	svc := buildStepService(accRepo, logRepo, config.StepsConfig{})
+	out, err := svc.GetAccount(context.Background(), 1001)
+	if err != nil {
+		t.Fatalf("GetAccount (all zero): %v", err)
+	}
+	if out == nil {
+		t.Fatal("out = nil, want non-nil (zero values 不应被误判为 NotFound)")
+	}
+	if out.TotalSteps != 0 || out.AvailableSteps != 0 || out.ConsumedSteps != 0 {
+		t.Errorf("out = %+v, want all zero", out)
+	}
+}
+
+// 4. RepoOtherDBError_Returns1009: 非 NotFound 的 DB error → 包成 1009
+func TestStepService_GetAccount_RepoOtherDBError_Returns1009(t *testing.T) {
+	dbErr := stderrors.New("simulated DB connection lost")
+	accRepo := &stubStepStepAccountRepo{
+		findByUserIDFn: func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+			return nil, dbErr
+		},
+	}
+	logRepo := failOnSyncLogStub(t)
+
+	svc := buildStepService(accRepo, logRepo, config.StepsConfig{})
+	out, err := svc.GetAccount(context.Background(), 1001)
+	if out != nil {
+		t.Errorf("out = %+v, want nil on DB error", out)
+	}
+	if got := apperror.Code(err); got != apperror.ErrServiceBusy {
+		t.Errorf("apperror.Code = %d, want %d (1009 非 NotFound 走 ServiceBusy)", got, apperror.ErrServiceBusy)
+	}
+	if !stderrors.Is(err, dbErr) {
+		t.Errorf("err 链不含 dbErr; err = %v", err)
+	}
+}

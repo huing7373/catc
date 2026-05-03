@@ -174,7 +174,8 @@ func NewRouter(deps Deps) *gin.Engine {
 			middleware.RateLimit(deps.RateLimitCfg, middleware.RateLimitByUserID),
 		)
 		authedGroup.GET("/home", homeHandler.LoadHome)
-		authedGroup.POST("/steps/sync", stepsHandler.PostSync) // Story 7.3 加
+		authedGroup.POST("/steps/sync", stepsHandler.PostSync)    // Story 7.3 加
+		authedGroup.GET("/steps/account", stepsHandler.GetAccount) // Story 7.4 加
 	}
 
 	return r

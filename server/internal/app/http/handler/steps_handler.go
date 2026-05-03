@@ -258,3 +258,57 @@ func postSyncResponseDTO(out *service.SyncStepsOutput) gin.H {
 		},
 	}
 }
+
+// GetAccount 处理 GET /api/v1/steps/account（Story 7.4）。
+//
+// 流程：
+//  1. 从 c.Get(UserIDKey) 拿 userID（auth 中间件已注入；不存在 → 1009 unreachable 兜底）
+//  2. 调 svc.GetAccount(ctx, userID) —— ctx = c.Request.Context()（**不**用 *gin.Context；ADR-0007 §2.2）
+//  3. 成功 → response.Success(c, dto, "ok")；失败 → c.Error(err) + return（middleware envelope）
+//
+// **不**做参数校验（GET 无 body / 无 query；userID 由 auth 中间件兜底）；与 home_handler.LoadHome 同模式。
+//
+// **不**直接调 response.Error 写 envelope（ADR-0006 单一 envelope 生产者；与 4.6 / 4.8 / 7.3 同模式）。
+func (h *StepsHandler) GetAccount(c *gin.Context) {
+	// 从 auth 中间件取 userID（与 home_handler.LoadHome / steps_handler.PostSync 同模式）
+	v, ok := c.Get(middleware.UserIDKey)
+	if !ok {
+		// unreachable: Auth 中间件挂在前；保险兜底走 1009
+		_ = c.Error(apperror.New(apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy]))
+		return
+	}
+	userID, ok := v.(uint64)
+	if !ok {
+		// unreachable: Auth 中间件 c.Set(UserIDKey, claims.UserID) 永远是 uint64
+		_ = c.Error(apperror.New(apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy]))
+		return
+	}
+
+	out, err := h.svc.GetAccount(c.Request.Context(), userID)
+	if err != nil {
+		_ = c.Error(err) // service 已 wrap *AppError；ErrorMappingMiddleware 写 envelope
+		return
+	}
+
+	response.Success(c, getAccountResponseDTO(out), "ok")
+}
+
+// getAccountResponseDTO 把 service 输出转成 V1 §6.2 wire 格式。
+//
+// **关键 schema 嵌套差异**（V1 §6.2 行 628 引用块钦定）：
+//   - §6.1 POST /steps/sync 响应：`data.stepAccount.{totalSteps, ...}`（**嵌套** stepAccount 子对象）
+//   - §6.2 GET /steps/account 响应：`data.{totalSteps, ...}`（**扁平**，无 stepAccount 子对象）
+//
+// 这两端不同设计的原因：§6.1 是"动作型"接口，data 还要并列 acceptedDeltaSteps 等动作返回值，
+// 故聚合 stepAccount 子对象避免与同级字段平铺混淆；§6.2 是"纯读型"接口，data 只含三档值，
+// 无嵌套必要。**本 helper 不能复用 postSyncResponseDTO**（嵌套结构不同）。
+//
+// 客户端 Codable 解析 V1 §6.2 行 628 已警告：StepsSyncResponse.data.stepAccount.* 与
+// StepsAccountResponse.data.* 是**两种结构**，必须分别解析。
+func getAccountResponseDTO(out *service.StepAccountBrief) gin.H {
+	return gin.H{
+		"totalSteps":     out.TotalSteps,
+		"availableSteps": out.AvailableSteps,
+		"consumedSteps":  out.ConsumedSteps,
+	}
+}

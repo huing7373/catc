@@ -23,11 +23,17 @@ import (
 // ============================================================
 
 type stubStepService struct {
-	syncStepsFn func(ctx context.Context, in service.SyncStepsInput) (*service.SyncStepsOutput, error)
+	syncStepsFn  func(ctx context.Context, in service.SyncStepsInput) (*service.SyncStepsOutput, error)
+	getAccountFn func(ctx context.Context, userID uint64) (*service.StepAccountBrief, error) // Story 7.4 加
 }
 
 func (s *stubStepService) SyncSteps(ctx context.Context, in service.SyncStepsInput) (*service.SyncStepsOutput, error) {
 	return s.syncStepsFn(ctx, in)
+}
+
+// GetAccount 实装（Story 7.4 加）。
+func (s *stubStepService) GetAccount(ctx context.Context, userID uint64) (*service.StepAccountBrief, error) {
+	return s.getAccountFn(ctx, userID)
 }
 
 // newStepsHandlerRouter 构造 handler test router。
@@ -49,6 +55,7 @@ func newStepsHandlerRouter(svc service.StepService, mockUserID *uint64) *gin.Eng
 	}
 	h := handler.NewStepsHandler(svc)
 	r.POST("/api/v1/steps/sync", h.PostSync)
+	r.GET("/api/v1/steps/account", h.GetAccount) // Story 7.4 加
 	return r
 }
 
@@ -601,5 +608,142 @@ func TestStepsHandler_PostSync_SyncDateRejectMessageContainsToleranceHint(t *tes
 	}
 	if !strings.Contains(env.Message, "范围") && !strings.Contains(env.Message, "天") {
 		t.Errorf("envelope.message = %q, 缺少范围/天 提示词（让 client 知道是窗口越界，不是格式错）", env.Message)
+	}
+}
+
+// ============================================================
+// Story 7.4: GetAccount 3 case
+//
+// 关键约束（详见 Story 7.4 AC5）：
+//   - HappyPath 必须断**扁平** schema（data.totalSteps 顶级；data.stepAccount 不存在）
+//     这是 V1 §6.2 行 628 钦定差异的核心断言点（区别于 §6.1 PostSync 的嵌套 schema）
+//   - 1003 case 验 HTTP 200 + envelope.code=1003（V1 §2.4 钦定业务错走 200）
+//   - MissingUserID case 用 mockUserID = nil → handler 走 unreachable 兜底 → 1009
+// ============================================================
+
+// 23. HappyPath_ReturnsFlatSchema:
+// 合法 GET → 200 + envelope.code=0 + data.{totalSteps, availableSteps, consumedSteps} **扁平**结构
+// **关键断言**：data.stepAccount 子对象不存在（区别于 PostSync 嵌套）
+func TestStepsHandler_GetAccount_HappyPath_ReturnsFlatSchema(t *testing.T) {
+	uid := uint64(1001)
+	svc := &stubStepService{
+		getAccountFn: func(ctx context.Context, userID uint64) (*service.StepAccountBrief, error) {
+			if userID != 1001 {
+				t.Errorf("svc.GetAccount userID = %d, want 1001 (透传校验)", userID)
+			}
+			return &service.StepAccountBrief{
+				TotalSteps: 1140, AvailableSteps: 840, ConsumedSteps: 300,
+			}, nil
+		},
+	}
+	r := newStepsHandlerRouter(svc, &uid)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/steps/account", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeStepsEnvelope(t, w.Body.Bytes())
+	if env.Code != 0 {
+		t.Errorf("envelope.code = %d, want 0", env.Code)
+	}
+	if env.Message != "ok" {
+		t.Errorf("envelope.message = %q, want ok", env.Message)
+	}
+
+	data, ok := env.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("envelope.data not object: %T", env.Data)
+	}
+	// **关键 AC8 #2 / #7**：扁平 schema —— data.totalSteps 顶级；**没有** data.stepAccount 子对象
+	// （V1 §6.2 行 628 钦定差异；区别于 §6.1 PostSync 的 data.stepAccount.totalSteps 嵌套结构）
+	if _, hasStepAccount := data["stepAccount"]; hasStepAccount {
+		t.Errorf("data.stepAccount 不应存在（V1 §6.2 钦定扁平 schema；嵌套是 §6.1 PostSync 的事）；data=%+v", data)
+	}
+	if ts, _ := data["totalSteps"].(float64); ts != 1140 {
+		t.Errorf("data.totalSteps = %v, want 1140 (顶级访问)", data["totalSteps"])
+	}
+	if as, _ := data["availableSteps"].(float64); as != 840 {
+		t.Errorf("data.availableSteps = %v, want 840 (顶级访问)", data["availableSteps"])
+	}
+	if cs, _ := data["consumedSteps"].(float64); cs != 300 {
+		t.Errorf("data.consumedSteps = %v, want 300 (顶级访问)", data["consumedSteps"])
+	}
+}
+
+// 24. ServiceReturns1003_ForwardsAsCode1003_HTTP200:
+// service 返 *AppError(ErrResourceNotFound, "资源不存在") → handler c.Error → middleware envelope code=1003
+// HTTP **200**（V1 §2.4 钦定业务错也走 HTTP 200，不是 4xx）
+func TestStepsHandler_GetAccount_ServiceReturns1003_ForwardsAsCode1003_HTTP200(t *testing.T) {
+	uid := uint64(1001)
+	svc := &stubStepService{
+		getAccountFn: func(ctx context.Context, userID uint64) (*service.StepAccountBrief, error) {
+			return nil, apperror.New(apperror.ErrResourceNotFound, apperror.DefaultMessages[apperror.ErrResourceNotFound])
+		},
+	}
+	r := newStepsHandlerRouter(svc, &uid)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/steps/account", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	// 业务码 1003 走 HTTP 200（V1 §2.4 钦定；只有 1009 走 500）
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (业务码 1003 走 200, V1 §2.4)", w.Code)
+	}
+	env := decodeStepsEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrResourceNotFound {
+		t.Errorf("envelope.code = %d, want %d (1003)", env.Code, apperror.ErrResourceNotFound)
+	}
+}
+
+// 25. MissingUserIDInContext_Returns1009:
+// 单测启动 router 时 mockUserID = nil（不注入 userID 到 c.Keys）→ handler 走 unreachable 兜底 → 1009
+func TestStepsHandler_GetAccount_MissingUserIDInContext_Returns1009(t *testing.T) {
+	svc := &stubStepService{
+		getAccountFn: func(ctx context.Context, userID uint64) (*service.StepAccountBrief, error) {
+			t.Errorf("service should NOT be called when userID missing")
+			return nil, nil
+		},
+	}
+	// mockUserID = nil → 不挂 mock auth middleware
+	r := newStepsHandlerRouter(svc, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/steps/account", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500 (1009 走 500; ADR-0006)", w.Code)
+	}
+	env := decodeStepsEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrServiceBusy {
+		t.Errorf("envelope.code = %d, want %d (1009)", env.Code, apperror.ErrServiceBusy)
+	}
+}
+
+// 26. ServiceReturnsBusyErr_Forwards1009:
+// service 返 ErrServiceBusy → envelope code=1009，HTTP 500（与 PostSync 同模式）
+func TestStepsHandler_GetAccount_ServiceReturnsBusyErr_Forwards1009(t *testing.T) {
+	uid := uint64(1001)
+	svc := &stubStepService{
+		getAccountFn: func(ctx context.Context, userID uint64) (*service.StepAccountBrief, error) {
+			return nil, apperror.New(apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+		},
+	}
+	r := newStepsHandlerRouter(svc, &uid)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/steps/account", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500 (1009 走 500)", w.Code)
+	}
+	env := decodeStepsEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrServiceBusy {
+		t.Errorf("envelope.code = %d, want %d", env.Code, apperror.ErrServiceBusy)
 	}
 }

@@ -63,6 +63,23 @@ type StepService interface {
 	//     apperror.Wrap(err, ErrServiceBusy, ...)（1009）
 	//   - 乐观锁失败 ErrStepAccountVersionMismatch → 包成 1009
 	SyncSteps(ctx context.Context, in SyncStepsInput) (*SyncStepsOutput, error)
+
+	// GetAccount 处理 GET /api/v1/steps/account 业务（Story 7.4）。
+	//
+	// 流程（V1 §6.2.4 + 数据库设计 §5.4）：
+	//  1. stepAccountRepo.FindByUserID(ctx, userID) → step_account（必有；登录初始化已建）
+	//  2. 拼装 StepAccountBrief 返回（三档值原样透传，无动态判定）
+	//
+	// 错误约定（ADR-0006 三层映射）：
+	//   - mysql.ErrStepAccountNotFound（理论不该发生 —— Story 4.6 五表事务必建一行）→
+	//     **包成 ErrResourceNotFound (1003)**（V1 §6.2.6 行 657 钦定 1003，**不**包成 1009 ——
+	//     即便是"理论不该发生"的数据 invariant 损坏，仍按 V1 钦定的错误码下发，让客户端
+	//     能区分"账户缺失"vs"DB 异常"，便于运维排查）
+	//   - 其他 DB 异常（连接断 / SQL 错 / 死锁等）→ 包成 ErrServiceBusy (1009)
+	//
+	// **不**接事务（纯读，与 home_service.LoadHome 同模式）；**不**接防作弊（GET 不写入）；
+	// **不**调 stepSyncLogRepo（账户值是 user_step_accounts 单表查询，**不**经 sync_log 重算）。
+	GetAccount(ctx context.Context, userID uint64) (*StepAccountBrief, error)
 }
 
 // SyncStepsInput 是 service 层 DTO（**不是** wire DTO；handler 转换）。
@@ -324,4 +341,38 @@ func (s *stepServiceImpl) SyncSteps(ctx context.Context, in SyncStepsInput) (*Sy
 		return nil, apperror.New(apperror.ErrStepSyncInvalid, apperror.DefaultMessages[apperror.ErrStepSyncInvalid])
 	}
 	return &out, nil
+}
+
+// GetAccount 实装：单表查询 user_step_accounts → StepAccountBrief。
+//
+// **关键**：account 必有（登录初始化已建）；查不到 = 数据 invariant 损坏 → 1003（V1 §6.2.6 钦定）。
+// 任何其他 DB 异常 → 1009 服务繁忙（连接断 / 死锁等运行期失败）。
+//
+// **复用 StepAccountBrief**（home_service.go 已定义）：节点 2 阶段 home_service.LoadHome
+// 已经把"账户三档值"抽象成 StepAccountBrief；本 service 直接复用，**不**新建 GetAccountOutput
+// 等同义类型（避免类型膨胀；与 7.3 SyncStepsOutput 嵌套 StepAccountBrief 同模式）。
+//
+// **返回 *StepAccountBrief 而非 StepAccountBrief**（指针类型）：与 7.3 SyncStepsOutput 同模式 ——
+// nil 表示 error 路径未拼装，调用方 handler 的 `if err != nil { return }` 短路；
+// 成功路径返回 &StepAccountBrief{...}。
+//
+// **NotFound vs LoadHome 的差异**：home_service.LoadHome 把 stepAccount NotFound 也包成 1009
+// （聚合接口"任一查询失败 → 1009 不部分降级"策略，避免主界面渲染异常）；本 service 是单查接口，
+// 1003 vs 1009 区分有运维价值（1003 = 数据 invariant 损坏，需查 4.6 firstTimeLogin 是否漏掉某用户；
+// 1009 = 运行期 DB 异常，需查 MySQL 健康状态）。详见 step_service_test.go 注释。
+func (s *stepServiceImpl) GetAccount(ctx context.Context, userID uint64) (*StepAccountBrief, error) {
+	account, err := s.stepAccountRepo.FindByUserID(ctx, userID)
+	if err != nil {
+		// 理论不该发生（Story 4.6 五表事务必建一行）→ 但 V1 §6.2.6 钦定 1003，按契约下发。
+		if stderrors.Is(err, mysql.ErrStepAccountNotFound) {
+			return nil, apperror.Wrap(err, apperror.ErrResourceNotFound, apperror.DefaultMessages[apperror.ErrResourceNotFound])
+		}
+		// 其他 DB 异常 → 1009
+		return nil, apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+	}
+	return &StepAccountBrief{
+		TotalSteps:     account.TotalSteps,
+		AvailableSteps: account.AvailableSteps,
+		ConsumedSteps:  account.ConsumedSteps,
+	}, nil
 }
