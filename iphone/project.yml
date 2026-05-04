@@ -21,6 +21,7 @@ targets:
       - PetApp
     dependencies:
       - sdk: HealthKit.framework  # Story 8.1 新增（节点 3 阶段 Health 接入）
+      - sdk: CoreMotion.framework  # Story 8.2 新增（节点 3 阶段 Motion 接入）
     info:
       path: PetApp/Resources/Info.plist
       properties:
@@ -51,6 +52,9 @@ targets:
         # 否则系统直接 crash（即使 simulator 也会抛 NSInvalidArgumentException）.
         # 写入路径仅 #if DEBUG 编译，但 Info.plist key 是 build-time 全局配置——保留即可.
         NSHealthUpdateUsageDescription: "PetApp 在测试模式下预置步数到 HealthKit。"
+        # Story 8.2: CoreMotion 运动状态识别权限弹窗的描述文案（系统首次申请时展示给用户）.
+        # iOS 必填；缺失会让 startActivityUpdates / queryActivityStarting 直接抛错或被系统拒绝.
+        NSMotionUsageDescription: "PetApp 识别你的运动状态，让小猫和你一起活动。"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zhuming.pet.app
