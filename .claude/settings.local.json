@@ -73,7 +73,21 @@
       "Bash(bash --version)",
       "Bash(bash iphone/scripts/check_a11y_coverage.sh --self-test)",
       "Bash(curl -s http://127.0.0.1:8080/ping)",
-      "Bash(curl -s http://127.0.0.1:8080/version)"
+      "Bash(curl -s http://127.0.0.1:8080/version)",
+      "WebFetch(domain:github.com)",
+      "Bash(claude mcp *)",
+      "Bash(brew --version)",
+      "Bash(brew tap *)",
+      "Bash(brew install *)",
+      "Bash(brew list *)",
+      "WebFetch(domain:pypi.org)",
+      "Bash(pipx install *)",
+      "Bash(idb list-targets *)",
+      "mcp__ios-simulator__open_simulator",
+      "mcp__ios-simulator__install_app",
+      "mcp__ios-simulator__launch_app",
+      "mcp__ios-simulator__ui_view",
+      "mcp__ios-simulator__screenshot"
     ],
     "deny": [
       "Bash(rm -rf:*)",
