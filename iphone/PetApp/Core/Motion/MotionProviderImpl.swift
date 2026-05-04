@@ -12,6 +12,17 @@
 // 重要（与 Story 8.1 round 1 lesson 同精神）:
 // NSLock 区间内**禁止** await——任何 lock.lock()/lock.unlock() 必须在同一同步段内闭合，
 // 防 Swift 6 strict concurrency error（actor reentrancy + lock cross-suspension）.
+//
+// 重要（review round 3 P2 — stop/callback race full close）:
+// CoreMotion handler 在 OperationQueue.main 上 dispatch 后，必须在 NSLock 持有期间**同步**调用 user handler；
+// 否则 "check generation in lock → unlock → invoke" 之间存在间隙，stopUpdates 在此间隙跑完会让一个本应被丢弃的
+// callback 仍 invoke user handler（违反"stopUpdates 返回后保证不再 fire"的契约）.
+//
+// 约束：user handler **禁止** 在其闭包内再调 startUpdates() / stopUpdates()——NSLock 不可重入，会死锁.
+// 调用方需保证 handler 是轻量同步操作（写 @Published / @State / array.append 等），不在 handler 内做长耗时 IO 或锁等待.
+// 预期合规调用点（Story 8.4+）：
+//  - HomeViewModel.handleMotionUpdate（仅 store latest activity 到 @Published）
+//  - debug probe view（仅 print）.
 
 import Foundation
 import CoreMotion  // 必须 import；framework 由 project.yml 显式声明（AC3）
@@ -82,15 +93,21 @@ public final class MotionProviderImpl: MotionProvider, @unchecked Sendable {
         // OperationQueue.main 让 callback 也在 main，与 SwiftUI 状态更新对齐.
         manager.startActivityUpdates(to: OperationQueue.main) { [weak self] activity in
             guard let self, let activity else { return }
-            // lock 内 check generation 一致才 forward——防 stop/restart race（review round 1 P2）.
-            // generation 不等于 myGen 说明自本次 startActivityUpdates 注册之后已经发生过 stop（或 stop+restart），
-            // 此 callback 就是"上一代"已 enqueue 的 stale event，**必须丢弃**，不能让它流入当前 handler.
+            // lock 内 check generation 一致 + **同步** invoke user handler——防 stop/restart race（review round 3 P2）.
+            //
+            // 关键：generation check 与 user handler invoke **必须**在同一 lock 持有段内完成——
+            // 如果 unlock 后再 invoke，stopUpdates 可能在 unlock 与 invoke 之间跑完，导致 "stopUpdates 返回后
+            // 仍有一个 callback 抵达 user handler" 的契约违反.
+            //
+            // 代价：user handler 阻塞 lock 期间所有其他 start/stop——但 handler 文档约束为轻量同步操作
+            // （Story 8.4 HomeViewModel store @Published；debug probe 仅 print），sub-microsecond 级别可接受.
+            //
+            // 死锁规避：user handler **禁止**在闭包内调 startUpdates() / stopUpdates()（NSLock 不可重入）.
             self.lock.lock()
+            defer { self.lock.unlock() }
             guard self.generation == myGen, let captured = self.currentHandler else {
-                self.lock.unlock()
                 return
             }
-            self.lock.unlock()
             captured(activity)
         }
     }
