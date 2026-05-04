@@ -73,6 +73,15 @@ public final class HealthProviderImpl: HealthProvider, @unchecked Sendable {
 
         // 每次都重新 query HK（不缓存）——HK 本身廉价，缓存会让同日 sync 持续读到陈旧值.
         // 详见 docs/lessons/2026-05-04-debug-seed-vs-probe-await-coupling.md Lesson 2.
+        //
+        // ⚠️ 关于 `.strictStartDate` 单独使用而非 `[.strictStartDate, .strictEndDate]`（codex r3 [P2] defer）:
+        // - 跨午夜 sample（罕见的 vendor batched 写入，如 23:59→00:01）会**整段归到起始日**，
+        //   理论上前一日 overcount + 后一日 undercount.
+        // - 但 codex 建议的 `[.strictStartDate, .strictEndDate]` 反而**完全丢弃**跨午夜 sample，更糟.
+        // - Apple 钦定的 prorate 方案是 `HKStatisticsCollectionQuery` + daily anchored interval（按时间比例自动拆分），
+        //   但那是 Story 8.3/8.5 步数同步业务级别的重写，超出本 story（probe-level read API）scope.
+        // - HKQuantitySample stepCount 在实践中通常分钟级 sample 且不跨午夜；trade-off 接受.
+        // - 详见 docs/lessons/2026-05-04-healthkit-strictstartdate-cross-midnight-tradeoff.md.
         let predicate = HKQuery.predicateForSamples(withStart: dayStart, end: dayEnd, options: .strictStartDate)
         let value: Int = try await withCheckedThrowingContinuation { continuation in
             let query = HKStatisticsQuery(
