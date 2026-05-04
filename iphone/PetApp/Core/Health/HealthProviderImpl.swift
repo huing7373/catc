@@ -82,7 +82,18 @@ public final class HealthProviderImpl: HealthProvider, @unchecked Sendable {
         //   但那是 Story 8.3/8.5 步数同步业务级别的重写，超出本 story（probe-level read API）scope.
         // - HKQuantitySample stepCount 在实践中通常分钟级 sample 且不跨午夜；trade-off 接受.
         // - 详见 docs/lessons/2026-05-04-healthkit-strictstartdate-cross-midnight-tradeoff.md.
-        let predicate = HKQuery.predicateForSamples(withStart: dayStart, end: dayEnd, options: .strictStartDate)
+        //
+        // ⚠️ endDate clamp 到 `min(now, dayEnd)`（codex r4 [P2] fix）:
+        // - 当 date == 今天 时，dayEnd 是次日 0 点（未来时刻）；任何 future-timestamp sample
+        //   （manual entries / 本仓 debug seed 11:00 写入）会在早晨读时被提前计入，导致 inflated read.
+        // - 反例：debug seed 在 09:00 启动时把 5000 步打在 11:00；09:05 probe-read 用 dayEnd 会读到 5000
+        //   而真实"截至 09:05 的累计"应是 0.
+        // - Story 8.5 `/steps/sync` 也基于此 API → 不 clamp 会上传通胀步数.
+        // - 仅当 date == 今天 时 clamp；历史日的 dayEnd 早已 ≤ now，min 不影响结果.
+        // - 与 r3 startDate 端的归属 trade-off 互不冲突——窗口边界两端各有独立坑，r3 defer / r4 fix.
+        let now = Date()
+        let endDate = min(now, dayEnd)
+        let predicate = HKQuery.predicateForSamples(withStart: dayStart, end: endDate, options: .strictStartDate)
         let value: Int = try await withCheckedThrowingContinuation { continuation in
             let query = HKStatisticsQuery(
                 quantityType: stepCountType,

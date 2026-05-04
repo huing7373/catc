@@ -142,3 +142,4 @@
 | 2026-05-04 | [DEBUG seed 必须串到 probe `.task` 里 await + HK 当日缓存是反优化](2026-05-04-debug-seed-vs-probe-await-coupling.md) | 2 | testing / concurrency / architecture | `<pending>` |
 | 2026-05-04 | [HK read 授权必须 probe-read 推断 + UITest 0 是合法 fallback + preseed flag 不能只在 probe 路径生效](2026-05-04-healthkit-read-auth-and-preseed-flag-non-probe.md) | 3 | architecture / testing / api-contract | `<pending>` |
 | 2026-05-04 | [HealthKit `.strictStartDate` 跨午夜 sample 的 trade-off（defer 而非 codex 钦定 fix）](2026-05-04-healthkit-strictstartdate-cross-midnight-tradeoff.md) | 1 | architecture | `<pending>` |
+| 2026-05-04 | [HealthKit 当日窗口的 endDate 必须 clamp 到 now，不能用次日 0 点](2026-05-04-healthkit-today-enddate-clamp-to-now.md) | 1 | other (correctness) | `<pending>` |
