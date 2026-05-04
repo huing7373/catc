@@ -139,3 +139,4 @@
 | 2026-05-03 | [步数 sync 第三层防御：截断 + 乱序组合下 SUM 兜底仍漏，需叠加 max-reported clamp](2026-05-03-step-sync-truncation-plus-ooo-needs-max-reported-clamp.md) | 1 | architecture | `9ba23b0` |
 | 2026-05-04 | [步数 sync r6：reset 与"截断+乱序"二选一的产品权衡 + prod 配置覆盖必须靠 env var 强制](2026-05-04-step-sync-r6-reset-vs-ooo-tradeoff-and-prod-env-gate.md) | 2 | architecture / config | `be64bc3` |
 | 2026-05-03 | [信任客户端 syncDate 的 anti-cheat 漏洞 + ±N 天容忍窗口的 trade-off](2026-05-03-step-sync-syncdate-rotation-attack-tolerance-window.md) | 2 | security / docs | `bf876ba` |
+| 2026-05-04 | [DEBUG seed 必须串到 probe `.task` 里 await + HK 当日缓存是反优化](2026-05-04-debug-seed-vs-probe-await-coupling.md) | 2 | testing / concurrency / architecture | `<pending>` |

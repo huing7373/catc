@@ -64,6 +64,13 @@ public final class AppContainer: ObservableObject {
     /// 解 chicken-and-egg：container init 时 stateMachine 还不存在；sink 让 handler 可 late-bind.
     public let unauthorizedHandlerSink: UnauthorizedHandlerSink
 
+    /// Story 8.1: HealthProvider 实例.
+    /// 节点 3 阶段（Story 8.1～8.5）逐步 wire：
+    /// - 8.1（本 story）：仅声明 + init 默认实例化为 HealthProviderImpl；当前无 caller，HomeViewModel 不消费.
+    /// - 8.5：StepSyncTriggerService 通过 container.healthProvider 注入；SyncStepsUseCase 调 readDailyTotalSteps.
+    /// 测试场景通过未来追加的 init 重载注入 HealthProviderMock（YAGNI：本 story 不预留 init 参数；Story 8.5 落地时再加）.
+    public let healthProvider: HealthProvider
+
     /// 默认 init：用 `APIClient(baseURL:, keychainStore:)` 构造默认 client。
     /// baseURL 来源优先级：Info.plist[`PetAppBaseURL`] → fallback `http://localhost:8080`。
     /// 不含 `/api/v1` 前缀（host-only baseURL 决策，见 Story 2.5 Dev Note #1）。
@@ -118,6 +125,9 @@ public final class AppContainer: ObservableObject {
         // ADR-0008 v2 / Story 0008-impl-1: sink 默认值是空 handler 的实例 —— 测试中传 mock APIClient
         // 时通常不会触发 401 cold-start 路径，sink 没人调；如需验证可 inject 自定义 sink.
         self.unauthorizedHandlerSink = unauthorizedHandlerSink
+        // Story 8.1: HealthProvider 默认实例化为 HealthProviderImpl（HKHealthStore + HKStatisticsQuery 真接入）；
+        // 测试场景由未来 Story 8.5 落地的 init(healthProvider:) 重载注入 HealthProviderMock.
+        self.healthProvider = HealthProviderImpl()
     }
 
     /// 解析默认 baseURL：从给定 bundle 的 Info.plist 读 `PetAppBaseURL`，否则回退到 fallback。

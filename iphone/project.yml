@@ -19,6 +19,8 @@ targets:
     platform: iOS
     sources:
       - PetApp
+    dependencies:
+      - sdk: HealthKit.framework  # Story 8.1 新增（节点 3 阶段 Health 接入）
     info:
       path: PetApp/Resources/Info.plist
       properties:
@@ -41,6 +43,14 @@ targets:
         # 详见 docs/lessons/2026-04-26-ios-ats-cleartext-http.md
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        # Story 8.1：HealthKit 步数读取权限弹窗的描述文案（系统首次申请时展示给用户）.
+        # iOS 必填；缺失会让 requestAuthorization 直接抛错（HKError.errorAuthorizationNotDetermined）.
+        NSHealthShareUsageDescription: "PetApp 读取你的步数，让小猫和你一起活动。"
+        # Story 8.1 AC7：DEBUG-only 集成测试 HealthKitDevSeedUseCase 通过 HKHealthStore.save
+        # 写入步数 sample；调 requestAuthorization(toShare:) 必须配 NSHealthUpdateUsageDescription
+        # 否则系统直接 crash（即使 simulator 也会抛 NSInvalidArgumentException）.
+        # 写入路径仅 #if DEBUG 编译，但 Info.plist key 是 build-time 全局配置——保留即可.
+        NSHealthUpdateUsageDescription: "PetApp 在测试模式下预置步数到 HealthKit。"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zhuming.pet.app

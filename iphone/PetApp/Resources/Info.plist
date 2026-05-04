@@ -27,6 +27,10 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSHealthShareUsageDescription</key>
+	<string>PetApp 读取你的步数，让小猫和你一起活动。</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>PetApp 在测试模式下预置步数到 HealthKit。</string>
 	<key>PetAppBaseURL</key>
 	<string>http://localhost:8080</string>
 	<key>UIApplicationSceneManifest</key>
