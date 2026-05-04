@@ -144,6 +144,6 @@
 | 2026-05-04 | [HealthKit `.strictStartDate` 跨午夜 sample 的 trade-off（defer 而非 codex 钦定 fix）](2026-05-04-healthkit-strictstartdate-cross-midnight-tradeoff.md) | 1 | architecture | `61f6518` |
 | 2026-05-04 | [HealthKit 当日窗口的 endDate 必须 clamp 到 now，不能用次日 0 点](2026-05-04-healthkit-today-enddate-clamp-to-now.md) | 1 | other (correctness) | `7d7b1b7` |
 | 2026-05-04 | [HealthKit dev-seed sample 必须落在过去（与读端 endDate clamp 配套）](2026-05-04-healthkit-preseed-sample-must-be-past-dated.md) | 1 | testing | `9b55cc2` |
-| 2026-05-04 | [MotionProvider stop/restart 的 stale callback 必须用 generation token 拦截 + UI test 不能把 (waiting) 占位当 PASS](2026-05-04-motion-stop-restart-stale-callback-race.md) | 2 | architecture / concurrency / testing | `<pending>` |
-| 2026-05-04 | [MotionProvider probe view 必须显式处理 deny 路径 + UI 集成测试不能依赖 simulator 自发 emit motion event](2026-05-04-motion-probe-deny-path-and-subscribed-marker.md) | 2 | error-handling / testing | `<pending>` |
-| 2026-05-04 | [CoreMotion subscribe/stop 契约：handler invoke 必须与 generation check 共享同一锁段](2026-05-04-motion-handler-invoke-must-be-in-lock.md) | 1 | architecture / concurrency | `<pending>` |
+| 2026-05-04 | [MotionProvider stop/restart 的 stale callback 必须用 generation token 拦截 + UI test 不能把 (waiting) 占位当 PASS](2026-05-04-motion-stop-restart-stale-callback-race.md) | 2 | architecture / concurrency / testing | `4907398` |
+| 2026-05-04 | [MotionProvider probe view 必须显式处理 deny 路径 + UI 集成测试不能依赖 simulator 自发 emit motion event](2026-05-04-motion-probe-deny-path-and-subscribed-marker.md) | 2 | error-handling / testing | `504ba40` |
+| 2026-05-04 | [CoreMotion subscribe/stop 契约：handler invoke 必须与 generation check 共享同一锁段](2026-05-04-motion-handler-invoke-must-be-in-lock.md) | 1 | architecture / concurrency | `d875b7d` |

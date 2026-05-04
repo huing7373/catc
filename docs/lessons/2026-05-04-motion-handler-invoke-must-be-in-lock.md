@@ -2,7 +2,7 @@
 date: 2026-05-04
 source_review: codex review round 3 — /tmp/epic-loop-review-8-2-r3.md
 story: 8-2-coremotion-接入
-commit: <pending>
+commit: d875b7d
 lesson_count: 1
 ---
 

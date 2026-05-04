@@ -2,7 +2,7 @@
 date: 2026-05-04
 source_review: codex review (epic-loop round 2) — /tmp/epic-loop-review-8-2-r2.md
 story: 8-2-coremotion-接入
-commit: <pending>
+commit: 504ba40
 lesson_count: 2
 ---
 
