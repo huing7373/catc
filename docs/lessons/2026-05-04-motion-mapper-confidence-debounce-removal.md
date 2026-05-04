@@ -2,7 +2,7 @@
 date: 2026-05-04
 source_review: codex /tmp/epic-loop-review-8-3-r1.md (round 1)
 story: 8-3-运动状态机映射
-commit: <pending>
+commit: a0d869e
 lesson_count: 1
 ---
 
