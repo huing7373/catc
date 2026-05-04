@@ -80,15 +80,26 @@ final class HealthProviderIntegrationTests: XCTestCase {
             "lastResultLabel='\(lastResultLabel)', lastErrorLabel='\(lastErrorLabel)'"
         )
 
-        // 如果 result label 是数字（happy path），验证 >= 5000；
-        // 如果是 error path，记录 simulator HK sandbox 状态作为 lesson.
+        // result label 三态（codex r2 [P1] fix——AC7 红线钦定 0 也是合法 sandbox fallback）：
+        //   1) >= 5000：happy path（HK seed 写入成功 + read 拿到累计步数）
+        //   2) == 0：sandbox-limited path——HK seed 未生效 / read 已授权但本日无 sample，
+        //      路径 wired up，视作 PASS（AC7 红线）
+        //   3) error path（resultLabel == "-" + errorLabel 非空）：HK 拒授权或系统错误，
+        //      路径 wired up，视作 PASS（AC7 红线）
         if lastResultLabel != "-", let actual = Int(lastResultLabel) {
-            XCTAssertGreaterThanOrEqual(
-                actual, 5000,
-                "happy path 期望 >= 5000；实际 \(actual)"
-            )
+            if actual == 0 {
+                // sandbox-limited path 的数值表达：probe view read 成功但拿到 0.
+                // 不强求 >= 5000；记录为 lesson，本 case 仍视作 PASS.
+                print("INFO: simulator HealthKit sandbox 已授权但 read 返 0（seed 未生效或 HK 不返本进程内 sample）" +
+                      "——已知坑（详见 story 8.1 AC7 红线）；本 case 视作 PASS（路径 wired up）.")
+            } else {
+                XCTAssertGreaterThanOrEqual(
+                    actual, 5000,
+                    "happy path（result>0）期望 >= 5000；实际 \(actual)"
+                )
+            }
         } else {
-            // sandbox-limited 路径：probe wired up 但 HK 拒授权——视作 PASS（AC7 钦定 fallback）
+            // error path：resultLabel 仍是 "-" 且 errorLabel 必须非空表明 catch 路径走过.
             XCTAssertFalse(
                 lastErrorLabel.isEmpty,
                 "errorLabel 必须有值表明 readDailyTotalSteps 走 catch；当前空 = path 未走通"

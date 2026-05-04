@@ -140,3 +140,4 @@
 | 2026-05-04 | [步数 sync r6：reset 与"截断+乱序"二选一的产品权衡 + prod 配置覆盖必须靠 env var 强制](2026-05-04-step-sync-r6-reset-vs-ooo-tradeoff-and-prod-env-gate.md) | 2 | architecture / config | `be64bc3` |
 | 2026-05-03 | [信任客户端 syncDate 的 anti-cheat 漏洞 + ±N 天容忍窗口的 trade-off](2026-05-03-step-sync-syncdate-rotation-attack-tolerance-window.md) | 2 | security / docs | `bf876ba` |
 | 2026-05-04 | [DEBUG seed 必须串到 probe `.task` 里 await + HK 当日缓存是反优化](2026-05-04-debug-seed-vs-probe-await-coupling.md) | 2 | testing / concurrency / architecture | `<pending>` |
+| 2026-05-04 | [HK read 授权必须 probe-read 推断 + UITest 0 是合法 fallback + preseed flag 不能只在 probe 路径生效](2026-05-04-healthkit-read-auth-and-preseed-flag-non-probe.md) | 3 | architecture / testing / api-contract | `<pending>` |

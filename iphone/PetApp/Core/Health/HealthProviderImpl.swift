@@ -23,17 +23,36 @@ public final class HealthProviderImpl: HealthProvider, @unchecked Sendable {
         guard HKHealthStore.isHealthDataAvailable() else {
             throw HealthProviderError.healthDataNotAvailable
         }
-        return try await withCheckedThrowingContinuation { continuation in
-            // requestAuthorization 即使用户拒绝也返回 success=true（Apple 故意防探测）；
-            // 真实拒绝在后续 readDailyTotalSteps 时通过 errorAuthorizationDenied 暴露.
-            // 故此处仅检测 system error（如 HealthKit 服务不可达），不视 success=true 为"已授权".
-            healthStore.requestAuthorization(toShare: [], read: [stepCountType]) { success, error in
+
+        // Step 1: 走原始 HKHealthStore.requestAuthorization 完成系统弹窗（或模拟器自动授权）.
+        //
+        // ⚠️ Apple 钦定的隐私契约：requestAuthorization 即使用户拒绝 read 权限也返回 `success == true`，
+        // `authorizationStatus(for:)` 对 read 类型同样故意返回 `.sharingDenied` 防外部探测真实授权.
+        // 详见 https://developer.apple.com/documentation/healthkit/protecting_user_privacy
+        // 因此 success 自身**不**是"已授权"信号——必须用 probe-read heuristic 推断（Step 2）.
+        let _: Void = try await withCheckedThrowingContinuation { continuation in
+            healthStore.requestAuthorization(toShare: [], read: [stepCountType]) { _, error in
                 if let nsError = error as NSError? {
                     continuation.resume(throwing: HealthProviderError.systemFailure(underlying: nsError))
                 } else {
-                    continuation.resume(returning: success)
+                    continuation.resume(returning: ())
                 }
             }
+        }
+
+        // Step 2: probe-read 当日步数 → 拿真实授权信号.
+        //   - HK 抛 `errorAuthorizationDenied` → readDailyTotalSteps throw `.permissionDenied` → 返 false
+        //   - 其他错误（systemFailure / healthDataNotAvailable）→ 视为真错往上抛
+        //   - 成功（任意 Int 返回值，包括 0）→ 视为已授权 → 返 true
+        //     （0 在已授权但当日无 sample 时合法；这与 read deny 在数值上无法区分，
+        //     但 HK 在 read deny 时**抛错**而非返 0，所以可靠）
+        do {
+            _ = try await readDailyTotalSteps(date: Date())
+            return true
+        } catch HealthProviderError.permissionDenied {
+            return false
+        } catch {
+            throw error
         }
     }
 

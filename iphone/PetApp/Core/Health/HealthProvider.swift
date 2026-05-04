@@ -19,10 +19,13 @@ public protocol HealthProvider: Sendable {
     /// - Returns: true 表示用户授权 / 已授权；false 表示用户拒绝.
     /// - Throws: `HealthProviderError.healthDataNotAvailable` 当设备不支持 HealthKit
     ///           （iPad 在某些版本 / 模拟器某些机型）；其他 OS 错误 wrap 为 `.systemFailure(underlying:)`.
-    /// - Note: HealthKit 拒绝授权的语义特殊 —— 即使用户拒绝，系统也返回 `success(true)`
-    ///         但实际查询返回 0 / 无数据；本协议**不**用 HKAuthorizationStatus 探测真实是否授权
-    ///         （Apple 文档明示 `authorizationStatus(for:)` 对 read 权限故意返回 sharingDenied 防探测），
-    ///         改在 readDailyTotalSteps 自然失败时抛 `.permissionDenied`.
+    /// - Note: HealthKit read 隐私契约——`HKHealthStore.requestAuthorization` 即使用户拒绝也返
+    ///         `success == true`，`authorizationStatus(for:)` 对 read 类型亦故意返 `.sharingDenied`
+    ///         防外部探测；故 HealthProviderImpl 实装在 requestAuthorization 完成后**额外做一次
+    ///         probe-read**（试读当日步数）：HK 抛 `errorAuthorizationDenied` → 返 false；
+    ///         任何整数（含 0）成功返回 → 返 true. 0 在已授权但当日无 sample 时合法，
+    ///         与 read deny 数值不可区分，但 HK 钦定 deny 走"抛错"而非"返 0"，所以可靠.
+    ///         详见 docs/lessons/2026-05-04-healthkit-read-auth-must-probe-read.md.
     func requestPermission() async throws -> Bool
 
     /// 读指定日期（按本机本地时区起止）的累计步数总和.
