@@ -139,8 +139,8 @@
 | 2026-05-03 | [步数 sync 第三层防御：截断 + 乱序组合下 SUM 兜底仍漏，需叠加 max-reported clamp](2026-05-03-step-sync-truncation-plus-ooo-needs-max-reported-clamp.md) | 1 | architecture | `9ba23b0` |
 | 2026-05-04 | [步数 sync r6：reset 与"截断+乱序"二选一的产品权衡 + prod 配置覆盖必须靠 env var 强制](2026-05-04-step-sync-r6-reset-vs-ooo-tradeoff-and-prod-env-gate.md) | 2 | architecture / config | `be64bc3` |
 | 2026-05-03 | [信任客户端 syncDate 的 anti-cheat 漏洞 + ±N 天容忍窗口的 trade-off](2026-05-03-step-sync-syncdate-rotation-attack-tolerance-window.md) | 2 | security / docs | `bf876ba` |
-| 2026-05-04 | [DEBUG seed 必须串到 probe `.task` 里 await + HK 当日缓存是反优化](2026-05-04-debug-seed-vs-probe-await-coupling.md) | 2 | testing / concurrency / architecture | `<pending>` |
-| 2026-05-04 | [HK read 授权必须 probe-read 推断 + UITest 0 是合法 fallback + preseed flag 不能只在 probe 路径生效](2026-05-04-healthkit-read-auth-and-preseed-flag-non-probe.md) | 3 | architecture / testing / api-contract | `<pending>` |
-| 2026-05-04 | [HealthKit `.strictStartDate` 跨午夜 sample 的 trade-off（defer 而非 codex 钦定 fix）](2026-05-04-healthkit-strictstartdate-cross-midnight-tradeoff.md) | 1 | architecture | `<pending>` |
-| 2026-05-04 | [HealthKit 当日窗口的 endDate 必须 clamp 到 now，不能用次日 0 点](2026-05-04-healthkit-today-enddate-clamp-to-now.md) | 1 | other (correctness) | `<pending>` |
-| 2026-05-04 | [HealthKit dev-seed sample 必须落在过去（与读端 endDate clamp 配套）](2026-05-04-healthkit-preseed-sample-must-be-past-dated.md) | 1 | testing | `<pending>` |
+| 2026-05-04 | [DEBUG seed 必须串到 probe `.task` 里 await + HK 当日缓存是反优化](2026-05-04-debug-seed-vs-probe-await-coupling.md) | 2 | testing / concurrency / architecture | `55f5c4a` |
+| 2026-05-04 | [HK read 授权必须 probe-read 推断 + UITest 0 是合法 fallback + preseed flag 不能只在 probe 路径生效](2026-05-04-healthkit-read-auth-and-preseed-flag-non-probe.md) | 3 | architecture / testing / api-contract | `851c87b` |
+| 2026-05-04 | [HealthKit `.strictStartDate` 跨午夜 sample 的 trade-off（defer 而非 codex 钦定 fix）](2026-05-04-healthkit-strictstartdate-cross-midnight-tradeoff.md) | 1 | architecture | `61f6518` |
+| 2026-05-04 | [HealthKit 当日窗口的 endDate 必须 clamp 到 now，不能用次日 0 点](2026-05-04-healthkit-today-enddate-clamp-to-now.md) | 1 | other (correctness) | `7d7b1b7` |
+| 2026-05-04 | [HealthKit dev-seed sample 必须落在过去（与读端 endDate clamp 配套）](2026-05-04-healthkit-preseed-sample-must-be-past-dated.md) | 1 | testing | `9b55cc2` |

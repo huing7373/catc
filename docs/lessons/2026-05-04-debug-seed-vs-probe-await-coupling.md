@@ -2,7 +2,7 @@
 date: 2026-05-04
 source_review: codex review of Story 8.1 r1 (`/tmp/epic-loop-review-8-1-r1.md`)
 story: 8-1-healthkit-接入
-commit: <pending>
+commit: 55f5c4a
 lesson_count: 2
 ---
 

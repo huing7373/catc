@@ -2,7 +2,7 @@
 date: 2026-05-04
 source_review: codex review round 5 (file: /tmp/epic-loop-review-8-1-r5.md)
 story: 8-1-healthkit-接入
-commit: <pending>
+commit: 9b55cc2
 lesson_count: 1
 review_round: 5 of 5 (final round, no round 6)
 related_lessons:
