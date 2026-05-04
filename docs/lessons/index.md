@@ -147,3 +147,4 @@
 | 2026-05-04 | [MotionProvider stop/restart 的 stale callback 必须用 generation token 拦截 + UI test 不能把 (waiting) 占位当 PASS](2026-05-04-motion-stop-restart-stale-callback-race.md) | 2 | architecture / concurrency / testing | `4907398` |
 | 2026-05-04 | [MotionProvider probe view 必须显式处理 deny 路径 + UI 集成测试不能依赖 simulator 自发 emit motion event](2026-05-04-motion-probe-deny-path-and-subscribed-marker.md) | 2 | error-handling / testing | `504ba40` |
 | 2026-05-04 | [CoreMotion subscribe/stop 契约：handler invoke 必须与 generation check 共享同一锁段](2026-05-04-motion-handler-invoke-must-be-in-lock.md) | 1 | architecture / concurrency | `d875b7d` |
+| 2026-05-04 | [pure mapper 内做 confidence debounce 让下游卡 stale；防抖应在带时间维度的上层做](2026-05-04-motion-mapper-confidence-debounce-removal.md) | 1 | architecture / correctness | `<pending>` |

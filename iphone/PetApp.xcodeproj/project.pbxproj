@@ -99,6 +99,7 @@
 		7671F46DB32D18B530DFAC2D /* GuestLoginRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = A67BA2AE8B846A8622DA39DF /* GuestLoginRequest.swift */; };
 		77035657C96A166F4E609A18 /* AppCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 483BC7F72A7FCD49E2BE1D30 /* AppCoordinatorTests.swift */; };
 		7870245EC5F30C39A3286B6A /* URLSessionProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD158D72201FD8CE844F6A94 /* URLSessionProtocol.swift */; };
+		796CBB799E4724A5540B2ECA /* MotionStateMapper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4194EDC7AEF6C50E3AD4D11D /* MotionStateMapper.swift */; };
 		79BF47DA87D7B7BEC6A38A90 /* HealthProviderProbeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDA2E8B7A5F4EC9870C190A7 /* HealthProviderProbeView.swift */; };
 		7ADBDC56A2CEB23A3498AF5A /* WardrobeScaffoldView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46A8E61D61BABA4EC4DE1350 /* WardrobeScaffoldView.swift */; };
 		7DDAECA090A44C9778FB7ABC /* KeychainKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = B433BA798A041C7AA978179C /* KeychainKey.swift */; };
@@ -161,10 +162,12 @@
 		CACE000487BC1E2B0244362E /* CoreMotion.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FB5AFE430C56296FDF1008C1 /* CoreMotion.framework */; };
 		CD6D5A31EE9E1AEA229F0EAC /* MockLoadHomeUseCase.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAA6988B9A64BBA62374B494 /* MockLoadHomeUseCase.swift */; };
 		D13E1F1947A3DCE06AEE60C3 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B3B005848E85E46928DC192 /* MainTabView.swift */; };
+		D13E4CDCC53154AF352EDBDC /* MotionStateMapperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 704FE4554B3171103BDB7AED /* MotionStateMapperTests.swift */; };
 		D1FA721D837E36CD0348DA8F /* HomeViewScaffoldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2EFB35C4DA2A1B759C5FB9A /* HomeViewScaffoldTests.swift */; };
 		D476C405DD80E77B96C6E65B /* PingUseCase.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3987EA4E158D2F9250986C9 /* PingUseCase.swift */; };
 		D49ADDA71AF1A6BEF8A40751 /* SessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD7B7BDE4B6BE2B7378352EC /* SessionStore.swift */; };
 		D4EB16A507E8DA8BBC849AF3 /* HealthProviderImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA0A53B2DE325D783AA52526 /* HealthProviderImpl.swift */; };
+		D89FC864350D8CFE0C0280DE /* MotionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2721D8BB395F190B373F0C78 /* MotionState.swift */; };
 		D937EBE723E43D3431F93A64 /* KeychainPersistenceUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A2D1D094D742D4DCC3301C3 /* KeychainPersistenceUITests.swift */; };
 		DABCAF4CF39EED13C8B9FD10 /* SessionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = B75295C260CB8C58C10561AA /* SessionState.swift */; };
 		DD1CA3F4A262B95ADB43ADAA /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1395FB63EFED053C4C4C497C /* Theme.swift */; };
@@ -237,6 +240,7 @@
 		24EA253A0F2724428AFB87D5 /* KeychainUITestHookView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainUITestHookView.swift; sourceTree = "<group>"; };
 		25AC5E3AE3DB7FE8288D3B5A /* ThemeShadow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeShadow.swift; sourceTree = "<group>"; };
 		27159F23CEAFE8C5C69ED14B /* JoinRoomModal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoinRoomModal.swift; sourceTree = "<group>"; };
+		2721D8BB395F190B373F0C78 /* MotionState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionState.swift; sourceTree = "<group>"; };
 		27D05E3B609A20DC41CE4A81 /* ErrorPresenterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorPresenterTests.swift; sourceTree = "<group>"; };
 		2D836DE136F5616109D4BA59 /* WardrobeViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WardrobeViewModel.swift; sourceTree = "<group>"; };
 		2E94000B196080C665C08550 /* ProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileView.swift; sourceTree = "<group>"; };
@@ -249,6 +253,7 @@
 		3D064C818136EC5DFF7EBC59 /* StatefulMockAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatefulMockAPIClient.swift; sourceTree = "<group>"; };
 		3D547B069D6394604A3F7D9D /* MotionProviderIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionProviderIntegrationTests.swift; sourceTree = "<group>"; };
 		3DA46BB6516A8163D6A248A3 /* MockAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockAPIClient.swift; sourceTree = "<group>"; };
+		4194EDC7AEF6C50E3AD4D11D /* MotionStateMapper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionStateMapper.swift; sourceTree = "<group>"; };
 		41B91CE72C06EB19940C55CE /* HomeViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeViewModel.swift; sourceTree = "<group>"; };
 		426B47E14859D36E2054952B /* AuthEndpoints.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthEndpoints.swift; sourceTree = "<group>"; };
 		429BCD069210F263A08F6BA9 /* DeviceInfoProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceInfoProviderTests.swift; sourceTree = "<group>"; };
@@ -295,6 +300,7 @@
 		6F5B35935DB82835EF3763FC /* ResetIdentityViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResetIdentityViewModel.swift; sourceTree = "<group>"; };
 		6FF4654890D6ED4396D460AE /* AppErrorMapper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppErrorMapper.swift; sourceTree = "<group>"; };
 		704A84374E7FD033D996D545 /* ErrorPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorPresenter.swift; sourceTree = "<group>"; };
+		704FE4554B3171103BDB7AED /* MotionStateMapperTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionStateMapperTests.swift; sourceTree = "<group>"; };
 		7050D81BA9C76A339D071AB5 /* HealthKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = HealthKit.framework; path = System/Library/Frameworks/HealthKit.framework; sourceTree = SDKROOT; };
 		7313A2F9EB8855EA34065028 /* MotionProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionProvider.swift; sourceTree = "<group>"; };
 		73C55F32B57A7D49B7C4B736 /* PrimitivesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrimitivesTests.swift; sourceTree = "<group>"; };
@@ -999,6 +1005,8 @@
 				7313A2F9EB8855EA34065028 /* MotionProvider.swift */,
 				52C39B4B9C296B052B9EC5E4 /* MotionProviderImpl.swift */,
 				AEC51C8FA46026E39A419461 /* MotionProviderMock.swift */,
+				2721D8BB395F190B373F0C78 /* MotionState.swift */,
+				4194EDC7AEF6C50E3AD4D11D /* MotionStateMapper.swift */,
 			);
 			path = Motion;
 			sourceTree = "<group>";
@@ -1253,6 +1261,7 @@
 			isa = PBXGroup;
 			children = (
 				C50A9302109780F85AA9AFDA /* MotionProviderMockTests.swift */,
+				704FE4554B3171103BDB7AED /* MotionStateMapperTests.swift */,
 			);
 			path = Motion;
 			sourceTree = "<group>";
@@ -1447,6 +1456,7 @@
 				CD6D5A31EE9E1AEA229F0EAC /* MockLoadHomeUseCase.swift in Sources */,
 				70FBF4905D77D838BFEA9C00 /* MockURLSession.swift in Sources */,
 				2CCACE2F631BD551DB5CE8F1 /* MotionProviderMockTests.swift in Sources */,
+				D13E4CDCC53154AF352EDBDC /* MotionStateMapperTests.swift in Sources */,
 				293098F699F6FD8D8840EAB8 /* PingStubURLProtocol.swift in Sources */,
 				AF73DA276AD359BD78E1CD94 /* PingUseCaseIntegrationTests.swift in Sources */,
 				464399591B61E13F5171051A /* PingUseCaseTests.swift in Sources */,
@@ -1552,6 +1562,8 @@
 				67F46E9CFA2C919F85254AF6 /* MotionProviderImpl.swift in Sources */,
 				47857C117AE5354586EE0A4D /* MotionProviderMock.swift in Sources */,
 				8FE80766A25D6659AEA64461 /* MotionProviderProbeView.swift in Sources */,
+				D89FC864350D8CFE0C0280DE /* MotionState.swift in Sources */,
+				796CBB799E4724A5540B2ECA /* MotionStateMapper.swift in Sources */,
 				8AF55882CCF571AE0AEA2533 /* PetAppApp.swift in Sources */,
 				3E8ED12103ECB6F9ED2CF802 /* PetStats.swift in Sources */,
 				45150EC475C8A7BF8C9052A3 /* PingEndpoints.swift in Sources */,
