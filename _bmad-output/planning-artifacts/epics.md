@@ -1516,6 +1516,14 @@ So that ViewModel 不直接处理底层 CoreMotion 类型，规则集中可测.
 
 ### Story 8.4: 主界面猫 sprite 三态动画切换
 
+> **2026-05-04 补充 addendum**（依据 ADR-0009 / ADR-0010 + Story 37.7 落地，参照 Story 21.1 §5.3 范例）：
+> 「PetSpriteView 替换 Story 2.2 的猫展示区占位（`Rectangle().fill(.gray)` → 实际组件）」段作废 ——
+> Story 2.2 占位已被 Story 37.7 HomeView 真实布局替代。PetSpriteView 通过 Story 37.7 HomeView 暴露的
+> `petSlot: () -> PetSpriteView` ViewBuilder closure 注入（HomeView 内部代码 zero edit；同 21.1 chestSlot 范例）。
+> HomeViewModel 仅持瞬时 `motionState: MotionState`（订阅 MotionProvider），**不持** stepAccount / currentChest 等
+> domain state（按 ADR-0010 §3.2 应放 AppState；stepAccount 写入由 8.5 负责）；ViewModel 通过构造注入 AppState，
+> **禁止** ViewModel 内 `@EnvironmentObject`（ADR-0010 §3.1）。其它 AC 不变。
+
 As an iPhone 用户,
 I want 主界面的猫根据我当前的运动状态自动切换动画,
 So that 我能直观看到自己运动时猫也在跑或走.
@@ -1540,6 +1548,13 @@ So that 我能直观看到自己运动时猫也在跑或走.
 **And** **UI 测试覆盖**（XCUITest）: 在主界面手动注入 MockMotionProvider 触发 .run → 验证 PetSpriteView 的 accessibility identifier 切到 "petSprite_run"
 
 ### Story 8.5: 步数同步触发器（启动 / 回前台 / 定时 / 开箱前）
+
+> **2026-05-04 补充 addendum**（依据 ADR-0010 §3.2 落地）：
+> SyncStepsUseCase 同步成功后写入目标改为 `appState.currentStepAccount`（AppState 7 字段白名单内的
+> `currentStepAccount: HomeStepAccount?` 字段，节点 2 起已在 Story 37.4 实装），**不**写
+> `HomeViewModel.stepAccount`（ViewModel 不持 domain state；ADR-0010 §3.2）。HomeViewModel 通过构造注入
+> AppState，订阅 `currentStepAccount` 变化驱动 UI 更新；**禁止** ViewModel 内 `@EnvironmentObject`
+> （ADR-0010 §3.1）。其它 AC 不变。
 
 As an iPhone 用户,
 I want App 在合适时机自动同步我的累计步数到服务端,
@@ -3013,6 +3028,13 @@ So that 我能看到宝箱的进度并知道何时可以开.
 
 ### Story 21.2: GET /chest/current 调用 + 状态展示 + 主动定时纠正
 
+> **2026-05-04 补充 addendum**（依据 ADR-0010 §3.2 + Story 21.1 §5.3 范例落地）：
+> LoadChestUseCase 拿到 server 状态后写入目标改为 `appState.currentChest`（AppState 白名单内字段），
+> 不再写 `HomeViewModel.chestState`（ViewModel 不持 domain state；21.1 已落地此约定）。本地倒计时仍由
+> HomeViewModel 内 `chestRemainingSeconds: Int`（Timer 驱动）维护，是 view-state 不上 AppState；
+> server 校准时同时更新 `appState.currentChest` 与重置本地 timer。ViewModel 通过构造注入 AppState 订阅
+> `currentChest` 变化；**禁止** ViewModel 内 `@EnvironmentObject`（ADR-0010 §3.1）。其它 AC 不变。
+
 As an iPhone 用户,
 I want App 启动时拉到准确的宝箱状态，且本地倒计时不要持续偏离 server,
 So that 我看到的宝箱状态可信.
@@ -3036,6 +3058,12 @@ So that 我看到的宝箱状态可信.
 **And** **集成测试覆盖**（XCUITest + mock server）: 启动 → ChestCardView 显示 server 返回的状态
 
 ### Story 21.3: 开箱按钮 + 调用 POST /chest/open（含 idempotencyKey 生成）
+
+> **2026-05-04 补充 addendum**（依据 ADR-0010 §3.2 落地）：
+> POST /chest/open 成功后写入目标改为：`response.nextChest` → `appState.currentChest`；
+> 步数账户更新（response 内步数余额变化）→ `appState.currentStepAccount`（如 server response 含步数变化字段）。
+> **不**写 `ViewModel.chestState`（ViewModel 不持 domain state）。开箱按钮 disabled 期间的 loading 状态仍由
+> ViewModel 内瞬时 `isOpening: Bool` 管理（view-state，不上 AppState）。其它 AC 不变。
 
 As an iPhone 用户,
 I want 点开箱按钮后 App 调用 server 完成开箱，并防止重复开箱,
@@ -3062,6 +3090,14 @@ So that 我不会因为多点几下被多次扣步数.
 
 ### Story 21.4: 奖励弹窗 popup
 
+> **2026-05-04 补充 addendum**（依据 ADR-0009 §3.4 + Story 37.6 Primitives 落地）：
+> RewardPopupView 复用 Story 37.6 共享 primitives，**不要**自己写颜色 / 自绘按钮：
+> - 品质徽章 → `RarityTag(rarity:)`（4 档色条 N/R/SR/SSR；rarity 数字到 enum 的映射按 RarityTag 已落地约定）
+> - "确定"按钮 → `PrimaryButton(variant: .primary)`
+> - 弹窗淡入动画 → `FadeInModifier`（0.28s ease + 上移 8pt；替代 AC 中"含淡入动画"的自己实装）
+>
+> Sheet 作次级路由是 OK 的（ADR-0009 §3.4 把"奖励弹窗"列入 sheet 次级场景白名单）。其它 AC 不变。
+
 As an iPhone 用户,
 I want 开箱成功后看到一个弹窗展示我获得的装扮（图标 + 名称 + 品质）,
 So that 我有获得感.
@@ -3083,6 +3119,11 @@ So that 我有获得感.
 **And** **UI 测试覆盖**（XCUITest + mock server 返回固定 reward）: 开箱 → 弹窗出现 → 验证 accessibility identifier "rewardPopup" + 点关闭 → 弹窗消失
 
 ### Story 21.5: 开箱前主动同步步数（接 Story 8.5 手动触发接口）
+
+> **2026-05-04 补充 addendum**（依据 Story 8.5 addendum 落地）：
+> Story 8.5 addendum 落地后，SyncStepsUseCase 写入目标已改为 `appState.currentStepAccount`；
+> OpenChestUseCase 在调 /chest/open 之前先 `await syncStepsUseCase.execute()`，同步完成即认为
+> AppState 已最新，**不需要**单独读 `ViewModel.stepAccount`。其它 AC 不变。
 
 As an iPhone 用户,
 I want 我点开箱前 App 自动同步一次步数到 server,
