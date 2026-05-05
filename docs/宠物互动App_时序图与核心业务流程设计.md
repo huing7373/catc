@@ -534,8 +534,9 @@ sequenceDiagram
     Service->>MySQL: 查询 room + room_members + pet 简要信息
     Service-->>WSGateway: room snapshot
     WSGateway-->>Client: 推送 room.snapshot
-    WSGateway-->>房间其他在线成员: 推送 member.joined
 ```
+
+> **业务消息延后锚定**：上图节点 4 阶段（Epic 10 ~ 13）服务端 → 客户端**只**会主动发送 `room.snapshot` / `pong` / `error` 三种消息，**不**在握手完成时广播 `member.joined` 给房间其他在线成员（与 `docs/宠物互动App_V1接口设计.md` §12.1.3 + §12.3 末尾"业务消息延后锚定"块、§1 节点 4 协议骨架冻结声明一致）。各业务广播消息的字段层契约与"是否在握手时广播"的语义由后续 epic 锚定：`member.joined` / `member.left` → Story 11.1（Epic 11 房间业务契约，节点 4 中段）；`emoji.received` → Story 17.1（Epic 17 表情广播契约，节点 6）。本时序图已与节点 4 协议骨架冻结对齐，删除了原"推送 member.joined"步骤；`member.joined` 广播的真实时序在 Story 11.1 实装期重绘。
 
 ### 13.3 断连处理
 

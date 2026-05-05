@@ -1304,7 +1304,7 @@ GET /ws/rooms/{roomId}?token=xxx
 
 成功握手后服务端必须**主动**推送：
 
-1. **第一条**：`room.snapshot`（payload schema 见 §12.3，节点 4 阶段为 placeholder：room 三字段 + members 空数组）
+1. **第一条**：`room.snapshot`（payload schema 见 §12.3，节点 4 阶段为 placeholder：room 三字段 + members 数组**至少**含当前握手用户自身条目，详见 §12.3 placeholder 示例）
 
 > 节点 4 阶段服务端 → 客户端**只**会主动发送 `room.snapshot` / `pong` / `error` 三种消息（与本节末 §12.3 业务消息延后锚定块 + §1 节点 4 协议骨架冻结声明一致）；`member.joined` 等业务广播消息的字段层契约与"是否在握手时广播"的语义由 Story 11.1（Epic 11）锚定，**不**在本 story 范围内 —— 即节点 4 阶段服务端**不**在握手时广播 `member.joined`。
 
@@ -1350,13 +1350,15 @@ GET /ws/rooms/{roomId}?token=xxx
 5. **用户房间归属校验**（查 `room_members` WHERE `user_id = ? AND room_id = ?`）：失败 → close 4003
 6. **内部错误**（panic / DB 异常等）：close 1011
 
-校验通过后：
+校验通过后**严格按以下顺序**执行（顺序由 §12.1.3"`room.snapshot` 是握手成功后必发的**第一条** authoritative 消息"契约钦定，**禁止**调换）：
 
-- 创建 Session 对象（详见 Go 项目结构 §9.1）
-- 注册到 SessionManager
-- 启动读 / 写 goroutine
-- 推送 `room.snapshot`（§12.3 schema）
-- 在 Redis presence 记录在线（详见 Story 10.6）
+1. 创建 Session 对象（详见 Go 项目结构 §9.1）
+2. 注册到 SessionManager
+3. **同步**构建并发送 `room.snapshot`（§12.3 schema） —— 必须在握手响应路径里**同步**写入 underlying `*websocket.Conn`（或 enqueue 到 send buffer 后**flush**完成）；**不**通过"投递到尚未启动的写 goroutine 队列"完成，因为本步骤完成时写 goroutine 尚未启动，消息将永不被发送
+4. 启动读 / 写 goroutine —— 此步骤**必须**在第 3 步 snapshot 写入完成（write call 返回 nil error）之后才启动；snapshot 写失败时**不**启动 goroutine，按 §12.1 close code 表 1011 行（reason = `"snapshot build failed"`）close 连接
+5. 在 Redis presence 记录在线（详见 Story 10.6）
+
+> **顺序 rationale**：若先启动读 goroutine 再推 snapshot，client 在 upgrade 完成的下一个 tick 即可发送合法 `ping`（client 不知道 server 还没推过 snapshot），server 写 goroutine 已经启动 → 直接回 `pong`，client 收到 `pong` 在 `room.snapshot` 之前，违反 §12.1.3 "first must be snapshot" 契约；尤其是 SnapshotBuilder 命中 DB 慢路径 / 锁等待场景下窗口被放大。把 snapshot 写入放在 goroutine 启动**之前**的同步段执行 = 物理上保证 snapshot frame 必定先于任何"对 client 消息的响应 frame"出现在 wire 上（写 goroutine 此时还不存在，无法产生任何竞争性写入）。
 
 **注意**：第 5 步是**协议层面强制的授权环节**，必须以**持久化 membership 数据**（即 `room_members` 表）为 single source of truth —— **禁止**使用 Redis presence 替代该校验。理由：presence 仅表示 ephemeral 在线态，不代表 user 是房间合法成员；以下两种常见场景下，"用 presence 做 membership 校验"会错误返回"非成员"并 close 4003：(a) server 重启 / Redis 清空后第一个合法成员重连（presence 全空）；(b) 合法成员的 presence entry TTL 过期后重连。如未来需要为该热路径降低 MySQL 读压（Story 10.6 / 11.4 实装阶段评估），**必须**引入与 presence 区分的"durable membership cache"（持久层语义、由加入 / 退出房间事务原子失效），而**不是**复用 presence；本协议层面的 §12.1 校验顺序不因任何缓存方案而改变。
 
@@ -1480,8 +1482,8 @@ JSON 通用骨架：
 | `requestId` | string | 必填 | 固定 `""`（主动推送类消息） |
 | `payload.room.id` | string | 必填 | 房间 ID（BIGINT 字符串化下发，遵循 §2.5 全局约定） |
 | `payload.room.maxMembers` | number (int) | 必填 | 房间容量上限（节点 4 阶段固定 4，由 Story 11.3 创建房间事务写入；本接口仅返回当前值） |
-| `payload.room.memberCount` | number (int) | 必填 | 房间总成员数（**含离线成员**，与下文 `payload.members` 数组长度严格相等，见本节末"不变量"小节）；节点 4 阶段 Story 10.7 placeholder 实现固定返回 0；Story 11.7 真实实现 = `room_members` 行数（与 `payload.members` 同一次 JOIN 聚合产出，**禁止**单独查询导致 drift） |
-| `payload.members` | array | 必填 | 房间全成员列表（**含离线成员**，节点 4 阶段不区分在线 / 离线，所有 `room_members` 记录都返回；"在线态"由后续 epic 通过 presence 推送类消息单独维护，不混入 snapshot）；节点 4 阶段 Story 10.7 placeholder 实现固定返回 `[]`；Story 11.7 真实实现按 `room_members` JOIN `users` JOIN `pets` 聚合 |
+| `payload.room.memberCount` | number (int) | 必填 | 房间总成员数（**含离线成员**，与下文 `payload.members` 数组长度严格相等，见本节末"不变量"小节）；节点 4 阶段 Story 10.7 placeholder 实现 = 当前握手用户自身的单成员快照（`memberCount: 1`，**不**写 0 —— 详见本节末 placeholder 示例与解释）；Story 11.7 真实实现 = `room_members` 行数（与 `payload.members` 同一次 JOIN 聚合产出，**禁止**单独查询导致 drift） |
+| `payload.members` | array | 必填 | 房间全成员列表（**含离线成员**，节点 4 阶段不区分在线 / 离线，所有 `room_members` 记录都返回；"在线态"由后续 epic 通过 presence 推送类消息单独维护，不混入 snapshot）；节点 4 阶段 Story 10.7 placeholder 实现 = 单成员数组（仅当前握手用户自身条目，复用 §12.1 第 5 步已查到的 `room_members` 行；其他成员的 `nickname` / `pet` 等字段在 Story 14.x / 26.x 真实驱动前**不**枚举）；Story 11.7 真实实现按 `room_members` JOIN `users` JOIN `pets` 聚合 |
 | `payload.members[].userId` | string | 必填 | 成员用户 ID（BIGINT 字符串化） |
 | `payload.members[].nickname` | string | 必填 | 成员昵称 |
 | `payload.members[].pet.petId` | string | 必填 | 成员当前宠物 ID（BIGINT 字符串化） |
@@ -1529,9 +1531,9 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 }
 ```
 
-> **不变量（snapshot 内部一致性）**：`memberCount` 必须**严格等于** `members[]` 数组长度。两者**统一表示房间全成员（含离线）**，**不**做"在线态过滤"—— 即 snapshot 是房间的 full roster view，**不是** online-only view。理由：(a) 若 `memberCount` 与 `members[].length` 任一方做"在线态过滤"而另一方不做，违反不变量；(b) 节点 4 阶段服务端**不**在握手时广播 `member.joined`（详见 §12.1 末尾 placeholder 注），客户端无法靠后续推送补齐离线成员，snapshot 必须自包含房间全部成员；(c) 在线 / 离线状态由后续 epic 的独立 presence 推送通道维护，不混入 snapshot 字段。节点 4 阶段 Story 10.7 placeholder 实装时两者均为 0（房间无成员）；Story 11.7 真实实装时由**同一次** `room_members` JOIN `users` JOIN `pets` 聚合产出 `members[]`，`memberCount` 取该数组长度（或同一次 query 的 `COUNT(*)`），server 实装层面**禁止**让两者出现 drift。
+> **不变量（snapshot 内部一致性）**：`memberCount` 必须**严格等于** `members[]` 数组长度。两者**统一表示房间全成员（含离线）**，**不**做"在线态过滤"—— 即 snapshot 是房间的 full roster view，**不是** online-only view。理由：(a) 若 `memberCount` 与 `members[].length` 任一方做"在线态过滤"而另一方不做，违反不变量；(b) 节点 4 阶段服务端**不**在握手时广播 `member.joined`（详见 §12.1 末尾 placeholder 注），客户端无法靠后续推送补齐离线成员，snapshot 必须自包含房间全部成员；(c) 在线 / 离线状态由后续 epic 的独立 presence 推送通道维护，不混入 snapshot 字段。节点 4 阶段 Story 10.7 placeholder 实装时**至少**包含当前握手用户自身的单成员条目（`memberCount: 1`，`members: [{当前用户}]`，详见下方 placeholder 示例）—— **禁止**写"全零 placeholder"（`memberCount: 0` + `members: []`），因为：(i) §12.1 第 5 步握手成功**充分条件**就是当前用户已在 `room_members` 表中，握手成功 = 房间里**至少**有一个合法成员；(ii) 推荐房间进入流程要求 client 先 `GET /api/v1/rooms/{roomId}` 加载房间状态后再开 WS（详见 §11.5 客户端推荐调用顺序），client 已经持有合法 roster 视图，再收到一个"零成员"snapshot 会清空已加载的合法状态，房间页错误渲染为空；(iii) §12.1.3 钦定 `room.snapshot` 是握手成功后**必发**的第一条 authoritative 消息，client 把它作为权威态采用，placeholder 必须给出真实可用的最小快照。Story 11.7 真实实装时由**同一次** `room_members` JOIN `users` JOIN `pets` 聚合产出 `members[]`，`memberCount` 取该数组长度（或同一次 query 的 `COUNT(*)`），server 实装层面**禁止**让两者出现 drift。
 
-**节点 4 阶段 placeholder 示例**（Story 10.7 实装；与上述真实示例的差异是 `members: []` + `memberCount: 0`）：
+**节点 4 阶段 placeholder 示例**（Story 10.7 实装；与上述真实示例的差异是 `members[]` 仅含当前握手用户自身条目，其他离线成员的 `nickname` / `pet` 字段在 Story 14.x / 26.x 真实驱动之前**不**枚举；`memberCount` 与 `members[].length` 仍严格相等，不变量不破）：
 
 ```json
 {
@@ -1541,13 +1543,24 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
     "room": {
       "id": "3001",
       "maxMembers": 4,
-      "memberCount": 0
+      "memberCount": 1
     },
-    "members": []
+    "members": [
+      {
+        "userId": "1001",
+        "nickname": "A",
+        "pet": {
+          "petId": "2001",
+          "currentState": 1
+        }
+      }
+    ]
   },
   "ts": 1776920345000
 }
 ```
+
+> **placeholder 字段值来源说明**：上例 `members[0]` 为当前握手用户自身条目 —— `userId` / `nickname` 来自 §12.1 第 5 步 `room_members` JOIN `users` 已查到的当前用户记录；`pet.petId` 来自当前用户的 `pets.id`（节点 4 阶段每个用户固定一只宠物）；`pet.currentState` 节点 4 阶段固定 `1`（stationary_or_unknown，Epic 14 才真实驱动 motion_state）。Story 10.7 SnapshotBuilder placeholder 实装路径：**禁止**额外查询其它成员（避免 placeholder 阶段过度耦合 Story 11.7 的多表 JOIN），仅复用 §12.1 第 5 步已查的当前用户行；其他离线 / 在线成员条目由 Story 11.7 真实实装时一次性补全。
 
 ### 成员加入
 
