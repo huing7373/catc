@@ -163,3 +163,4 @@
 | 2026-05-05 | [WS 协议契约的"内部自洽"三连：reserved close code / 永久 null 字段引用 / 业务消息冻结边界](2026-05-05-ws-protocol-contract-internal-consistency.md) | 3 | architecture, docs | `<pending>` |
 | 2026-05-06 | [WS 协议冻结后的"示例字面量自洽"与"close code 全局保留"](2026-05-06-ws-frozen-examples-and-close-code-collision.md) | 2 | docs, architecture | `<pending>` |
 | 2026-05-06 | [`error` 消息的双重语义 & 心跳 close code 必须在冻结表里给具体值](2026-05-06-ws-error-dual-semantics-and-heartbeat-close-code.md) | 2 | docs, architecture | `<pending>` |
+| 2026-05-06 | [WS 冻结段内部一致性（example 字段值 / 强制信封 / handshake 必发消息的失败路径）](2026-05-06-ws-frozen-section-internal-coherence-r4.md) | 3 | docs, architecture | `<pending>` |

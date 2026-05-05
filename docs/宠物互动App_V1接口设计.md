@@ -1327,7 +1327,7 @@ GET /ws/rooms/{roomId}?token=xxx
 | 1001 | server 或 client 任一方主动 close | going away（服务端重启 / 客户端切后台） | 否 | 服务端重启 → 客户端**应**自动重连（指数退避，参考 iOS Story 12.5）；客户端切后台 → 客户端自身决定 |
 | 1006 | **仅 client 侧观测**（不可被任一端 emit） | 异常断开（无 close frame，TCP 中断 / 网络抖动）—— RFC 6455 §7.1.5 规定 1006 为 reserved 状态码，**禁止**出现在 close frame 内；客户端 WebSocket runtime 在底层 TCP 断开且未收到 close frame 时本地合成该 code 通知上层 | 不适用（无 close frame，因此服务端**不**emit 该 code） | 客户端**应**自动重连（指数退避） |
 | 1008 | server 主动 close | 客户端违反协议策略 —— 节点 4 阶段唯一触发条件：单条消息 frame 超过 `ws.max_message_size_bytes`（默认 16 KB） | 是（reason = `"message too large"`） | **不**自动重连（视为客户端实装 bug，重连仍会被 close）；记 log error 后回退 |
-| 1011 | server 主动 close | 服务端内部错误（panic / 不可恢复异常） | 是（reason 应包含简短错误提示但**不**泄漏 stack trace） | 客户端**应**自动重连（指数退避，但限制最大重试次数避免雪崩） |
+| 1011 | server 主动 close | 服务端内部错误（panic / 不可恢复异常）；**含**握手完成后 SnapshotBuilder 构建初始 `room.snapshot` 失败的场景（reason = `"snapshot build failed"`） —— 因为 §12.1 钦定 `room.snapshot` 是握手成功后必发的第一条消息，构建失败若不 close 而仅推 `error`，client 会永远等待一个永不到达的 snapshot，房间页无法初始化 | 是（reason 应包含简短错误提示但**不**泄漏 stack trace） | 客户端**应**自动重连（指数退避，但限制最大重试次数避免雪崩） |
 
 **关键约束**：
 
@@ -1513,12 +1513,22 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
           "petId": "2001",
           "currentState": 2
         }
+      },
+      {
+        "userId": "1002",
+        "nickname": "B",
+        "pet": {
+          "petId": "2002",
+          "currentState": 1
+        }
       }
     ]
   },
   "ts": 1776920345000
 }
 ```
+
+> 注：`memberCount` 必须等于 `members[]` 数组长度（节点 4 阶段 Story 10.7 placeholder 实装时两者均为 0；Story 11.7 真实实装时由同一次 `room_members` JOIN 聚合产出，server 实装层面**禁止**让两者出现 drift）。
 
 **节点 4 阶段 placeholder 示例**（Story 10.7 实装；与上述真实示例的差异是 `members: []` + `memberCount: 0`）：
 
@@ -1543,6 +1553,7 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 ```json
 {
   "type": "member.joined",
+  "requestId": "",
   "payload": {
     "userId": "1002",
     "nickname": "B"
@@ -1556,6 +1567,7 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 ```json
 {
   "type": "member.left",
+  "requestId": "",
   "payload": {
     "userId": "1002"
   },
@@ -1568,6 +1580,7 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 ```json
 {
   "type": "emoji.received",
+  "requestId": "",
   "payload": {
     "userId": "1002",
     "emojiCode": "wave"
@@ -1618,7 +1631,7 @@ JSON 示例（与本节字段表对齐，含 `requestId`）：
 |---|---|---|---|
 | `type` | string | 必填 | 固定值 `"error"` |
 | `requestId` | string | 必填 | 如该 error 是某 client 请求的响应（如 `emoji.send` 失败），回带原 `requestId`；如是 server 主动错误（如内部状态异常），固定 `""` |
-| `payload.code` | number (int) | 必填 | 错误码，复用 §3 全局错误码定义（如 `7001` 表情不存在 / `6005` 房间状态异常 / `1009` 服务繁忙） |
+| `payload.code` | number (int) | 必填 | 错误码，复用 §3 全局错误码定义（如 `7001` 表情不存在 / `1009` 服务繁忙；**注**：`6005` 房间状态异常**不**用于握手后初始 `room.snapshot` 构建失败 —— 该场景走 close 1011，详见 §12.1 close code 表 1011 行 + 本节末"节点 4 阶段适用错误码"表下的注） |
 | `payload.message` | string | 必填 | 错误描述，可读字符串（不做国际化，与 §3 message 字段一致） |
 | `ts` | number (int64) | 必填 | 服务端发送时间戳（ms） |
 
@@ -1636,16 +1649,19 @@ JSON 示例（与本节字段表对齐，含 `requestId`）：
 }
 ```
 
-> 注：当 error 是某 client 请求的响应（如 `emoji.send` 失败）时，`requestId` 回带原请求 `requestId`；当 error 是 server 主动推送（如内部状态异常 / Story 10.7 SnapshotBuilder 抛错）时，`requestId` 固定 `""`。该示例可作为 Story 10.3 / Story 12.3 的复制粘贴样本使用。
+> 注：当 error 是某 client 请求的响应（如 `emoji.send` 失败）时，`requestId` 回带原请求 `requestId`；当 error 是 server 主动推送（如运行时业务状态异常）时，`requestId` 固定 `""`。该示例可作为 Story 10.3 / Story 12.3 的复制粘贴样本使用。
+>
+> **不在 `error` 范围**：握手后初始 `room.snapshot` 构建失败**不**走 `error` 路径，统一走 close 1011（详见 §12.1 close code 表 1011 行 + 本节末"节点 4 阶段适用错误码"表下的注）。本节 `error` 仅承载"连接已可用、业务侧出问题但不致死"的非致命错误。
 
 **节点 4 阶段适用错误码**（仅 Epic 10 协议骨架范围内）：
 
 | code | 触发条件（节点 4 阶段） |
 |---|---|
 | 1009 | 服务繁忙（Session 内部异常但不致死，如临时 Redis 慢；client 应忽略并继续） |
-| 6005 | 房间状态异常（Story 10.7 SnapshotBuilder 抛 error 时 → server 主动推 error，code = 6005） |
 
 > 业务错误码（如 `7001` 表情不存在）由对应 Epic 各自的 §X.1 锚定（如 Story 17.1）；本 story 不预先列入节点 4 阶段适用错误码表。
+>
+> **注（snapshot 构建失败的处理路径）**：握手完成后 Story 10.7 SnapshotBuilder 构建初始 `room.snapshot` 抛 error 时，server **不**走 "推 `error` 消息" 路径 —— 因为 §12.1 钦定 `room.snapshot` 是握手成功后必发的第一条消息，若仅推 `error` 而保持连接，client 会永远等待一个永不到达的 snapshot，房间页无法初始化、auto-reconnect 也不会触发。该场景统一走 close 路径：close **1011**（reason = `"snapshot build failed"`，详见 §12.1 close code 表 1011 行），客户端按 1011 语义自动重连（指数退避 + 最大重试次数限制）。错误码 `6005`（房间状态异常）保留给后续业务 epic 在房间已可用之后的运行时状态错误推送（如 Story 11.x / 14.x 业务流程中），**不**用于初始 snapshot 失败场景。
 
 > **业务消息延后锚定**：上文 `### 成员加入` / `### 成员离开` / `### 收到表情广播` 三个小节为节点 4 之前的协议草稿示例，**不**在节点 4 / Epic 10 范围内。各消息字段层契约的正式锚定 epic 如下：
 >
