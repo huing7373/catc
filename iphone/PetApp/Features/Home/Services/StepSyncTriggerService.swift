@@ -11,14 +11,20 @@
 //   - currentSyncTask Task 引用追踪：当前 sync in-flight 时新触发被忽略（不排队）
 //   - 失败不阻塞 UI（背景同步；下次定时器到达再试）
 //
-// triggerManual 等待语义（review round 3 [P2] fix）:
+// triggerManual 等待语义（review round 3 [P2] fix → round 4 [P2] race tighten）:
 //   - 与 launch / foreground / timer 不同：caller（Story 21.x ChestOpenUseCase 节点 7）
 //     需要 await 拿到 fresh `currentStepAccount` 才能继续开箱
-//   - 实装：triggerManual 先 await currentSyncTask?.value（如有 in-flight 等它完），
-//     再启动自己的新 sync Task 并 await 完成；保证返回时 sync 一定刚跑完
+//   - 实装：triggerManual 用 while-loop 链式等待 in-flight + @MainActor 同步段原子 assign 自身 task
+//     —— 然后 await 自己的 task 完成；保证返回时 sync 一定刚跑完
 //   - 不能简单复用 fire-and-forget 路径——那会被 in-flight gate 短路 return,
 //     caller 拿到 stale state（review round 3 命中的 bug）.
+//   - round 4 race 修法：单次 `await currentSyncTask?.value` resume 后**不能假设**
+//     currentSyncTask == nil —— main actor 让出期间，automatic trigger（launch/foreground/timer）
+//     可能又 spawn 了新 task 并存进 currentSyncTask. 所以必须 while-loop re-check：
+//     每次 await 完后看 currentSyncTask 是不是又被填了，是就继续等. 直到看到 nil 才进入下一步.
+//     而"nil check + 创建并 assign 自己 task"是 @MainActor 的同步段（无 await） → 原子.
 //   - 详见 docs/lessons/2026-05-04-manual-trigger-must-await-in-flight.md
+//     + docs/lessons/2026-05-04-await-then-recheck-single-flight-gate.md
 //
 // option A 锁定（AC9 边界澄清段）:
 //   - service 注入 `HomeViewModel`（**不**接 motionProvider）；
@@ -106,22 +112,46 @@ public final class StepSyncTriggerService {
     /// 手动触发（epics.md AC 行 1571；节点 7 ChestOpenUseCase 调用入口）.
     /// 等待同步完成 —— caller（Story 21.x ChestOpenUseCase）需要在同步完成后再继续开箱.
     ///
-    /// review round 3 [P2] fix：
+    /// review round 3 [P2] fix → round 4 [P2] race tighten：
     /// 不能复用 spawnSyncIfIdle / performSync 的 fire-and-forget 路径——那会被
     /// in-flight gate 短路 return，caller 拿到 stale `currentStepAccount`，破坏
-    /// "同步完成后再继续开箱"契约. 改为：
-    ///   1. 若有 in-flight sync（fire-and-forget 路径起的），先 await 它完成
-    ///   2. 再启动自己的新 sync Task 并 await 完成（保证返回时一定刚跑完一次 fresh sync）
-    /// 详见 docs/lessons/2026-05-04-manual-trigger-must-await-in-flight.md.
+    /// "同步完成后再继续开箱"契约.
+    ///
+    /// 改为 while-loop 链式等待 + @MainActor 同步段原子 assign：
+    ///   1. 若 currentSyncTask 非 nil → await 它的 value；resume 后**重新 re-check** —— main actor
+    ///      让出期间 automatic trigger 可能又 spawn 了新 task 并存进 currentSyncTask，必须继续等.
+    ///   2. 直到 currentSyncTask == nil（@MainActor 同步段：从 nil check 到 assign 之间不会让出）
+    ///      → 立即创建自己的 task 并 assign currentSyncTask（原子）
+    ///   3. await 自己 task.value，保证返回时 sync 一定刚跑完
+    ///
+    /// 关键不变量：
+    ///   - while-loop 退出条件是 `currentSyncTask == nil`，不是 "前一个 inflight 完成"
+    ///     （前一个完成不代表没有别的 automatic trigger 又起了新 task）
+    ///   - "re-check + create + assign" 三步是 @MainActor 同步段 → 不会被 race 干扰
+    ///   - automatic 路径 spawnSyncIfIdle 的 `if currentSyncTask != nil { return }` 短路保证：
+    ///     一旦 manual assign 成功，automatic 不会覆盖；一旦 manual 看到 nil，automatic 也看到 nil
+    ///     时是 race，但此时 manual 已经在同一个 @MainActor 同步段里完成了 assign，automatic 在
+    ///     manual yield 之前不会执行 —— 所以 manual 总是先抢到.
+    ///
+    /// 详见 docs/lessons/2026-05-04-manual-trigger-must-await-in-flight.md
+    /// + docs/lessons/2026-05-04-await-then-recheck-single-flight-gate.md.
     public func triggerManual() async {
-        // 若有 in-flight sync（launch / foreground / timer 起的 fire-and-forget 路径），先等它完成.
-        // 等完后 currentSyncTask 已被 task 自身的 defer 清成 nil，自然能进入下一步.
-        await currentSyncTask?.value
+        // 链式等待：每次 await 完后 re-check currentSyncTask；只要还非 nil，继续等.
+        // round 4 修法关键：单次 `await inflight?.value` resume 后**不假设** nil ——
+        // main actor 让出期间 automatic 路径可能又填了一个新 task.
+        while let inflight = currentSyncTask {
+            await inflight.value
+            // resume 时 currentSyncTask 可能：
+            //   a. 仍指向 inflight（runSync defer 在该 task @MainActor 里清，已清 nil；
+            //      此 case 里 currentSyncTask == nil → loop 退出）
+            //   b. 已被 automatic trigger 覆盖为新的 in-flight task（loop 继续等新 task）
+            //   c. nil（loop 退出）
+        }
 
-        // 再启动自己的新 sync Task 并等待完成 —— 保证 caller 拿到的是刚跑完的 fresh state.
-        // 用 currentSyncTask 占位防止此期间被 fire-and-forget 路径短路.
-        // 注：closure 内必须显式 unwrap optional 写 Void 返回；用 `if let self` + 显式 return 确保
-        // Task<Void, Never> 类型推断（避免 self?.runSync() 隐含 Task<Void?, Never>）.
+        // 此时 currentSyncTask == nil，且我们处在 @MainActor 同步段（while-loop 退出 → 下面创建并
+        // assign 之间没有 await） → 不会被任何 race 打断.
+        // automatic 路径 spawnSyncIfIdle 也是 @MainActor，但只有在我们 yield 之后才能跑；它会看到
+        // currentSyncTask 已被 manual 占位 → 短路 return.
         let task: Task<Void, Never> = Task { @MainActor [weak self] in
             guard let self else { return }
             await self.runSync(reason: .manual)

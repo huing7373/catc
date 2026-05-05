@@ -159,3 +159,4 @@
 | 2026-05-04 | [fresh install HealthKit requestPermission gap：与 Story 8.4 motion 权限同坑（epic 切片漏专门 caller story 的二次复发）](2026-05-04-step-sync-fresh-install-requestpermission-gap.md) | 1 | architecture / process | `<pending>` |
 | 2026-05-04 | [launch state 离开 .ready 时必须 stop 所有 .ready-attached 后台 service（对称生命周期）](2026-05-04-launch-state-leave-ready-must-stop-feature-services.md) | 1 | architecture | `<pending>` |
 | 2026-05-04 | [manual trigger 必须 await in-flight，不能用 gate 短路 return；公开 async API 的等待语义要明示](2026-05-04-manual-trigger-must-await-in-flight.md) | 1 | architecture | `<pending>` |
+| 2026-05-04 | [`await` 期间 race 让 single-flight gate 失效，必须 while-loop 链式等待 + @MainActor 同步段原子 assign（fresh install requestPermission gap 第 3 次复发 reaffirm wontfix）](2026-05-04-await-then-recheck-single-flight-gate.md) | 2 | concurrency / process | `<pending>` |

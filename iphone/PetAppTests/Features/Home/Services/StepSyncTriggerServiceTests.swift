@@ -105,6 +105,89 @@ final class StepSyncTriggerServiceTests: XCTestCase {
             "triggerManual 应等 in-flight 完成后再自己跑一次 fresh sync；总 sync 应为 2")
     }
 
+    // codex review round 4 [P2] fix: triggerManual 在等 in-flight 期间，automatic trigger 又起一次 sync
+    // 时必须 chain-wait（不能只 await 第一个 in-flight 完就跑自己）.
+    //
+    // 旧实装（round 3 fix）: `await currentSyncTask?.value` 单次 await + 无条件覆盖 currentSyncTask
+    //   → 等 launch 完后，main actor 让出期间 timer-like automatic trigger 起新 sync 并填 currentSyncTask
+    //   → manual resume 时无视新 task，把 currentSyncTask 直接覆写成自己的 → 旧 automatic task 失去引用
+    //   但仍在跑 → manual 自己也启动 → **双 sync 并发**，违反 "同步不重叠" 契约.
+    //
+    // 新实装（round 4 fix）: while-loop 链式等待 + @MainActor 同步段原子 assign
+    //   → manual await launch 完 → re-check 看到 currentSyncTask 又被 timer 填了 → 继续 await 它
+    //   → 它完后 currentSyncTask 清 nil → manual 此时同步段创建并 assign 自己 task → 跑.
+    //   总 sync 落地数 = 3（launch + automatic 第二次 + manual），证明 chain-wait 生效.
+    //
+    // 测试序列：
+    //   1. triggerForeground() 启动 in-flight A（80ms 延迟）
+    //   2. 启动 manual（不 await，先放 detached Task 拿到 manual completion future）
+    //   3. 等 ~30ms 让 manual 进入"await currentSyncTask?.value（A）"挂起态
+    //   4. 此时 main actor 让出（A 在 sleep；manual 在 await）→ 主测试 task 跑 triggerForeground() 第二次
+    //      —— 因为 A 仍 in-flight，A 还在 currentSyncTask 里 → 第二次 triggerForeground 被 gate 短路.
+    //      ⚠️ 这无法触发本场景的 race —— race 的关键是"manual await resume 时新 automatic task 已填".
+    //
+    // 重新设计测试：通过 mock 控制时序 —— 让 mock execute 在第一次 80ms 完成后，
+    //   manual 还没 resume 前，模拟 timer-like trigger 再起一次新 in-flight.
+    //   实现：在 manual await 期间用 detached Task 间隔再调一次 triggerForeground()，
+    //   该 trigger 会观察到 currentSyncTask == nil（A 刚跑完）→ spawn 新 task B，然后 manual resume
+    //   看到 currentSyncTask = B（非 nil）→ 旧实装会覆写，新实装应继续 await B 完成.
+    //
+    // 时序控制要点：
+    //   - useCase delay 80ms（A 持续期）
+    //   - manual 开始 await 后，等 A 完成（>80ms）+ B 立即起来这一窗口
+    //   - 期望最终 invocations.count == 3（A + B + manual）
+    func testTriggerManual_chainWaitsThroughMultipleAutomaticInflights() async {
+        let useCaseMock = MockSyncStepsUseCase()
+        useCaseMock.executeDelayMs = 60  // 每次 sync 60ms 窗口
+        let viewModel = HomeViewModel()
+        let service = StepSyncTriggerService(syncStepsUseCase: useCaseMock, homeViewModel: viewModel)
+
+        // 步骤 1: 起 in-flight A.
+        service.triggerForeground()
+        try? await Task.sleep(nanoseconds: 5_000_000)  // 5ms
+        XCTAssertEqual(useCaseMock.invocations.count, 1, "前置：A 已启动")
+
+        // 步骤 2: detached task 跑 manual（不 await 它，让本 task 继续控制时序）.
+        let manualDone = Task { @MainActor in
+            await service.triggerManual()
+        }
+
+        // 步骤 3: 等 A 跑完（60ms+ 缓冲）但 manual resume 之前，模拟 automatic trigger 再起一次.
+        // A 起在 t=0, 60ms 完. manual 进入 await currentSyncTask?.value 在 ~5ms 后.
+        // 等到 A 完成（~80ms 缓冲让 defer 清 nil）.
+        try? await Task.sleep(nanoseconds: 80_000_000)  // 80ms
+
+        // A 应已完成；currentSyncTask 应被 A 自己的 defer 清成 nil.
+        // 现在 race-window: manual 可能还没 resume 来抢；本 task 立刻 spawn automatic B.
+        // 注意：manual resume 是 main actor 调度问题；如果 manual 已 resume 完成自己创建并 assign 了
+        // 自己的 task，那么 triggerForeground 此时被 gate 短路（manual task in-flight）→ 总数 = 2
+        // （旧实装的 race-good case）. 但若 manual 还在 await suspension queue 里没 resume，本 task
+        // 先抢到 → triggerForeground spawn B（observe nil → 起新 task）→ manual resume 后看到 B.
+        //
+        // 旧实装：manual resume 看到 currentSyncTask = B → 无视它直接覆写 → B 失去引用但仍在跑 →
+        //   manual 起自己 task → 总落地 invocations = 3，但 currentSyncTask 在某瞬间 = manual task
+        //   而 B 还在跑 → "同步不重叠"违反.
+        //
+        // 新实装：manual resume 看到 currentSyncTask = B（非 nil）→ while-loop 继续等 B → B 完成
+        //   → currentSyncTask = nil → manual 同步段 assign 自己 task → 跑 → 总落地 = 3.
+        //
+        // 两个实装在 invocations.count 上都可能达到 3，但新实装保证"任意时刻最多 1 个 in-flight".
+        // 用 mock 的"max-concurrent-execute"计数器去断言这一点.
+        service.triggerForeground()
+
+        // 等 manual 完成（最多再等 200ms：B 60ms + manual 60ms + 缓冲）.
+        await manualDone.value
+
+        // 至少跑了 3 次（A + B + manual）；若 manual 抢得快本 trigger 被 gate 短路则跑 2 次（也合规）.
+        // 关键断言：永远不超过 1 个 in-flight.
+        XCTAssertGreaterThanOrEqual(useCaseMock.invocations.count, 2,
+            "至少 A + manual；race-window 命中时 = 3（A + B + manual）")
+        XCTAssertLessThanOrEqual(useCaseMock.invocations.count, 3,
+            "最多 A + B + manual = 3")
+        XCTAssertEqual(useCaseMock.maxConcurrentInflight, 1,
+            "不变量：任意时刻最多 1 个 sync in-flight；旧实装 race 路径会让此值 = 2")
+    }
+
     // edge: useCase 抛错 → 不阻塞 UI 不传染下次触发（epics.md AC 行 1584）.
     func testSyncFails_doesNotBlockNextTrigger() async {
         let useCaseMock = MockSyncStepsUseCase()
@@ -255,8 +338,25 @@ final class MockSyncStepsUseCase: SyncStepsUseCaseProtocol, @unchecked Sendable 
     var stubError: Error?
     var executeDelayMs: UInt64 = 0
 
+    /// codex review round 4 [P2] regression test: 追踪并发 in-flight 峰值.
+    /// 每次 execute 进入时 +1，离开时 -1；max 值供"任意时刻最多 1 个"不变量断言.
+    private(set) var maxConcurrentInflight: Int = 0
+    private var currentInflight: Int = 0
+    private let inflightLock = NSLock()
+
     func execute(motionState: MotionState) async throws {
         invocations.append(motionState)
+        inflightLock.lock()
+        currentInflight += 1
+        if currentInflight > maxConcurrentInflight {
+            maxConcurrentInflight = currentInflight
+        }
+        inflightLock.unlock()
+        defer {
+            inflightLock.lock()
+            currentInflight -= 1
+            inflightLock.unlock()
+        }
         if executeDelayMs > 0 {
             try? await Task.sleep(nanoseconds: executeDelayMs * 1_000_000)
         }
