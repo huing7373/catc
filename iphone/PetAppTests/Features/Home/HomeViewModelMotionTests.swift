@@ -273,4 +273,82 @@ final class HomeViewModelMotionTests: XCTestCase {
         XCTAssertEqual(mock.stopUpdatesCallCount, 0, "未订阅过的状态下不该 stopUpdates")
         XCTAssertEqual(viewModel.petState, .rest, "始终 .rest，不应被 downgrade 路径误改写")
     }
+
+    // MARK: - Story 8.4 review round 5 P2: motion handler Task @MainActor stale write race
+
+    // edge（round 5 P2 修复核心）：在飞 Task @MainActor stale callback 不能覆盖 downgrade 后已 reset 的 petState.
+    //
+    // 时序（generation token 拦截路径）：
+    //   ① bind authorized → mock.startUpdates 注入 handler；motionBindGeneration += 1（=1），closure capture token=1.
+    //   ② 推 walk activity → Task { check generation==1, set petState = .walk } 排队入 main actor.
+    //      （此处用 await Task.yield() 让 Task 实际跑掉，让 petState=.walk 先生效）
+    //   ③ 用户撤权限 → 第二次 bind → downgrade 路径推进 motionBindGeneration += 1（=2）+ petState=.rest.
+    //   ④ "**模拟 stale handler 仍能 invoke**"——直接调 mock.injectActivity，handler closure 还指向老 captured token=1
+    //      但 motionBindGeneration 已 = 2 → Task 内 generation guard 拦截 → drop, petState 仍 .rest.
+    //
+    // before 修复（round 4 实现）：Task 不 check generation → 无差别覆盖 petState = .walk → 测试 fail（expect .rest got .walk）.
+    // after 修复（round 5）：Task check generation == captured token，token 不等就 drop → petState 仍 .rest.
+    //
+    // 详见 docs/lessons/2026-05-04-mainactor-task-hop-stale-write-needs-generation-token.md.
+    func testStaleMotionCallback_afterDowngrade_doesNotOverwriteRestState() async {
+        let viewModel = HomeViewModel()
+        let mock = MotionProviderMock()
+
+        // ① first bind: authorized → startUpdates handler 注册
+        mock.authorizationStatusStub = .authorized
+        viewModel.bind(motionProvider: mock)
+        XCTAssertEqual(mock.startUpdatesCallCount, 1)
+
+        // ② 推 walk activity 让 petState 先进入 .walk（与 stale 起点对齐）
+        mock.injectActivity(MotionProviderMock.makeActivity(walking: true))
+        await Task.yield()
+        XCTAssertEqual(viewModel.petState, .walk)
+
+        // ③ downgrade：撤权限 + rebind
+        mock.authorizationStatusStub = .denied
+        viewModel.bind(motionProvider: mock)
+        XCTAssertEqual(mock.stopUpdatesCallCount, 1, "downgrade 必须 stopUpdates")
+        XCTAssertEqual(viewModel.petState, .rest, "downgrade 立刻 reset 到 .rest")
+
+        // ④ 模拟"在飞 stale Task @MainActor 仍排队中"——直接 inject activity 让 mock 调老 handler closure
+        //   （mock 在 stopUpdates 后不主动清 handler；handler closure 仍指向老 captured token，与现 token 不等）
+        //   即使 mock handler 仍存在，handler 派发 Task 进 main actor 后 generation check 拦截 → drop.
+        mock.injectActivity(MotionProviderMock.makeActivity(walking: true))
+        await Task.yield()
+
+        XCTAssertEqual(viewModel.petState, .rest,
+                       "stale callback Task 必须被 generation token 拦截，不覆盖已 reset 的 .rest")
+    }
+
+    // edge（round 5 P2 衍生）：再次授权后 rebind → 新 startUpdates handler capture 新 token，新 callback 正常 mutate;
+    // 老 in-flight stale callback（来自第一次订阅）仍被 token mismatch 拦截.
+    func testStaleMotionCallback_afterRegrant_doesNotOverwriteNewState() async {
+        let viewModel = HomeViewModel()
+        let mock = MotionProviderMock()
+
+        // ① first bind authorized → token=1
+        mock.authorizationStatusStub = .authorized
+        viewModel.bind(motionProvider: mock)
+        XCTAssertEqual(mock.startUpdatesCallCount, 1)
+
+        // ② walk → .walk
+        mock.injectActivity(MotionProviderMock.makeActivity(walking: true))
+        await Task.yield()
+        XCTAssertEqual(viewModel.petState, .walk)
+
+        // ③ downgrade → token=2, petState=.rest
+        mock.authorizationStatusStub = .denied
+        viewModel.bind(motionProvider: mock)
+        XCTAssertEqual(viewModel.petState, .rest)
+
+        // ④ re-grant authorized → 第三次 bind → 升级到新 startUpdates，token=3
+        mock.authorizationStatusStub = .authorized
+        viewModel.bind(motionProvider: mock)
+        XCTAssertEqual(mock.startUpdatesCallCount, 2, "re-grant 后应再次 startUpdates")
+
+        // ⑤ 推 running activity 走新 handler → 新 token 匹配 → petState = .run
+        mock.injectActivity(MotionProviderMock.makeActivity(running: true))
+        await Task.yield()
+        XCTAssertEqual(viewModel.petState, .run, "re-grant 后新 handler callback 应正常 mutate petState")
+    }
 }

@@ -175,6 +175,24 @@ public class HomeViewModel: ObservableObject {
     /// 单一字段无法区分"未存"与"已存但未订阅"两态. 详见 docs/lessons/2026-05-04-motion-bind-must-gate-on-authorization-status.md.
     private var hasStartedMotionUpdates: Bool = false
 
+    /// Story 8.4 review round 5 P2 引入：motion bind generation token，防 stale callback Task 在
+    /// stop/downgrade 后覆盖已 reset 的 petState.
+    ///
+    /// 背景（review round 5 P2 race）：motion handler closure 在 OperationQueue.main 入队 callback,
+    /// 但闭包内 `Task { @MainActor in self?.petState = mapped }` 引入异步 hop——Task 排队后 bind 处理
+    /// downgrade 路径会先跑 (stopUpdates + petState=.rest)，随后排队的 Task 才执行，把 petState 覆盖
+    /// 回 stale .walk/.run，UI 出现"撤权限后看到 sprite 闪一下回 stale state 再被 .rest 校正"的可见
+    /// race（generation token 模式同 8.2 MotionProviderImpl 的精神，见
+    /// docs/lessons/2026-05-04-motion-stop-restart-stale-callback-race.md；UI 端额外加一层）.
+    ///
+    /// 用法：
+    ///   - bind 升级到 startUpdates / 触发 downgrade 时 += 1，并 capture 当前值给新的 handler closure;
+    ///   - handler 内 Task 在 mutate petState 前 check capturedToken == self.motionBindGeneration,
+    ///     不等则 ignore（已有 in-flight callback 是 stale，丢弃即可）.
+    ///
+    /// UInt64 不会溢出（即使每秒 bind 100 次也要 ~58 亿年）.
+    private var motionBindGeneration: UInt64 = 0
+
     /// Story 37.4：通过 `bind(appState:)` 注入或 init 注入的 AppState 引用.
     ///
     /// **strong** 持有（Story 37.4 codex round 1 [P2] fix）：原方案 weak 与 init 参数注入路径不兼容 ——
@@ -356,8 +374,10 @@ public class HomeViewModel: ObservableObject {
     ///      | true                | not authorized    | stopUpdates + hasStartedMotionUpdates = false +   |
     ///      |                     |                   | petState = .rest（**downgrade 路径**：让 UI 立即  |
     ///      |                     |                   | 回到 rest，不卡 stale .walk / .run）              |
-    ///   3. handler 内部：mapper.map 同步派生 → Task { @MainActor in self?.petState = mapped }
-    ///      ── @Sendable closure 捕获 [weak self] 防循环；写 @Published 必须在 main actor.
+    ///   3. handler 内部（round 5 P2 增强）：mapper.map 同步派生 → Task { @MainActor in
+    ///      guard self.motionBindGeneration == token else { return }; self?.petState = mapped }
+    ///      ── @Sendable closure 捕获 [weak self] + 启动期 capture token；写 @Published 必须在
+    ///      main actor；token check 防 stop/downgrade 后排队中的 stale Task 覆盖已 reset 的 petState.
     ///   4. 不调 requestPermission（红线：权限申请按 AR17 / 节点 3 设计交给 8.5 / 8.6 统一处理）.
     ///
     /// 红线：
@@ -389,12 +409,22 @@ public class HomeViewModel: ObservableObject {
         case (false, true):
             // 未订阅 + 已授权 → 升级到 startUpdates（生产路径 / first-launch 授权后 rebind）.
             hasStartedMotionUpdates = true
+            // round 5 P2：推进 generation token + capture 当前值给 handler closure.
+            // Task @MainActor hop 在 mutate 前 check token，让 stop/downgrade 后排队中的
+            // stale callback Task 直接 drop（不覆盖已 reset 的 petState）.
+            motionBindGeneration &+= 1
+            let token = motionBindGeneration
             motionProvider.startUpdates { [weak self] activity in
                 // closure 在 OperationQueue.main 触发（8.2 MotionProviderImpl 钦定）；
                 // mapper.map 是 pure function 同步调用；写 @Published 必须 main actor.
                 let mapped = MotionStateMapper.map(activity)
                 Task { @MainActor in
-                    self?.petState = mapped
+                    guard let self else { return }
+                    // round 5 P2：generation check——bind 推进 token 后排队中的 stale Task drop.
+                    // 这层兜底覆盖 "callback 在 OperationQueue.main 入口时 generation 还匹配,
+                    // 但 Task 排队后 bind 处理 downgrade 推进了 token" 的 race 窗口.
+                    guard self.motionBindGeneration == token else { return }
+                    self.petState = mapped
                 }
             }
         case (false, false):
@@ -405,16 +435,19 @@ public class HomeViewModel: ObservableObject {
             // active 的 rebind 但权限未变化的常态路径）.
             return
         case (true, false):
-            // **downgrade 路径**（round 4 P2 修复的核心）：用户去 Settings 撤销权限后，RootView 触发
-            // rebind 时落到这里. 必须主动：
+            // **downgrade 路径**（round 4 P2 修复的核心 + round 5 P2 generation token 兜底）：
+            // 用户去 Settings 撤销权限后，RootView 触发 rebind 时落到这里. 必须主动：
             //   ① stopUpdates 拆掉老订阅（虽然系统在权限拒后已不 deliver 事件，但 generation token
             //      推进 + handler 释放是干净路径，避免 in-flight callback 还能 hit 老 closure）；
             //   ② hasStartedMotionUpdates = false（让后续 re-grant 后 rebind 能升级回 authorized 路径）；
-            //   ③ petState = .rest 显式回 baseline——MotionProviderImpl generation token 已能滤掉 stale
+            //   ③ **motionBindGeneration += 1**（round 5 P2）：让在飞 Task @MainActor 排队中的 stale
+            //      callback 进 main actor 时 generation check 失败 → drop，不覆盖刚 reset 的 .rest;
+            //   ④ petState = .rest 显式回 baseline——MotionProviderImpl generation token 已能滤掉 stale
             //      callback（详见 docs/lessons/2026-05-04-motion-stop-restart-stale-callback-race.md），
             //      但 UI 端 stale 值是已经 set 到 @Published 的，必须主动 reset 才看得到立即更新.
             motionProvider.stopUpdates()
             hasStartedMotionUpdates = false
+            motionBindGeneration &+= 1   // round 5 P2：让 in-flight stale Task 进 main 后被 token check 拦截
             petState = .rest
             return
         }
