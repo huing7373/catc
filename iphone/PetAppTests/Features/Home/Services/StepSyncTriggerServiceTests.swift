@@ -104,6 +104,56 @@ final class StepSyncTriggerServiceTests: XCTestCase {
             "stop() 后无新增 invocations（cancel 生效）")
     }
 
+    // codex review round 2 [P2] fix: start → stop → start 序列（rebind 路径）；
+    // 模拟 launch state 离开 .ready（onLeaveReady → service.stop()）后又重新进入 .ready
+    // （onReadyTask → service.start()）的真实 lifecycle.
+    //
+    // 验证：
+    //   1. 第一次 start() → timer 启动 + launch sync（hasStartedTimer = true）
+    //   2. stop() → timer cancel + hasStartedTimer 复位（让下次 start() 走 firstStart 路径）
+    //   3. 第二次 start() → 视为新 firstStart，再启 timer + 再发一次 launch sync
+    //   4. 总 sync 次数 = 2（第一个 launch + 第二个 rebind launch），证明 stop 后 rebind 路径活了
+    func testStart_thenStop_thenStart_rebindPathWorks() async {
+        let useCaseMock = MockSyncStepsUseCase()
+        let viewModel = HomeViewModel()
+        let service = StepSyncTriggerService(syncStepsUseCase: useCaseMock, homeViewModel: viewModel)
+
+        // 第一次：启动 + 一次 launch sync
+        service.start()
+        await waitForInvocations(useCaseMock, atLeast: 1)
+        XCTAssertEqual(useCaseMock.invocations.count, 1)
+
+        // stop（模拟 launch state 离开 .ready）
+        service.stop()
+
+        // 第二次 start（模拟重新进入 .ready）：因 hasStartedTimer 已复位，应走 firstStart 路径
+        service.start()
+        await waitForInvocations(useCaseMock, atLeast: 2)
+        XCTAssertEqual(useCaseMock.invocations.count, 2,
+            "stop 后再 start 应被视为新 firstStart 并触发一次 launch sync")
+    }
+
+    // codex review round 2 [P2] fix: stop() 调用幂等（多次 stop 安全）.
+    // RootView 同时在 onLeaveReady 与 .scenePhase .background 路径调 stop()；
+    // 状态切换序列可能触发两次 stop，必须不抛错 / 不破坏后续 start 行为.
+    func testStop_idempotent_safeToCallTwice() async {
+        let useCaseMock = MockSyncStepsUseCase()
+        let viewModel = HomeViewModel()
+        let service = StepSyncTriggerService(syncStepsUseCase: useCaseMock, homeViewModel: viewModel)
+
+        service.start()
+        await waitForInvocations(useCaseMock, atLeast: 1)
+
+        service.stop()
+        service.stop()  // 第二次 stop 应不抛错（cancel nil timer 安全 + hasStartedTimer 已 false）
+
+        // 后续仍可正常 start
+        service.start()
+        await waitForInvocations(useCaseMock, atLeast: 2)
+        XCTAssertEqual(useCaseMock.invocations.count, 2,
+            "两次 stop 不应破坏后续 start —— 总 sync = 2")
+    }
+
     // codex review round 1 [P3] fix: start() 幂等 —— 多次调用不重启 timer / 不并发 spawn 多个
     // 立即 sync；每次 .active scenePhase RootView 只需调 start() 一次（不再额外调 triggerForeground()）.
     //

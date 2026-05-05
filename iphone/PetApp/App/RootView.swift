@@ -162,6 +162,24 @@ struct RootView: View {
                         // currentUser 等）；ready 子树只在 bootstrap 完成后渲染 → onReadyTask 执行时
                         // SessionStore.token 必已存在；service.start() 调 /steps/sync 不会 401.
                         stepSyncTriggerService?.start()
+                    },
+                    // Story 8.5 review round 2 [P2] fix: launch state 离开 .ready 时停 step sync timer.
+                    //
+                    // 触发链路：token expiry 401 → AuthBoundaryAPIClient 调
+                    // unauthorizedHandlerSink → AppLaunchStateMachine.triggerColdStart() →
+                    // state = .launching → bootstrap 重跑（可能再失败 → .needsAuth）.
+                    //
+                    // 旧实装漏洞：5min timer 在 .ready 启动后无人 stop —— 离开 .ready 期间仍然
+                    // 每 5min 跑一次 sync（用已被 sessionStore.clear() 清掉的 token → 又触发 401 →
+                    // 又触发 cold-start，形成自激循环）；scenePhase listener 在下次 .active 仍会
+                    // 调 start() 重启 timer.
+                    //
+                    // 修复：在 LaunchedContentView 内 .onChange(of: stateMachine.state) 监听
+                    // state 切换；离开 .ready 时调本回调 → service.stop() cancel timer.
+                    // 重新进入 .ready 时由 onReadyTask 重新调 service.start()（既有路径，幂等）.
+                    // 详见 docs/lessons/2026-05-04-launch-state-leave-ready-must-stop-feature-services.md.
+                    onLeaveReady: {
+                        stepSyncTriggerService?.stop()
                     }
                 )
             } else {
@@ -274,7 +292,16 @@ struct RootView: View {
             // `/steps/sync`. 修复：start() 自身改成幂等 reactivate 入口（首次启 timer + 立即 sync；
             // 后续仅立即 sync，不重启 timer）.详见 lesson
             // docs/lessons/2026-05-04-scenephase-idempotent-start-no-duplicate-trigger.md.
-            stepSyncTriggerService?.start()
+            //
+            // Story 8.5 review round 2 [P2] fix: 加 `.ready` gate —— launch state 不在 .ready
+            // 时（如 token expiry 401 后被 cold-start 路径重置回 .launching/.needsAuth），
+            // 即便 scenePhase .active 也不应 restart step sync timer（无 valid session token,
+            // 调 /steps/sync 必 401 → 又触发 cold-start 自激循环）.重新进入 .ready 时由
+            // onReadyTask 路径调 service.start()，本路径不再越权.
+            // 详见 docs/lessons/2026-05-04-launch-state-leave-ready-must-stop-feature-services.md.
+            if launchStateMachine?.state == .ready {
+                stepSyncTriggerService?.start()
+            }
         }
         .errorPresentationHost(presenter: container.errorPresenter)
     }
@@ -433,6 +460,11 @@ private struct LaunchedContentView: View {
     let resetIdentityViewModel: ResetIdentityViewModel?
     let onReadyAppear: () -> Void
     let onReadyTask: () async -> Void
+    /// Story 8.5 review round 2 [P2] fix: launch state 离开 `.ready` 时回调（同步路径）.
+    /// 用于让外层 RootView 停 step sync timer，避免 token expiry 401 → cold-start 重置回
+    /// `.launching` / `.needsAuth` 期间 timer 仍 5min 跑一次 sync（用清掉的 token → 又 401 自激循环）.
+    /// 详见 docs/lessons/2026-05-04-launch-state-leave-ready-must-stop-feature-services.md.
+    let onLeaveReady: () -> Void
 
     init(
         stateMachine: AppLaunchStateMachine,
@@ -447,7 +479,8 @@ private struct LaunchedContentView: View {
         sessionStore: SessionStore?,
         resetIdentityViewModel: ResetIdentityViewModel?,
         onReadyAppear: @escaping () -> Void,
-        onReadyTask: @escaping () async -> Void = { }
+        onReadyTask: @escaping () async -> Void = { },
+        onLeaveReady: @escaping () -> Void = { }
     ) {
         self.stateMachine = stateMachine
         self.coordinator = coordinator
@@ -462,6 +495,7 @@ private struct LaunchedContentView: View {
         self.resetIdentityViewModel = resetIdentityViewModel
         self.onReadyAppear = onReadyAppear
         self.onReadyTask = onReadyTask
+        self.onLeaveReady = onLeaveReady
     }
 
     var body: some View {
@@ -503,6 +537,22 @@ private struct LaunchedContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: stateMachine.state)
+        // Story 8.5 review round 2 [P2] fix: 监听 launch state 切换，离开 `.ready` 时
+        // 调 onLeaveReady 让外层停 step sync timer（避免 token expiry 401 后 timer 仍跑）.
+        // 重新进入 `.ready` 时由 .ready 分支的 .task → onReadyTask 重启 timer（既有路径，幂等）.
+        .onChange(of: stateMachine.state) { oldState, newState in
+            let wasReady: Bool = {
+                if case .ready = oldState { return true }
+                return false
+            }()
+            let isReady: Bool = {
+                if case .ready = newState { return true }
+                return false
+            }()
+            if wasReady && !isReady {
+                onLeaveReady()
+            }
+        }
     }
 
     /// Story 5.5 round 8 [P1] fix（终极方案）: bootstrap 路径的 `.alert` / `.toast` 改用
