@@ -1,6 +1,6 @@
 # Story 8.4: 主界面猫 sprite 三态动画切换
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
