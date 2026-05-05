@@ -149,3 +149,5 @@
 | 2026-05-04 | [CoreMotion subscribe/stop 契约：handler invoke 必须与 generation check 共享同一锁段](2026-05-04-motion-handler-invoke-must-be-in-lock.md) | 1 | architecture / concurrency | `d875b7d` |
 | 2026-05-04 | [pure mapper 内做 confidence debounce 让下游卡 stale；防抖应在带时间维度的上层做](2026-05-04-motion-mapper-confidence-debounce-removal.md) | 1 | architecture / correctness | `a0d869e` |
 | 2026-05-04 | [MotionProvider.bind 必须先 gate authorizationStatus 再 startUpdates（first-launch 不弹权限红线）](2026-05-04-motion-bind-must-gate-on-authorization-status.md) | 1 | architecture | `<pending>` |
+| 2026-05-04 | [SwiftUI body 内 switch 分支 swap 必须用 `.id() + .transition() + .animation(value:)` 三件套才能 fade](2026-05-04-swiftui-content-swap-needs-id-and-transition.md) | 1 | architecture | `<pending>` |
+| 2026-05-04 | [auth-gated bind 必须挂 ScenePhase rebind 才能覆盖 "用户去 Settings 改权限再回来" 路径](2026-05-04-scenephase-rebind-for-auth-gated-subscriptions.md) | 1 | architecture | `<pending>` |

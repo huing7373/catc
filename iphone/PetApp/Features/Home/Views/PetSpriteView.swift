@@ -33,25 +33,47 @@ public struct PetSpriteView: View {
         //   "homeCatStage" identifier 继承覆盖子节点 identifier（iOS 26 简化处子级时 parent identifier 会优先 win）.
         //   identifier 与 label 挂在 outer 容器层；switch state 内部 image 仅做视觉渲染，不再各自挂 a11y modifier.
         //
-        // 三态分支（仅一个会被渲染；其它走 EmptyView 路径节省渲染开销）.
-        ZStack {
-            switch state {
-            case .rest:
-                spriteImage(symbol: "cat.fill", tintColor: theme.colors.inkSoft)
-            case .walk:
-                spriteImage(symbol: "figure.walk", tintColor: theme.colors.accent)
-            case .run:
-                spriteImage(symbol: "figure.run", tintColor: theme.colors.success)
-            }
-        }
-        // 200ms 平滑过渡（epics.md AC 行 1539 钦定 "state 切换时有平滑过渡（淡入淡出 200ms）"）.
-        // .animation(_:value:) 让 ZStack 内分支切换时整体淡入淡出；不需要 .transition() — value-based animation
-        // 自动对内容变化做 default crossfade（200ms easeInOut）.
+        // 单一 sprite image 渲染（state 决定 SF Symbol + tint）—— 用 `.id(state)` 强制 SwiftUI 把
+        //   state 切换识别为 view 替换 → `.transition(.opacity)` 才能生效；否则 `.animation(value:)`
+        //   单独修饰一个常驻 view 的 modifier 链不会让 SF Symbol 内容做 fade（review round 2 P2 fix）.
+        //
+        // 设计要点（review round 2 P2 fix；详见 docs/lessons/2026-05-04-swiftui-content-swap-needs-id-and-transition.md）：
+        //   · `.id(state)`：让 SwiftUI 在 state 改变时把当前 view tree 视为新 view（旧 view 移除 / 新 view 插入），
+        //     而不是仅 mutate modifier；这是 .transition() 生效的前提.
+        //   · `.transition(.opacity)`：声明 view 加入 / 移除时走 opacity 过渡（替代默认的瞬时切换）.
+        //   · `.animation(.easeInOut(duration: 0.2), value: state)`：声明 transition 的 timing curve
+        //     与 200ms duration（epics.md AC 行 1539 钦定）.
+        //   · 三者缺一不可；.animation(value:) 单独使用只会动画化"已存在 modifier"的 value 变化，
+        //     不会让 view body 内 switch 分支 swap 触发 fade.
+        spriteImage(
+            symbol: spriteSymbolName(for: state),
+            tintColor: spriteTintColor(for: state)
+        )
+        .id(state)
+        .transition(.opacity)
         .animation(.easeInOut(duration: 0.2), value: state)
         // 把 PetSpriteView 整体收成 a11y 叶子节点；children: .ignore 让内部 SF Symbol 不被另算成 a11y 子节点.
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(accessibilityLabel))
         .accessibilityIdentifier(currentIdentifier)
+    }
+
+    /// state → SF Symbol 名映射（占位 sprite；节点 3 阶段美术资产不阻塞）.
+    private func spriteSymbolName(for state: MotionState) -> String {
+        switch state {
+        case .rest: return "cat.fill"
+        case .walk: return "figure.walk"
+        case .run:  return "figure.run"
+        }
+    }
+
+    /// state → tint color 映射（从 theme tokens 取值，遵循 Story 37.5 主题约定）.
+    private func spriteTintColor(for state: MotionState) -> Color {
+        switch state {
+        case .rest: return theme.colors.inkSoft
+        case .walk: return theme.colors.accent
+        case .run:  return theme.colors.success
+        }
     }
 
     /// 当前状态对应的 accessibility identifier（UITest 通过此值定位状态变化）.

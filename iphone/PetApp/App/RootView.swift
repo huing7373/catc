@@ -99,6 +99,20 @@ struct RootView: View {
     /// Story 2.9 新增 / Story 5.2 升级：启动状态机.
     @State private var launchStateMachine: AppLaunchStateMachine?
 
+    /// Story 8.4 review round 2 P2 fix: scenePhase listener，让 background → foreground reactivate
+    /// 时再 bind 一次 motionProvider —— 覆盖 first-launch 用户去 Settings 改权限再回 app 的真实路径.
+    ///
+    /// 单纯的 `.onAppear` 仅在 RootView 首次出现时触发；用户在同 session 中授权（去 Settings App
+    /// 切完 Motion 权限再回来）时 RootView 不会重新 .onAppear → bind 不会被再调 → first-launch
+    /// 未授权 path 持有的引用永远停在 .notDetermined gate 上 → petState 卡 .rest 直到 app relaunch.
+    /// scenePhase `.active` 切换覆盖此场景：从 Settings 回来 app 走 background → active 路径，
+    /// .onChange 触发 → 调一次 idempotent bind → 此时 authorizationStatus 已变 .authorized → startUpdates.
+    ///
+    /// 与 Story 5.5 round 8 RetryView / Story 37.x 各 ViewModel bind 模式同精神：bind 入口幂等 + auth-gate，
+    /// 多次调用安全（hasStartedMotionUpdates 短路防重复订阅；未授权时仅持引用不订阅，不会触发权限弹窗）.
+    /// 详见 docs/lessons/2026-05-04-scenephase-rebind-for-auth-gated-subscriptions.md.
+    @Environment(\.scenePhase) private var scenePhase
+
     #if DEBUG
     /// Story 2.8: dev "重置身份" 按钮 ViewModel.仅 Debug build 存在；Release build 字段不存在.
     @State private var resetIdentityViewModel: ResetIdentityViewModel?
@@ -214,6 +228,23 @@ struct RootView: View {
         .task {
             ensureLaunchStateMachineWired()
             await launchStateMachine?.bootstrap()
+        }
+        .onChange(of: scenePhase) { oldPhase, newPhase in
+            // Story 8.4 review round 2 P2 fix: app 从 background / inactive 回到 .active 时
+            // 重新 bind 一次 motionProvider —— 覆盖用户去 Settings 改 Motion 权限再回 app 的路径.
+            //
+            // bind 入口幂等：
+            //   · 已 startUpdates → hasStartedMotionUpdates short-circuit 直接 return；
+            //   · 仍未授权 → authorization gate 仍 return；
+            //   · 首次到达 .authorized（用户刚去 Settings 授权回来）→ 第一次走完 startUpdates 注册 handler.
+            // 因此 reactivate 触发 bind 不会重复订阅 / 不会触发权限弹窗 / 不会破坏既有 first-launch 红线.
+            //
+            // 仅在 `oldPhase != .active && newPhase == .active` 时触发：
+            //   · 滤掉 .active → .inactive（如系统通知 banner）的反向边沿；
+            //   · 滤掉首次启动时 .background → .inactive → .active 中的 .inactive 边沿（避免重复 bind）.
+            // 详见 docs/lessons/2026-05-04-scenephase-rebind-for-auth-gated-subscriptions.md.
+            guard newPhase == .active, oldPhase != .active else { return }
+            homeViewModel.bind(motionProvider: container.motionProvider)
         }
         .errorPresentationHost(presenter: container.errorPresenter)
     }
