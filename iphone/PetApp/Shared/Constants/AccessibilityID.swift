@@ -41,6 +41,13 @@ public enum AccessibilityID {
         public static let teamIdleCardCreate = "homeTeamIdleCard_create"
         public static let teamIdleCardJoin = "homeTeamIdleCard_join"
 
+        // Story 8.4 AC6 新增：PetSpriteView 三态 a11y identifier.
+        // 命名风格：petSprite + 状态名（小驼峰）— 与 Story 37.13 落地的命名风格一致（如 catStage / userInfo）.
+        // PetSpriteView 内部按 state 三分支挂对应 identifier；UITest 通过 identifier 切换断言判定.
+        public static let petSpriteRest = "petSprite_rest"
+        public static let petSpriteWalk = "petSprite_walk"
+        public static let petSpriteRun = "petSprite_run"
+
         // Story 37.13 删除：Story 37.3 落地的 deprecated 3 CTA 按钮常量
         //   (`btnRoom` = "home_btnRoom" / `btnInventory` = "home_btnInventory" / `btnCompose` = "home_btnCompose").
         //   原因：Story 37.3 主入口已改 4 Tab IA, 3 CTA 按钮 view 已删, 常量保留无意义.

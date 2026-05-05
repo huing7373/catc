@@ -186,6 +186,20 @@ struct RootView: View {
             if let realProfileVM = profileViewModel as? RealProfileViewModel {
                 realProfileVM.bind(appState: appState)
             }
+
+            // Story 8.4 AC4: 同步 wire MotionProvider（与 bind(appState:) 同精神 — 在 first paint 前注入）.
+            //
+            // 在 .onAppear 而非 .task：与 Story 37.8 round 2 [P2] lesson `onappear-vs-task-sync-bind-before-first-paint.md`
+            //   钦定路径同精神 —— ViewModel 在 first paint 前必须持有订阅引用，否则 catStage 第一帧渲染时
+            //   petSlot() 调用 PetSpriteView(state: viewModel.petState) 会拿到默认 .rest（视觉本就该如此），
+            //   但**第一次** activity event 到达前 petState 不会更新；如果用户在 1s 内（首帧到第一次 motion event 之间）
+            //   切走然后回来，subscribe 漏触发的话视觉永远停在 .rest. 同步 bind 让此 race 不存在.
+            //
+            // **不**调 motionProvider.requestPermission（按 AR17 / 节点 3 设计：权限按需）.
+            //   Story 8.5 同步触发器内部会走 8.2 motionProvider.requestPermission 链路；
+            //   未授权时 CMMotionActivityManager 默默不发事件 → handler 不被调 → petState 保持 .rest 默认值.
+            homeViewModel.bind(motionProvider: container.motionProvider)
+
             ensureLaunchStateMachineWired()
         }
         .task {

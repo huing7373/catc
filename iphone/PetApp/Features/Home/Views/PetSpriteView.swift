@@ -1,0 +1,101 @@
+// PetSpriteView.swift
+// Story 8.4 AC2: 主界面猫 sprite 三态动画显示组件（rest / walk / run）.
+//
+// 设计基线：
+// - generic struct + @Binding-free（接 MotionState 直接 read-only 入参）
+// - 三态分支：rest / walk / run 各自独立的 SwiftUI 子视图（占位 SF Symbol 或简单几何形状）
+// - 200ms 平滑过渡（淡入淡出）：用 `.animation(.easeInOut(duration: 0.2), value: state)`
+// - accessibility identifier：state 切换时同步换 "petSprite_rest" / "petSprite_walk" / "petSprite_run"
+//   ── UITest 通过 identifier 切换断言判定状态机是否真的驱动 sprite 渲染.
+// - 占位 sprite 资产（节点 3 阶段美术资产不阻塞）：rest / walk / run 各用一个 SF Symbol + 颜色区分.
+//
+// 与 Story 37.7 chestSlot 接缝模式同精神：本 view 是独立 component；caller（HomeContainerHomeViewBridge
+// 通过 petSlot ViewBuilder closure 注入）传入 PetSpriteView(state: viewModel.petState).
+//
+// **不**接 ViewModel：本 view 是 stateless representation —— state 由 caller 通过参数提供；
+// 单元测试场景可 PetSpriteView(state: .walk) 直接构造验证视觉路径，不需要构造完整 ViewModel.
+
+import SwiftUI
+
+public struct PetSpriteView: View {
+    public let state: MotionState
+
+    /// Story 37.5: 主题 token 取值入口；本 view 嵌入 HomeView catStage 内 → 由父级 .environment(\.theme, ...) 透传.
+    @Environment(\.theme) private var theme
+
+    public init(state: MotionState) {
+        self.state = state
+    }
+
+    public var body: some View {
+        // Story 8.4 AC2 + Story 8.4 review fix: 整个 PetSpriteView 通过 `.accessibilityElement(children: .ignore)`
+        //   收成单一 a11y leaf，防止被父级 catStage `.accessibilityElement(children: .contain)` 把
+        //   "homeCatStage" identifier 继承覆盖子节点 identifier（iOS 26 简化处子级时 parent identifier 会优先 win）.
+        //   identifier 与 label 挂在 outer 容器层；switch state 内部 image 仅做视觉渲染，不再各自挂 a11y modifier.
+        //
+        // 三态分支（仅一个会被渲染；其它走 EmptyView 路径节省渲染开销）.
+        ZStack {
+            switch state {
+            case .rest:
+                spriteImage(symbol: "cat.fill", tintColor: theme.colors.inkSoft)
+            case .walk:
+                spriteImage(symbol: "figure.walk", tintColor: theme.colors.accent)
+            case .run:
+                spriteImage(symbol: "figure.run", tintColor: theme.colors.success)
+            }
+        }
+        // 200ms 平滑过渡（epics.md AC 行 1539 钦定 "state 切换时有平滑过渡（淡入淡出 200ms）"）.
+        // .animation(_:value:) 让 ZStack 内分支切换时整体淡入淡出；不需要 .transition() — value-based animation
+        // 自动对内容变化做 default crossfade（200ms easeInOut）.
+        .animation(.easeInOut(duration: 0.2), value: state)
+        // 把 PetSpriteView 整体收成 a11y 叶子节点；children: .ignore 让内部 SF Symbol 不被另算成 a11y 子节点.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(accessibilityLabel))
+        .accessibilityIdentifier(currentIdentifier)
+    }
+
+    /// 当前状态对应的 accessibility identifier（UITest 通过此值定位状态变化）.
+    private var currentIdentifier: String {
+        switch state {
+        case .rest: return AccessibilityID.Home.petSpriteRest
+        case .walk: return AccessibilityID.Home.petSpriteWalk
+        case .run:  return AccessibilityID.Home.petSpriteRun
+        }
+    }
+
+    /// 当前状态对应的 VoiceOver 中文 label.
+    private var accessibilityLabel: String {
+        switch state {
+        case .rest: return "猫静止"
+        case .walk: return "猫行走"
+        case .run:  return "猫跑步"
+        }
+    }
+
+    /// 单一占位 sprite image 渲染（SF Symbol 180pt + 半透明 tint）.
+    /// 节点 3 阶段美术资产不阻塞；后续 Story 30.x 落地真实 sprite render 时替换此 helper.
+    private func spriteImage(symbol: String, tintColor: Color) -> some View {
+        Image(systemName: symbol)
+            .resizable()
+            .scaledToFit()
+            .frame(width: 180, height: 180)
+            .foregroundColor(tintColor.opacity(0.7))
+    }
+}
+
+#if DEBUG
+#Preview("PetSprite — rest") {
+    PetSpriteView(state: .rest)
+        .environment(\.theme, ThemeName.candy.theme)
+}
+
+#Preview("PetSprite — walk") {
+    PetSpriteView(state: .walk)
+        .environment(\.theme, ThemeName.candy.theme)
+}
+
+#Preview("PetSprite — run") {
+    PetSpriteView(state: .run)
+        .environment(\.theme, ThemeName.candy.theme)
+}
+#endif

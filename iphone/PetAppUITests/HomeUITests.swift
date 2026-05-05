@@ -31,8 +31,12 @@ final class HomeUITests: XCTestCase {
         let userInfo = app.descendants(matching: .any)[AccessibilityID.Home.userInfo]
         XCTAssertTrue(userInfo.waitForExistence(timeout: timeout), "userInfo 区块未找到")
 
-        let petArea = app.descendants(matching: .any)[AccessibilityID.Home.petArea]
-        XCTAssertTrue(petArea.waitForExistence(timeout: timeout), "petArea 区块未找到")
+        // Story 8.4 修改：catStage 中央 SF Symbol 占位被 PetSpriteView 替换；
+        //   AccessibilityID.Home.petArea = "home_petArea" 在 Story 37.7 落地的 SF Symbol 上挂；
+        //   本 story 用 PetSpriteView 替换后该 identifier 不再渲染（PetSpriteView 自身挂 petSprite_rest 等）.
+        //   断言改为：验证 PetSpriteView 三态之一的 identifier 存在（默认 .rest 路径）.
+        let petSpriteRest = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteRest]
+        XCTAssertTrue(petSpriteRest.waitForExistence(timeout: timeout), "petSprite_rest 区块未找到（Story 8.4 替换 petArea 占位）")
 
         let stepBalance = app.descendants(matching: .any)[AccessibilityID.Home.stepBalance]
         XCTAssertTrue(stepBalance.waitForExistence(timeout: timeout), "stepBalance 区块未找到")
@@ -86,6 +90,34 @@ final class HomeUITests: XCTestCase {
             app.descendants(matching: .any)[AccessibilityID.Home.teamIdleCardJoin].exists,
             "homeTeamIdleCard_join 按钮未找到"
         )
+    }
+
+    /// Story 8.4 AC8: PetSpriteView 默认渲染 rest 状态 a11y identifier.
+    ///
+    /// 范围：本 UITest 仅验证启动后 catStage 内有 PetSpriteView "petSprite_rest" identifier 渲染.
+    ///   动态切换（rest → walk → run）通过模拟器系统 motion event 不可靠（Xcode 26 模拟器 idle 时
+    ///   30s 都不发 activity，与 Story 8.2 MotionProviderIntegrationTests round 2 P2 同坑），
+    ///   动态切换断言由 Story 9.1 跨端 e2e 阶段加 MockMotionProvider launch arg 路径覆盖.
+    ///
+    /// 与 Story 37.7 / 37.8 同模式：waitForExistence(timeout: 5) 兜底 launch 期 race；
+    ///   UITEST_SKIP_GUEST_LOGIN=1 跳过真实登录链路（无 server 依赖）.
+    func testPetSpriteShowsRestStateOnLaunch() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
+        app.launch()
+
+        let timeout: TimeInterval = 5
+
+        // PetSpriteView 启动时 viewModel.petState = .rest（AC1 默认值）→ 渲染 "petSprite_rest" identifier.
+        let petSpriteRest = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteRest]
+        XCTAssertTrue(
+            petSpriteRest.waitForExistence(timeout: timeout),
+            "petSprite_rest identifier 未找到；检查 PetSpriteView 三态分支默认 .rest 路径"
+        )
+
+        // 同时验证 catStage 父容器仍存在（既有 Story 37.7 视觉锚不漂移）.
+        let catStage = app.descendants(matching: .any)[AccessibilityID.Home.catStage]
+        XCTAssertTrue(catStage.exists, "homeCatStage 父容器未找到；本 story 不应破坏 Story 37.7 catStage 锚")
     }
 
     /// Story 37.8 AC8：RoomScaffoldView 7 锚 a11y identifier 可定位验证.

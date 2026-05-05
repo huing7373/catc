@@ -68,13 +68,22 @@ private struct HomeContainerHomeViewBridge: View {
     var body: some View {
         // Story 37.7: HomeView 改 generic struct + chestSlot ViewBuilder closure 接缝.
         // 参数名 viewModel → state；本期 chestSlot 传 EmptyView()（Story 21.1 改传 ChestCardView()）.
+        // Story 8.4 AC5: petSlot 接缝传入 PetSpriteView，订阅 viewModel.petState 派生.
+        //
+        // SwiftUI 自动追踪 viewModel.petState 变化：HomeContainerHomeViewBridge body 重新求值时,
+        //   PetSpriteView(state: ...) 也跟着重新构造 → state 参数变化 → AC2 钦定的
+        //   `.animation(.easeInOut(duration: 0.2), value: state)` 触发 200ms 过渡.
+        //
+        // 注：homeViewModel 类型签名是基类 `HomeViewModel`，本 view 通过 EnvironmentObject 拿到的
+        //   实例运行时是 RealHomeViewModel（RootView 注入路径），但 .petState 字段在基类 @Published
+        //   声明，子类继承零冲突.
         HomeView(
             state: homeViewModel,
             resetIdentityViewModel: resetIdentityViewModel,
-            sessionStore: sessionStore
-        ) {
-            EmptyView()
-        }
+            sessionStore: sessionStore,
+            petSlot: { PetSpriteView(state: homeViewModel.petState) },
+            chestSlot: { EmptyView() }
+        )
     }
 }
 

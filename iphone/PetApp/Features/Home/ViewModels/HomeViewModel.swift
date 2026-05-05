@@ -100,6 +100,20 @@ public class HomeViewModel: ObservableObject {
     /// 唯一 owner = ViewModel @Published（避免 SwiftUI @State 双写漂移；详见 Dev Notes "showJoinModal 唯一 owner"）.
     @Published public var showJoinModal: Bool = false
 
+    // MARK: - Story 8.4 新增字段（PetSpriteView 三态视觉契约 + MotionProvider 订阅链路）
+
+    /// Story 8.4 AC1: 猫 sprite 当前运动状态.
+    /// - 订阅来源：通过 `bind(motionProvider:)` wire 后由 MotionProvider.startUpdates 闭包内调
+    ///   `MotionStateMapper.map(activity)` 派生.
+    /// - 默认值 `.rest`：HomeView 首次渲染时默认显示 idle 动画（AC2 PetSpriteView 三态分支）；
+    ///   未授权 / 未 startUpdates 时也保持 .rest（与 8.2 MotionProvider 协议契约对齐：
+    ///   "未授权时 startUpdates 不抛错，handler 不被调用即可"）.
+    /// - **不**写 AppState：motionState 不是 ADR-0010 §3.2 白名单 7 字段；
+    ///   仅作为 ViewModel 瞬时投影（8.4 addendum 钦定）.
+    /// - 子类（RealHomeViewModel / MockHomeViewModel）**不** override：基类 @Published 字段已可用;
+    ///   override 会破坏 Combine publisher 链路（详 docs/lessons/2026-04-30-real-viewmodel-override-placeholder-must-mutate-state.md）.
+    @Published public var petState: MotionState = .rest
+
     // Story 37.3 删除（ADR-0009 §3.5 步骤 4）：
     //   onRoomTap / onInventoryTap / onComposeTap 三个 closure 字段已删除.
     //   主入口 IA 改 4 Tab + HomeContainerView 互斥状态机后,这三个 closure 不再有 caller.
@@ -145,6 +159,21 @@ public class HomeViewModel: ObservableObject {
 
     /// 当前 loadHome 任务句柄；同 task 边界内并发触发短路.
     private var loadHomeTask: Task<Void, Never>?
+
+    /// Story 8.4 AC1: 通过 bind(motionProvider:) 注入的 MotionProvider 引用.
+    ///
+    /// **strong** 持有（与 Story 37.4 weak vs strong lesson 同精神）：
+    /// - container.motionProvider 是 AppContainer 单例（与 ViewModel 同生命周期，不形成循环）.
+    /// - bind 后 ViewModel 反向不持 motionProvider —— motionProvider 通过 @Sendable closure
+    ///   弱捕获 self（[weak self]）；ViewModel deinit 时主动 stopUpdates 让 closure 取消 subscription.
+    /// 详见 docs/lessons/2026-04-30-strong-vs-weak-for-constructor-injected-state.md.
+    private var motionProvider: MotionProvider?
+
+    /// Story 8.4 review round 1 P1 引入：是否已成功调过 motionProvider.startUpdates.
+    /// guard 让"已经 startUpdates 之后的 rebind"短路（防 8.6 授权后多次 rebind 重复订阅 / 双倍事件）.
+    /// 与 motionProvider 字段分离的理由：bind 在未授权时仍会存 motionProvider 引用（仅不 startUpdates），
+    /// 单一字段无法区分"未存"与"已存但未订阅"两态. 详见 docs/lessons/2026-05-04-motion-bind-must-gate-on-authorization-status.md.
+    private var hasStartedMotionUpdates: Bool = false
 
     /// Story 37.4：通过 `bind(appState:)` 注入或 init 注入的 AppState 引用.
     ///
@@ -307,6 +336,61 @@ public class HomeViewModel: ObservableObject {
         self.appState = appState
     }
 
+    /// Story 8.4 AC1: 绑定 MotionProvider（与 bind(pingUseCase:) / bind(loadHomeUseCase:) /
+    ///                                   bind(appState:) 同模式；但 review round 1 P1 后**允许 rebind**
+    ///                                   场景——授权 flow 在 8.5 / 8.6 走完后调用方需再调一次 bind
+    ///                                   让未授权 first-launch path 升级到 authorized startUpdates）.
+    ///
+    /// 行为（review round 1 P1 修订；详见 docs/lessons/2026-05-04-motion-bind-must-gate-on-authorization-status.md）：
+    ///   1. **存引用 once**：仅当 self.motionProvider 为 nil 时写入；防多个不同 MotionProvider
+    ///      实例混入引用造成 deinit stopUpdates 漏（上层按约定每个 ViewModel 只配一个 provider）.
+    ///   2. **gate**：查 motionProvider.authorizationStatus()
+    ///      - `.authorized` 且 hasStartedMotionUpdates == false → 调 motionProvider.startUpdates 注册
+    ///        handler 并设 hasStartedMotionUpdates = true.
+    ///      - `.authorized` 且 hasStartedMotionUpdates == true → noop（防重复订阅 / 双倍事件）.
+    ///      - `.notDetermined` / `.denied` / `.restricted` → return（不调 startUpdates，不弹权限）.
+    ///        未授权时 petState 保持 .rest 默认值；后续 story 走完授权 flow 后调用方负责再 bind 一次.
+    ///   3. handler 内部：mapper.map 同步派生 → Task { @MainActor in self?.petState = mapped }
+    ///      ── @Sendable closure 捕获 [weak self] 防循环；写 @Published 必须在 main actor.
+    ///   4. 不调 requestPermission（红线：权限申请按 AR17 / 节点 3 设计交给 8.5 / 8.6 统一处理）.
+    ///
+    /// 红线：
+    ///   - **不**调 motionProvider.requestPermission（权限申请由 8.5 / 8.6 / 8.1 统一管，
+    ///     避免本 story 触发 NSMotionUsageDescription 权限弹窗破坏 first-launch UX + UITest 阻塞）.
+    ///   - **更不**在 .notDetermined 下直接 startUpdates —— `CMMotionActivityManager.startActivityUpdates`
+    ///     在未授权下会触发系统权限弹窗，与"权限按需"红线冲突. round 1 P1 codex 抓到的就是这条.
+    ///   - **不**在 closure 内做长耗时操作（按 8.2 lesson `motion-handler-invoke-must-be-in-lock.md`
+    ///     钦定：handler 必须轻量同步 mutate @Published / @State；YAGNI 不引入 throttle / debounce —
+    ///     由 mapper / ViewModel 配合做 hysteresis 是未来扩展点，不在本 story 范围）.
+    public func bind(motionProvider: MotionProvider) {
+        // 第一次 bind：存引用. 后续重 bind（同 instance）走 idempotent 升级路径——不覆盖既有引用.
+        if self.motionProvider == nil {
+            self.motionProvider = motionProvider
+        }
+
+        // 已 startUpdates 过 → 防重复订阅（重复 startUpdates 在 MotionProviderImpl 内部也会被
+        // isUpdating guard 拦掉，但此处显式短路更明确，也省一次 lock 进出）.
+        guard !hasStartedMotionUpdates else { return }
+
+        // Story 8.4 review round 1 P1 fix：未授权时只持引用、不订阅，避免 startUpdates 触发权限弹窗.
+        // CoreMotion 在 .notDetermined 下调 startActivityUpdates 会让系统弹 NSMotionUsageDescription
+        // 权限 sheet——破坏 first-launch UX + 阻塞 launch-time UITest. 改为 gate 后：
+        //   · authorized → 正常 startUpdates，生产路径不变
+        //   · notDetermined / denied / restricted → 仅持引用 return，等后续 story（8.5 / 8.6）显式
+        //     授权后再调一次 bind 就能升级到 startUpdates（idempotent rebind 模式）.
+        guard motionProvider.authorizationStatus() == .authorized else { return }
+
+        hasStartedMotionUpdates = true
+        motionProvider.startUpdates { [weak self] activity in
+            // closure 在 OperationQueue.main 触发（8.2 MotionProviderImpl 钦定）；
+            // mapper.map 是 pure function 同步调用；写 @Published 必须 main actor.
+            let mapped = MotionStateMapper.map(activity)
+            Task { @MainActor in
+                self?.petState = mapped
+            }
+        }
+    }
+
     /// Story 5.5: LoadHome 入口（启动时由 RootView bootstrapStep1 注入路径调；
     /// 用户重试时由 ErrorPresenter onRetry 闭包调）.
     ///
@@ -390,6 +474,22 @@ public class HomeViewModel: ObservableObject {
             return desc
         }
         return "首屏加载失败，请重试"
+    }
+
+    // MARK: - Story 8.4 AC1: deinit 取消 MotionProvider 订阅（防泄漏）
+
+    /// Story 8.4 AC1: ViewModel deinit 时取消 MotionProvider 订阅（防泄漏，对应 epics.md AC 行 1547）.
+    ///
+    /// SwiftUI @StateObject ViewModel 的生命周期：
+    ///   - RootView @StateObject 持 HomeViewModel 整个 App 生命；正常情况不会 deinit.
+    ///   - 但**测试场景**（unit test 创建 ViewModel 实例 → 测试结束 ARC 释放）必须 stopUpdates，
+    ///     否则 mock motionProvider 仍持 closure → @testable import 不洁 → flaky test.
+    ///   - 也防 future scenario（ViewModel 是 short-lived；如未来 child ViewModel 模式）泄漏.
+    ///
+    /// `deinit` 不能 await / 不能调 @MainActor —— motionProvider.stopUpdates() 协议契约同步签名（无 actor 标记），
+    /// 直接调 OK；与 base class 既有 deinit 行为不冲突（HomeViewModel base 之前没有 deinit，子类也没有）.
+    deinit {
+        motionProvider?.stopUpdates()
     }
 
     // MARK: - Story 37.7: 5 个 abstract method（基类 fatalError 占位，子类必 override）

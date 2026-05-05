@@ -25,6 +25,11 @@ public final class MotionProviderMock: MotionProvider, @unchecked Sendable {
     /// requestPermission 返回值 stub.
     public var requestPermissionStub: Result<Bool, Error> = .success(true)
 
+    /// authorizationStatus 返回值 stub（Story 8.4 review round 1 P1 引入）.
+    /// 默认 `.authorized` —— 与既有测试用例兼容（多数测试场景下 bind 后期望 startUpdates 立即被调）.
+    /// 想测试 first-launch 未授权 gate 路径时显式设 `.notDetermined` / `.denied` / `.restricted`.
+    public var authorizationStatusStub: MotionAuthorizationStatus = .authorized
+
     /// 调用历史；按 ADR-0002 §3.1 钦定的"至少记录 invocations"模板.
     public private(set) var invocations: [String] = []
 
@@ -32,6 +37,8 @@ public final class MotionProviderMock: MotionProvider, @unchecked Sendable {
     public private(set) var requestPermissionCallCount: Int = 0
     public private(set) var startUpdatesCallCount: Int = 0
     public private(set) var stopUpdatesCallCount: Int = 0
+    /// authorizationStatus 调用次数（让单测可断言 bind 路径是否真的查询过权限状态而非直接 startUpdates）.
+    public private(set) var authorizationStatusCallCount: Int = 0
     /// 通过 injectActivity 触发 handler 的次数（包括被忽略的，便于断言"权限拒绝时 handler 没收到"）.
     public private(set) var handlerInvocationCount: Int = 0
 
@@ -45,6 +52,12 @@ public final class MotionProviderMock: MotionProvider, @unchecked Sendable {
     private var generation: UInt64 = 0
 
     public init() {}
+
+    public func authorizationStatus() -> MotionAuthorizationStatus {
+        invocations.append("authorizationStatus")
+        authorizationStatusCallCount += 1
+        return authorizationStatusStub
+    }
 
     public func requestPermission() async throws -> Bool {
         invocations.append("requestPermission()")
@@ -121,10 +134,12 @@ public final class MotionProviderMock: MotionProvider, @unchecked Sendable {
     /// 重置全部 stub + 调用历史（测试 setUp / tearDown 用）.
     public func reset() {
         requestPermissionStub = .success(true)
+        authorizationStatusStub = .authorized
         invocations = []
         requestPermissionCallCount = 0
         startUpdatesCallCount = 0
         stopUpdatesCallCount = 0
+        authorizationStatusCallCount = 0
         handlerInvocationCount = 0
         lock.lock()
         registeredHandler = nil

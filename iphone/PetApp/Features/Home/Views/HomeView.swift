@@ -21,7 +21,7 @@
 
 import SwiftUI
 
-public struct HomeView<ChestSlot: View>: View {
+public struct HomeView<ChestSlot: View, PetSlot: View>: View {
     @ObservedObject public var state: HomeViewModel
 
     /// Story 37.4：通过 `.environmentObject(appState)` 由 RootView 注入 → 子视图（HomeView）订阅 AppState.
@@ -42,6 +42,11 @@ public struct HomeView<ChestSlot: View>: View {
     /// 本期调用方传 EmptyView() 占位（HomeContainerHomeViewBridge / Preview）；视图位置在 ScrollView VStack 第 4 区块.
     private let chestSlot: () -> ChestSlot
 
+    /// Story 8.4 AC3: petSlot ViewBuilder closure 接缝（与 Story 37.7 chestSlot 接缝同精神）.
+    /// caller view（HomeContainerHomeViewBridge）传 PetSpriteView(state: viewModel.petState).
+    /// 视觉位置：catStage 区块中央，覆盖 SF Symbol "cat.fill" 占位（用 ZStack 分层）.
+    private let petSlot: () -> PetSlot
+
     /// Story 37.7 codex round 2 [P2] fix：interactionAnimation `.flying` → `.idle` 重置 timer 句柄.
     /// rapid tap（如 t=0 Feed → t=0.5s Play）时取消上一个 1.4s sleep task —— 否则
     /// 第一个 timer 在 t=1.4s 触发把 .idle 写入，第二个 emoji 提前消失（应当持续到 t=1.9s）.
@@ -53,17 +58,20 @@ public struct HomeView<ChestSlot: View>: View {
     /// 详见 spec Dev Notes "joinRoomInput @State vs @Published 决策".
     @State private var joinRoomInput: String = ""
 
-    /// Story 37.7 AC3: 唯一 init —— 删除老 3 个重载，caller 漏改靠编译器报错驱动.
+    /// Story 37.7 AC3 / Story 8.4 AC3: 唯一 init —— 删除老 3 个重载，caller 漏改靠编译器报错驱动.
     /// 参数名 `state` 而非 `viewModel`（v2 提案钦定）.
+    /// Story 8.4 AC3：新增 `petSlot:` ViewBuilder closure（位于 chestSlot 之前；视觉 top-to-bottom 顺序对应 statusBar → catStage 内嵌 petSlot → actionRow → chestSlot 槽位）.
     public init(
         state: HomeViewModel,
         resetIdentityViewModel: ResetIdentityViewModel? = nil,
         sessionStore: SessionStore? = nil,
+        @ViewBuilder petSlot: @escaping () -> PetSlot,
         @ViewBuilder chestSlot: @escaping () -> ChestSlot
     ) {
         self.state = state
         self.resetIdentityViewModel = resetIdentityViewModel
         self.sessionStore = sessionStore
+        self.petSlot = petSlot
         self.chestSlot = chestSlot
     }
 
@@ -235,15 +243,17 @@ public struct HomeView<ChestSlot: View>: View {
                 // 装饰背景斑点（accent-soft 50pt + 30pt 圆，固定位置 + 低 opacity）.
                 catStageDecorBlobs
 
-                // 中心 cat sprite (SF Symbol cat.fill 220pt; ink-soft).
-                Image(systemName: "cat.fill")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 180, height: 180)
-                    .foregroundColor(theme.colors.inkSoft.opacity(0.7))
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(Text("猫展示区"))
-                    .accessibilityIdentifier(AccessibilityID.Home.petArea)
+                // Story 8.4 AC3：替换 Story 37.7 落地的 `Image(systemName: "cat.fill")` SF Symbol 占位
+                //   为 petSlot() ViewBuilder closure 调用（caller 传 PetSpriteView(state: viewModel.petState)）.
+                //   PetSpriteView 内部已挂 accessibility identifier "petSprite_rest" / "petSprite_walk" /
+                //   "petSprite_run"；外层不再挂 AccessibilityID.Home.petArea —— 改由 PetSpriteView 自身挂.
+                //
+                // 注：AccessibilityID.Home.petArea = "home_petArea" 在 Story 37.13 收编为常量；本 story
+                //   保留该常量定义（不删），但物理位置从此处迁出 —— Story 8.4 落地后 Home tab 内不再有
+                //   "home_petArea" identifier；老 testHomeViewShowsAllPlaceholders UITest 内对 `petArea`
+                //   的断言改为 `petSprite_rest`（详见 HomeUITests.swift 修改）.
+                petSlot()
+                    .frame(width: 180, height: 180)   // 与 Story 37.7 占位 SF Symbol 同尺寸；保 catStage 视觉锚不漂移
 
                 // 等级名牌（左上）+ 三状态条（底部）+ floatUp emoji 浮层
                 VStack {
@@ -565,13 +575,21 @@ public struct FloatingEmojiView: View {
 
 #if DEBUG
 #Preview("HomeView — candy") {
-    HomeView(state: MockHomeViewModel()) { EmptyView() }
+    HomeView(
+        state: MockHomeViewModel(),
+        petSlot: { PetSpriteView(state: .rest) },
+        chestSlot: { EmptyView() }
+    )
         .environmentObject(AppState())
         .environment(\.theme, ThemeName.candy.theme)
 }
 
 #Preview("HomeView — dark") {
-    HomeView(state: MockHomeViewModel()) { EmptyView() }
+    HomeView(
+        state: MockHomeViewModel(),
+        petSlot: { PetSpriteView(state: .rest) },
+        chestSlot: { EmptyView() }
+    )
         .environmentObject(AppState())
         .environment(\.theme, ThemeName.dark.theme)
 }

@@ -79,7 +79,11 @@ final class HomeViewTests: XCTestCase {
         let viewModel = MockHomeViewModel()
         let appState = AppState()
         let controller = UIHostingController(
-            rootView: HomeView(state: viewModel) { EmptyView() }.environmentObject(appState)
+            rootView: HomeView(
+                state: viewModel,
+                petSlot: { PetSpriteView(state: .rest) },
+                chestSlot: { EmptyView() }
+            ).environmentObject(appState)
         )
         controller.view.bounds = CGRect(x: 0, y: 0, width: 375, height: 667)
         controller.view.layoutIfNeeded()
@@ -91,7 +95,11 @@ final class HomeViewTests: XCTestCase {
         let viewModel = MockHomeViewModel()
         let appState = AppState()
         let controller = UIHostingController(
-            rootView: HomeView(state: viewModel) { EmptyView() }.environmentObject(appState)
+            rootView: HomeView(
+                state: viewModel,
+                petSlot: { PetSpriteView(state: .rest) },
+                chestSlot: { EmptyView() }
+            ).environmentObject(appState)
         )
         controller.view.bounds = CGRect(x: 0, y: 0, width: 430, height: 932)
         controller.view.layoutIfNeeded()

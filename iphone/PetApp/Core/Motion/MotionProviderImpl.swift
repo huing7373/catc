@@ -51,6 +51,26 @@ public final class MotionProviderImpl: MotionProvider, @unchecked Sendable {
 
     public init() {}
 
+    /// Story 8.4 review round 1 P1 修复：纯查询当前权限状态，不触发任何系统调用.
+    /// bridge `CMMotionActivityManager.authorizationStatus()` (iOS 11+ class func) → MotionAuthorizationStatus.
+    ///
+    /// 关键：本方法**不调** startActivityUpdates / queryActivityStarting，绝不触发系统权限弹窗——
+    /// `CMMotionActivityManager.authorizationStatus()` 是 lightweight class-method 静态属性查询，
+    /// 在 simulator / device 上读 sandbox 内权限缓存即返回，无 IO 无弹窗.
+    /// HomeViewModel.bind(motionProvider:) 在 first paint 前调此 API gate：仅 `.authorized` 走
+    /// startUpdates，其他三态保留引用不订阅，让 first launch UX 干净（不在 launch 路径弹权限）.
+    public func authorizationStatus() -> MotionAuthorizationStatus {
+        switch CMMotionActivityManager.authorizationStatus() {
+        case .authorized: return .authorized
+        case .denied: return .denied
+        case .restricted: return .restricted
+        case .notDetermined: return .notDetermined
+        @unknown default:
+            // future iOS 引入新 case 时保守视作未授权——与 requestPermission 内 @unknown default 同精神.
+            return .notDetermined
+        }
+    }
+
     public func requestPermission() async throws -> Bool {
         guard CMMotionActivityManager.isActivityAvailable() else {
             throw MotionProviderError.activityDataNotAvailable

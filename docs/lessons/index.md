@@ -148,3 +148,4 @@
 | 2026-05-04 | [MotionProvider probe view 必须显式处理 deny 路径 + UI 集成测试不能依赖 simulator 自发 emit motion event](2026-05-04-motion-probe-deny-path-and-subscribed-marker.md) | 2 | error-handling / testing | `504ba40` |
 | 2026-05-04 | [CoreMotion subscribe/stop 契约：handler invoke 必须与 generation check 共享同一锁段](2026-05-04-motion-handler-invoke-must-be-in-lock.md) | 1 | architecture / concurrency | `d875b7d` |
 | 2026-05-04 | [pure mapper 内做 confidence debounce 让下游卡 stale；防抖应在带时间维度的上层做](2026-05-04-motion-mapper-confidence-debounce-removal.md) | 1 | architecture / correctness | `a0d869e` |
+| 2026-05-04 | [MotionProvider.bind 必须先 gate authorizationStatus 再 startUpdates（first-launch 不弹权限红线）](2026-05-04-motion-bind-must-gate-on-authorization-status.md) | 1 | architecture | `<pending>` |

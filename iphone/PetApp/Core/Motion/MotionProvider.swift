@@ -20,10 +20,49 @@
 import Foundation
 import CoreMotion  // 协议层暴露 CMMotionActivity 类型——Story 8.3 mapper 直接吃此类型
 
+/// MotionProvider 权限状态枚举——与 `CMAuthorizationStatus` 1:1 映射，但不让协议层耦合 CoreMotion 类型.
+///
+/// 设计理由（Story 8.4 review round 1 P1 修复）：
+/// - 让 HomeViewModel.bind(motionProvider:) 能在调 `startUpdates` 前**纯查询**当前权限状态——
+///   `.authorized` 才发起订阅；`.notDetermined` / `.denied` / `.restricted` 时只持引用不订阅,
+///   避免 first launch UX 异常（`startActivityUpdates` 本身在 `.notDetermined` 下会触发系统权限弹窗,
+///   破坏"权限申请由 8.5 / 8.6 同步触发器统一处理"的红线）.
+/// - 用自定义 enum 而非直接暴露 `CMAuthorizationStatus`：协议层零 CoreMotion 依赖,
+///   未来更换 motion 后端（如 SensorKit / 自研 fallback）不需要全链路改 protocol;
+///   `MotionProviderImpl` 内部 bridge `CMMotionActivityManager.authorizationStatus()` → 本 enum.
+/// - 与 `MotionProviderError` 的 `.permissionDenied` 不重复：error 是"操作失败的原因",
+///   status 是"当前授权快照"——两者分别承担"事后失败分类"与"事前查询"职责.
+public enum MotionAuthorizationStatus: Equatable {
+    /// 用户尚未对此 App 做出 motion 权限决定（首次启动 / 重置授权后）.
+    case notDetermined
+    /// 用户授权 App 读取运动状态识别数据.
+    case authorized
+    /// 用户拒绝 App 读取运动状态识别数据.
+    case denied
+    /// 系统级别 restriction（如 Screen Time / MDM）禁止 App 读取——用户无法自主授予.
+    case restricted
+}
+
 /// CoreMotion 运动状态识别的抽象边界（System Adapter 层）.
 /// 业务层（HomeViewModel / Story 8.4 + Story 8.3 MotionStateMapper）只依赖此协议；
 /// 测试用 MotionProviderMock 替换；生产用 MotionProviderImpl 真接入 CMMotionActivityManager.
 public protocol MotionProvider: Sendable {
+    /// 当前 motion 权限状态——**纯查询，不发起任何系统调用 / 不触发权限弹窗**.
+    ///
+    /// Story 8.4 review round 1 P1 引入：
+    /// HomeViewModel.bind(motionProvider:) 在 .onAppear（first paint 之前）被调；
+    /// 如果直接调 `startUpdates`，CoreMotion 在 `.notDetermined` 下会触发系统权限弹窗——
+    /// 破坏 Story 8.4 红线"权限按需 by 8.5 / 8.6 统一处理". 加此查询入口让 bind 可 gate：
+    ///   - `.authorized` → 调 startUpdates 正常订阅
+    ///   - 其他三态 → 仅持 motionProvider 引用 return，不订阅，不弹权限
+    ///
+    /// 实装契约（详见 MotionProviderImpl）：
+    /// - 必须**同步**调用（async/throws 都不允许）——bind 在 SwiftUI .onAppear（同步上下文）调.
+    /// - **禁止**在内部触发任何 OS 弹窗 / IO；仅读 CMMotionActivityManager.authorizationStatus() 类的
+    ///   "本地静态属性"或等价快照.
+    /// - 调用次数语义无副作用（idempotent；可被 caller 反复查询）.
+    func authorizationStatus() -> MotionAuthorizationStatus
+
     /// 申请运动状态识别权限（CMMotionActivity）.
     /// - Returns: true 表示用户授权 / 已授权；false 表示用户拒绝 / 受限.
     /// - Throws: `MotionProviderError.activityDataNotAvailable` 当设备不支持 activity 识别
