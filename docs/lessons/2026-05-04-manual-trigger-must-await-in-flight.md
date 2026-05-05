@@ -2,7 +2,7 @@
 date: 2026-05-04
 source_review: codex review round 3 — /tmp/epic-loop-review-8-5-r3.md
 story: 8-5-步数同步触发器
-commit: <pending>
+commit: 1ec3855
 lesson_count: 1
 ---
 

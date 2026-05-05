@@ -2,7 +2,7 @@
 date: 2026-05-04
 source_review: codex review round 2 — Story 8.5 dev-story output（base=story 8-5 r1 fix commit）
 story: 8-5-步数同步触发器
-commit: <pending>
+commit: f43bc89
 lesson_count: 1
 ---
 

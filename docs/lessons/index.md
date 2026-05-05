@@ -155,8 +155,8 @@
 | 2026-05-04 | [auth-gated subscription 必须支持 downgrade，不能用单向 flag 短路 rebind](2026-05-04-auth-gated-subscription-must-handle-downgrade.md) | 1 | architecture | `0d597c3` |
 | 2026-05-04 | [auth-gated feature 切片必须显式分配"权限申请 caller" story，spec gap 不能静默漏到末端 story](2026-05-04-auth-gated-feature-needs-explicit-requester-story.md) | 1 | architecture | `c457f93` |
 | 2026-05-04 | [`Task { @MainActor in ... }` hop 引入 stale write race，generation token 是稳健解](2026-05-04-mainactor-task-hop-stale-write-needs-generation-token.md) | 1 | concurrency / architecture | `c457f93` |
-| 2026-05-04 | [跨午夜时间字段必须从单一 captured Date 派生 & scenePhase 幂等 start 不能并排两条同效 API](2026-05-04-cross-midnight-single-captured-date-and-idempotent-start.md) | 2 | architecture | `<pending>` |
-| 2026-05-04 | [fresh install HealthKit requestPermission gap：与 Story 8.4 motion 权限同坑（epic 切片漏专门 caller story 的二次复发）](2026-05-04-step-sync-fresh-install-requestpermission-gap.md) | 1 | architecture / process | `<pending>` |
-| 2026-05-04 | [launch state 离开 .ready 时必须 stop 所有 .ready-attached 后台 service（对称生命周期）](2026-05-04-launch-state-leave-ready-must-stop-feature-services.md) | 1 | architecture | `<pending>` |
-| 2026-05-04 | [manual trigger 必须 await in-flight，不能用 gate 短路 return；公开 async API 的等待语义要明示](2026-05-04-manual-trigger-must-await-in-flight.md) | 1 | architecture | `<pending>` |
-| 2026-05-04 | [`await` 期间 race 让 single-flight gate 失效，必须 while-loop 链式等待 + @MainActor 同步段原子 assign（fresh install requestPermission gap 第 3 次复发 reaffirm wontfix）](2026-05-04-await-then-recheck-single-flight-gate.md) | 2 | concurrency / process | `<pending>` |
+| 2026-05-04 | [跨午夜时间字段必须从单一 captured Date 派生 & scenePhase 幂等 start 不能并排两条同效 API](2026-05-04-cross-midnight-single-captured-date-and-idempotent-start.md) | 2 | architecture | `8f24404` |
+| 2026-05-04 | [fresh install HealthKit requestPermission gap：与 Story 8.4 motion 权限同坑（epic 切片漏专门 caller story 的二次复发）](2026-05-04-step-sync-fresh-install-requestpermission-gap.md) | 1 | architecture / process | `8f24404` |
+| 2026-05-04 | [launch state 离开 .ready 时必须 stop 所有 .ready-attached 后台 service（对称生命周期）](2026-05-04-launch-state-leave-ready-must-stop-feature-services.md) | 1 | architecture | `f43bc89` |
+| 2026-05-04 | [manual trigger 必须 await in-flight，不能用 gate 短路 return；公开 async API 的等待语义要明示](2026-05-04-manual-trigger-must-await-in-flight.md) | 1 | architecture | `1ec3855` |
+| 2026-05-04 | [`await` 期间 race 让 single-flight gate 失效，必须 while-loop 链式等待 + @MainActor 同步段原子 assign（fresh install requestPermission gap 第 3 次复发 reaffirm wontfix）](2026-05-04-await-then-recheck-single-flight-gate.md) | 2 | concurrency / process | `1042af2` |

@@ -2,7 +2,7 @@
 date: 2026-05-04
 source_review: codex review round 4 of Story 8-5-步数同步触发器（/tmp/epic-loop-review-8-5-r4.md）
 story: 8-5-步数同步触发器
-commit: <pending>
+commit: 1042af2
 lesson_count: 2
 related_lessons:
   - 2026-05-04-manual-trigger-must-await-in-flight.md
