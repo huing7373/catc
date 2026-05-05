@@ -26,6 +26,14 @@
   2. 触发 server Epic 7 已完成 story 的回归（影响 Story 7.3 / 7.4 已落地的 handler）
   3. 在本 story 文件 + epics.md 同步标注变更原因 + 影响范围
 - `steps.single_sync_cap` / `steps.daily_cap` 两个配置 key 的**默认值**（5000 / 50000）属契约一部分：**prod 部署必须使用默认值**（5000 / 50000），不允许通过配置文件覆盖 —— 否则不同 prod 实例会在不同阈值上 truncate / 返 3001，重新引入本 story 想消除的客户端/服务端契约漂移；**dev / test 环境**可通过配置文件覆盖默认值（仅用于单测 / 调试 / fixture），**不**视为契约变更（这些环境不对外提供 prod 体验，跨端契约一致性不受影响）；**修改默认值本身**视为契约变更走完整冻结流程。
+- 自 2026-05-05（Story 10.1 完成日，对应 git commit hash 见 commit message）起，§12.1（连接地址 + close code 表 + 服务端校验顺序）/ §12.2（客户端 → 服务端通用消息信封 + `ping`）/ §12.3（服务端 → 客户端通用消息信封 + `room.snapshot` + `pong` + `error`）三个节点 4 WS 协议骨架章节进入**冻结**状态。
+- 任何字段名 / 字段类型 / close code / 信封字段（`type` / `requestId` / `payload` / `ts`）的修改都必须：
+  1. 触发 iOS Epic 12 重新评审（影响 Story 12.2 ~ 12.6 所有 WS 集成 story）
+  2. 触发 server Epic 10 已完成 story 的回归（影响 Story 10.3 / 10.4 / 10.7 已落地的 gateway / heartbeat / snapshot framework）
+  3. 触发后续业务 Epic 11 / 14 / 17 的契约 story（11.1 / 14.1 / 17.1）回归（业务消息基于本骨架扩展）
+  4. 在本 story 文件 + epics.md 同步标注变更原因 + 影响范围
+- `ws.heartbeat_timeout_sec`（默认 60s）/ `ws.max_message_size_bytes`（默认 16 KB）两个配置 key 的**默认值**属契约一部分：**prod 部署必须使用默认值**，不允许通过配置文件覆盖 —— 否则不同 prod 实例会在不同心跳超时 / message 大小上限上踢人，重新引入跨端契约漂移；**dev / test 环境**可通过配置文件覆盖默认值（仅用于单测 / 调试 / fixture），**不**视为契约变更（这些环境不对外提供 prod 体验，跨端契约一致性不受影响）；**修改默认值本身**视为契约变更走完整冻结流程。
+- WS 业务消息（`member.joined` / `member.left` / `pet.state.changed` / `emoji.send` / `emoji.received` 等）的字段层契约**不**在节点 4 协议骨架冻结范围内，由对应 Epic 的 §X.1 story（Story 11.1 / 14.1 / 17.1）独立锚定 + 独立冻结 —— 即"协议骨架在 Epic 10 冻结，业务消息按 epic 顺序逐步冻结"。
 
 ---
 
@@ -1255,20 +1263,129 @@ JSON 示例：
 
 ## 12.1 连接地址
 
+#### 连接元信息
+
+| 字段 | 值 |
+|---|---|
+| Protocol | WebSocket（生产 wss / 本地 dev ws） |
+| Path | /ws/rooms/{roomId} |
+| Query | `token`（必填，URL-encoded Bearer token，复用 §2.3 `Authorization: Bearer <token>` 的 token util，详见 Story 4.4） |
+| 鉴权 | **需要**（连接握手时校验 token + 用户在该房间） |
+| 限频 | **不**走 HTTP rate_limit（Story 4.5 中间件不挂在 WS 路由），但 Session 创建后受限于 Story 10.4 心跳超时（60s 静默自动清理） |
+| 节点 | 节点 4（Epic 10 落地骨架，Epic 11 / 12 业务集成） |
+
+连接 URL 模板：
+
+```text
+{ws_scheme}://{host}/ws/rooms/{roomId}?token={url_encoded_token}
+```
+
+- `ws_scheme`：生产环境 **`wss`**（TLS）；dev / test 环境 **`ws`**（明文，仅本地）
+- `host`：与 HTTP 接口同 host（不分离 WS 域名，简化 Info.plist / CORS 配置）
+- `roomId`：路径参数，必须是用户当前所在房间的 ID（client 从 `GET /home.room.currentRoomId` 拿 —— **不要**使用 `GET /me.user.currentRoomId`，该字段是永久 `null` schema 占位，详见 §4.3 Future Fields 引用块；当前节点 4 阶段也可以用 client 已知的 roomId，如刚 `POST /rooms/{roomId}/join` 成功后立即建连）
+- `token`：query 参数，URL-encoded（必须 url-encode，避免 token 中 `+` `/` `=` 等字符影响 query 解析）；token 来自 §2.3 Bearer token 同源（`POST /auth/guest-login` 返回的 `token`）
+
+兼容性 / 简化形式（保留旧 README 中的写法，等价于上方完整模板）：
+
 ```text
 GET /ws/rooms/{roomId}?token=xxx
 ```
 
+> 兼容性提示：上述裸 URL 与"完整 URL 模板"小节是同一契约的两种书写，二者并存不冲突；以"完整 URL 模板"+ 字段说明为字段层锚定权威。
+
 服务端连接建立后需要校验：
 
-- token 合法
-- 用户确实在该房间中
+- token 合法（解码 + 签名校验 + 未过期）
+- 用户确实在该房间中（查 `room_members` 表，节点 4 阶段 Story 10.3 实装查询路径）
 
 成功后返回房间快照。
+
+#### 握手成功流程
+
+成功握手后服务端必须**主动**推送：
+
+1. **第一条**：`room.snapshot`（payload schema 见 §12.3，节点 4 阶段为 placeholder：room 三字段 + members 空数组）
+
+> 节点 4 阶段服务端 → 客户端**只**会主动发送 `room.snapshot` / `pong` / `error` 三种消息（与本节末 §12.3 业务消息延后锚定块 + §1 节点 4 协议骨架冻结声明一致）；`member.joined` 等业务广播消息的字段层契约与"是否在握手时广播"的语义由 Story 11.1（Epic 11）锚定，**不**在本 story 范围内 —— 即节点 4 阶段服务端**不**在握手时广播 `member.joined`。
+
+服务端不要求 client 在握手后发送任何"我准备好了"的初始化消息，握手成功 = 服务端可以推快照。
+
+时序图见 `docs/宠物互动App_时序图与核心业务流程设计.md` §13.2（本 story **不**重画时序图，只引用）。
+
+#### close code 表
+
+握手 / 连接期间任一校验失败，服务端必须主动 close 连接，并使用以下 close code：
+
+| close code | 由谁产生 | 触发条件 | 服务端是否带 reason | 客户端推荐处理 |
+|---|---|---|---|---|
+| 4001 | server 主动 close | token 缺失 / 解码失败 / 签名不匹配 / token 已过期 | 是（reason = `"invalid token"` / `"token expired"`） | 触发"无效 token 静默重新登录"流程（参考 iOS Story 5.4）：清 keychain 旧 token → guest-login 拿新 token → 重连；**不**自动无限重试 |
+| 4003 | server 主动 close | token 合法但 user 不在该 roomId 的 `room_members` 表中 | 是（reason = `"user not in room"`） | **不**自动重连（业务级拒绝，重试无意义）；UX 提示用户"未加入该房间"，回退到主界面 |
+| 4002 | server 主动 close | roomId 路径参数格式错（非数字 / 缺失） | 是（reason = `"invalid roomId"`） | **不**自动重连；视为客户端实装 bug，记 log 后回退 |
+| 4004 | server 主动 close | room 不存在（`rooms` 表无该 ID 或已 archived） | 是（reason = `"room not found"`） | **不**自动重连；UX 提示"房间不存在"，回退到主界面 |
+| 1000 | server 或 client 任一方主动 close | 服务端 / 客户端正常关闭 | 否 | 客户端主动 close 不重连；服务端主动 close（如 graceful shutdown）客户端可选重连 |
+| 1001 | server 或 client 任一方主动 close | going away（服务端重启 / 客户端切后台） | 否 | 服务端重启 → 客户端**应**自动重连（指数退避，参考 iOS Story 12.5）；客户端切后台 → 客户端自身决定 |
+| 1006 | **仅 client 侧观测**（不可被任一端 emit） | 异常断开（无 close frame，TCP 中断 / 网络抖动）—— RFC 6455 §7.1.5 规定 1006 为 reserved 状态码，**禁止**出现在 close frame 内；客户端 WebSocket runtime 在底层 TCP 断开且未收到 close frame 时本地合成该 code 通知上层 | 不适用（无 close frame，因此服务端**不**emit 该 code） | 客户端**应**自动重连（指数退避） |
+| 1011 | server 主动 close | 服务端内部错误（panic / 不可恢复异常） | 是（reason 应包含简短错误提示但**不**泄漏 stack trace） | 客户端**应**自动重连（指数退避，但限制最大重试次数避免雪崩） |
+
+**关键约束**：
+
+- 4001 / 4003 / 4002 / 4004 是**业务级**拒绝（4xxx 段是应用自定义；WebSocket RFC 6455 规定 4000-4999 为应用保留段），重试无意义，客户端**不**应自动重连；客户端应展示明确 UX 提示并回退
+- 1000 / 1001 / 1011 是**协议 / 网络**级断开（1xxx 段是 RFC 标准段，可由服务端主动 emit），客户端**应**自动重连（除 1000 主动关闭）
+- **1006 例外**：1006 是 RFC 6455 §7.1.5 reserved status code，**MUST NOT** be set as a status code in a Close control frame；服务端实装层（Story 10.3 / 12.5）**禁止**写 1006 到 close frame，必须由客户端 WebSocket runtime 在 TCP 异常断开时本地合成；本表保留 1006 行是为了完整描述客户端侧重连决策，**不**意味着服务端会主动 emit
+- 4001 触发时 server **不**写 log error（这是常态，token 过期是正常业务），写 log info；4003 / 4004 写 log warn（疑似客户端实装 bug 或数据不一致）；1011 写 log error（必排查）
+
+#### 服务端校验顺序
+
+握手期间服务端必须按以下顺序校验，任一步失败立即 close 并使用对应 close code：
+
+1. **解析 query**：缺 `token` 参数 → close 4001（reason = `"missing token"`）
+2. **路径参数校验**：`roomId` 非数字 / 缺失 → close 4002
+3. **token 校验**（不查 DB，仅本地校验签名 + 过期，复用 Story 4.4 token util）：失败 → close 4001
+4. **room 存在性校验**（查 `rooms` WHERE `id = ?`）：失败 → close 4004
+5. **用户房间归属校验**（查 `room_members` WHERE `user_id = ? AND room_id = ?`）：失败 → close 4003
+6. **内部错误**（panic / DB 异常等）：close 1011
+
+校验通过后：
+
+- 创建 Session 对象（详见 Go 项目结构 §9.1）
+- 注册到 SessionManager
+- 启动读 / 写 goroutine
+- 推送 `room.snapshot`（§12.3 schema）
+- 在 Redis presence 记录在线（详见 Story 10.6）
+
+**注意**：第 5 步的 DB 查询是热点路径（每次连接 / 重连都查一次），Story 10.3 / 10.6 实装时**应**将 `room_members` 在线态缓存到 Redis presence（避免每次连接都查 MySQL）；但**协议层面**第 5 步仍是契约一部分（client 不可见，但 server 必须保证语义一致 —— Redis 缓存与 MySQL 一致性由 Story 10.6 + Story 11.4 加入房间事务保证）。
 
 ---
 
 ## 12.2 客户端 -> 服务端消息
+
+#### 通用消息信封（client → server）
+
+所有客户端 → 服务端 WS 消息共享同一信封结构：
+
+| 字段 | 类型 | 必填 | 范围/约束 | 说明 |
+|---|---|---|---|---|
+| `type` | string | 必填 | 1 ≤ length ≤ 64 字符；只允许 `[a-z0-9.]` | 消息类型，全小写点分（如 `"ping"` / `"emoji.send"`）；服务端按 `type` 路由到对应 handler |
+| `requestId` | string | 选填 | 0 ≤ length ≤ 64 字符；客户端定义格式（推荐 `<short-prefix>_<timestamp_ms>` 或 UUID） | 客户端生成的请求 ID，用于追踪 / 日志关联；服务端**响应**当前请求时**应**带回同一 `requestId`（如 `pong` 回带 `ping` 的 `requestId`）；**广播消息**（如 `emoji.received`）的 `requestId` 由服务端置空字符串 `""` |
+| `payload` | object | 必填 | 任意 JSON 对象；具体 schema 由 `type` 决定 | 业务负载；空 payload 也必须**显式**写 `"payload": {}`，**不**省略 key |
+
+JSON 通用骨架：
+
+```json
+{
+  "type": "<message_type>",
+  "requestId": "<optional_client_id>",
+  "payload": { "...": "..." }
+}
+```
+
+**关键约束**：
+
+- 信封**不**带 `ts` 字段（client → server 方向不需要 client 时间戳；如某业务消息需要 client 时间戳，由该业务消息 payload 自带，如 `emoji.send.payload.clientTs`，详见 Story 17.1）
+- `requestId` **不**进 server 持久化日志的关键字段，仅用于本次连接 session 内的 request-response 配对（避免无意义的 cross-session 追踪）
+- `type` 字段值大小写敏感：服务端 strict match；客户端**必须**按文档锚定的字面量发送（如 `"ping"` 不是 `"PING"` 或 `"Ping"`）
+- 消息 frame 必须是 WebSocket text frame（opcode 0x1）+ UTF-8 JSON；**不**使用 binary frame（opcode 0x2）
+- 单条消息 frame **大小上限 16 KB**（默认值；配置 `ws.max_message_size_bytes`，**prod 必须使用默认值不可覆盖**，dev/test 可覆盖）；超限服务端 close 1009（message too big）+ 不重连（客户端实装 bug）
 
 ### 发送表情
 
@@ -1282,7 +1399,23 @@ GET /ws/rooms/{roomId}?token=xxx
 }
 ```
 
-### 心跳
+> **业务消息延后锚定**：上文 `### 发送表情`（`emoji.send`）为节点 4 之前的协议草稿示例，**不**在节点 4 / Epic 10 范围内。该消息字段层契约的正式锚定由 **Story 17.1**（Epic 17 表情广播契约）负责，节点 6 落地。
+>
+> 节点 4 阶段（Epic 10 ~ 13）客户端 → 服务端**只**有 `ping` 一种合法消息；客户端**不**应在节点 4 阶段发送 `emoji.send`（即使协议草稿示例存在），server 收到非 `ping` 消息当前阶段**忽略**（log warn + 不 close 连接，避免兼容性问题；具体行为 Story 10.3 实装时锁定）。
+
+### ping（心跳）
+
+**心跳间隔**：客户端**应**每 30 秒发送一次 `ping`（默认值；配置 `ws.heartbeat_interval_sec` 在 client 侧）；服务端 60 秒未收到任何消息（含 ping）→ Session 被 Story 10.4 心跳框架自动清理 + close（close code 由 Story 10.4 决定，本 story 不规定具体 code）。
+
+**字段**：本消息无业务字段，`payload` 为空对象 `{}`。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `type` | string | 必填 | 固定值 `"ping"` |
+| `requestId` | string | 选填 | 客户端可生成（如 `"ping_<seq>"` / `"ping_<ts_ms>"`），服务端 `pong` 必须回带；省略 → server `pong.requestId = ""` |
+| `payload` | object | 必填 | 固定空对象 `{}` |
+
+JSON 示例：
 
 ```json
 {
@@ -1292,11 +1425,70 @@ GET /ws/rooms/{roomId}?token=xxx
 }
 ```
 
+服务端响应：见 §12.3 `pong` 消息。
+
 ---
 
 ## 12.3 服务端 -> 客户端消息
 
-### 房间快照
+#### 通用消息信封（server → client）
+
+所有服务端 → 客户端 WS 消息共享同一信封结构：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `type` | string | 必填 | 消息类型（如 `"room.snapshot"` / `"pong"` / `"error"`）；客户端按 `type` 路由解析 |
+| `requestId` | string | 必填 | **响应类**消息（如 `pong`）回带 client 请求的 `requestId`（client 未提供 → 回 `""`）；**广播 / 主动推送类**消息（如 `room.snapshot` / `member.joined` / `emoji.received` / `error`）固定 `""`；**不**省略 key（即使值为空） |
+| `payload` | object | 必填 | 业务负载；空 payload 也必须**显式**写 `"payload": {}` |
+| `ts` | number (int64) | 必填 | 服务端发送时的 Unix 毫秒时间戳，> 0；客户端用于本地排序 / 日志，**不**用于业务时序判断 |
+
+JSON 通用骨架：
+
+```json
+{
+  "type": "<message_type>",
+  "requestId": "<optional_request_correlation_or_empty>",
+  "payload": { "...": "..." },
+  "ts": 1776920345000
+}
+```
+
+**关键约束**：
+
+- server → client 信封**多**一个 `ts` 字段（client → server 没有），用途是客户端日志关联 + UI 排序（如多条 `member.joined` 接连到达时按 `ts` 排序避免乱序）；**不**用作业务时序判断（业务时序仍由 server 单调时钟保证；client 不应基于 `ts` 比较推断"谁先发生"，因为不同 server 实例时钟可能漂移 —— 节点 4 单实例无此风险，但接口契约层面提前规避）
+- `requestId` 在响应类消息中是**回带**（必须等于 client 请求的 `requestId`，包括 client 未提供时回 `""`）；在广播 / 主动推送类消息中是固定 `""`（不要让客户端误以为这是一个新 request 的 ID）
+- frame 类型 + 编码 + 大小上限 同 §12.2 通用信封（text frame / UTF-8 JSON / 16 KB 默认上限）
+
+### 房间快照（room.snapshot）
+
+**触发**：
+
+- WS 握手成功后，服务端**主动**推送（必发）
+- 服务端**可选**在 Session 生命周期内重复推送（如房间状态变化触发全量重发；节点 4 阶段不实装，仅 Story 10.7 placeholder 阶段在握手时发一次）
+
+**字段**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `type` | string | 必填 | 固定值 `"room.snapshot"` |
+| `requestId` | string | 必填 | 固定 `""`（主动推送类消息） |
+| `payload.room.id` | string | 必填 | 房间 ID（BIGINT 字符串化下发，遵循 §2.5 全局约定） |
+| `payload.room.maxMembers` | number (int) | 必填 | 房间容量上限（节点 4 阶段固定 4，由 Story 11.3 创建房间事务写入；本接口仅返回当前值） |
+| `payload.room.memberCount` | number (int) | 必填 | 当前房间在线成员数；节点 4 阶段 Story 10.7 placeholder 实现固定返回 0；Story 11.7 真实实现按 `room_members` 行数 + Redis presence 在线态计算 |
+| `payload.members` | array | 必填 | 成员列表；节点 4 阶段 Story 10.7 placeholder 实现固定返回 `[]`；Story 11.7 真实实现按 `room_members` JOIN `users` JOIN `pets` 聚合 |
+| `payload.members[].userId` | string | 必填 | 成员用户 ID（BIGINT 字符串化） |
+| `payload.members[].nickname` | string | 必填 | 成员昵称 |
+| `payload.members[].pet.petId` | string | 必填 | 成员当前宠物 ID（BIGINT 字符串化） |
+| `payload.members[].pet.currentState` | number (int) | 必填 | 宠物当前状态枚举：`1 = stationary_or_unknown` / `2 = walking` / `3 = running`（与数据库设计 §6.5 motion_state 同义，复用枚举不另起）；**节点 4 阶段 Story 11.7 真实实现固定返回 1**（Epic 14 才真实驱动） |
+| `ts` | number (int64) | 必填 | 服务端发送时间戳（ms） |
+
+> **Future Fields（节点 4 阶段为占位 / 节点 5 / 9 落地）**：
+>
+> - `payload.members[].avatarUrl`（成员头像 URL）：Story 11.7 真实实现时启用；节点 4 阶段 placeholder 不返回该字段（不要在 §12.3 字段表添加；client 解析为 `String?` 可选字段）
+> - `payload.members[].pet.equips`（成员当前装备）：Epic 26 / Story 26.6 落地后由 Story 11.7 同步扩展；节点 4 阶段不返回
+> - `payload.members[].pet.equips[].renderConfig`（装备渲染配置）：Epic 29 / Story 29.6 落地后由 Story 11.7 同步扩展；节点 4 阶段不返回
+
+JSON 示例（真实示例，Story 11.7 落地后形态）：
 
 ```json
 {
@@ -1318,6 +1510,24 @@ GET /ws/rooms/{roomId}?token=xxx
         }
       }
     ]
+  },
+  "ts": 1776920345000
+}
+```
+
+**节点 4 阶段 placeholder 示例**（Story 10.7 实装；与上述真实示例的差异是 `members: []` + `memberCount: 0`）：
+
+```json
+{
+  "type": "room.snapshot",
+  "requestId": "",
+  "payload": {
+    "room": {
+      "id": "3001",
+      "maxMembers": 4,
+      "memberCount": 0
+    },
+    "members": []
   },
   "ts": 1776920345000
 }
@@ -1361,7 +1571,20 @@ GET /ws/rooms/{roomId}?token=xxx
 }
 ```
 
-### 心跳响应
+### pong（心跳响应）
+
+**触发**：服务端收到客户端 `ping`（§12.2 ping 小节）后**立即**回复 `pong`（同步路径，不走异步队列）。
+
+**字段**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `type` | string | 必填 | 固定值 `"pong"` |
+| `requestId` | string | 必填 | **必须**回带 client `ping.requestId`；client 未提供 → 回 `""` |
+| `payload` | object | 必填 | 固定空对象 `{}` |
+| `ts` | number (int64) | 必填 | 服务端响应时间戳（ms） |
+
+JSON 示例（保留旧示例字面量；该示例缺 `requestId`，见下方修订说明）：
 
 ```json
 {
@@ -1371,7 +1594,29 @@ GET /ws/rooms/{roomId}?token=xxx
 }
 ```
 
-### 错误消息
+> **既有示例修订说明**：上述示例缺 `requestId` 字段（仅有 `type` / `payload` / `ts`），违反本 §12.3 通用消息信封规范（`requestId` 必填）。本 story（10.1）保留示例 JSON 字面量不动以维持 git diff 最小化；正式实装时 server **必须**带 `requestId`（客户端未提供时为 `""`），按字段表执行；该示例下次 V1 文档大版本（V2）合并时**统一**补字段，本节点 4 阶段保留旧示例避免大幅 diff。
+
+**关键约束**：
+
+- `pong` 是同步响应（同一 ping 事件触发，server 立即回；不通过 broadcast / 业务路径）
+- `pong.requestId` 必须等于 `ping.requestId`（含 `""` 情况），方便 client 测心跳 RTT
+- `pong` **不**是广播（仅回给发 ping 的连接），server 实装层面与 `BroadcastToRoom`（Story 10.5）走不同路径
+
+### error（错误消息）
+
+**触发**：服务端处理 client 消息或主动事件时遇到业务错误，但**不**够严重到 close 连接（如表情 code 不存在、临时性资源问题等）。严重错误（如 Session 内部 panic）走 close 流程而非 error 消息（详见 §12.1 close code 表）。
+
+**字段**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `type` | string | 必填 | 固定值 `"error"` |
+| `requestId` | string | 必填 | 如该 error 是某 client 请求的响应（如 `emoji.send` 失败），回带原 `requestId`；如是 server 主动错误（如内部状态异常），固定 `""` |
+| `payload.code` | number (int) | 必填 | 错误码，复用 §3 全局错误码定义（如 `7001` 表情不存在 / `6005` 房间状态异常 / `1009` 服务繁忙） |
+| `payload.message` | string | 必填 | 错误描述，可读字符串（不做国际化，与 §3 message 字段一致） |
+| `ts` | number (int64) | 必填 | 服务端发送时间戳（ms） |
+
+JSON 示例（保留旧示例字面量；该示例缺 `requestId`，见下方修订说明）：
 
 ```json
 {
@@ -1383,6 +1628,25 @@ GET /ws/rooms/{roomId}?token=xxx
   "ts": 1776920345000
 }
 ```
+
+> **既有示例修订说明**：与 `pong` 同 —— 上述示例缺 `requestId` 字段，违反 §12.3 通用消息信封规范（`requestId` 必填）。本 story（10.1）保留示例 JSON 字面量不动；正式实装时 server **必须**带 `requestId`（客户端未提供 / server 主动错误时为 `""`）。
+
+**节点 4 阶段适用错误码**（仅 Epic 10 协议骨架范围内）：
+
+| code | 触发条件（节点 4 阶段） |
+|---|---|
+| 1009 | 服务繁忙（Session 内部异常但不致死，如临时 Redis 慢；client 应忽略并继续） |
+| 6005 | 房间状态异常（Story 10.7 SnapshotBuilder 抛 error 时 → server 主动推 error，code = 6005） |
+
+> 业务错误码（如 `7001` 表情不存在）由对应 Epic 各自的 §X.1 锚定（如 Story 17.1）；本 story 不预先列入节点 4 阶段适用错误码表。
+
+> **业务消息延后锚定**：上文 `### 成员加入` / `### 成员离开` / `### 收到表情广播` 三个小节为节点 4 之前的协议草稿示例，**不**在节点 4 / Epic 10 范围内。各消息字段层契约的正式锚定 epic 如下：
+>
+> - `member.joined` / `member.left` → **Story 11.1**（Epic 11 房间业务契约，节点 4 中段）
+> - `pet.state.changed` → **Story 14.1**（Epic 14 宠物状态同步契约，节点 5）—— **注意**：现有 §12.3 草稿中**不存在** `pet.state.changed` 消息示例（仅在 epics.md 业务消息列表里出现），Story 14.1 落地时**需新增**该小节
+> - `emoji.received` → **Story 17.1**（Epic 17 表情广播契约，节点 6）
+>
+> 节点 4 阶段（Epic 10 ~ 13）服务端 → 客户端**只**会主动发送 `room.snapshot` / `pong` / `error` 三种消息（其中 `error` 仅在节点 4 阶段适用错误码场景下出现）；客户端 Story 12.3 解析层在节点 4 阶段**应**对未识别的 `type` 值（如收到不该到达的 `emoji.received`）走"安全忽略 + log warn"路径，**不**因未识别消息 close 连接 / crash app（避免后续 epic 灰度上线时跨版本兼容问题）。
 
 ---
 
