@@ -934,7 +934,10 @@ auth:
 
 ws:
   heartbeat_timeout_sec: 60
+  max_message_size_bytes: 16384  # 16 KB；与 V1 接口设计 §1 节点 4 冻结声明 + §12.2 关键约束对齐；prod 不可覆盖，dev/test 可覆盖
 ```
+
+> **配置 key 与 V1 协议契约对齐**：上述 `ws` 段两个 key 的**默认值**属契约一部分，由 `docs/宠物互动App_V1接口设计.md` §1 节点 4 冻结声明锚定（自 2026-05-05 起冻结）。`heartbeat_timeout_sec` 默认 60 秒（V1 §12.2 `ping` 小节锚定）；`max_message_size_bytes` 默认 16384 bytes = 16 KB（V1 §12.2 关键约束 + §12.1 close code 4006 行锚定）。两个 key **prod 必须使用默认值不可覆盖**，dev/test 可覆盖；修改默认值本身视为契约变更，需走完整冻结流程。
 
 ---
 

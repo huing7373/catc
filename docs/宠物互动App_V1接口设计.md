@@ -1326,17 +1326,17 @@ GET /ws/rooms/{roomId}?token=xxx
 | 1000 | server 或 client 任一方主动 close | 服务端 / 客户端正常关闭 | 否 | 客户端主动 close 不重连；服务端主动 close（如 graceful shutdown）客户端可选重连 |
 | 1001 | server 或 client 任一方主动 close | going away（服务端重启 / 客户端切后台） | 否 | 服务端重启 → 客户端**应**自动重连（指数退避，参考 iOS Story 12.5）；客户端切后台 → 客户端自身决定 |
 | 1006 | **仅 client 侧观测**（不可被任一端 emit） | 异常断开（无 close frame，TCP 中断 / 网络抖动）—— RFC 6455 §7.1.5 规定 1006 为 reserved 状态码，**禁止**出现在 close frame 内；客户端 WebSocket runtime 在底层 TCP 断开且未收到 close frame 时本地合成该 code 通知上层 | 不适用（无 close frame，因此服务端**不**emit 该 code） | 客户端**应**自动重连（指数退避） |
-| 1008 | server 主动 close | 客户端违反协议策略 —— 节点 4 阶段唯一触发条件：单条消息 frame 超过 `ws.max_message_size_bytes`（默认 16 KB） | 是（reason = `"message too large"`） | **不**自动重连（视为客户端实装 bug，重连仍会被 close）；记 log error 后回退 |
+| 4006 | server 主动 close | 客户端违反协议策略 —— 节点 4 阶段唯一触发条件：单条消息 frame 超过 `ws.max_message_size_bytes`（默认 16 KB） | 是（reason = `"message too large"`） | **不**自动重连（视为客户端实装 bug，重连仍会被 close）；记 log error 后回退 |
 | 1011 | server 主动 close | 服务端内部错误（panic / 不可恢复异常）；**含**握手完成后 SnapshotBuilder 构建初始 `room.snapshot` 失败的场景（reason = `"snapshot build failed"`） —— 因为 §12.1 钦定 `room.snapshot` 是握手成功后必发的第一条消息，构建失败若不 close 而仅推 `error`，client 会永远等待一个永不到达的 snapshot，房间页无法初始化 | 是（reason 应包含简短错误提示但**不**泄漏 stack trace） | 客户端**应**自动重连（指数退避，但限制最大重试次数避免雪崩） |
 
 **关键约束**：
 
-- 4001 / 4002 / 4003 / 4004 是**业务级**拒绝（4xxx 段是应用自定义；WebSocket RFC 6455 规定 4000-4999 为应用保留段），重试无意义，客户端**不**应自动重连；客户端应展示明确 UX 提示并回退
+- 4001 / 4002 / 4003 / 4004 / 4006 是**业务级**拒绝（4xxx 段是应用自定义；WebSocket RFC 6455 规定 4000-4999 为应用保留段），重试无意义，客户端**不**应自动重连；客户端应展示明确 UX 提示并回退（4006 = 客户端实装 bug，记 log error 后回退）
 - **4005 是 4xxx 段中的例外**：虽然位于 4xxx 应用自定义段，但语义是 transient network failure（心跳超时多半是网络抖动 / 客户端切后台），不是业务级拒绝；客户端**应**自动重连，与 1006 / 1011 同等对待（指数退避 + 最大重试次数限制）
-- 1000 / 1001 / 1008 / 1011 是**协议 / 网络**级断开（1xxx 段是 RFC 标准段，可由服务端主动 emit），客户端**应**自动重连（除 1000 主动关闭、1008 客户端 bug 不重连）
+- 1000 / 1001 / 1011 是**协议 / 网络**级断开（1xxx 段是 RFC 标准段，可由服务端主动 emit），客户端**应**自动重连（除 1000 主动关闭外）
 - **1006 例外**：1006 是 RFC 6455 §7.1.5 reserved status code，**MUST NOT** be set as a status code in a Close control frame；服务端实装层（Story 10.3 / 12.5）**禁止**写 1006 到 close frame，必须由客户端 WebSocket runtime 在 TCP 异常断开时本地合成；本表保留 1006 行是为了完整描述客户端侧重连决策，**不**意味着服务端会主动 emit
-- **不使用 RFC close code 1009**：RFC 6455 §7.4.1 定义 1009 为 "Message Too Big" 的标准 close code，但本协议**禁止**使用，原因是 §3 全局错误码表已将 `1009` 用于应用层 `服务繁忙`（在 §12.3 `error.payload.code` 中出现），同一数值出现在 close frame 和 application error frame 会让客户端无法仅凭数字区分 transport-level fatal 与 application-level transient（前者要 close + 不重连，后者要忽略 + 保连接）。"消息超大"场景统一改用 1008（policy violation），保留语义清晰
-- 4001 触发时 server **不**写 log error（这是常态，token 过期是正常业务），写 log info；4003 / 4004 写 log warn（疑似客户端实装 bug 或数据不一致）；4005 写 log info（这是常态，心跳超时多半是网络抖动 / 切后台；写 warn 会让正常网络抖动场景下日志噪声暴涨）；1008 写 log error（必排查，疑似客户端 bug 或恶意流量）；1011 写 log error（必排查）
+- **不使用 RFC close code 1008 / 1009**：RFC 6455 §7.4.1 分别定义 1008 (Policy Violation) / 1009 (Message Too Big) 为标准 close code，但本协议**禁止**这两个 1xxx 段值用于 close frame，原因是 §3 全局错误码表已将 `1008`（幂等冲突）/ `1009`（服务繁忙）用作应用层错误码（在 §12.3 `error.payload.code` 中出现），同一数值同时出现在 close frame 和 application error frame 会让客户端、日志、监控无法仅凭数字区分 transport-level fatal 与 application-level transient/retryable（前者要 close + 不重连或固定重连分类，后者要忽略 + 保连接）。"消息超大"场景统一改用 **4006**（4xxx 应用自定义段，与 4001-4005 同段位，数字空间不与 §3 重叠），保留语义清晰
+- 4001 触发时 server **不**写 log error（这是常态，token 过期是正常业务），写 log info；4003 / 4004 写 log warn（疑似客户端实装 bug 或数据不一致）；4005 写 log info（这是常态，心跳超时多半是网络抖动 / 切后台；写 warn 会让正常网络抖动场景下日志噪声暴涨）；4006 写 log error（必排查，疑似客户端 bug 或恶意流量）；1011 写 log error（必排查）
 
 #### 服务端校验顺序
 
@@ -1389,7 +1389,7 @@ JSON 通用骨架：
 - `requestId` **不**进 server 持久化日志的关键字段，仅用于本次连接 session 内的 request-response 配对（避免无意义的 cross-session 追踪）
 - `type` 字段值大小写敏感：服务端 strict match；客户端**必须**按文档锚定的字面量发送（如 `"ping"` 不是 `"PING"` 或 `"Ping"`）
 - 消息 frame 必须是 WebSocket text frame（opcode 0x1）+ UTF-8 JSON；**不**使用 binary frame（opcode 0x2）
-- 单条消息 frame **大小上限 16 KB**（默认值；配置 `ws.max_message_size_bytes`，**prod 必须使用默认值不可覆盖**，dev/test 可覆盖）；超限服务端 close **1008**（policy violation，reason = `"message too large"`） + 不重连（客户端实装 bug）。**不使用 RFC 1009**：本协议 §3 全局错误码表已将 `1009` 用于应用层 `服务繁忙`（在 §12.3 `error.payload.code` 中出现），为避免 close frame code 与 application error code 数字冲突，"消息超大"统一走 1008；详见 §12.1 close code 表关键约束
+- 单条消息 frame **大小上限 16 KB**（默认值；配置 `ws.max_message_size_bytes`，**prod 必须使用默认值不可覆盖**，dev/test 可覆盖）；超限服务端 close **4006**（policy violation, 4xxx 应用自定义段，reason = `"message too large"`） + 不重连（客户端实装 bug）。**不使用 RFC 1008 / 1009**：本协议 §3 全局错误码表已将 `1008`（幂等冲突）/ `1009`（服务繁忙）用作应用层错误码（在 §12.3 `error.payload.code` 中出现），为避免 close frame code 与 application error code 数字冲突，"消息超大"统一走 4006（与 4001-4005 同段位，数字空间不与 §3 重叠）；详见 §12.1 close code 表关键约束
 
 ### 发送表情
 
