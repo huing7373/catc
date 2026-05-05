@@ -1322,6 +1322,7 @@ GET /ws/rooms/{roomId}?token=xxx
 | 4003 | server 主动 close | token 合法但 user 不在该 roomId 的 `room_members` 表中 | 是（reason = `"user not in room"`） | **不**自动重连（业务级拒绝，重试无意义）；UX 提示用户"未加入该房间"，回退到主界面 |
 | 4002 | server 主动 close | roomId 路径参数格式错（非数字 / 缺失） | 是（reason = `"invalid roomId"`） | **不**自动重连；视为客户端实装 bug，记 log 后回退 |
 | 4004 | server 主动 close | room 不存在（`rooms` 表无该 ID 或已 archived） | 是（reason = `"room not found"`） | **不**自动重连；UX 提示"房间不存在"，回退到主界面 |
+| 4005 | server 主动 close | 心跳超时（60 秒未收到任何 client 消息含 ping，由 Story 10.4 心跳框架触发；详见 §12.2 `ping` 小节） | 是（reason = `"heartbeat timeout"`） | **应**自动重连（指数退避；视为 transient network failure，与 1006 / 1011 同等对待 —— 不视为业务级拒绝，因为底层多半是网络抖动 / 客户端切后台超时） |
 | 1000 | server 或 client 任一方主动 close | 服务端 / 客户端正常关闭 | 否 | 客户端主动 close 不重连；服务端主动 close（如 graceful shutdown）客户端可选重连 |
 | 1001 | server 或 client 任一方主动 close | going away（服务端重启 / 客户端切后台） | 否 | 服务端重启 → 客户端**应**自动重连（指数退避，参考 iOS Story 12.5）；客户端切后台 → 客户端自身决定 |
 | 1006 | **仅 client 侧观测**（不可被任一端 emit） | 异常断开（无 close frame，TCP 中断 / 网络抖动）—— RFC 6455 §7.1.5 规定 1006 为 reserved 状态码，**禁止**出现在 close frame 内；客户端 WebSocket runtime 在底层 TCP 断开且未收到 close frame 时本地合成该 code 通知上层 | 不适用（无 close frame，因此服务端**不**emit 该 code） | 客户端**应**自动重连（指数退避） |
@@ -1330,11 +1331,12 @@ GET /ws/rooms/{roomId}?token=xxx
 
 **关键约束**：
 
-- 4001 / 4003 / 4002 / 4004 是**业务级**拒绝（4xxx 段是应用自定义；WebSocket RFC 6455 规定 4000-4999 为应用保留段），重试无意义，客户端**不**应自动重连；客户端应展示明确 UX 提示并回退
+- 4001 / 4002 / 4003 / 4004 是**业务级**拒绝（4xxx 段是应用自定义；WebSocket RFC 6455 规定 4000-4999 为应用保留段），重试无意义，客户端**不**应自动重连；客户端应展示明确 UX 提示并回退
+- **4005 是 4xxx 段中的例外**：虽然位于 4xxx 应用自定义段，但语义是 transient network failure（心跳超时多半是网络抖动 / 客户端切后台），不是业务级拒绝；客户端**应**自动重连，与 1006 / 1011 同等对待（指数退避 + 最大重试次数限制）
 - 1000 / 1001 / 1008 / 1011 是**协议 / 网络**级断开（1xxx 段是 RFC 标准段，可由服务端主动 emit），客户端**应**自动重连（除 1000 主动关闭、1008 客户端 bug 不重连）
 - **1006 例外**：1006 是 RFC 6455 §7.1.5 reserved status code，**MUST NOT** be set as a status code in a Close control frame；服务端实装层（Story 10.3 / 12.5）**禁止**写 1006 到 close frame，必须由客户端 WebSocket runtime 在 TCP 异常断开时本地合成；本表保留 1006 行是为了完整描述客户端侧重连决策，**不**意味着服务端会主动 emit
 - **不使用 RFC close code 1009**：RFC 6455 §7.4.1 定义 1009 为 "Message Too Big" 的标准 close code，但本协议**禁止**使用，原因是 §3 全局错误码表已将 `1009` 用于应用层 `服务繁忙`（在 §12.3 `error.payload.code` 中出现），同一数值出现在 close frame 和 application error frame 会让客户端无法仅凭数字区分 transport-level fatal 与 application-level transient（前者要 close + 不重连，后者要忽略 + 保连接）。"消息超大"场景统一改用 1008（policy violation），保留语义清晰
-- 4001 触发时 server **不**写 log error（这是常态，token 过期是正常业务），写 log info；4003 / 4004 写 log warn（疑似客户端实装 bug 或数据不一致）；1008 写 log error（必排查，疑似客户端 bug 或恶意流量）；1011 写 log error（必排查）
+- 4001 触发时 server **不**写 log error（这是常态，token 过期是正常业务），写 log info；4003 / 4004 写 log warn（疑似客户端实装 bug 或数据不一致）；4005 写 log info（这是常态，心跳超时多半是网络抖动 / 切后台；写 warn 会让正常网络抖动场景下日志噪声暴涨）；1008 写 log error（必排查，疑似客户端 bug 或恶意流量）；1011 写 log error（必排查）
 
 #### 服务端校验顺序
 
@@ -1407,7 +1409,7 @@ JSON 通用骨架：
 
 ### ping（心跳）
 
-**心跳间隔**：客户端**应**每 30 秒发送一次 `ping`（默认值；配置 `ws.heartbeat_interval_sec` 在 client 侧）；服务端 60 秒未收到任何消息（含 ping）→ Session 被 Story 10.4 心跳框架自动清理 + close（close code 由 Story 10.4 决定，本 story 不规定具体 code）。
+**心跳间隔**：客户端**应**每 30 秒发送一次 `ping`（默认值；配置 `ws.heartbeat_interval_sec` 在 client 侧）；服务端 60 秒未收到任何消息（含 ping）→ Session 被 Story 10.4 心跳框架自动清理 + close **4005**（reason = `"heartbeat timeout"`），客户端**应**自动重连（指数退避，参考 iOS Story 12.5；视为 transient network failure，与 1006 / 1011 同等对待）。该 code 由本 story 锚定，Story 10.4 实装时**必须**使用，**不**可改用其他 code。
 
 **字段**：本消息无业务字段，`payload` 为空对象 `{}`。
 
@@ -1440,7 +1442,7 @@ JSON 示例：
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `type` | string | 必填 | 消息类型（如 `"room.snapshot"` / `"pong"` / `"error"`）；客户端按 `type` 路由解析 |
-| `requestId` | string | 必填 | **响应类**消息（如 `pong`）回带 client 请求的 `requestId`（client 未提供 → 回 `""`）；**广播 / 主动推送类**消息（如 `room.snapshot` / `member.joined` / `emoji.received` / `error`）固定 `""`；**不**省略 key（即使值为空） |
+| `requestId` | string | 必填 | **响应类**消息（如 `pong`，及作为某 client 请求响应的 `error`）回带 client 请求的 `requestId`（client 未提供 → 回 `""`）；**广播 / 主动推送类**消息（如 `room.snapshot` / `member.joined` / `emoji.received`，及 server 主动产生的 `error`）固定 `""`；**不**省略 key（即使值为空）；`error` 的双重语义详见 §12.3 `error` 小节字段表 |
 | `payload` | object | 必填 | 业务负载；空 payload 也必须**显式**写 `"payload": {}` |
 | `ts` | number (int64) | 必填 | 服务端发送时的 Unix 毫秒时间戳，> 0；客户端用于本地排序 / 日志，**不**用于业务时序判断 |
 
@@ -1459,6 +1461,7 @@ JSON 通用骨架：
 
 - server → client 信封**多**一个 `ts` 字段（client → server 没有），用途是客户端日志关联 + UI 排序（如多条 `member.joined` 接连到达时按 `ts` 排序避免乱序）；**不**用作业务时序判断（业务时序仍由 server 单调时钟保证；client 不应基于 `ts` 比较推断"谁先发生"，因为不同 server 实例时钟可能漂移 —— 节点 4 单实例无此风险，但接口契约层面提前规避）
 - `requestId` 在响应类消息中是**回带**（必须等于 client 请求的 `requestId`，包括 client 未提供时回 `""`）；在广播 / 主动推送类消息中是固定 `""`（不要让客户端误以为这是一个新 request 的 ID）
+- 特例：`error` 消息是**双重语义**的 —— 当它作为某 client 请求的响应（如 `emoji.send` 失败）时按"响应类"语义回带 `requestId`；当它是 server 主动产生（如内部状态异常 / SnapshotBuilder 抛错）时按"主动推送类"语义固定 `""`。客户端解析层（Story 12.3）**应**把 `error` 与 `pong` 同等对待：`requestId != ""` → 走 request-response 配对；`requestId == ""` → 走全局错误事件总线。详见 §12.3 `error` 小节
 - frame 类型 + 编码 + 大小上限 同 §12.2 通用信封（text frame / UTF-8 JSON / 16 KB 默认上限）
 
 ### 房间快照（room.snapshot）
