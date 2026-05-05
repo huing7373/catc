@@ -91,6 +91,20 @@ public final class AppState: ObservableObject {
         self.currentRoomId = roomId
     }
 
+    /// Story 8.5 AC7: 步数同步成功后写入 currentStepAccount 单字段.
+    /// 由 SyncStepsUseCase.execute(_:) 在同步成功后调；不动其它 6 字段
+    /// （与 applyHomeData 全字段写入区分）.
+    ///
+    /// 命名 `applySyncedStepAccount` 与 `applyHomeData` 同前缀（apply* 前缀表示"hydrate / mutation 入口"；
+    /// 详见 ADR-0010 §3.3）；后缀 `SyncedStepAccount` 表达数据来源
+    /// （**同步动作返回**，与 GET /home 全量加载区分）.
+    ///
+    /// **不**包装 Optional：caller SyncStepsUseCase 同步成功必有 stepAccount（V1 §6.1 响应字段必填；
+    /// 不可能为 nil，schema 已冻结）.
+    public func applySyncedStepAccount(_ stepAccount: HomeStepAccount) {
+        self.currentStepAccount = stepAccount
+    }
+
     /// 显式 setter（节点 5 后 WS pet.state.changed 自身分支用；ADR-0010 §3.3 WS 流程）.
     /// 节点 5 才接 WS；本 story 仅声明类型契约（让 AppStateTests 可写 case），
     /// 不连真实 WS 入口.

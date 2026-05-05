@@ -99,6 +99,12 @@ struct RootView: View {
     /// Story 2.9 新增 / Story 5.2 升级：启动状态机.
     @State private var launchStateMachine: AppLaunchStateMachine?
 
+    /// Story 8.5 AC9: StepSyncTriggerService（持 4 触发器 + in-flight gate + 5min 定时器）.
+    /// 由 RootView @State 持有，避免 body 重建时 service 重启
+    /// （rebuild → factory 返回新 service → 旧 timer 仍在跑 → 资源泄漏）.
+    /// `nil` 守卫让 `ensureStepSyncWired()` 仅初始化一次（与 ensureLaunchStateMachineWired() 同模式）.
+    @State private var stepSyncTriggerService: StepSyncTriggerService?
+
     /// Story 8.4 review round 2 P2 fix: scenePhase listener，让 background → foreground reactivate
     /// 时再 bind 一次 motionProvider —— 覆盖 first-launch 用户去 Settings 改权限再回 app 的真实路径.
     ///
@@ -150,6 +156,12 @@ struct RootView: View {
                         // 2026-04-27-swiftui-multi-task-no-ordering.md）.
                         homeViewModel.bind(pingUseCase: container.makePingUseCase())
                         await homeViewModel.start()
+
+                        // Story 8.5 AC9: 启动步数同步触发器（首次同步 + 5min 定时循环）.
+                        // 必须在 launchStateMachine bootstrapStep1 完成后（AppState.applyHomeData 已写入
+                        // currentUser 等）；ready 子树只在 bootstrap 完成后渲染 → onReadyTask 执行时
+                        // SessionStore.token 必已存在；service.start() 调 /steps/sync 不会 401.
+                        stepSyncTriggerService?.start()
                     }
                 )
             } else {
@@ -215,6 +227,9 @@ struct RootView: View {
             homeViewModel.bind(motionProvider: container.motionProvider)
 
             ensureLaunchStateMachineWired()
+            // Story 8.5 AC9: lazy 注入 stepSyncTriggerService（与 ensureLaunchStateMachineWired 同模式）.
+            // 必须在 ensureLaunchStateMachineWired 之后调（与未来 audit 期望顺序一致）.
+            ensureStepSyncWired()
         }
         .task {
             // Story 5.5：bind LoadHomeUseCase + ErrorPresenter，让 ErrorPresenter onRetry 闭包
@@ -243,8 +258,23 @@ struct RootView: View {
             //   · 滤掉 .active → .inactive（如系统通知 banner）的反向边沿；
             //   · 滤掉首次启动时 .background → .inactive → .active 中的 .inactive 边沿（避免重复 bind）.
             // 详见 docs/lessons/2026-05-04-scenephase-rebind-for-auth-gated-subscriptions.md.
+
+            // Story 8.5 AC9: background 进入时 stop step sync timer（节省电；下次 .active 重启）.
+            if newPhase == .background {
+                stepSyncTriggerService?.stop()
+            }
+
             guard newPhase == .active, oldPhase != .active else { return }
             homeViewModel.bind(motionProvider: container.motionProvider)
+
+            // Story 8.5 AC9 / codex review round 1 [P3] fix: 回前台只调 `start()`（幂等）.
+            //
+            // 旧实装（round 1 review 命中）同时调 `triggerForeground()` + `start()` —— 两个 Task
+            // 各 spawn 一次 performSync；in-flight gate 仅压重叠，第一个完成后第二个即发出 duplicate
+            // `/steps/sync`. 修复：start() 自身改成幂等 reactivate 入口（首次启 timer + 立即 sync；
+            // 后续仅立即 sync，不重启 timer）.详见 lesson
+            // docs/lessons/2026-05-04-scenephase-idempotent-start-no-duplicate-trigger.md.
+            stepSyncTriggerService?.start()
         }
         .errorPresentationHost(presenter: container.errorPresenter)
     }
@@ -256,6 +286,17 @@ struct RootView: View {
         #else
         return nil
         #endif
+    }
+
+    /// Story 8.5 AC9: lazy 注入 `stepSyncTriggerService`（与 ensureLaunchStateMachineWired 同模式）.
+    /// nil 守卫确保 RootView 重建（旋转 / 离开返回）时不重新构造覆盖既有 instance —— 否则旧 timer 仍在跑.
+    /// option A：service 持 homeViewModel 借用 petState 作为 motionState 来源（不订阅 motionProvider）.
+    private func ensureStepSyncWired() {
+        guard stepSyncTriggerService == nil else { return }
+        stepSyncTriggerService = container.makeStepSyncTriggerService(
+            appState: appState,
+            homeViewModel: homeViewModel
+        )
     }
 
     /// Story 5.2 AC8 新增：lazy 注入 `launchStateMachine`，把 GuestLoginUseCase + SessionStore wire 到 bootstrapStep1.

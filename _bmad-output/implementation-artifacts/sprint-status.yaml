@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-05-04  # Story 8.4 done (主界面猫 sprite 三态动画切换)
+last_updated: 2026-05-05  # Story 8.5 review (步数同步触发器)
 # Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
 # 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
@@ -126,7 +126,7 @@ development_status:
   8-2-coremotion-接入: done
   8-3-运动状态机映射: done
   8-4-主界面猫-sprite-三态动画切换: done
-  8-5-步数同步触发器: backlog
+  8-5-步数同步触发器: review
   epic-8-retrospective: optional
   epic-9: backlog
   9-1-跨端集成测试场景-步数-猫动作-e2e: backlog

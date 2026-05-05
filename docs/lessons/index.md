@@ -155,3 +155,5 @@
 | 2026-05-04 | [auth-gated subscription 必须支持 downgrade，不能用单向 flag 短路 rebind](2026-05-04-auth-gated-subscription-must-handle-downgrade.md) | 1 | architecture | `0d597c3` |
 | 2026-05-04 | [auth-gated feature 切片必须显式分配"权限申请 caller" story，spec gap 不能静默漏到末端 story](2026-05-04-auth-gated-feature-needs-explicit-requester-story.md) | 1 | architecture | `c457f93` |
 | 2026-05-04 | [`Task { @MainActor in ... }` hop 引入 stale write race，generation token 是稳健解](2026-05-04-mainactor-task-hop-stale-write-needs-generation-token.md) | 1 | concurrency / architecture | `c457f93` |
+| 2026-05-04 | [跨午夜时间字段必须从单一 captured Date 派生 & scenePhase 幂等 start 不能并排两条同效 API](2026-05-04-cross-midnight-single-captured-date-and-idempotent-start.md) | 2 | architecture | `<pending>` |
+| 2026-05-04 | [fresh install HealthKit requestPermission gap：与 Story 8.4 motion 权限同坑（epic 切片漏专门 caller story 的二次复发）](2026-05-04-step-sync-fresh-install-requestpermission-gap.md) | 1 | architecture / process | `<pending>` |

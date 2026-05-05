@@ -78,6 +78,17 @@ public final class AppContainer: ObservableObject {
     /// 测试场景通过未来追加的 init 重载注入 MotionProviderMock（YAGNI：本 story 不预留 init 参数；Story 8.4 落地时再加）.
     public let motionProvider: MotionProvider
 
+    /// Story 8.5 AC8: 时间抽象（dateProvider 默认 DefaultDateProvider；
+    /// 测试场景通过 init(apiClient:keychainStore:unauthorizedHandlerSink:dateProvider:) 重载注入 mock）.
+    public let dateProvider: DateProvider
+
+    #if DEBUG
+    /// Story 8.5 AC11: UITest 路径下注入的 mock StepRepository（替代默认 DefaultStepRepository）.
+    /// 仅 DEBUG 编译；通过 `UITEST_MOCK_STEP_SYNC=1` launch arg 启用.
+    /// `makeStepRepository()` 检查此字段；非 nil 时返回 mock，nil 时返回 default.
+    private let uiTestMockStepRepository: StepRepositoryProtocol?
+    #endif
+
     /// 默认 init：用 `APIClient(baseURL:, keychainStore:)` 构造默认 client。
     /// baseURL 来源优先级：Info.plist[`PetAppBaseURL`] → fallback `http://localhost:8080`。
     /// 不含 `/api/v1` 前缀（host-only baseURL 决策，见 Story 2.5 Dev Note #1）。
@@ -104,11 +115,50 @@ public final class AppContainer: ObservableObject {
         let sink = UnauthorizedHandlerSink()
         let wrappedAPIClient = AuthBoundaryAPIClient(inner: baseAPIClient, sink: sink)
 
+        #if DEBUG
+        // Story 8.5 AC11: UITest 路径走 launch env 注入 mock StepRepository + mock HealthProvider.
+        // - UITEST_MOCK_STEP_SYNC=1 启用 mock（同时联动 mock HealthProvider，
+        //   避免 sim 上 HealthKit 权限拒绝导致 SyncStepsUseCase 提前抛错→AppState 永不写入）；
+        // - UITEST_MOCK_HEALTH_STEPS（可选）：HealthProvider mock 返的当日步数（默认 1234）；
+        // - UITEST_MOCK_SYNC_RESPONSE_AVAILABLE（可选）：覆盖 mock 响应的 availableSteps（默认 5678）.
+        let env = ProcessInfo.processInfo.environment
+        let uitestMockStepRepo: StepRepositoryProtocol?
+        let uitestMockHealth: HealthProvider?
+        if env["UITEST_MOCK_STEP_SYNC"] == "1" {
+            let totalSteps = env["UITEST_MOCK_HEALTH_STEPS"].flatMap(Int.init) ?? 1234
+            let availableSteps = env["UITEST_MOCK_SYNC_RESPONSE_AVAILABLE"].flatMap(Int.init) ?? 5678
+            uitestMockStepRepo = UITestMockStepRepository(
+                stubResponse: StepsSyncResponse(
+                    acceptedDeltaSteps: totalSteps,
+                    stepAccount: StepAccountInSyncResponse(
+                        totalSteps: totalSteps,
+                        availableSteps: availableSteps,
+                        consumedSteps: 0
+                    )
+                )
+            )
+            // HealthProviderMock：让 readDailyTotalSteps 返 totalSteps（任意 day key 均返同值；
+            // 详见下方 UITestMockHealthProvider）.
+            uitestMockHealth = UITestMockHealthProvider(stubSteps: totalSteps)
+        } else {
+            uitestMockStepRepo = nil
+            uitestMockHealth = nil
+        }
+
+        self.init(
+            apiClient: wrappedAPIClient,
+            keychainStore: keychainStore,
+            unauthorizedHandlerSink: sink,
+            healthProvider: uitestMockHealth,
+            uiTestMockStepRepository: uitestMockStepRepo
+        )
+        #else
         self.init(
             apiClient: wrappedAPIClient,
             keychainStore: keychainStore,
             unauthorizedHandlerSink: sink
         )
+        #endif
     }
 
     /// 注入式 init：测试中传 mock APIClient；未来 release build 切到 production baseURL 时也走此入口。
@@ -117,28 +167,42 @@ public final class AppContainer: ObservableObject {
     /// - Story 5.1 默认值切换为 `KeychainServicesStore()`（基于 Apple Security.framework，真实持久化）
     /// 协议 `KeychainStoreProtocol` 四方法签名不变，Story 2.8 既有调用方零改动；
     /// `InMemoryKeychainStore` 作为测试便利 + 模板示范保留（仍由 InMemoryKeychainStoreTests 维护）。
+    #if DEBUG
     public init(
         apiClient: APIClientProtocol,
         keychainStore: KeychainStoreProtocol = KeychainServicesStore(),
-        unauthorizedHandlerSink: UnauthorizedHandlerSink = UnauthorizedHandlerSink()
+        unauthorizedHandlerSink: UnauthorizedHandlerSink = UnauthorizedHandlerSink(),
+        dateProvider: DateProvider = DefaultDateProvider(),
+        healthProvider: HealthProvider? = nil,
+        uiTestMockStepRepository: StepRepositoryProtocol? = nil
     ) {
         self.apiClient = apiClient
         self.errorPresenter = ErrorPresenter()
         self.keychainStore = keychainStore
-        // Story 5.2 新增：sessionStore 在 init 一次性构造，与 errorPresenter 同模式（stable singleton）。
-        // 不预留 init(...sessionStore:) 注入式签名 —— 测试场景直接 new SessionStore() 即可（@MainActor 类，
-        // 跨 actor 注入需 @Sendable 约束麻烦；container.sessionStore 已暴露足以验证）。
         self.sessionStore = SessionStore()
-        // ADR-0008 v2 / Story 0008-impl-1: sink 默认值是空 handler 的实例 —— 测试中传 mock APIClient
-        // 时通常不会触发 401 cold-start 路径，sink 没人调；如需验证可 inject 自定义 sink.
         self.unauthorizedHandlerSink = unauthorizedHandlerSink
-        // Story 8.1: HealthProvider 默认实例化为 HealthProviderImpl（HKHealthStore + HKStatisticsQuery 真接入）；
-        // 测试场景由未来 Story 8.5 落地的 init(healthProvider:) 重载注入 HealthProviderMock.
-        self.healthProvider = HealthProviderImpl()
-        // Story 8.2: MotionProvider 默认实例化为 MotionProviderImpl（CMMotionActivityManager 真接入）；
-        // 测试场景由未来 Story 8.4 落地的 init(motionProvider:) 重载注入 MotionProviderMock.
+        self.healthProvider = healthProvider ?? HealthProviderImpl()
         self.motionProvider = MotionProviderImpl()
+        self.dateProvider = dateProvider
+        self.uiTestMockStepRepository = uiTestMockStepRepository
     }
+    #else
+    public init(
+        apiClient: APIClientProtocol,
+        keychainStore: KeychainStoreProtocol = KeychainServicesStore(),
+        unauthorizedHandlerSink: UnauthorizedHandlerSink = UnauthorizedHandlerSink(),
+        dateProvider: DateProvider = DefaultDateProvider()
+    ) {
+        self.apiClient = apiClient
+        self.errorPresenter = ErrorPresenter()
+        self.keychainStore = keychainStore
+        self.sessionStore = SessionStore()
+        self.unauthorizedHandlerSink = unauthorizedHandlerSink
+        self.healthProvider = HealthProviderImpl()
+        self.motionProvider = MotionProviderImpl()
+        self.dateProvider = dateProvider
+    }
+    #endif
 
     /// 解析默认 baseURL：从给定 bundle 的 Info.plist 读 `PetAppBaseURL`，否则回退到 fallback。
     /// 提取为 static + 接受 bundle 参数：方便测试通过 mock bundle / fixture plist 验证读取逻辑。
@@ -236,6 +300,45 @@ public final class AppContainer: ObservableObject {
         DefaultLoadHomeUseCase(repository: makeHomeRepository())
     }
 
+    // MARK: - Story 8.5 AC8: Step Sync 链路 factory
+
+    /// Story 8.5 AC2: 构造 StepRepository（每次调用返回新实例；apiClient 单例由 container 持有）.
+    /// DEBUG build 路径下若 UITest 注入了 mock，则返回 mock 而非 default.
+    public func makeStepRepository() -> StepRepositoryProtocol {
+        #if DEBUG
+        if let mock = uiTestMockStepRepository {
+            return mock
+        }
+        #endif
+        return DefaultStepRepository(apiClient: apiClient)
+    }
+
+    /// Story 8.5 AC3: 构造 SyncStepsUseCase（每次调用返回新实例；
+    /// 依赖 healthProvider / repository / appState / dateProvider）.
+    /// caller 必须传 appState（AppState 在 RootView 持有；不进 AppContainer 字段；ADR-0010 §3.1）.
+    public func makeSyncStepsUseCase(appState: AppState) -> SyncStepsUseCaseProtocol {
+        DefaultSyncStepsUseCase(
+            healthProvider: healthProvider,
+            repository: makeStepRepository(),
+            appState: appState,
+            dateProvider: dateProvider
+        )
+    }
+
+    /// Story 8.5 AC5 / AC9 (option A): 构造 StepSyncTriggerService（**每次调用返回新实例**；
+    /// caller 应自行通过 @State 持有 strong 引用，避免 RootView body 重建时重启 timer）.
+    /// option A：service 注入 homeViewModel 而非 motionProvider，借用 HomeViewModel.petState
+    /// 作为 motionState 来源（避免与 8.4 motionProvider 单订阅契约冲突；详见 story 8.5 AC9 边界澄清段）.
+    public func makeStepSyncTriggerService(
+        appState: AppState,
+        homeViewModel: HomeViewModel
+    ) -> StepSyncTriggerService {
+        StepSyncTriggerService(
+            syncStepsUseCase: makeSyncStepsUseCase(appState: appState),
+            homeViewModel: homeViewModel
+        )
+    }
+
     #if DEBUG
     /// Story 2.8 新增（仅 Debug build）：构造 ResetIdentityViewModel。
     /// Release build 该方法不存在；调用方（RootView）也必须 #if DEBUG 包裹调用 — fail-closed。
@@ -257,3 +360,39 @@ public final class AppContainer: ObservableObject {
     }
     #endif
 }
+
+#if DEBUG
+/// Story 8.5 AC11: UITest 路径下注入的 mock StepRepository，按 launch env 提供 stub 响应.
+/// 仅 DEBUG 编译；不污染 Production binary.
+///
+/// 与 UITEST_MOCK_STEP_SYNC=1 配合使用；详见 AppContainer.convenience init() 中的 launch env 解析路径.
+/// `@unchecked Sendable`：与 MockAPIClient / HealthProviderMock 同模式（mutable 字段但测试串行调用）.
+private final class UITestMockStepRepository: StepRepositoryProtocol, @unchecked Sendable {
+    private let stubResponse: StepsSyncResponse
+
+    init(stubResponse: StepsSyncResponse) {
+        self.stubResponse = stubResponse
+    }
+
+    func syncSteps(_ request: StepsSyncRequest) async throws -> StepsSyncResponse {
+        return stubResponse
+    }
+}
+
+/// Story 8.5 AC11: UITest 路径下注入的 mock HealthProvider；与 UITEST_MOCK_STEP_SYNC=1 联动启用.
+/// 任意日期都返同一 stubSteps；权限申请直接返 true（避免 sim 上 HealthKit 权限拒绝阻塞链路）.
+/// 仅 DEBUG 编译；不污染 Production binary.
+private final class UITestMockHealthProvider: HealthProvider, @unchecked Sendable {
+    private let stubSteps: Int
+
+    init(stubSteps: Int) {
+        self.stubSteps = stubSteps
+    }
+
+    func requestPermission() async throws -> Bool { true }
+
+    func readDailyTotalSteps(date: Date) async throws -> Int {
+        return stubSteps
+    }
+}
+#endif

@@ -21,3 +21,21 @@ public enum MotionState: String, Codable, Equatable, Sendable, CaseIterable {
     case walk = "walk"
     case run = "run"
 }
+
+// MARK: - Story 8.5 AC4.1: V1 §6.1 wire 类型派生
+
+public extension MotionState {
+    /// V1 §6.1 motionState 字段 wire value（int 1/2/3）.
+    /// - 1 = stationary_or_unknown（与 .rest 对应）
+    /// - 2 = walking（与 .walk 对应）
+    /// - 3 = running（与 .run 对应）
+    /// - **必须**与 server INT8 motion_state 字段值对齐（V1 §6.1.3 + 数据库设计 §5.5）.
+    /// - 命名 `wireValue` 与 `rawValue`（"rest"/"walk"/"run" String）区分语义.
+    var wireValue: Int {
+        switch self {
+        case .rest: return 1
+        case .walk: return 2
+        case .run:  return 3
+        }
+    }
+}
