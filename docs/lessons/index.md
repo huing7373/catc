@@ -148,10 +148,10 @@
 | 2026-05-04 | [MotionProvider probe view 必须显式处理 deny 路径 + UI 集成测试不能依赖 simulator 自发 emit motion event](2026-05-04-motion-probe-deny-path-and-subscribed-marker.md) | 2 | error-handling / testing | `504ba40` |
 | 2026-05-04 | [CoreMotion subscribe/stop 契约：handler invoke 必须与 generation check 共享同一锁段](2026-05-04-motion-handler-invoke-must-be-in-lock.md) | 1 | architecture / concurrency | `d875b7d` |
 | 2026-05-04 | [pure mapper 内做 confidence debounce 让下游卡 stale；防抖应在带时间维度的上层做](2026-05-04-motion-mapper-confidence-debounce-removal.md) | 1 | architecture / correctness | `a0d869e` |
-| 2026-05-04 | [MotionProvider.bind 必须先 gate authorizationStatus 再 startUpdates（first-launch 不弹权限红线）](2026-05-04-motion-bind-must-gate-on-authorization-status.md) | 1 | architecture | `<pending>` |
-| 2026-05-04 | [SwiftUI body 内 switch 分支 swap 必须用 `.id() + .transition() + .animation(value:)` 三件套才能 fade](2026-05-04-swiftui-content-swap-needs-id-and-transition.md) | 1 | architecture | `<pending>` |
-| 2026-05-04 | [auth-gated bind 必须挂 ScenePhase rebind 才能覆盖 "用户去 Settings 改权限再回来" 路径](2026-05-04-scenephase-rebind-for-auth-gated-subscriptions.md) | 1 | architecture | `<pending>` |
-| 2026-05-04 | [UITest 不应钦定权限/异步事件依赖的 launch-time state；改为"三态任一"或"稳定 container"断言](2026-05-04-uitest-launch-state-must-not-hardcode-permission-gated-state.md) | 1 | testing | `<pending>` |
-| 2026-05-04 | [auth-gated subscription 必须支持 downgrade，不能用单向 flag 短路 rebind](2026-05-04-auth-gated-subscription-must-handle-downgrade.md) | 1 | architecture | `<pending>` |
-| 2026-05-04 | [auth-gated feature 切片必须显式分配"权限申请 caller" story，spec gap 不能静默漏到末端 story](2026-05-04-auth-gated-feature-needs-explicit-requester-story.md) | 1 | architecture | `<pending>` |
-| 2026-05-04 | [`Task { @MainActor in ... }` hop 引入 stale write race，generation token 是稳健解](2026-05-04-mainactor-task-hop-stale-write-needs-generation-token.md) | 1 | concurrency / architecture | `<pending>` |
+| 2026-05-04 | [MotionProvider.bind 必须先 gate authorizationStatus 再 startUpdates（first-launch 不弹权限红线）](2026-05-04-motion-bind-must-gate-on-authorization-status.md) | 1 | architecture | `9960e25` |
+| 2026-05-04 | [SwiftUI body 内 switch 分支 swap 必须用 `.id() + .transition() + .animation(value:)` 三件套才能 fade](2026-05-04-swiftui-content-swap-needs-id-and-transition.md) | 1 | architecture | `28ee7c9` |
+| 2026-05-04 | [auth-gated bind 必须挂 ScenePhase rebind 才能覆盖 "用户去 Settings 改权限再回来" 路径](2026-05-04-scenephase-rebind-for-auth-gated-subscriptions.md) | 1 | architecture | `28ee7c9` |
+| 2026-05-04 | [UITest 不应钦定权限/异步事件依赖的 launch-time state；改为"三态任一"或"稳定 container"断言](2026-05-04-uitest-launch-state-must-not-hardcode-permission-gated-state.md) | 1 | testing | `ece7aa0` |
+| 2026-05-04 | [auth-gated subscription 必须支持 downgrade，不能用单向 flag 短路 rebind](2026-05-04-auth-gated-subscription-must-handle-downgrade.md) | 1 | architecture | `0d597c3` |
+| 2026-05-04 | [auth-gated feature 切片必须显式分配"权限申请 caller" story，spec gap 不能静默漏到末端 story](2026-05-04-auth-gated-feature-needs-explicit-requester-story.md) | 1 | architecture | `c457f93` |
+| 2026-05-04 | [`Task { @MainActor in ... }` hop 引入 stale write race，generation token 是稳健解](2026-05-04-mainactor-task-hop-stale-write-needs-generation-token.md) | 1 | concurrency / architecture | `c457f93` |

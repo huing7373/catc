@@ -2,7 +2,7 @@
 date: 2026-05-04
 source_review: codex review round 1 — /tmp/epic-loop-review-8-4-r1.md
 story: 8-4-主界面猫-sprite-三态动画切换
-commit: <pending>
+commit: 9960e25
 lesson_count: 1
 ---
 
