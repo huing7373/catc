@@ -1325,7 +1325,6 @@ GET /ws/rooms/{roomId}?token=xxx
 | 4005 | server 主动 close | 心跳超时（60 秒未收到任何 client 消息含 ping，由 Story 10.4 心跳框架触发；详见 §12.2 `ping` 小节） | 是（reason = `"heartbeat timeout"`） | **应**自动重连（指数退避；视为 transient network failure，与 1006 / 1011 同等对待 —— 不视为业务级拒绝，因为底层多半是网络抖动 / 客户端切后台超时） |
 | 1000 | server 或 client 任一方主动 close | 服务端 / 客户端正常关闭 | 否 | 客户端主动 close 不重连；服务端主动 close（如 graceful shutdown）客户端可选重连 |
 | 1001 | server 或 client 任一方主动 close | going away（服务端重启 / 客户端切后台） | 否 | 服务端重启 → 客户端**应**自动重连（指数退避，参考 iOS Story 12.5）；客户端切后台 → 客户端自身决定 |
-| 1006 | **仅 client 侧观测**（不可被任一端 emit） | 异常断开（无 close frame，TCP 中断 / 网络抖动）—— RFC 6455 §7.1.5 规定 1006 为 reserved 状态码，**禁止**出现在 close frame 内；客户端 WebSocket runtime 在底层 TCP 断开且未收到 close frame 时本地合成该 code 通知上层 | 不适用（无 close frame，因此服务端**不**emit 该 code） | 客户端**应**自动重连（指数退避） |
 | 4006 | server 主动 close | 客户端违反协议策略 —— 节点 4 阶段唯一触发条件：单条消息 frame 超过 `ws.max_message_size_bytes`（默认 16 KB） | 是（reason = `"message too large"`） | **不**自动重连（视为客户端实装 bug，重连仍会被 close）；记 log error 后回退 |
 | 1011 | server 主动 close | 服务端内部错误（panic / 不可恢复异常）；**含**握手完成后 SnapshotBuilder 构建初始 `room.snapshot` 失败的场景（reason = `"snapshot build failed"`） —— 因为 §12.1 钦定 `room.snapshot` 是握手成功后必发的第一条消息，构建失败若不 close 而仅推 `error`，client 会永远等待一个永不到达的 snapshot，房间页无法初始化 | 是（reason 应包含简短错误提示但**不**泄漏 stack trace） | 客户端**应**自动重连（指数退避，但限制最大重试次数避免雪崩） |
 
@@ -1334,8 +1333,10 @@ GET /ws/rooms/{roomId}?token=xxx
 - 4001 / 4002 / 4003 / 4004 / 4006 是**业务级**拒绝（4xxx 段是应用自定义；WebSocket RFC 6455 规定 4000-4999 为应用保留段），重试无意义，客户端**不**应自动重连；客户端应展示明确 UX 提示并回退（4006 = 客户端实装 bug，记 log error 后回退）
 - **4005 是 4xxx 段中的例外**：虽然位于 4xxx 应用自定义段，但语义是 transient network failure（心跳超时多半是网络抖动 / 客户端切后台），不是业务级拒绝；客户端**应**自动重连，与 1006 / 1011 同等对待（指数退避 + 最大重试次数限制）
 - 1000 / 1001 / 1011 是**协议 / 网络**级断开（1xxx 段是 RFC 标准段，可由服务端主动 emit），客户端**应**自动重连（除 1000 主动关闭外）
-- **1006 例外**：1006 是 RFC 6455 §7.1.5 reserved status code，**MUST NOT** be set as a status code in a Close control frame；服务端实装层（Story 10.3 / 12.5）**禁止**写 1006 到 close frame，必须由客户端 WebSocket runtime 在 TCP 异常断开时本地合成；本表保留 1006 行是为了完整描述客户端侧重连决策，**不**意味着服务端会主动 emit
-- **不使用 RFC close code 1008 / 1009**：RFC 6455 §7.4.1 分别定义 1008 (Policy Violation) / 1009 (Message Too Big) 为标准 close code，但本协议**禁止**这两个 1xxx 段值用于 close frame，原因是 §3 全局错误码表已将 `1008`（幂等冲突）/ `1009`（服务繁忙）用作应用层错误码（在 §12.3 `error.payload.code` 中出现），同一数值同时出现在 close frame 和 application error frame 会让客户端、日志、监控无法仅凭数字区分 transport-level fatal 与 application-level transient/retryable（前者要 close + 不重连或固定重连分类，后者要忽略 + 保连接）。"消息超大"场景统一改用 **4006**（4xxx 应用自定义段，与 4001-4005 同段位，数字空间不与 §3 重叠），保留语义清晰
+- **不使用 RFC close code 1006 / 1008 / 1009**（**不**出现在上方 close code 表内，**也不**由服务端主动 emit，原因分两类）：
+  - **1006**：RFC 6455 §7.1.5 reserved status code —— **MUST NOT** be set as a status code in a Close control frame。1006 仅由客户端 WebSocket runtime 在底层 TCP 异常断开 / 网络抖动且未收到 close frame 时**本地合成**通知上层；服务端实装层（Story 10.3 / 12.5）**禁止**写 1006 到 close frame。客户端收到 1006 时按 transient network failure 处理 —— 与 1011 / 4005 同等对待（指数退避 + 最大重试次数限制自动重连）。1006 不进入 close code 表的另一个理由：§3 全局错误码表已将 `1006`（状态不允许当前操作）用作应用层错误码（在 §12.3 `error.payload.code` 中出现），与其它"1xxx 段被 §3 占用"的 code 同类，避免数字空间冲突
+  - **1008 / 1009**：RFC 6455 §7.4.1 分别定义 1008 (Policy Violation) / 1009 (Message Too Big) 为标准 close code，但本协议**禁止**这两个 1xxx 段值用于 close frame，原因是 §3 全局错误码表已将 `1008`（幂等冲突）/ `1009`（服务繁忙）用作应用层错误码（在 §12.3 `error.payload.code` 中出现）。"消息超大"场景统一改用 **4006**（4xxx 应用自定义段，与 4001-4005 同段位，数字空间不与 §3 重叠）；其他 policy violation 场景同样走 4xxx 段
+  - **共同根因**：同一数值同时出现在 close frame 和 application error frame 会让客户端、日志、监控无法仅凭数字区分 transport-level fatal 与 application-level transient/retryable（前者要 close + 不重连或固定重连分类，后者要忽略 + 保连接）。因此 §3 已占用的 1xxx 段值（含 1006 / 1008 / 1009）一律**禁止**作为 close code；服务端主动 emit 的 close code 限定在 1000 / 1001 / 1011 + 4001 / 4002 / 4003 / 4004 / 4005 / 4006 这 9 个值内
 - 4001 触发时 server **不**写 log error（这是常态，token 过期是正常业务），写 log info；4003 / 4004 写 log warn（疑似客户端实装 bug 或数据不一致）；4005 写 log info（这是常态，心跳超时多半是网络抖动 / 切后台；写 warn 会让正常网络抖动场景下日志噪声暴涨）；4006 写 log error（必排查，疑似客户端 bug 或恶意流量）；1011 写 log error（必排查）
 
 #### 服务端校验顺序
@@ -1357,7 +1358,7 @@ GET /ws/rooms/{roomId}?token=xxx
 - 推送 `room.snapshot`（§12.3 schema）
 - 在 Redis presence 记录在线（详见 Story 10.6）
 
-**注意**：第 5 步的 DB 查询是热点路径（每次连接 / 重连都查一次），Story 10.3 / 10.6 实装时**应**将 `room_members` 在线态缓存到 Redis presence（避免每次连接都查 MySQL）；但**协议层面**第 5 步仍是契约一部分（client 不可见，但 server 必须保证语义一致 —— Redis 缓存与 MySQL 一致性由 Story 10.6 + Story 11.4 加入房间事务保证）。
+**注意**：第 5 步是**协议层面强制的授权环节**，必须以**持久化 membership 数据**（即 `room_members` 表）为 single source of truth —— **禁止**使用 Redis presence 替代该校验。理由：presence 仅表示 ephemeral 在线态，不代表 user 是房间合法成员；以下两种常见场景下，"用 presence 做 membership 校验"会错误返回"非成员"并 close 4003：(a) server 重启 / Redis 清空后第一个合法成员重连（presence 全空）；(b) 合法成员的 presence entry TTL 过期后重连。如未来需要为该热路径降低 MySQL 读压（Story 10.6 / 11.4 实装阶段评估），**必须**引入与 presence 区分的"durable membership cache"（持久层语义、由加入 / 退出房间事务原子失效），而**不是**复用 presence；本协议层面的 §12.1 校验顺序不因任何缓存方案而改变。
 
 ---
 
@@ -1461,7 +1462,7 @@ JSON 通用骨架：
 
 - server → client 信封**多**一个 `ts` 字段（client → server 没有），用途是客户端日志关联 + UI 排序（如多条 `member.joined` 接连到达时按 `ts` 排序避免乱序）；**不**用作业务时序判断（业务时序仍由 server 单调时钟保证；client 不应基于 `ts` 比较推断"谁先发生"，因为不同 server 实例时钟可能漂移 —— 节点 4 单实例无此风险，但接口契约层面提前规避）
 - `requestId` 在响应类消息中是**回带**（必须等于 client 请求的 `requestId`，包括 client 未提供时回 `""`）；在广播 / 主动推送类消息中是固定 `""`（不要让客户端误以为这是一个新 request 的 ID）
-- 特例：`error` 消息是**双重语义**的 —— 当它作为某 client 请求的响应（如 `emoji.send` 失败）时按"响应类"语义回带 `requestId`；当它是 server 主动产生（如内部状态异常 / SnapshotBuilder 抛错）时按"主动推送类"语义固定 `""`。客户端解析层（Story 12.3）**应**把 `error` 与 `pong` 同等对待：`requestId != ""` → 走 request-response 配对；`requestId == ""` → 走全局错误事件总线。详见 §12.3 `error` 小节
+- 特例：`error` 消息是**双重语义**的 —— 当它作为某 client 请求的响应（如 `emoji.send` 失败）时按"响应类"语义回带 `requestId`；当它是 server 主动产生（如运行时业务状态异常 —— 注意**不含**握手期 SnapshotBuilder 失败，该场景统一走 close 1011 而非 `error`，详见 §12.1 close code 表 1011 行 + §12.3 `error` 小节末尾"snapshot 构建失败处理路径"注）时按"主动推送类"语义固定 `""`。客户端解析层（Story 12.3）**应**把 `error` 与 `pong` 同等对待：`requestId != ""` → 走 request-response 配对；`requestId == ""` → 走全局错误事件总线。详见 §12.3 `error` 小节
 - frame 类型 + 编码 + 大小上限 同 §12.2 通用信封（text frame / UTF-8 JSON / 16 KB 默认上限）
 
 ### 房间快照（room.snapshot）
@@ -1479,8 +1480,8 @@ JSON 通用骨架：
 | `requestId` | string | 必填 | 固定 `""`（主动推送类消息） |
 | `payload.room.id` | string | 必填 | 房间 ID（BIGINT 字符串化下发，遵循 §2.5 全局约定） |
 | `payload.room.maxMembers` | number (int) | 必填 | 房间容量上限（节点 4 阶段固定 4，由 Story 11.3 创建房间事务写入；本接口仅返回当前值） |
-| `payload.room.memberCount` | number (int) | 必填 | 当前房间在线成员数；节点 4 阶段 Story 10.7 placeholder 实现固定返回 0；Story 11.7 真实实现按 `room_members` 行数 + Redis presence 在线态计算 |
-| `payload.members` | array | 必填 | 成员列表；节点 4 阶段 Story 10.7 placeholder 实现固定返回 `[]`；Story 11.7 真实实现按 `room_members` JOIN `users` JOIN `pets` 聚合 |
+| `payload.room.memberCount` | number (int) | 必填 | 房间总成员数（**含离线成员**，与下文 `payload.members` 数组长度严格相等，见本节末"不变量"小节）；节点 4 阶段 Story 10.7 placeholder 实现固定返回 0；Story 11.7 真实实现 = `room_members` 行数（与 `payload.members` 同一次 JOIN 聚合产出，**禁止**单独查询导致 drift） |
+| `payload.members` | array | 必填 | 房间全成员列表（**含离线成员**，节点 4 阶段不区分在线 / 离线，所有 `room_members` 记录都返回；"在线态"由后续 epic 通过 presence 推送类消息单独维护，不混入 snapshot）；节点 4 阶段 Story 10.7 placeholder 实现固定返回 `[]`；Story 11.7 真实实现按 `room_members` JOIN `users` JOIN `pets` 聚合 |
 | `payload.members[].userId` | string | 必填 | 成员用户 ID（BIGINT 字符串化） |
 | `payload.members[].nickname` | string | 必填 | 成员昵称 |
 | `payload.members[].pet.petId` | string | 必填 | 成员当前宠物 ID（BIGINT 字符串化） |
@@ -1528,7 +1529,7 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 }
 ```
 
-> 注：`memberCount` 必须等于 `members[]` 数组长度（节点 4 阶段 Story 10.7 placeholder 实装时两者均为 0；Story 11.7 真实实装时由同一次 `room_members` JOIN 聚合产出，server 实装层面**禁止**让两者出现 drift）。
+> **不变量（snapshot 内部一致性）**：`memberCount` 必须**严格等于** `members[]` 数组长度。两者**统一表示房间全成员（含离线）**，**不**做"在线态过滤"—— 即 snapshot 是房间的 full roster view，**不是** online-only view。理由：(a) 若 `memberCount` 与 `members[].length` 任一方做"在线态过滤"而另一方不做，违反不变量；(b) 节点 4 阶段服务端**不**在握手时广播 `member.joined`（详见 §12.1 末尾 placeholder 注），客户端无法靠后续推送补齐离线成员，snapshot 必须自包含房间全部成员；(c) 在线 / 离线状态由后续 epic 的独立 presence 推送通道维护，不混入 snapshot 字段。节点 4 阶段 Story 10.7 placeholder 实装时两者均为 0（房间无成员）；Story 11.7 真实实装时由**同一次** `room_members` JOIN `users` JOIN `pets` 聚合产出 `members[]`，`memberCount` 取该数组长度（或同一次 query 的 `COUNT(*)`），server 实装层面**禁止**让两者出现 drift。
 
 **节点 4 阶段 placeholder 示例**（Story 10.7 实装；与上述真实示例的差异是 `members: []` + `memberCount: 0`）：
 
