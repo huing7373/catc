@@ -34,9 +34,22 @@ final class HomeUITests: XCTestCase {
         // Story 8.4 修改：catStage 中央 SF Symbol 占位被 PetSpriteView 替换；
         //   AccessibilityID.Home.petArea = "home_petArea" 在 Story 37.7 落地的 SF Symbol 上挂；
         //   本 story 用 PetSpriteView 替换后该 identifier 不再渲染（PetSpriteView 自身挂 petSprite_rest 等）.
-        //   断言改为：验证 PetSpriteView 三态之一的 identifier 存在（默认 .rest 路径）.
+        //
+        // round 3 fix-review (codex P2): 不硬编码 .rest —— 已授权 sim 上 RootView 启动即订阅 motion，
+        //   pet 可能瞬切到 .walk / .run；断言改为"三态任一存在"，覆盖：
+        //   - 已授权环境：rest/walk/run 任一 → PASS
+        //   - 未授权环境：rest 存在 → PASS
+        //   - dead wiring（PetSpriteView 没渲染）：三态都不存在 → FAIL（仍捕获 wiring 断裂）.
+        //   保留 PetSprite 覆盖（不只断 catStage container 避免假绿）.
         let petSpriteRest = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteRest]
-        XCTAssertTrue(petSpriteRest.waitForExistence(timeout: timeout), "petSprite_rest 区块未找到（Story 8.4 替换 petArea 占位）")
+        let petSpriteWalk = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteWalk]
+        let petSpriteRun = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteRun]
+        // 给 launch 期 race 一个 wait window（任一 identifier 出现即满足）.
+        _ = petSpriteRest.waitForExistence(timeout: timeout)
+        XCTAssertTrue(
+            petSpriteRest.exists || petSpriteWalk.exists || petSpriteRun.exists,
+            "PetSpriteView 三态 a11y identifier 都未找到（Story 8.4 替换 petArea 占位；不应 dead wiring）"
+        )
 
         let stepBalance = app.descendants(matching: .any)[AccessibilityID.Home.stepBalance]
         XCTAssertTrue(stepBalance.waitForExistence(timeout: timeout), "stepBalance 区块未找到")
@@ -92,27 +105,36 @@ final class HomeUITests: XCTestCase {
         )
     }
 
-    /// Story 8.4 AC8: PetSpriteView 默认渲染 rest 状态 a11y identifier.
+    /// Story 8.4 AC8: PetSpriteView 启动时渲染三态之一（rest/walk/run）的 a11y identifier.
     ///
-    /// 范围：本 UITest 仅验证启动后 catStage 内有 PetSpriteView "petSprite_rest" identifier 渲染.
+    /// round 3 fix-review (codex P2) 改名 + 改断言：原 `testPetSpriteShowsRestStateOnLaunch` 钦定 .rest，
+    ///   但已授权 sim 上 RootView 启动即订阅 motion → pet 可能瞬切到 .walk / .run，导致 nondeterministic fail.
+    ///   改名为 `testPetSpriteRendersAtLaunch` —— 不再保证"rest"为稳定 launch state，仅断"三态任一存在"（保留
+    ///   wiring 覆盖：三态都不存在 → FAIL，捕获 PetSpriteView dead wiring）.
+    ///
+    /// 范围：本 UITest 仅验证启动后 catStage 内有 PetSpriteView 三态之一 identifier 渲染.
     ///   动态切换（rest → walk → run）通过模拟器系统 motion event 不可靠（Xcode 26 模拟器 idle 时
     ///   30s 都不发 activity，与 Story 8.2 MotionProviderIntegrationTests round 2 P2 同坑），
     ///   动态切换断言由 Story 9.1 跨端 e2e 阶段加 MockMotionProvider launch arg 路径覆盖.
     ///
     /// 与 Story 37.7 / 37.8 同模式：waitForExistence(timeout: 5) 兜底 launch 期 race；
     ///   UITEST_SKIP_GUEST_LOGIN=1 跳过真实登录链路（无 server 依赖）.
-    func testPetSpriteShowsRestStateOnLaunch() throws {
+    func testPetSpriteRendersAtLaunch() throws {
         let app = XCUIApplication()
         app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
         app.launch()
 
         let timeout: TimeInterval = 5
 
-        // PetSpriteView 启动时 viewModel.petState = .rest（AC1 默认值）→ 渲染 "petSprite_rest" identifier.
+        // PetSpriteView 启动后渲染三态之一（已授权环境可能瞬切 walk/run；未授权环境保持 rest）.
         let petSpriteRest = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteRest]
+        let petSpriteWalk = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteWalk]
+        let petSpriteRun = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteRun]
+        // 给 launch 期 race 一个 wait window（任一 identifier 出现即满足，不强求 .rest）.
+        _ = petSpriteRest.waitForExistence(timeout: timeout)
         XCTAssertTrue(
-            petSpriteRest.waitForExistence(timeout: timeout),
-            "petSprite_rest identifier 未找到；检查 PetSpriteView 三态分支默认 .rest 路径"
+            petSpriteRest.exists || petSpriteWalk.exists || petSpriteRun.exists,
+            "PetSpriteView 三态 a11y identifier 都未找到；检查 PetSpriteView 三态分支 wiring（rest/walk/run）"
         )
 
         // 同时验证 catStage 父容器仍存在（既有 Story 37.7 视觉锚不漂移）.
