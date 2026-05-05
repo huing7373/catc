@@ -152,3 +152,4 @@
 | 2026-05-04 | [SwiftUI body 内 switch 分支 swap 必须用 `.id() + .transition() + .animation(value:)` 三件套才能 fade](2026-05-04-swiftui-content-swap-needs-id-and-transition.md) | 1 | architecture | `<pending>` |
 | 2026-05-04 | [auth-gated bind 必须挂 ScenePhase rebind 才能覆盖 "用户去 Settings 改权限再回来" 路径](2026-05-04-scenephase-rebind-for-auth-gated-subscriptions.md) | 1 | architecture | `<pending>` |
 | 2026-05-04 | [UITest 不应钦定权限/异步事件依赖的 launch-time state；改为"三态任一"或"稳定 container"断言](2026-05-04-uitest-launch-state-must-not-hardcode-permission-gated-state.md) | 1 | testing | `<pending>` |
+| 2026-05-04 | [auth-gated subscription 必须支持 downgrade，不能用单向 flag 短路 rebind](2026-05-04-auth-gated-subscription-must-handle-downgrade.md) | 1 | architecture | `<pending>` |

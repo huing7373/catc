@@ -196,4 +196,81 @@ final class HomeViewModelMotionTests: XCTestCase {
         // 哪怕本次 bind 没 startUpdates 也安全（mock 内部 registeredHandler == nil 直接 noop）.
         XCTAssertEqual(mock.stopUpdatesCallCount, 1, "deinit 始终调 stopUpdates（hold-ref 路径不变）")
     }
+
+    // MARK: - Story 8.4 review round 4 P2: bind 必须支持 permission downgrade
+
+    // edge（round 4 P2 修复核心）：先 .authorized → 订阅 + 推 walk → 用户撤销权限 → rebind →
+    // 验证 stopUpdates 被调 + petState 回到 .rest（不卡 stale .walk）+ hasStartedMotionUpdates 重置.
+    // 详见 docs/lessons/2026-05-04-auth-gated-subscription-must-handle-downgrade.md.
+    func testBind_authorizedSubscribed_thenRevoked_stopsUpdatesAndResetsState() async {
+        let viewModel = HomeViewModel()
+        let mock = MotionProviderMock()
+
+        // ① 第一次 bind：authorized → 订阅生效
+        mock.authorizationStatusStub = .authorized
+        viewModel.bind(motionProvider: mock)
+        XCTAssertEqual(mock.startUpdatesCallCount, 1, "first bind authorized 应订阅")
+
+        // ② 推 walk activity → petState = .walk
+        mock.injectActivity(MotionProviderMock.makeActivity(walking: true))
+        await Task.yield()
+        XCTAssertEqual(viewModel.petState, .walk, "walk activity 后 petState = .walk（被 stale 起点）")
+
+        // ③ 用户去 Settings 撤销权限 → mock 切到 .denied
+        mock.authorizationStatusStub = .denied
+
+        // ④ 第二次 bind（模拟 RootView 在 ScenePhase active 触发的 rebind）
+        viewModel.bind(motionProvider: mock)
+
+        // ⑤ 断言：downgrade 路径生效
+        XCTAssertEqual(mock.stopUpdatesCallCount, 1,
+                       "downgrade 时 stopUpdates 必须被调（拆老订阅，不留 stale callback 入口）")
+        XCTAssertEqual(viewModel.petState, .rest,
+                       "downgrade 后 petState 必须 reset 到 .rest（UI 端不卡 stale .walk）")
+        XCTAssertEqual(mock.startUpdatesCallCount, 1,
+                       "downgrade 路径不应再次 startUpdates（still 1 from first bind）")
+
+        // ⑥ Bonus：再次授权 + rebind → 应能升级回 startUpdates（hasStartedMotionUpdates 已 reset）
+        mock.authorizationStatusStub = .authorized
+        viewModel.bind(motionProvider: mock)
+        XCTAssertEqual(mock.startUpdatesCallCount, 2,
+                       "re-grant 后 rebind 应升级回订阅（hasStartedMotionUpdates 已被 downgrade 重置）")
+    }
+
+    // edge（round 4 P2 衍生）：已订阅 + 再次 .authorized rebind → idempotent noop（不重复订阅 / 不动 petState）
+    // 防御 RootView 在 ScenePhase active 频繁触发 rebind 时的常态路径（权限没变化）.
+    func testBind_authorizedTwice_idempotent() async {
+        let viewModel = HomeViewModel()
+        let mock = MotionProviderMock()
+        mock.authorizationStatusStub = .authorized
+
+        viewModel.bind(motionProvider: mock)
+        XCTAssertEqual(mock.startUpdatesCallCount, 1)
+
+        // 推一个 walk activity 让 petState 进入 .walk
+        mock.injectActivity(MotionProviderMock.makeActivity(walking: true))
+        await Task.yield()
+        XCTAssertEqual(viewModel.petState, .walk)
+
+        // 再次 bind（仍 .authorized）→ 应 idempotent，不动状态
+        viewModel.bind(motionProvider: mock)
+        XCTAssertEqual(mock.startUpdatesCallCount, 1, "已订阅 + 仍 authorized 不应重复 startUpdates")
+        XCTAssertEqual(mock.stopUpdatesCallCount, 0, "已订阅 + 仍 authorized 不应触发 stopUpdates")
+        XCTAssertEqual(viewModel.petState, .walk, "已订阅 + 仍 authorized 不应回踩 petState")
+    }
+
+    // edge（round 4 P2 衍生）：未订阅 + 未授权 rebind → 仍仅持引用 return（不调 stopUpdates 也不 reset petState）.
+    // 这是 first-launch path 的多次 rebind 常态——权限始终未授，bind 应纯 noop.
+    func testBind_unauthorizedTwice_remainsNoOp() {
+        let viewModel = HomeViewModel()
+        let mock = MotionProviderMock()
+        mock.authorizationStatusStub = .notDetermined
+
+        viewModel.bind(motionProvider: mock)
+        viewModel.bind(motionProvider: mock)
+
+        XCTAssertEqual(mock.startUpdatesCallCount, 0, "始终未授权 → 不订阅")
+        XCTAssertEqual(mock.stopUpdatesCallCount, 0, "未订阅过的状态下不该 stopUpdates")
+        XCTAssertEqual(viewModel.petState, .rest, "始终 .rest，不应被 downgrade 路径误改写")
+    }
 }

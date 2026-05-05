@@ -341,15 +341,21 @@ public class HomeViewModel: ObservableObject {
     ///                                   场景——授权 flow 在 8.5 / 8.6 走完后调用方需再调一次 bind
     ///                                   让未授权 first-launch path 升级到 authorized startUpdates）.
     ///
-    /// 行为（review round 1 P1 修订；详见 docs/lessons/2026-05-04-motion-bind-must-gate-on-authorization-status.md）：
+    /// 行为（review round 1 P1 + round 4 P2 修订；详见
+    /// docs/lessons/2026-05-04-motion-bind-must-gate-on-authorization-status.md +
+    /// docs/lessons/2026-05-04-auth-gated-subscription-must-handle-downgrade.md）：
     ///   1. **存引用 once**：仅当 self.motionProvider 为 nil 时写入；防多个不同 MotionProvider
     ///      实例混入引用造成 deinit stopUpdates 漏（上层按约定每个 ViewModel 只配一个 provider）.
-    ///   2. **gate**：查 motionProvider.authorizationStatus()
-    ///      - `.authorized` 且 hasStartedMotionUpdates == false → 调 motionProvider.startUpdates 注册
-    ///        handler 并设 hasStartedMotionUpdates = true.
-    ///      - `.authorized` 且 hasStartedMotionUpdates == true → noop（防重复订阅 / 双倍事件）.
-    ///      - `.notDetermined` / `.denied` / `.restricted` → return（不调 startUpdates，不弹权限）.
-    ///        未授权时 petState 保持 .rest 默认值；后续 story 走完授权 flow 后调用方负责再 bind 一次.
+    ///   2. **每次都查 authorizationStatus**（**不**用 hasStartedMotionUpdates 做单向短路；round 4 P2 修复）.
+    ///      根据"当前订阅状态 × 当前授权状态"四象限决定 action：
+    ///      | currentlySubscribed | newAuthStatus     | action                                            |
+    ///      |---------------------|-------------------|---------------------------------------------------|
+    ///      | false               | .authorized       | startUpdates + hasStartedMotionUpdates = true     |
+    ///      | false               | not authorized    | noop（仅持引用，等 8.5 / 8.6 授权后再 rebind）    |
+    ///      | true                | .authorized       | noop（idempotent；防重复订阅 / 双倍事件）         |
+    ///      | true                | not authorized    | stopUpdates + hasStartedMotionUpdates = false +   |
+    ///      |                     |                   | petState = .rest（**downgrade 路径**：让 UI 立即  |
+    ///      |                     |                   | 回到 rest，不卡 stale .walk / .run）              |
     ///   3. handler 内部：mapper.map 同步派生 → Task { @MainActor in self?.petState = mapped }
     ///      ── @Sendable closure 捕获 [weak self] 防循环；写 @Published 必须在 main actor.
     ///   4. 不调 requestPermission（红线：权限申请按 AR17 / 节点 3 设计交给 8.5 / 8.6 统一处理）.
@@ -359,35 +365,58 @@ public class HomeViewModel: ObservableObject {
     ///     避免本 story 触发 NSMotionUsageDescription 权限弹窗破坏 first-launch UX + UITest 阻塞）.
     ///   - **更不**在 .notDetermined 下直接 startUpdates —— `CMMotionActivityManager.startActivityUpdates`
     ///     在未授权下会触发系统权限弹窗，与"权限按需"红线冲突. round 1 P1 codex 抓到的就是这条.
+    ///   - **不**用 hasStartedMotionUpdates 短路 rebind（round 4 P2 修复）：用户中途去 Settings
+    ///     撤销权限后，RootView 在 ScenePhase active 触发 rebind；如果 bind 直接 hasStartedMotionUpdates
+    ///     短路 return，老订阅永不拆 + petState 卡在 stale .walk / .run，UI 永远错位直到重启 app.
+    ///     现在每次 bind 都重新查 authorizationStatus，downgrade 路径下显式 stopUpdates + reset 到 rest.
     ///   - **不**在 closure 内做长耗时操作（按 8.2 lesson `motion-handler-invoke-must-be-in-lock.md`
     ///     钦定：handler 必须轻量同步 mutate @Published / @State；YAGNI 不引入 throttle / debounce —
     ///     由 mapper / ViewModel 配合做 hysteresis 是未来扩展点，不在本 story 范围）.
     public func bind(motionProvider: MotionProvider) {
-        // 第一次 bind：存引用. 后续重 bind（同 instance）走 idempotent 升级路径——不覆盖既有引用.
+        // 第一次 bind：存引用. 后续重 bind（同 instance）走 idempotent 升级 / downgrade 路径——
+        // 不覆盖既有引用（避免 deinit 时 stopUpdates 拆错对象）.
         if self.motionProvider == nil {
             self.motionProvider = motionProvider
         }
 
-        // 已 startUpdates 过 → 防重复订阅（重复 startUpdates 在 MotionProviderImpl 内部也会被
-        // isUpdating guard 拦掉，但此处显式短路更明确，也省一次 lock 进出）.
-        guard !hasStartedMotionUpdates else { return }
+        // round 4 P2 fix：**每次都查** authorizationStatus，按"当前订阅状态 × 当前授权状态"四象限决策——
+        // 不再用 hasStartedMotionUpdates 单向短路 rebind，否则 mid-session permission revoke
+        // 后老订阅不拆 + petState 卡 stale .walk / .run.
+        let status = motionProvider.authorizationStatus()
+        let isAuthorized = (status == .authorized)
 
-        // Story 8.4 review round 1 P1 fix：未授权时只持引用、不订阅，避免 startUpdates 触发权限弹窗.
-        // CoreMotion 在 .notDetermined 下调 startActivityUpdates 会让系统弹 NSMotionUsageDescription
-        // 权限 sheet——破坏 first-launch UX + 阻塞 launch-time UITest. 改为 gate 后：
-        //   · authorized → 正常 startUpdates，生产路径不变
-        //   · notDetermined / denied / restricted → 仅持引用 return，等后续 story（8.5 / 8.6）显式
-        //     授权后再调一次 bind 就能升级到 startUpdates（idempotent rebind 模式）.
-        guard motionProvider.authorizationStatus() == .authorized else { return }
-
-        hasStartedMotionUpdates = true
-        motionProvider.startUpdates { [weak self] activity in
-            // closure 在 OperationQueue.main 触发（8.2 MotionProviderImpl 钦定）；
-            // mapper.map 是 pure function 同步调用；写 @Published 必须 main actor.
-            let mapped = MotionStateMapper.map(activity)
-            Task { @MainActor in
-                self?.petState = mapped
+        switch (hasStartedMotionUpdates, isAuthorized) {
+        case (false, true):
+            // 未订阅 + 已授权 → 升级到 startUpdates（生产路径 / first-launch 授权后 rebind）.
+            hasStartedMotionUpdates = true
+            motionProvider.startUpdates { [weak self] activity in
+                // closure 在 OperationQueue.main 触发（8.2 MotionProviderImpl 钦定）；
+                // mapper.map 是 pure function 同步调用；写 @Published 必须 main actor.
+                let mapped = MotionStateMapper.map(activity)
+                Task { @MainActor in
+                    self?.petState = mapped
+                }
             }
+        case (false, false):
+            // 未订阅 + 未授权 → 仅持引用 return（first-launch 未授权 path；等 8.5 / 8.6 授权后再 bind 一次）.
+            return
+        case (true, true):
+            // 已订阅 + 已授权 → idempotent noop（防重复订阅 / 双倍事件；包含 RootView 在 ScenePhase
+            // active 的 rebind 但权限未变化的常态路径）.
+            return
+        case (true, false):
+            // **downgrade 路径**（round 4 P2 修复的核心）：用户去 Settings 撤销权限后，RootView 触发
+            // rebind 时落到这里. 必须主动：
+            //   ① stopUpdates 拆掉老订阅（虽然系统在权限拒后已不 deliver 事件，但 generation token
+            //      推进 + handler 释放是干净路径，避免 in-flight callback 还能 hit 老 closure）；
+            //   ② hasStartedMotionUpdates = false（让后续 re-grant 后 rebind 能升级回 authorized 路径）；
+            //   ③ petState = .rest 显式回 baseline——MotionProviderImpl generation token 已能滤掉 stale
+            //      callback（详见 docs/lessons/2026-05-04-motion-stop-restart-stale-callback-race.md），
+            //      但 UI 端 stale 值是已经 set 到 @Published 的，必须主动 reset 才看得到立即更新.
+            motionProvider.stopUpdates()
+            hasStartedMotionUpdates = false
+            petState = .rest
+            return
         }
     }
 
