@@ -161,3 +161,4 @@
 | 2026-05-04 | [manual trigger 必须 await in-flight，不能用 gate 短路 return；公开 async API 的等待语义要明示](2026-05-04-manual-trigger-must-await-in-flight.md) | 1 | architecture | `1ec3855` |
 | 2026-05-04 | [`await` 期间 race 让 single-flight gate 失效，必须 while-loop 链式等待 + @MainActor 同步段原子 assign（fresh install requestPermission gap 第 3 次复发 reaffirm wontfix）](2026-05-04-await-then-recheck-single-flight-gate.md) | 2 | concurrency / process | `1042af2` |
 | 2026-05-05 | [WS 协议契约的"内部自洽"三连：reserved close code / 永久 null 字段引用 / 业务消息冻结边界](2026-05-05-ws-protocol-contract-internal-consistency.md) | 3 | architecture, docs | `<pending>` |
+| 2026-05-06 | [WS 协议冻结后的"示例字面量自洽"与"close code 全局保留"](2026-05-06-ws-frozen-examples-and-close-code-collision.md) | 2 | docs, architecture | `<pending>` |

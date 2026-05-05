@@ -1325,14 +1325,16 @@ GET /ws/rooms/{roomId}?token=xxx
 | 1000 | server 或 client 任一方主动 close | 服务端 / 客户端正常关闭 | 否 | 客户端主动 close 不重连；服务端主动 close（如 graceful shutdown）客户端可选重连 |
 | 1001 | server 或 client 任一方主动 close | going away（服务端重启 / 客户端切后台） | 否 | 服务端重启 → 客户端**应**自动重连（指数退避，参考 iOS Story 12.5）；客户端切后台 → 客户端自身决定 |
 | 1006 | **仅 client 侧观测**（不可被任一端 emit） | 异常断开（无 close frame，TCP 中断 / 网络抖动）—— RFC 6455 §7.1.5 规定 1006 为 reserved 状态码，**禁止**出现在 close frame 内；客户端 WebSocket runtime 在底层 TCP 断开且未收到 close frame 时本地合成该 code 通知上层 | 不适用（无 close frame，因此服务端**不**emit 该 code） | 客户端**应**自动重连（指数退避） |
+| 1008 | server 主动 close | 客户端违反协议策略 —— 节点 4 阶段唯一触发条件：单条消息 frame 超过 `ws.max_message_size_bytes`（默认 16 KB） | 是（reason = `"message too large"`） | **不**自动重连（视为客户端实装 bug，重连仍会被 close）；记 log error 后回退 |
 | 1011 | server 主动 close | 服务端内部错误（panic / 不可恢复异常） | 是（reason 应包含简短错误提示但**不**泄漏 stack trace） | 客户端**应**自动重连（指数退避，但限制最大重试次数避免雪崩） |
 
 **关键约束**：
 
 - 4001 / 4003 / 4002 / 4004 是**业务级**拒绝（4xxx 段是应用自定义；WebSocket RFC 6455 规定 4000-4999 为应用保留段），重试无意义，客户端**不**应自动重连；客户端应展示明确 UX 提示并回退
-- 1000 / 1001 / 1011 是**协议 / 网络**级断开（1xxx 段是 RFC 标准段，可由服务端主动 emit），客户端**应**自动重连（除 1000 主动关闭）
+- 1000 / 1001 / 1008 / 1011 是**协议 / 网络**级断开（1xxx 段是 RFC 标准段，可由服务端主动 emit），客户端**应**自动重连（除 1000 主动关闭、1008 客户端 bug 不重连）
 - **1006 例外**：1006 是 RFC 6455 §7.1.5 reserved status code，**MUST NOT** be set as a status code in a Close control frame；服务端实装层（Story 10.3 / 12.5）**禁止**写 1006 到 close frame，必须由客户端 WebSocket runtime 在 TCP 异常断开时本地合成；本表保留 1006 行是为了完整描述客户端侧重连决策，**不**意味着服务端会主动 emit
-- 4001 触发时 server **不**写 log error（这是常态，token 过期是正常业务），写 log info；4003 / 4004 写 log warn（疑似客户端实装 bug 或数据不一致）；1011 写 log error（必排查）
+- **不使用 RFC close code 1009**：RFC 6455 §7.4.1 定义 1009 为 "Message Too Big" 的标准 close code，但本协议**禁止**使用，原因是 §3 全局错误码表已将 `1009` 用于应用层 `服务繁忙`（在 §12.3 `error.payload.code` 中出现），同一数值出现在 close frame 和 application error frame 会让客户端无法仅凭数字区分 transport-level fatal 与 application-level transient（前者要 close + 不重连，后者要忽略 + 保连接）。"消息超大"场景统一改用 1008（policy violation），保留语义清晰
+- 4001 触发时 server **不**写 log error（这是常态，token 过期是正常业务），写 log info；4003 / 4004 写 log warn（疑似客户端实装 bug 或数据不一致）；1008 写 log error（必排查，疑似客户端 bug 或恶意流量）；1011 写 log error（必排查）
 
 #### 服务端校验顺序
 
@@ -1385,7 +1387,7 @@ JSON 通用骨架：
 - `requestId` **不**进 server 持久化日志的关键字段，仅用于本次连接 session 内的 request-response 配对（避免无意义的 cross-session 追踪）
 - `type` 字段值大小写敏感：服务端 strict match；客户端**必须**按文档锚定的字面量发送（如 `"ping"` 不是 `"PING"` 或 `"Ping"`）
 - 消息 frame 必须是 WebSocket text frame（opcode 0x1）+ UTF-8 JSON；**不**使用 binary frame（opcode 0x2）
-- 单条消息 frame **大小上限 16 KB**（默认值；配置 `ws.max_message_size_bytes`，**prod 必须使用默认值不可覆盖**，dev/test 可覆盖）；超限服务端 close 1009（message too big）+ 不重连（客户端实装 bug）
+- 单条消息 frame **大小上限 16 KB**（默认值；配置 `ws.max_message_size_bytes`，**prod 必须使用默认值不可覆盖**，dev/test 可覆盖）；超限服务端 close **1008**（policy violation，reason = `"message too large"`） + 不重连（客户端实装 bug）。**不使用 RFC 1009**：本协议 §3 全局错误码表已将 `1009` 用于应用层 `服务繁忙`（在 §12.3 `error.payload.code` 中出现），为避免 close frame code 与 application error code 数字冲突，"消息超大"统一走 1008；详见 §12.1 close code 表关键约束
 
 ### 发送表情
 
@@ -1584,17 +1586,18 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 | `payload` | object | 必填 | 固定空对象 `{}` |
 | `ts` | number (int64) | 必填 | 服务端响应时间戳（ms） |
 
-JSON 示例（保留旧示例字面量；该示例缺 `requestId`，见下方修订说明）：
+JSON 示例（与本节字段表对齐，含 `requestId`）：
 
 ```json
 {
   "type": "pong",
+  "requestId": "msg_001",
   "payload": {},
   "ts": 1776920345000
 }
 ```
 
-> **既有示例修订说明**：上述示例缺 `requestId` 字段（仅有 `type` / `payload` / `ts`），违反本 §12.3 通用消息信封规范（`requestId` 必填）。本 story（10.1）保留示例 JSON 字面量不动以维持 git diff 最小化；正式实装时 server **必须**带 `requestId`（客户端未提供时为 `""`），按字段表执行；该示例下次 V1 文档大版本（V2）合并时**统一**补字段，本节点 4 阶段保留旧示例避免大幅 diff。
+> 注：`requestId` 回带客户端 `ping.requestId`；客户端 `ping` 未提供时回 `""`。该示例可作为 Story 10.3（server 实装） / Story 12.3（iOS 解析层 Codable 结构与 mock fixture）的复制粘贴样本使用。
 
 **关键约束**：
 
@@ -1616,11 +1619,12 @@ JSON 示例（保留旧示例字面量；该示例缺 `requestId`，见下方修
 | `payload.message` | string | 必填 | 错误描述，可读字符串（不做国际化，与 §3 message 字段一致） |
 | `ts` | number (int64) | 必填 | 服务端发送时间戳（ms） |
 
-JSON 示例（保留旧示例字面量；该示例缺 `requestId`，见下方修订说明）：
+JSON 示例（与本节字段表对齐，含 `requestId`）：
 
 ```json
 {
   "type": "error",
+  "requestId": "msg_001",
   "payload": {
     "code": 7001,
     "message": "emoji not found"
@@ -1629,7 +1633,7 @@ JSON 示例（保留旧示例字面量；该示例缺 `requestId`，见下方修
 }
 ```
 
-> **既有示例修订说明**：与 `pong` 同 —— 上述示例缺 `requestId` 字段，违反 §12.3 通用消息信封规范（`requestId` 必填）。本 story（10.1）保留示例 JSON 字面量不动；正式实装时 server **必须**带 `requestId`（客户端未提供 / server 主动错误时为 `""`）。
+> 注：当 error 是某 client 请求的响应（如 `emoji.send` 失败）时，`requestId` 回带原请求 `requestId`；当 error 是 server 主动推送（如内部状态异常 / Story 10.7 SnapshotBuilder 抛错）时，`requestId` 固定 `""`。该示例可作为 Story 10.3 / Story 12.3 的复制粘贴样本使用。
 
 **节点 4 阶段适用错误码**（仅 Epic 10 协议骨架范围内）：
 
