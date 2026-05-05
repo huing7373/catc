@@ -49,25 +49,60 @@ final class StepSyncTriggerServiceTests: XCTestCase {
         XCTAssertEqual(useCaseMock.invocations.count, 1, "triggerManual 应等待同步完成")
     }
 
-    // edge: in-flight 时新触发被忽略（epics.md AC 行 1577 + 1583）.
-    func testTriggerWhileInFlight_isIgnored() async {
+    // edge: fire-and-forget 路径在 in-flight 时被忽略（epics.md AC 行 1577 + 1583）.
+    // review round 3 [P2] fix 后：in-flight gate 仍对 fire-and-forget 路径生效
+    // （launch / foreground / timer），但 triggerManual 改为"等 in-flight 完再自己跑一次".
+    // 本测试只验证 fire-and-forget 路径的重叠忽略（用 triggerForeground 跑两次，期望仅一次落地）.
+    func testFireAndForgetTrigger_whileInFlight_isIgnored() async {
         let useCaseMock = MockSyncStepsUseCase()
         useCaseMock.executeDelayMs = 80  // 让第一次 sync 有 80ms 窗口
         let viewModel = HomeViewModel()
         let service = StepSyncTriggerService(syncStepsUseCase: useCaseMock, homeViewModel: viewModel)
 
-        async let first: Void = service.triggerManual()
-        // 在第一次 in-flight 时立即触发第二次（fire-and-forget）.
-        // 给第一次 manual 足够时间进入 isSyncing 状态.
+        // 首次 triggerForeground 启动 fire-and-forget sync（80ms 延迟）.
+        service.triggerForeground()
+        // 给第一次进入 in-flight 状态.
         try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        // in-flight 期间再调 triggerForeground 应被 gate 忽略.
         service.triggerForeground()
         service.triggerForeground()
-        await first
+        // 等 80ms+ 让首次 sync 跑完.
+        try? await Task.sleep(nanoseconds: 150_000_000)  // 150ms
         await Task.yield()
         await Task.yield()
 
         XCTAssertEqual(useCaseMock.invocations.count, 1,
-            "in-flight 时新触发应被忽略；总同步次数应为 1")
+            "fire-and-forget 路径在 in-flight 时新触发应被忽略；总同步次数应为 1")
+    }
+
+    // review round 3 [P2] fix: triggerManual 在 in-flight 时不能被短路 return.
+    // 必须等 in-flight 完，再自己跑一次 fresh sync —— caller (Story 21.x ChestOpen)
+    // 依赖 await 返回时拿到刚跑完的 fresh `currentStepAccount`.
+    //
+    // 序列：
+    //   1. triggerForeground() 启动 fire-and-forget sync（80ms 延迟，模拟"正在跑"）
+    //   2. 立刻 await triggerManual() —— 旧实装直接被 gate 短路 return；新实装应：
+    //      a. 先 await in-flight 完成（拿到首次 sync 落地）
+    //      b. 再自己启动一次新 sync 并 await 完成（拿到第二次 sync 落地）
+    //   3. 总 invocations.count == 2，证明 manual 拿到的是 fresh state.
+    func testTriggerManual_whileInFlight_awaitsThenRunsOwnSync() async {
+        let useCaseMock = MockSyncStepsUseCase()
+        useCaseMock.executeDelayMs = 80  // 第一次 sync 80ms 窗口
+        let viewModel = HomeViewModel()
+        let service = StepSyncTriggerService(syncStepsUseCase: useCaseMock, homeViewModel: viewModel)
+
+        // 启动 in-flight sync.
+        service.triggerForeground()
+        // 给 in-flight 进入状态.
+        try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        XCTAssertEqual(useCaseMock.invocations.count, 1, "前置：in-flight sync 已启动")
+
+        // 关键：triggerManual 应等 in-flight 完，再自己跑一次.
+        await service.triggerManual()
+
+        // manual await 返回时：应该首次（in-flight）已完成 + 自己跑的也完成.
+        XCTAssertEqual(useCaseMock.invocations.count, 2,
+            "triggerManual 应等 in-flight 完成后再自己跑一次 fresh sync；总 sync 应为 2")
     }
 
     // edge: useCase 抛错 → 不阻塞 UI 不传染下次触发（epics.md AC 行 1584）.

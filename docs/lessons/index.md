@@ -158,3 +158,4 @@
 | 2026-05-04 | [跨午夜时间字段必须从单一 captured Date 派生 & scenePhase 幂等 start 不能并排两条同效 API](2026-05-04-cross-midnight-single-captured-date-and-idempotent-start.md) | 2 | architecture | `<pending>` |
 | 2026-05-04 | [fresh install HealthKit requestPermission gap：与 Story 8.4 motion 权限同坑（epic 切片漏专门 caller story 的二次复发）](2026-05-04-step-sync-fresh-install-requestpermission-gap.md) | 1 | architecture / process | `<pending>` |
 | 2026-05-04 | [launch state 离开 .ready 时必须 stop 所有 .ready-attached 后台 service（对称生命周期）](2026-05-04-launch-state-leave-ready-must-stop-feature-services.md) | 1 | architecture | `<pending>` |
+| 2026-05-04 | [manual trigger 必须 await in-flight，不能用 gate 短路 return；公开 async API 的等待语义要明示](2026-05-04-manual-trigger-must-await-in-flight.md) | 1 | architecture | `<pending>` |
