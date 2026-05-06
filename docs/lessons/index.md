@@ -181,3 +181,4 @@
 | 2026-05-06 | [房间存在校验补 status 过滤 & writeLoop priority 配额防 starvation（10-3 r7）](2026-05-06-ws-room-status-filter-and-priority-quota.md) | 2 | architecture, perf | `<pending>` |
 | 2026-05-06 | [WS 表 probe 错误分流：misconfig 必须 fail-fast，transient 才能 warn-and-continue（r8 收窄 r6）](2026-05-06-ws-table-probe-misconfig-vs-transient-error-classification-r8.md) | 1 | error-handling | `<pending>` |
 | 2026-05-06 | [sessionID 截断 8 字符 = birthday paradox 内存腐败（10-3 r9）](2026-05-06-ws-session-id-truncation-collision-r9.md) | 1 | architecture | `<pending>` |
+| 2026-05-06 | [reconnect 路径 destructive Register 必须延后到 transient IO 之后（10-3 r10）](2026-05-06-ws-handshake-register-after-snapshot-r10.md) | 1 | architecture | `<pending>` |

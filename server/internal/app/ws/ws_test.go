@@ -649,6 +649,257 @@ func TestSessionManager_Reconnect_CrossRoom_OldRoomImmediatelyEmpty(t *testing.T
 	}
 }
 
+// TestGateway_Reconnect_SnapshotTransientFail_OldSessionStillActive:
+// review r10 P1 防回归 —— reconnect 路径下若新 conn 的 snapshot 步骤 transient
+// 失败（ListMembers 返 error），旧 session **必须保持活跃**（不被 evict），新
+// conn 走 close 1011。这是"事务性 reconnect"语义的核心：transient handshake
+// 失败不能让 user 既无新连接也无旧连接。
+//
+// 修复前实装顺序（2.Register → 3.snapshot）→ Register 已 evict 旧 session →
+// snapshot 失败 close 1011 新 session 也死 → user 完全断线。
+// 修复后顺序（2.snapshot → 3.Register）→ snapshot 失败时 Register 还没跑 →
+// 旧 session 仍在 manager 索引内活跃；user 可以继续用旧 conn。
+func TestGateway_Reconnect_SnapshotTransientFail_OldSessionStillActive(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+
+	const userID = uint64(1001)
+	const roomID = uint64(3001)
+
+	// listMembersFn：第一次调用成功（让 OLD handshake 完成），第二次调用
+	// 返 error 模拟 transient DB 失败（让 NEW handshake snapshot 步骤失败）。
+	var listMembersCallCount atomic.Int32
+	repo := &stubRoomMemberRepo{
+		listMembersFn: func(ctx context.Context, _ uint64) ([]uint64, error) {
+			n := listMembersCallCount.Add(1)
+			if n == 1 {
+				return []uint64{userID}, nil
+			}
+			return nil, errors.New("simulated transient DB error")
+		},
+	}
+
+	signer := newSigner(t)
+	wsURL, ts := startGatewayServer(t, signer, mgr, repo)
+	defer ts.Close()
+
+	// OLD handshake：握手成功，session 进 manager 索引
+	tokenA, _ := signer.Sign(userID, 3600)
+	urlA := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomID, tokenA)
+	connA, _, err := dialWS(t, urlA)
+	if err != nil {
+		t.Fatalf("dial OLD: %v", err)
+	}
+	defer connA.Close()
+	_ = connA.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := connA.ReadMessage(); err != nil {
+		t.Fatalf("read OLD snapshot: %v", err)
+	}
+
+	// 等 OLD session 注册到 manager
+	deadline := time.Now().Add(2 * time.Second)
+	var oldSession *wsapp.Session
+	for time.Now().Before(deadline) {
+		sessions := mgr.ListSessionsByRoomID(context.Background(), roomID)
+		if len(sessions) > 0 {
+			oldSession = sessions[0]
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if oldSession == nil {
+		t.Fatalf("OLD session not registered in manager")
+	}
+	oldSessionID := oldSession.SessionID()
+
+	// NEW handshake：同 user，listMembersFn 第二次调用返 error → snapshot 步骤失败 →
+	// close 1011；**关键不变量**：OLD session 此时**未被 evict**（因为 Register 还
+	// 没跑）。
+	tokenB, _ := signer.Sign(userID, 3600)
+	urlB := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomID, tokenB)
+	connB, _, err := dialWS(t, urlB)
+	if err != nil {
+		t.Fatalf("dial NEW: %v", err)
+	}
+	defer connB.Close()
+	expectCloseError(t, connB, 1011, "snapshot build failed")
+
+	// 验证 OLD session **仍活跃**：
+	//   - manager 索引仍指向 OLD（同 sessionID）
+	//   - OLD session 仍能 Send（不返 ErrSessionClosed）
+	sessionsAfter := mgr.ListSessionsByRoomID(context.Background(), roomID)
+	if len(sessionsAfter) != 1 {
+		t.Fatalf("after NEW transient fail, ListSessionsByRoomID len = %d, want 1 (OLD must stay active)", len(sessionsAfter))
+	}
+	if sessionsAfter[0].SessionID() != oldSessionID {
+		t.Errorf("after NEW transient fail, session in room = %q, want OLD %q (OLD must NOT be evicted)",
+			sessionsAfter[0].SessionID(), oldSessionID)
+	}
+	if err := oldSession.Send([]byte(`{"type":"x"}`)); err != nil && errors.Is(err, wsapp.ErrSessionClosed) {
+		t.Errorf("OLD session should remain active after NEW transient fail; Send err = %v", err)
+	}
+}
+
+// TestGateway_Reconnect_SnapshotTransientFail_CrossRoom_OldSessionStillActive:
+// review r10 P1 防回归 cross-room 变体 —— OLD 在 roomA；NEW 拨 roomB；NEW
+// snapshot 失败 → roomA 的 OLD 仍活跃 + roomA byRoom 索引仍含 OLD。
+func TestGateway_Reconnect_SnapshotTransientFail_CrossRoom_OldSessionStillActive(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+
+	const userID = uint64(1001)
+	const roomA = uint64(3001)
+	const roomB = uint64(3002)
+
+	var listMembersCallCount atomic.Int32
+	repo := &stubRoomMemberRepo{
+		listMembersFn: func(ctx context.Context, _ uint64) ([]uint64, error) {
+			n := listMembersCallCount.Add(1)
+			if n == 1 {
+				return []uint64{userID}, nil
+			}
+			return nil, errors.New("simulated transient DB error")
+		},
+	}
+
+	signer := newSigner(t)
+	wsURL, ts := startGatewayServer(t, signer, mgr, repo)
+	defer ts.Close()
+
+	// OLD: 拨 roomA 成功
+	tokenA, _ := signer.Sign(userID, 3600)
+	urlA := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomA, tokenA)
+	connA, _, err := dialWS(t, urlA)
+	if err != nil {
+		t.Fatalf("dial roomA: %v", err)
+	}
+	defer connA.Close()
+	_ = connA.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := connA.ReadMessage(); err != nil {
+		t.Fatalf("read roomA snapshot: %v", err)
+	}
+
+	// 等 OLD 注册
+	deadline := time.Now().Add(2 * time.Second)
+	var oldSession *wsapp.Session
+	for time.Now().Before(deadline) {
+		sessions := mgr.ListSessionsByRoomID(context.Background(), roomA)
+		if len(sessions) > 0 {
+			oldSession = sessions[0]
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if oldSession == nil {
+		t.Fatalf("OLD session not registered in roomA")
+	}
+	oldSessionID := oldSession.SessionID()
+
+	// NEW: 拨 roomB（cross-room reconnect）；listMembers 返 error → close 1011
+	tokenB, _ := signer.Sign(userID, 3600)
+	urlB := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomB, tokenB)
+	connB, _, err := dialWS(t, urlB)
+	if err != nil {
+		t.Fatalf("dial roomB: %v", err)
+	}
+	defer connB.Close()
+	expectCloseError(t, connB, 1011, "snapshot build failed")
+
+	// roomA 索引仍含 OLD（cross-room reconnect transient 失败也不应 evict）
+	sessionsA := mgr.ListSessionsByRoomID(context.Background(), roomA)
+	if len(sessionsA) != 1 {
+		t.Fatalf("roomA after NEW(roomB) transient fail, len = %d, want 1 (OLD in roomA must stay active)", len(sessionsA))
+	}
+	if sessionsA[0].SessionID() != oldSessionID {
+		t.Errorf("roomA after NEW(roomB) transient fail, session = %q, want OLD %q",
+			sessionsA[0].SessionID(), oldSessionID)
+	}
+	// roomB 索引应为空（NEW 没 Register）
+	sessionsB := mgr.ListSessionsByRoomID(context.Background(), roomB)
+	if len(sessionsB) != 0 {
+		t.Errorf("roomB after NEW transient fail, len = %d, want 0 (NEW must not be registered)", len(sessionsB))
+	}
+}
+
+// TestGateway_Reconnect_HappyPath_OldSessionEvicted: review r10 P1 防回归
+// 配套 happy path —— 当 NEW handshake 全部步骤成功（snapshot 写完 + Register
+// 成功），OLD session **必须**被 evict（reconnect 替换语义保持）。这条测试
+// 验证修复 r10 P1 没有破坏 OLD eviction 行为。
+func TestGateway_Reconnect_HappyPath_OldSessionEvicted(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{} // 默认 listMembersFn 返 [1001, 1002] 始终成功
+
+	const userID = uint64(1001)
+	const roomID = uint64(3001)
+
+	signer := newSigner(t)
+	wsURL, ts := startGatewayServer(t, signer, mgr, repo)
+	defer ts.Close()
+
+	tokenA, _ := signer.Sign(userID, 3600)
+	urlA := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomID, tokenA)
+	connA, _, err := dialWS(t, urlA)
+	if err != nil {
+		t.Fatalf("dial OLD: %v", err)
+	}
+	defer connA.Close()
+	_ = connA.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := connA.ReadMessage(); err != nil {
+		t.Fatalf("read OLD snapshot: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	var oldSession *wsapp.Session
+	for time.Now().Before(deadline) {
+		sessions := mgr.ListSessionsByRoomID(context.Background(), roomID)
+		if len(sessions) > 0 {
+			oldSession = sessions[0]
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if oldSession == nil {
+		t.Fatalf("OLD session not registered")
+	}
+	oldSessionID := oldSession.SessionID()
+
+	// NEW: 同 user 同 room；snapshot + Register 都成功 → OLD 被 evict
+	tokenB, _ := signer.Sign(userID, 3600)
+	urlB := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomID, tokenB)
+	connB, _, err := dialWS(t, urlB)
+	if err != nil {
+		t.Fatalf("dial NEW: %v", err)
+	}
+	defer connB.Close()
+	_ = connB.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := connB.ReadMessage(); err != nil {
+		t.Fatalf("read NEW snapshot: %v", err)
+	}
+
+	// 等 OLD 被 evict（异步 Close → notifyClosed → Unregister）
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		err := oldSession.Send([]byte(`{"type":"x"}`))
+		if errors.Is(err, wsapp.ErrSessionClosed) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := oldSession.Send([]byte(`{"type":"x"}`)); !errors.Is(err, wsapp.ErrSessionClosed) {
+		t.Errorf("OLD session should be evicted/closed after NEW happy-path Register; Send err = %v", err)
+	}
+
+	// 现在 manager 索引内只有 NEW
+	sessionsAfter := mgr.ListSessionsByRoomID(context.Background(), roomID)
+	if len(sessionsAfter) != 1 {
+		t.Fatalf("after NEW happy path, ListSessionsByRoomID len = %d, want 1 (NEW only)", len(sessionsAfter))
+	}
+	if sessionsAfter[0].SessionID() == oldSessionID {
+		t.Errorf("after NEW happy path, session = OLD %q (NEW eviction did not happen)", oldSessionID)
+	}
+}
+
 // TestSessionManager_ListSessionsByRoomID_ReturnsAllInRoom: 多 user 在同 room →
 // ListSessionsByRoomID 返回全部。
 func TestSessionManager_ListSessionsByRoomID_ReturnsAllInRoom(t *testing.T) {

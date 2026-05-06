@@ -133,28 +133,44 @@ func NewGateway(
 //  6. （上述任一异常）→ close 1011 reason "<short error message>"
 //     （如 DB query 失败 / panic）
 //
-// 校验全通过后**严格按以下顺序**执行（V1 §12.1 钦定，禁止调换）：
+// 校验全通过后**严格按以下顺序**执行（review r10 P1 修：reconnect 路径下
+// 把 Register 推迟到 snapshot 写成功之后，避免 transient snapshot 失败把旧
+// session 误 evict 让 user 完全断线）：
 //
 //  1. upgrader.Upgrade 升级到 WS 协议（已在 step 2 / 3 失败路径中提前 Upgrade
 //     才能写 close frame；happy path 不需要在这里再 Upgrade —— 实装上 V1 §12.1
 //     close code 表钦定校验失败必须先 Upgrade，所以 Handle 内一进 handler 立即
 //     Upgrade，再走校验链路）
-//  2. 创建 Session 对象（newSession）
-//  3. mgr.Register(ctx, session)（触发 OnSessionRegister 钩子）
-//  4. **同步段**写 placeholder room.snapshot：
+//  2. 创建 Session 对象（newSession，sessionID 留空；**不** Register）
+//  3. **同步段**写 placeholder room.snapshot：
 //     - 调 roomMemberRepo.ListMembers(ctx, roomID) 拿全成员行
 //     - 构造 placeholder snapshot（payload.room.{id, maxMembers=4, memberCount=len(members)}
 //     + payload.members[]：每行 {userId, nickname:"", pet:{petId:"", currentState:1}}）
 //     - 调 conn.WriteMessage(TextMessage, snapshotBytes)；失败 → close 1011
-//     reason "snapshot build failed"，**不**启动读/写 goroutine
+//     reason "snapshot build failed"，**不**启动读/写 goroutine、**不** Register
+//     —— 旧 session（如有）保持活跃，user 可继续用旧连接
+//  4. mgr.Register(ctx, session)（触发 OnSessionRegister 钩子；reconnect 路径
+//     在此点 evict 旧 session）—— **必须**在 snapshot 写成功之后才执行；
+//     Register 失败 → close 1011 reason "session register failed"
 //  5. go session.readLoop() 启动读 goroutine
 //  6. go session.writeLoop() 启动写 goroutine
+//
+// **顺序 rationale**（review r10 P1）：V1 §12.1 字面写"先 Register 再 snapshot"，
+// 但 reconnect 路径下 Register 会 evict 旧 session；如果 snapshot 步骤 transient
+// 失败（DB 抖动 / client 中途断），handler close 1011 → user 既无新 session（被
+// 1011 close）也无旧 session（已被 evict）→ **完全断线**。把 Register 推迟到
+// snapshot 写成功之后实现"事务性 reconnect"：snapshot 失败时旧 session 仍活跃，
+// snapshot 成功才替换。这是局部偏离 spec 字面顺序但保持其精神（"snapshot 必为
+// 第一条 authoritative msg"在新 conn 上仍成立）的正确性修复。
 //
 // **关键反模式**（不要做）：
 //   - 不在 Upgrade 之前发 close code（HTTP 403 是错的；V1 §12.1 钦定校验失败
 //     必须**先 Upgrade 成功** 再发 close frame）
 //   - 不在 readLoop 启动后再写 snapshot（窗口期 client 可能发 ping，server 已
 //     有读 goroutine → server 可能先回 pong 让 snapshot 不再是第一条）
+//   - 不在 Register 之前启动 read/write goroutine（review r4 P3 修过：
+//     session.notifier 在 Register 之前是 nil，readLoop / writeLoop 内 Close
+//     触发 notifier 会 nil panic；必须 Register 完成才启 goroutine）
 func (g *Gateway) Handle(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -233,32 +249,26 @@ func (g *Gateway) Handle(c *gin.Context) {
 		return
 	}
 
-	// 校验全通过 → V1 §12.1 5 步握手成功流程
-	// 6.1 创建 Session（sessionID 暂为空，Register 内回填）
+	// 校验全通过 → V1 §12.1 握手成功流程（review r10 P1 调整顺序：Register
+	// 推迟到 snapshot 写成功之后，避免 reconnect 路径 transient snapshot 失败
+	// 让旧 session 被无故 evict。详见 Handle 头注释"顺序 rationale"段）。
+	//
+	// 6.1 创建 Session（sessionID 暂为空，Register 内回填）；**不** Register。
+	// 此时 Session 尚未进入 manager 索引，旧 session（如有）保持活跃。
 	session := newSession("", userID, roomID, conn, g.logger, g.cfg.MaxMessageSizeBytes, g.writeTimeout)
 
-	// 6.2 Register（触发 OnSessionRegister 钩子；ErrSessionReplaced 是合法路径
-	// 不阻塞握手）
-	sessionID, regErr := g.mgr.Register(ctx, session)
-	if regErr != nil && !errors.Is(regErr, ErrSessionReplaced) {
-		g.closeWithCode(conn, 1011, "session register failed")
-		g.logger.Error("ws handshake: session register failed", slog.Any("error", regErr))
-		return
-	}
-	if errors.Is(regErr, ErrSessionReplaced) {
-		g.logger.Info("ws session replaced previous connection",
-			slog.String("sessionID", sessionID), slog.Uint64("userID", userID), slog.Uint64("roomID", roomID))
-	}
-
-	// 6.3 同步段构造 + 写 placeholder room.snapshot
+	// 6.2 同步段构造 + 写 placeholder room.snapshot（**先于** Register；
+	// transient 失败时旧 session 不被 evict）
 	members, err := g.roomMember.ListMembers(ctx, roomID)
 	if err != nil {
 		g.closeWithCode(conn, 1011, "snapshot build failed")
 		g.logger.Error("ws handshake: ListMembers failed",
 			slog.Uint64("roomID", roomID), slog.Any("error", err))
-		// 已 Register；显式 Unregister 让钩子退出（避免泄漏）。Session 结构占用最小，
-		// 不需要再单独 Close —— defer conn.Close() 已经会触发 readLoop 的 ReadMessage
-		// 失败链路；但本 story 阶段 readLoop 还没启动，安全起见显式调 Session.Close。
+		// **未** Register —— 不需要 manager 侧 cleanup；Session 结构无副作用占用，
+		// 但需要显式 Close 释放 Session 持有的 ctx / chan（newSession 内已分配）+
+		// gorilla conn（closeWithCode 已 conn.Close，session.conn 是同一指针 ——
+		// session.Close 内 _ = s.conn.Close 是 idempotent no-op，不会 double close
+		// panic）。
 		_ = session.Close()
 		return
 	}
@@ -276,8 +286,8 @@ func (g *Gateway) Handle(c *gin.Context) {
 		_ = conn.SetWriteDeadline(time.Now().Add(g.writeTimeout))
 	}
 	if err := conn.WriteMessage(websocket.TextMessage, snapshotBytes); err != nil {
-		// 写 snapshot 失败 → 不再启动 goroutine；按 V1 §12.1 close 1011 reason
-		// "snapshot build failed"
+		// 写 snapshot 失败 → 不再启动 goroutine、**未** Register；按 V1 §12.1
+		// close 1011 reason "snapshot build failed"
 		g.closeWithCode(conn, 1011, "snapshot build failed")
 		g.logger.Error("ws handshake: snapshot write failed",
 			slog.Uint64("roomID", roomID), slog.Any("error", err))
@@ -285,7 +295,29 @@ func (g *Gateway) Handle(c *gin.Context) {
 		return
 	}
 
-	// 6.4 启动读 / 写 goroutine（snapshot 已经在 wire 上）
+	// 6.3 Register（触发 OnSessionRegister 钩子；ErrSessionReplaced 是合法路径
+	// 不阻塞握手）—— **必须**在 snapshot 写成功之后才执行（review r10 P1）。
+	// 注意：Register 内若 reconnect 命中，会 evict + Close 旧 session；snapshot
+	// 已在 NEW conn 上写完，OLD conn 此刻被 close 是预期行为（user 在 NEW 上活跃）。
+	sessionID, regErr := g.mgr.Register(ctx, session)
+	if regErr != nil && !errors.Is(regErr, ErrSessionReplaced) {
+		// Register 失败（如 manager 已 Close 返 ErrSessionManagerClosed）→
+		// snapshot 已经在 wire 上但 Session 没进 manager 索引 → 必须 close 1011
+		// + Session.Close 释放本 Session 资源；旧 session（如有）保持活跃因为
+		// Register 没真正 evict（manager 内 Register 失败路径不动 userToSessionID）。
+		g.closeWithCode(conn, 1011, "session register failed")
+		g.logger.Error("ws handshake: session register failed", slog.Any("error", regErr))
+		_ = session.Close()
+		return
+	}
+	if errors.Is(regErr, ErrSessionReplaced) {
+		g.logger.Info("ws session replaced previous connection",
+			slog.String("sessionID", sessionID), slog.Uint64("userID", userID), slog.Uint64("roomID", roomID))
+	}
+
+	// 6.4 启动读 / 写 goroutine（snapshot 已经在 wire 上 + session 已在 manager
+	// 索引内 + session.notifier 已在 Register 内 set，readLoop/writeLoop 自闭路径
+	// 触达 notifier 不会 nil panic）
 	go session.readLoop()
 	go session.writeLoop()
 
