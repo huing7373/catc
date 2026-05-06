@@ -42,6 +42,23 @@ import (
 //     保持内存占用合理（每 Session 32 * pointer-sized = ~256B）
 const sendChanCapacity = 32
 
+// sendPriorityChanCapacity 是 Session.sendPriorityChan 容量（review r4 P2 加）。
+//
+// 用途：让 protocol-level 消息（pong / 内部 close error）走独立 buffer，**不**
+// 与业务消息（snapshot / broadcast / emoji）共享 sendChan。即使业务 buffer 满
+// （慢 client 导致 sendChan 32 容量被填爆），心跳 pong 仍能在 priority buffer
+// 投递并被 writeLoop 优先消费 —— 客户端不会因 server-side backpressure 收不到
+// 心跳回应而误判 connection dead → reconnect 重试风暴。
+//
+// 选 4 的理由：
+//   - 节点 4 阶段单 Session 的 protocol msg 频率上限：60s 一次 ping → pong；
+//     最坏情况下连续 2 次 ping race 进入 readLoop（client 偷跑 / 重发）→ 容量 4
+//     有 2x 缓冲
+//   - 不需要更大：writeLoop 总会消费 priority；只要 writeLoop 存活就不会卡满
+//   - 不需要更小：unbuffered 会让 readLoop 在 priority send 时阻塞等 writeLoop
+//     消费，劣化为同步路径
+const sendPriorityChanCapacity = 4
+
 // Sentinel errors（暴露给调用方，让 errors.Is 判定）。
 var (
 	// ErrSessionClosed: 已 Close 的 Session 调 Send → 返此错误（fire-and-forget
@@ -51,6 +68,11 @@ var (
 	// ErrSessionSendBufferFull: sendChan 满 → fire-and-forget 丢弃此消息，调用方
 	// 收到此错误可以选择重试 / 跳过 / 关 Session（取决于消息语义）。
 	ErrSessionSendBufferFull = errors.New("ws: session send buffer full")
+
+	// ErrSessionSendPriorityBufferFull: sendPriorityChan 满 → priority msg 入队
+	// 失败。理论不会发生（容量 4，writeLoop 优先消费）；返回此 sentinel 让调用方
+	// 在异常路径上识别区别于 ErrSessionSendBufferFull（review r4 P2 加）。
+	ErrSessionSendPriorityBufferFull = errors.New("ws: session priority send buffer full")
 
 	// ErrSessionReplaced: 同 user 重复 Register → 旧 Session 被强制 Close，
 	// SessionManager.Register 在替换路径上返此错误（让上层日志区分"主动 Close"
@@ -127,30 +149,33 @@ type closeNotifier interface {
 //
 // 不导出字段：所有字段小写；外部访问通过 Send / Close。
 type Session struct {
-	sessionID       string
-	userID          uint64
-	roomID          uint64
-	conn            *websocket.Conn
-	sendChan        chan []byte
-	sendMu          sync.RWMutex // 保护 Send 与 Close 互斥（防 send-on-closed-channel panic）
-	lastHeartbeatAt atomic.Int64
-	closed          atomic.Bool
-	closeOnce       sync.Once
-	logger          *slog.Logger
-	writeTimeout    time.Duration
-	notifier        closeNotifier // SessionManager 注入；nil 安全（不通知）
-	ctx             context.Context
-	cancelCtx       context.CancelFunc
+	sessionID        string
+	userID           uint64
+	roomID           uint64
+	conn             *websocket.Conn
+	sendChan         chan []byte
+	sendPriorityChan chan []byte  // review r4 P2 加：protocol-level msg 独立 buffer（pong 等）
+	sendMu           sync.RWMutex // 保护 Send / SendPriority 与 Close 互斥（防 send-on-closed-channel panic）
+	lastHeartbeatAt  atomic.Int64
+	closed           atomic.Bool
+	closeOnce        sync.Once
+	logger           *slog.Logger
+	writeTimeout     time.Duration
+	notifier         closeNotifier // SessionManager 注入；nil 安全（不通知）
+	ctx              context.Context
+	cancelCtx        context.CancelFunc
 }
 
 // newSession 构造 Session（私有，仅供 SessionManager / Gateway 调用）。
 //
 // 字段：
-//   - sessionID: SessionManager.Register 内部生成的 short uuid
+//   - sessionID: 构造时**留空**（SessionManager.Register 内部生成 short uuid 后回填，
+//     review r4 P3 修：避免 logger 出现"sessionID="""空字段污染日志关联）
 //   - userID / roomID: 来自 V1 §12.1 校验通过后的 token claims + 路径参数
 //   - conn: gorilla/websocket Upgrade 后的 *websocket.Conn
-//   - logger: gateway 持有的 base logger，加上 sessionID / userID / roomID 三字段
-//     形成 contextual logger（每条 Session 日志都自带这三字段，便于 grep 排障）
+//   - logger: gateway 持有的 base logger，加上 userID / roomID 两字段形成
+//     contextual logger（**不**在此处加 sessionID —— sessionID 由 Register
+//     拿到真实值后 With 叠加，保证 grep "sessionID=<id>" 命中且不碰到空值）
 //   - maxMessageSize: 由 cfg.WS.MaxMessageSizeBytes 传入；调 conn.SetReadLimit
 //   - writeTimeout: writeLoop 的 SetWriteDeadline 时长
 //
@@ -167,12 +192,15 @@ func newSession(
 ) *Session {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Session{
-		sessionID:    sessionID,
-		userID:       userID,
-		roomID:       roomID,
-		conn:         conn,
-		sendChan:     make(chan []byte, sendChanCapacity),
-		logger:       logger.With(slog.String("sessionID", sessionID), slog.Uint64("userID", userID), slog.Uint64("roomID", roomID)),
+		sessionID:        sessionID,
+		userID:           userID,
+		roomID:           roomID,
+		conn:             conn,
+		sendChan:         make(chan []byte, sendChanCapacity),
+		sendPriorityChan: make(chan []byte, sendPriorityChanCapacity),
+		// **不**在此处 With sessionID（review r4 P3 修）：让 Register 拿到真实
+		// sessionID 后再 With 叠加，保证 logger 不出现 "sessionID="" 空字段。
+		logger:       logger.With(slog.Uint64("userID", userID), slog.Uint64("roomID", roomID)),
 		writeTimeout: writeTimeout,
 		ctx:          ctx,
 		cancelCtx:    cancel,
@@ -227,6 +255,36 @@ func (s *Session) Send(msg []byte) error {
 	}
 }
 
+// SendPriority 把 protocol-level 消息（pong / 内部 close error）入队 priority
+// buffer（review r4 P2 加）。writeLoop 优先消费 priority chan，业务 sendChan
+// 满时仍能投递心跳回应。
+//
+// 错误：
+//   - Session 已 Close → ErrSessionClosed
+//   - sendPriorityChan 满 → ErrSessionSendPriorityBufferFull（理论不发生，
+//     priority cap=4 + writeLoop 优先消费）
+//   - 入队成功 → nil
+//
+// **使用约束**：仅供 protocol-level msg 用（pong / 协议错误）；业务消息**必须**
+// 走 Send。如果业务路径滥用 SendPriority 会污染 priority buffer，pong 在突发
+// 流量下仍可能被挤掉。
+//
+// 并发：与 Send 共用 sendMu.RLock；Close 持 sendMu.Lock 同时关 sendChan +
+// sendPriorityChan，保证 send-on-closed-channel 不发生。
+func (s *Session) SendPriority(msg []byte) error {
+	s.sendMu.RLock()
+	defer s.sendMu.RUnlock()
+	if s.closed.Load() {
+		return ErrSessionClosed
+	}
+	select {
+	case s.sendPriorityChan <- msg:
+		return nil
+	default:
+		return ErrSessionSendPriorityBufferFull
+	}
+}
+
 // Close 关闭 Session（必须幂等）：
 //   - 持 sendMu.Lock 标记 closed + close(sendChan)（与 Send 路径互斥，
 //     防 send-on-closed-channel panic）
@@ -238,13 +296,14 @@ func (s *Session) Send(msg []byte) error {
 func (s *Session) Close() error {
 	notify := false
 	s.closeOnce.Do(func() {
-		// 锁内：原子地把 closed flag 翻 true + close(sendChan)。任何并发 Send 此
-		// 刻要么还没拿到 RLock（被本写锁阻塞），要么已经完成入队释放了 RLock。
-		// Send 拿到 RLock 后会先看 closed=true 立即 return ErrSessionClosed —— 不
-		// 再触达 select 的 send case。
+		// 锁内：原子地把 closed flag 翻 true + close(sendChan) + close(sendPriorityChan)。
+		// 任何并发 Send / SendPriority 此刻要么还没拿到 RLock（被本写锁阻塞），要
+		// 么已经完成入队释放了 RLock。Send / SendPriority 拿到 RLock 后会先看
+		// closed=true 立即 return ErrSessionClosed —— 不再触达 select 的 send case。
 		s.sendMu.Lock()
 		s.closed.Store(true)
 		close(s.sendChan)
+		close(s.sendPriorityChan)
 		s.sendMu.Unlock()
 
 		s.cancelCtx()
@@ -325,8 +384,10 @@ func (s *Session) readLoop() {
 // handlePing 收到 ping 后**占位**回 pong（V1 §12.3 pong 字段表的精确实装由
 // Story 10.4 补完；本 story 阶段保证 RequestID 回带 + payload {} + ts）。
 //
-// 用 Send（异步入队）而非 conn.WriteMessage（同步写）：保持读 goroutine 不阻塞
-// 写路径；writeLoop 串行消费 sendChan 即可。
+// 用 SendPriority（review r4 P2 修）：pong 走 protocol-level priority buffer，
+// 不与业务 sendChan 共享 32 容量。writeLoop 优先消费 sendPriorityChan，让心跳
+// 回应在业务 buffer 压力下仍能传达 —— 避免 server-side backpressure 让 client
+// 误判 connection dead → reconnect 重试风暴。
 func (s *Session) handlePing(env clientEnvelope) {
 	pong := serverEnvelope{
 		Type:      "pong",
@@ -340,7 +401,7 @@ func (s *Session) handlePing(env clientEnvelope) {
 		s.logger.Error("ws pong marshal failed", slog.Any("error", err))
 		return
 	}
-	if err := s.Send(bytes); err != nil {
+	if err := s.SendPriority(bytes); err != nil {
 		// Buffer 满 / Session 已关 → 客户端通常已下线；log warn 不 escalate
 		s.logger.Warn("ws pong send failed", slog.Any("error", err))
 	}
@@ -348,27 +409,69 @@ func (s *Session) handlePing(env clientEnvelope) {
 
 // writeLoop 是写 goroutine 主循环（私有方法）。
 //
-// 主流程：
-//  1. for msg := range s.sendChan { s.conn.WriteMessage(websocket.TextMessage, msg) }
-//  2. sendChan 关闭 → loop 退出
-//  3. 写错 → log warn + s.Close()（不传播错误给上层；wire 错通常意味着 conn 已死）
+// 主流程（review r4 P2 加 priority chan 后）：
+//  1. for { select { sendPriorityChan / sendChan }; conn.WriteMessage(...) }
+//  2. **优先**消费 sendPriorityChan（pong 等 protocol-level msg）：用 nested
+//     select + non-blocking priority drain → 业务 sendChan 与 priority chan 都
+//     有数据时**总是**先发 priority msg
+//  3. 两个 chan 都关闭 → loop 退出
+//  4. 写错 → log warn + s.Close()（wire 错通常意味着 conn 已死）
 //
 // **关键约束**：
 //   - 必须用 TextMessage（V1 §12.2 关键约束钦定）
 //   - 必须设 WriteDeadline（避免慢 client 卡住 server 写）
 //   - 写错 → 触发 s.Close() 而非简单 log（wire-level 写失败通常表示 conn 已死，
 //     继续 writeLoop 也会持续失败）
+//   - 必须双 chan 都耗尽才能退出（防 priority 还有数据但 sendChan 已关 → 漏发
+//     最后的 pong / 协议错误 msg）
 func (s *Session) writeLoop() {
 	defer func() {
 		_ = s.Close()
 	}()
-	for msg := range s.sendChan {
-		if s.writeTimeout > 0 {
-			_ = s.conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
-		}
-		if err := s.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-			s.logger.Warn("ws write failed", slog.Any("error", err))
-			return
+	for {
+		// 优先级 select：先 nested 非阻塞 select 检查 priority chan；为空才走
+		// 阻塞 select 等任意一边来消息。Go 没有内建优先级 select 语法，这是
+		// 标准的两段式 priority 模式。
+		select {
+		case msg, ok := <-s.sendPriorityChan:
+			if !ok {
+				// priority chan 关 → Close 路径在跑，退出 loop
+				return
+			}
+			if err := s.writeFrame(msg); err != nil {
+				return
+			}
+		default:
+			// priority 没数据 → 阻塞等任意一边
+			select {
+			case msg, ok := <-s.sendPriorityChan:
+				if !ok {
+					return
+				}
+				if err := s.writeFrame(msg); err != nil {
+					return
+				}
+			case msg, ok := <-s.sendChan:
+				if !ok {
+					return
+				}
+				if err := s.writeFrame(msg); err != nil {
+					return
+				}
+			}
 		}
 	}
+}
+
+// writeFrame 是 writeLoop 内部的"写一帧"小工具：设 WriteDeadline + WriteMessage
+// + log warn。返 error 让 caller 决定是否退出 loop（写错 = 退出）。
+func (s *Session) writeFrame(msg []byte) error {
+	if s.writeTimeout > 0 {
+		_ = s.conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
+	}
+	if err := s.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+		s.logger.Warn("ws write failed", slog.Any("error", err))
+		return err
+	}
+	return nil
 }

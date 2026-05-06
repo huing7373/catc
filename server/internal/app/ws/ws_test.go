@@ -199,6 +199,23 @@ func TestSession_Send_HappyPath(t *testing.T) {
 	}
 }
 
+// TestSession_SendPriority_AfterClose_ReturnsErr: Close 后 SendPriority →
+// ErrSessionClosed（review r4 P2 加 priority chan 后的语义对齐 Send）。
+func TestSession_SendPriority_AfterClose_ReturnsErr(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, session, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	_ = session.Close()
+	err := session.SendPriority([]byte(`{"type":"pong"}`))
+	if !errors.Is(err, wsapp.ErrSessionClosed) {
+		t.Errorf("SendPriority err = %v, want ErrSessionClosed", err)
+	}
+}
+
 // TestSession_Send_AfterClose_ReturnsErr: Close 后 Send → ErrSessionClosed。
 func TestSession_Send_AfterClose_ReturnsErr(t *testing.T) {
 	mgr := wsapp.NewSessionManager()

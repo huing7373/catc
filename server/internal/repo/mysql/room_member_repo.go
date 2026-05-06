@@ -49,14 +49,28 @@ func (RoomMember) TableName() string { return "room_members" }
 //     —— 与 step_account_repo.FindByUserID 不同，因为 IsUserInRoom 的"不在
 //     房间"是合法业务态（不是数据脏），不需要 errors.Is 判定路径
 type RoomMemberRepo interface {
-	// RoomExists 校验 rooms 表中存在该 roomID 且 status != archived。
-	// 不存在 → (false, nil)；查询失败 → (false, err)。
+	// RoomExists 校验 rooms 表中存在该 roomID。不存在 → (false, nil)；
+	// 查询失败 → (false, err)。
 	//
-	// **节点 4 阶段 placeholder 实装**：可简化为"room_members 表中是否有任何 user_id
-	// 与该 room_id 关联"（因为 rooms 表本 story 阶段不存在；Epic 11.2 加 rooms
-	// 表后再切到真实 SELECT 1 FROM rooms WHERE id=? AND status != 'archived'）。
-	// 副作用：空房间被视为不存在 —— 节点 4 阶段尚未支持空房间（创建房间事务由
-	// Epic 11.3 才落地，加入房间时房间内必有 ≥ 1 个 member），不影响业务路径。
+	// **关键语义**（review r4 P2 修）：必须查 rooms 表**不是** room_members 表。
+	// Gateway.Handle 用本方法决定 close 4004 (room not found) 路径；如果查
+	// room_members 则 archived rooms（status=closed 但 stale memberships 还在）
+	// 仍被判定 "存在" 而错误 accept WS 连接。
+	//
+	// **节点 4 阶段简化**：仅用 `SELECT 1 FROM rooms WHERE id=? LIMIT 1`（不带
+	// status 过滤）。理由：
+	//   - rooms 表 schema status 字段已在数据库设计.md §6.12 钦定（1=active,
+	//     2=closed），但 migration 还没落地（Epic 11.2 才做）；status 过滤逻辑
+	//     交给 Epic 11.2 实装期细化（届时 RoomExists 改为
+	//     `SELECT 1 FROM rooms WHERE id=? AND status=1 LIMIT 1` 或类似过滤）
+	//   - 当前节点 4 阶段没有 status=closed 的房间存在路径（创建 / 关闭事务
+	//     由 Epic 11.3 / 11.6 才落地），即便不带过滤也不会误判
+	//   - 集成测试 fixture 用 VARCHAR(16) DEFAULT 'active' 占位（与 prod TINYINT
+	//     schema 不一致）；不带过滤让本 placeholder 实装兼容两种 schema
+	//
+	// 与之前 placeholder 行为差异：之前查 room_members → 空房间被视为不存在；
+	// 现在查 rooms → 空房间也算存在（与 §设计说明 "只要还有成员保持 active；
+	// 没人后状态置 closed" 一致；本 story 阶段不区分空房间）。
 	RoomExists(ctx context.Context, roomID uint64) (bool, error)
 
 	// IsUserInRoom 校验 room_members 表中存在 (user_id, room_id) 关联。
@@ -82,9 +96,10 @@ func NewRoomMemberRepo(db *gorm.DB) RoomMemberRepo {
 	return &roomMemberRepo{db: db}
 }
 
-// RoomExists placeholder 实装：**Epic 11.2 后切换到** `SELECT 1 FROM rooms WHERE
-// id=? AND status != 'archived'`。当前 placeholder = "room_members 表中存在
-// 任何 (room_id) 关联行"。
+// RoomExists placeholder 实装（review r4 P2 修）：查 `rooms` 表**不**查
+// `room_members`，避免 archived rooms 残留 memberships 时误判 "存在"。
+// **Epic 11.2 后**：补上 status 过滤（如 `... AND status = 1` 排除 closed 房间），
+// 见 RoomMemberRepo.RoomExists 接口注释里的迁移说明。
 //
 // 用 raw query + LIMIT 1 让 GORM 不做 SELECT * 浪费 IO。返 NotFound → (false, nil)
 // 转译。
@@ -92,7 +107,7 @@ func (r *roomMemberRepo) RoomExists(ctx context.Context, roomID uint64) (bool, e
 	db := tx.FromContext(ctx, r.db)
 	var dummy int
 	err := db.WithContext(ctx).
-		Raw("SELECT 1 FROM room_members WHERE room_id = ? LIMIT 1", roomID).
+		Raw("SELECT 1 FROM rooms WHERE id = ? LIMIT 1", roomID).
 		Scan(&dummy).Error
 	if err != nil {
 		if stderrors.Is(err, gorm.ErrRecordNotFound) {

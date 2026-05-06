@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sort"
 	"sync"
 
@@ -161,9 +162,13 @@ func (m *sessionManager) Register(ctx context.Context, s *Session) (string, erro
 		}
 	}
 
-	// 把 sessionID 回填到 Session（newSession 构造时还没分配）+ 重建 logger
+	// 把 sessionID 回填到 Session + 给 logger 叠加 canonical "sessionID" 字段
+	// （review r4 P3 修：之前用 "sessionID_replay" 非标 key，且 newSession 已注入
+	// "sessionID="" 空字段，破坏 grep "sessionID=<id>" 关联模式。现在
+	// newSession **不**注入 sessionID 字段，Register 在此用 With 唯一一次叠加
+	// canonical 字段）。
 	s.sessionID = sessionID
-	s.logger = s.logger.With("sessionID_replay", sessionID) // 保留原 logger 字段同时叠加新 sessionID
+	s.logger = s.logger.With(slog.String("sessionID", sessionID))
 	s.notifier = m
 
 	// 注入双索引（覆盖 userToSessionID[user]=newID；旧 oldID 索引仍由 oldS.Close()

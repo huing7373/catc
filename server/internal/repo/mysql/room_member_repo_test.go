@@ -8,12 +8,13 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 )
 
-// TestRoomMemberRepo_RoomExists_True：room_members 表中存在该 room_id 任何行 → true
+// TestRoomMemberRepo_RoomExists_True：rooms 表中存在该 id → true
+// （review r4 P2 修：查 rooms 不查 room_members）
 func TestRoomMemberRepo_RoomExists_True(t *testing.T) {
 	gormDB, mock := newGormWithMock(t)
 	repo := NewRoomMemberRepo(gormDB)
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM room_members WHERE room_id = ? LIMIT 1")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM rooms WHERE id = ? LIMIT 1")).
 		WithArgs(uint64(3001)).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 
@@ -27,11 +28,12 @@ func TestRoomMemberRepo_RoomExists_True(t *testing.T) {
 }
 
 // TestRoomMemberRepo_RoomExists_FalseOnZeroRows：0 行 → false, nil
+// （review r4 P2 修：查 rooms 不查 room_members）
 func TestRoomMemberRepo_RoomExists_FalseOnZeroRows(t *testing.T) {
 	gormDB, mock := newGormWithMock(t)
 	repo := NewRoomMemberRepo(gormDB)
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM room_members WHERE room_id = ? LIMIT 1")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM rooms WHERE id = ? LIMIT 1")).
 		WithArgs(uint64(9999)).
 		WillReturnRows(sqlmock.NewRows([]string{"1"})) // 0 行
 
@@ -41,6 +43,47 @@ func TestRoomMemberRepo_RoomExists_FalseOnZeroRows(t *testing.T) {
 	}
 	if got {
 		t.Errorf("got = true, want false (0 rows)")
+	}
+}
+
+// TestRoomMemberRepo_RoomExists_RoomMissingButMembersExist：rooms 不存在但
+// room_members 有 stale 残留 → false, nil（核心 fix verification：review r4 P2
+// 指出旧实装会误判 true，导致 archived rooms 仍 accept WS 连接）。
+func TestRoomMemberRepo_RoomExists_RoomMissingButMembersExist(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	// 模拟"rooms 表无该 id（room 已 archived 删除）"；即便 room_members
+	// 表里仍有 (3001, 1001) 的 stale 行，RoomExists 也必须返 false。
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM rooms WHERE id = ? LIMIT 1")).
+		WithArgs(uint64(3001)).
+		WillReturnRows(sqlmock.NewRows([]string{"1"})) // rooms 0 行
+
+	got, err := repo.RoomExists(context.Background(), 3001)
+	if err != nil {
+		t.Fatalf("RoomExists: %v", err)
+	}
+	if got {
+		t.Errorf("got = true, want false (rooms missing even though room_members has stale rows)")
+	}
+}
+
+// TestRoomMemberRepo_RoomExists_EmptyRoomStillExists：rooms 表存在 + room_members
+// 空 → true（房间刚创建尚无成员的边界场景；review r4 P2 hint 列出的第三个用例）。
+func TestRoomMemberRepo_RoomExists_EmptyRoomStillExists(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM rooms WHERE id = ? LIMIT 1")).
+		WithArgs(uint64(3002)).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+
+	got, err := repo.RoomExists(context.Background(), 3002)
+	if err != nil {
+		t.Fatalf("RoomExists: %v", err)
+	}
+	if !got {
+		t.Errorf("got = false, want true (empty room still exists in rooms table)")
 	}
 }
 
