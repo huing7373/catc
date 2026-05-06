@@ -161,25 +161,31 @@ type closeNotifier interface {
 //     需要在 WriteControl close frame 之前**等** writeLoop 退出，确保没有任何
 //     data frame 会跟在 close frame 之后写到 wire（V1 §12.1 协议钦定 close
 //     frame 是 connection 上的最后一个 frame）
+//   - writeLoopStarted 是 writeLoop 是否已启动的 flag（review r2 P2 加）。
+//     Gateway.Handle 的 handshake 失败路径会在启动 readLoop/writeLoop **之前**
+//     调 session.Close 释放资源；此时 writeLoop 从未运行，writeLoopDone 永远不
+//     close → wait 必然落到 500ms timeout。该 flag 让 closeInternal 区分
+//     "writeLoop 跑过了，必须等它收尾" vs "writeLoop 没启动，直接跳过 wait"
 //
 // 不导出字段：所有字段小写；外部访问通过 Send / Close。
 type Session struct {
-	sessionID        string
-	userID           uint64
-	roomID           uint64
-	conn             *websocket.Conn
-	sendChan         chan []byte
-	sendPriorityChan chan []byte  // review r4 P2 加：protocol-level msg 独立 buffer（pong 等）
-	sendMu           sync.RWMutex // 保护 Send / SendPriority 与 Close 互斥（防 send-on-closed-channel panic）
-	lastHeartbeatAt  atomic.Int64
-	closed           atomic.Bool
-	closeOnce        sync.Once
-	writeLoopDone    chan struct{} // writeLoop 退出信号（review r1 P2 加：CloseWithCode 在 WriteControl 前等 writeLoop 退出）
-	logger           *slog.Logger
-	writeTimeout     time.Duration
-	notifier         closeNotifier // SessionManager 注入；nil 安全（不通知）
-	ctx              context.Context
-	cancelCtx        context.CancelFunc
+	sessionID         string
+	userID            uint64
+	roomID            uint64
+	conn              *websocket.Conn
+	sendChan          chan []byte
+	sendPriorityChan  chan []byte  // review r4 P2 加：protocol-level msg 独立 buffer（pong 等）
+	sendMu            sync.RWMutex // 保护 Send / SendPriority 与 Close 互斥（防 send-on-closed-channel panic）
+	lastHeartbeatAt   atomic.Int64
+	closed            atomic.Bool
+	closeOnce         sync.Once
+	writeLoopDone     chan struct{} // writeLoop 退出信号（review r1 P2 加：CloseWithCode 在 WriteControl 前等 writeLoop 退出）
+	writeLoopStarted  atomic.Bool   // writeLoop 是否已经启动（review r2 P2 加：handshake 失败路径调 Close 时 writeLoop 没启动 → 不需要 wait）
+	logger            *slog.Logger
+	writeTimeout      time.Duration
+	notifier          closeNotifier // SessionManager 注入；nil 安全（不通知）
+	ctx               context.Context
+	cancelCtx         context.CancelFunc
 }
 
 // newSession 构造 Session（私有，仅供 SessionManager / Gateway 调用）。
@@ -382,15 +388,26 @@ func (s *Session) closeInternal(emitClose bool, code int, reason string) error {
 		close(s.sendPriorityChan)
 		s.sendMu.Unlock()
 
-		// Step 2: 等 writeLoop 退出（review r1 P2 加）。channel 已关，writeLoop
-		// 在下一次 select 命中关 chan 立即 return；defer 内 _=s.Close() 走幂等
-		// 路径直接返 ErrSessionClosed 不会重入本 closeOnce。
+		// Step 2: 等 writeLoop 退出（review r1 P2 加 / r2 P2 修）。channel 已关，
+		// writeLoop 在下一次 select 命中关 chan 立即 return；defer 内 _=s.Close()
+		// 走幂等路径直接返 ErrSessionClosed 不会重入本 closeOnce。
 		// **关键**：必须**先** wait writeLoop done，**才** WriteControl —— 否则
 		// 仍可能 close frame 与 writeLoop 最后一帧并发写到 wire 触发协议错误。
-		// 防御性兜底：writeLoopDone 可能为 nil（极端测试场景未走 newSession 构造
-		// 直接 zero-init Session 的路径），nil channel select 永远阻塞 —— 用
-		// non-nil 检查 + 超时让本路径在异常 fixture 下不死锁。
-		if s.writeLoopDone != nil {
+		//
+		// **review r2 P2 修**：必须 gate 在 writeLoopStarted。Gateway.Handle 的
+		// handshake 失败路径（ListMembers / buildSnapshot / WriteMessage / Register
+		// 失败）会在启动 readLoop/writeLoop **之前**调 session.Close 释放资源。
+		// 此时 writeLoop 从没运行 → writeLoopDone 永远不会 close → 走 wait 分支
+		// 必然落到 500ms timeout 才返回。Story 10.3 之前的实装没有此 wait，所以
+		// 失败 handshake cleanup 是亚毫秒级；r1 引入 wait 让每个 handshake 失败
+		// 路径都付 +500ms tax，把 socket 释放从亚毫秒拖到亚秒。
+		// 修法：用 writeLoopStarted atomic.Bool 标记 writeLoop 是否启动；只有
+		// started=true 才等 writeLoopDone，否则直接跳过 —— 没启动的 goroutine
+		// 不会写 wire，没必要等任何东西。
+		// 防御性兜底：writeLoopDone 可能为 nil（极端测试场景未走 newSession
+		// 构造直接 zero-init Session 的路径），nil channel select 永远阻塞 ——
+		// 用 non-nil 检查 + 超时让本路径在异常 fixture 下不死锁。
+		if s.writeLoopStarted.Load() && s.writeLoopDone != nil {
 			select {
 			case <-s.writeLoopDone:
 				// writeLoop 已退出
@@ -578,7 +595,16 @@ const maxConsecutivePriority = 4
 //     defer 顺序反了（先 Close 后 close(writeLoopDone)），sync.Once 会让 defer
 //     的 Close 阻塞等 closeOnce.Do 跑完，而 closeOnce.Do 又在等 writeLoopDone
 //     —— 死锁。把 close(writeLoopDone) 放最前确保 wait 路径先解锁。
+//   - 入口**必须立刻** s.writeLoopStarted.Store(true)（review r2 P2 加）：
+//     closeInternal 在 wait writeLoopDone 之前先 check writeLoopStarted；只有
+//     started=true 才 wait。Store 在 defer 之前执行确保任何 close 路径（包括
+//     即将 panic / 立刻 return 的极端情况）都能让 wait 正常等到 writeLoopDone。
 func (s *Session) writeLoop() {
+	// review r2 P2 加：标记 writeLoop 已启动。closeInternal 看到 started=true
+	// 才会 wait writeLoopDone；handshake 失败路径调 Close 时 started=false →
+	// 跳过 500ms wait，立即释放 socket。**必须**在任何可能 panic / return 的
+	// 操作之前置位（即使 writeLoop 立刻退出，wait 路径也能正常等到 done）。
+	s.writeLoopStarted.Store(true)
 	defer func() {
 		// **顺序关键**：先 close writeLoopDone 让 closeInternal 的 wait 解锁，
 		// 再 _=s.Close()（幂等；如果 closeInternal 已在跑，sync.Once 让本 Close
