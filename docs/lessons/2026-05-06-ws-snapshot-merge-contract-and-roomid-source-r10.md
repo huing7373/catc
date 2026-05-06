@@ -2,7 +2,7 @@
 date: 2026-05-06
 source_review: codex review of Story 10.1 r10 (epic-loop final round, no further verification)
 story: 10-1-接口契约最终化
-commit: <pending>
+commit: 65b98f2
 lesson_count: 2
 ---
 

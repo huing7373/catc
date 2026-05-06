@@ -160,13 +160,13 @@
 | 2026-05-04 | [launch state 离开 .ready 时必须 stop 所有 .ready-attached 后台 service（对称生命周期）](2026-05-04-launch-state-leave-ready-must-stop-feature-services.md) | 1 | architecture | `f43bc89` |
 | 2026-05-04 | [manual trigger 必须 await in-flight，不能用 gate 短路 return；公开 async API 的等待语义要明示](2026-05-04-manual-trigger-must-await-in-flight.md) | 1 | architecture | `1ec3855` |
 | 2026-05-04 | [`await` 期间 race 让 single-flight gate 失效，必须 while-loop 链式等待 + @MainActor 同步段原子 assign（fresh install requestPermission gap 第 3 次复发 reaffirm wontfix）](2026-05-04-await-then-recheck-single-flight-gate.md) | 2 | concurrency / process | `1042af2` |
-| 2026-05-05 | [WS 协议契约的"内部自洽"三连：reserved close code / 永久 null 字段引用 / 业务消息冻结边界](2026-05-05-ws-protocol-contract-internal-consistency.md) | 3 | architecture, docs | `<pending>` |
-| 2026-05-06 | [WS 协议冻结后的"示例字面量自洽"与"close code 全局保留"](2026-05-06-ws-frozen-examples-and-close-code-collision.md) | 2 | docs, architecture | `<pending>` |
-| 2026-05-06 | [`error` 消息的双重语义 & 心跳 close code 必须在冻结表里给具体值](2026-05-06-ws-error-dual-semantics-and-heartbeat-close-code.md) | 2 | docs, architecture | `<pending>` |
-| 2026-05-06 | [WS 冻结段内部一致性（example 字段值 / 强制信封 / handshake 必发消息的失败路径）](2026-05-06-ws-frozen-section-internal-coherence-r4.md) | 3 | docs, architecture | `<pending>` |
-| 2026-05-06 | [WS close code 必须用 4xxx 应用自定义段隔离 §3 应用错误码 + 跨文档配置 key 双向锚定 (r5)](2026-05-06-ws-close-code-segment-discipline-r5.md) | 2 | architecture, docs, config | `<pending>` |
-| 2026-05-06 | [Redis presence 不能替代 membership 授权 + room.snapshot 单一视图原则 + close code 表 1006 数字冲突清理 (r6)](2026-05-06-ws-frozen-section-authz-and-snapshot-coherence-r6.md) | 3 | architecture, docs | `<pending>` |
-| 2026-05-06 | [握手 first-snapshot 契约的"启动时序原子性"+ placeholder 必须给真实可用最小值 + 跨文档时序图必须随冻结声明同步 (r7)](2026-05-06-ws-snapshot-startup-order-and-placeholder-r7.md) | 3 | architecture, docs | `<pending>` |
-| 2026-05-06 | [room.snapshot placeholder 必须反映 room_members 全表（仅丰富字段降级）+ 节点 4 断连分支同样不广播 member.left (r8)](2026-05-06-ws-snapshot-placeholder-full-roster-and-disconnect-broadcast-r8.md) | 2 | architecture, docs | `<pending>` |
-| 2026-05-06 | [V1 协议骨架冻结声明的范围必须收窄到具体 epic 阶段（不用"节点 X 阶段"）+ planning artifact 同步是契约最终化的最后一公里 (r9)](2026-05-06-ws-narrow-frozen-scope-and-planning-sync-r9.md) | 3 | architecture, docs | `<pending>` |
-| 2026-05-06 | [`room.snapshot` authoritative-but-non-destructive merge 契约 + WS roomId 来源按场景分两路 (r10 收官)](2026-05-06-ws-snapshot-merge-contract-and-roomid-source-r10.md) | 2 | architecture, docs | `<pending>` |
+| 2026-05-05 | [WS 协议契约的"内部自洽"三连：reserved close code / 永久 null 字段引用 / 业务消息冻结边界](2026-05-05-ws-protocol-contract-internal-consistency.md) | 3 | architecture, docs | `f1c9057` |
+| 2026-05-06 | [WS 协议冻结后的"示例字面量自洽"与"close code 全局保留"](2026-05-06-ws-frozen-examples-and-close-code-collision.md) | 2 | docs, architecture | `9f7b9e1` |
+| 2026-05-06 | [`error` 消息的双重语义 & 心跳 close code 必须在冻结表里给具体值](2026-05-06-ws-error-dual-semantics-and-heartbeat-close-code.md) | 2 | docs, architecture | `397eea6` |
+| 2026-05-06 | [WS 冻结段内部一致性（example 字段值 / 强制信封 / handshake 必发消息的失败路径）](2026-05-06-ws-frozen-section-internal-coherence-r4.md) | 3 | docs, architecture | `2a3936b` |
+| 2026-05-06 | [WS close code 必须用 4xxx 应用自定义段隔离 §3 应用错误码 + 跨文档配置 key 双向锚定 (r5)](2026-05-06-ws-close-code-segment-discipline-r5.md) | 2 | architecture, docs, config | `9a78506` |
+| 2026-05-06 | [Redis presence 不能替代 membership 授权 + room.snapshot 单一视图原则 + close code 表 1006 数字冲突清理 (r6)](2026-05-06-ws-frozen-section-authz-and-snapshot-coherence-r6.md) | 3 | architecture, docs | `11a1429` |
+| 2026-05-06 | [握手 first-snapshot 契约的"启动时序原子性"+ placeholder 必须给真实可用最小值 + 跨文档时序图必须随冻结声明同步 (r7)](2026-05-06-ws-snapshot-startup-order-and-placeholder-r7.md) | 3 | architecture, docs | `4f52033` |
+| 2026-05-06 | [room.snapshot placeholder 必须反映 room_members 全表（仅丰富字段降级）+ 节点 4 断连分支同样不广播 member.left (r8)](2026-05-06-ws-snapshot-placeholder-full-roster-and-disconnect-broadcast-r8.md) | 2 | architecture, docs | `c15f247` |
+| 2026-05-06 | [V1 协议骨架冻结声明的范围必须收窄到具体 epic 阶段（不用"节点 X 阶段"）+ planning artifact 同步是契约最终化的最后一公里 (r9)](2026-05-06-ws-narrow-frozen-scope-and-planning-sync-r9.md) | 3 | architecture, docs | `9c82129` |
+| 2026-05-06 | [`room.snapshot` authoritative-but-non-destructive merge 契约 + WS roomId 来源按场景分两路 (r10 收官)](2026-05-06-ws-snapshot-merge-contract-and-roomid-source-r10.md) | 2 | architecture, docs | `65b98f2` |
