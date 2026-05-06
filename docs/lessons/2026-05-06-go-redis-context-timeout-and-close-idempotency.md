@@ -2,7 +2,7 @@
 date: 2026-05-06
 source_review: codex review (epic-loop r2 for Story 10-2-redis-接入)
 story: 10-2-redis-接入
-commit: <pending>
+commit: 9acf65f
 lesson_count: 2
 ---
 

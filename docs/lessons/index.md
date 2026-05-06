@@ -170,5 +170,5 @@
 | 2026-05-06 | [room.snapshot placeholder 必须反映 room_members 全表（仅丰富字段降级）+ 节点 4 断连分支同样不广播 member.left (r8)](2026-05-06-ws-snapshot-placeholder-full-roster-and-disconnect-broadcast-r8.md) | 2 | architecture, docs | `c15f247` |
 | 2026-05-06 | [V1 协议骨架冻结声明的范围必须收窄到具体 epic 阶段（不用"节点 X 阶段"）+ planning artifact 同步是契约最终化的最后一公里 (r9)](2026-05-06-ws-narrow-frozen-scope-and-planning-sync-r9.md) | 3 | architecture, docs | `9c82129` |
 | 2026-05-06 | [`room.snapshot` authoritative-but-non-destructive merge 契约 + WS roomId 来源按场景分两路 (r10 收官)](2026-05-06-ws-snapshot-merge-contract-and-roomid-source-r10.md) | 2 | architecture, docs | `65b98f2` |
-| 2026-05-06 | [Redis PoolSize 负值绕过 fail-fast，go-redis NewClient panic](2026-05-06-redis-poolsize-negative-makechan-panic.md) | 1 | error-handling, config | `<pending>` |
-| 2026-05-06 | [go-redis ContextTimeoutEnabled 默认 false 让 ctx 形同虚设 + 抽象层 Close 真·幂等需要 sync.Once 兜底](2026-05-06-go-redis-context-timeout-and-close-idempotency.md) | 2 | config, architecture | `<pending>` |
+| 2026-05-06 | [Redis PoolSize 负值绕过 fail-fast，go-redis NewClient panic](2026-05-06-redis-poolsize-negative-makechan-panic.md) | 1 | error-handling, config | `b7c8dad` |
+| 2026-05-06 | [go-redis ContextTimeoutEnabled 默认 false 让 ctx 形同虚设 + 抽象层 Close 真·幂等需要 sync.Once 兜底](2026-05-06-go-redis-context-timeout-and-close-idempotency.md) | 2 | config, architecture | `9acf65f` |
