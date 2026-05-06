@@ -176,3 +176,4 @@
 | 2026-05-06 | [WS reconnect 替换路径漏触发 onUnregister 钩子 + WSConfig 契约字段缺 prod 强制](2026-05-06-ws-reconnect-unregister-hook-and-prod-contract-gate.md) | 2 | architecture, config | `<pending>` |
 | 2026-05-06 | [WS 路由必须 gate 在 backing tables migration 落地之后（启动期表存在性 sniff）](2026-05-06-ws-route-table-existence-gate.md) | 1 | architecture | `<pending>` |
 | 2026-05-06 | [WS room 存在性来源 / pong 优先级 buffer / sessionID logger 字段（10-3 r4）](2026-05-06-ws-room-existence-source-and-pong-priority-r4.md) | 3 | architecture, observability | `<pending>` |
+| 2026-05-06 | [WS 路由"表存在性 gate"循环陷阱 + reconnect 替换的 broadcast 重叠窗口](2026-05-06-ws-table-existence-gate-and-reconnect-broadcast-window.md) | 2 | architecture | `<pending>` |

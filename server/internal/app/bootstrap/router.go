@@ -21,44 +21,63 @@ import (
 
 // wsTablesReady 探测 rooms / room_members 两张表是否在当前 schema 下存在。
 //
-// **背景**（Story 10.3 review r3 [P1]）：本 story 范围红线钦定**不**做 rooms /
-// room_members migration（Epic 11.2 才落地）。当前 server/migrations/ 只到
-// 0006_init_user_step_sync_logs；任何走 WS 握手的部署环境（用 repo 现存
-// migration 拉起的 prod / staging）会在 RoomMemberRepo.RoomExists / IsUserInRoom
-// 阶段拿到 SQL "Table 'cat.rooms' doesn't exist" / "Table 'cat.room_members'
-// doesn't exist" → Gateway close 1011 → feature 完全不可用。
+// **历史**（Story 10.3 多轮 review）：
+//   - r3 [P1] 引入：当时 rooms / room_members migration 还没落地（钦定 Epic 11.2
+//     接管），prod 启动会在 RoomMemberRepo 阶段 SQL 报 "table doesn't exist" →
+//     Gateway close 1011；初版用 warn-and-skip（表缺 → 跳过路由挂载）兜底
+//   - r5 [P1] 改写：warn-and-skip 让 prod 永远拿到 HTTP 404 而非 documented
+//     WS close codes，Story 10.3 在正常 server startup 完全不可用 →
+//     **真正的修法**：把 rooms / room_members 的 CREATE TABLE 拆出 Epic 11.2
+//     提前到 Story 10.3（migrations 0007 / 0008 已 ship），让 Story 10.3
+//     self-contained 可部署；JOIN / LEAVE 等业务事务仍由 Epic 11.4 / 11.5 接管
 //
-// **修法**：启动期 sniff 两张表存在性 —— 都存在才挂 /ws/rooms/:roomId 路由；
-// 任一不存在则跳过路由挂载并 log warn 提醒"待 Epic 11.2 落地 migration"。
+// **当前职责（r5 后）**：保留**防御性早期检测**语义；**表不存在 → log error
+// 并 panic（fail-fast）**，**不**再 silent skip 跳过路由挂载。
 //
-// 不 fail-fast 改 warn-and-skip 的原因：本阶段 0001-0006 跑完是**预期状态**；
-// 集成测试 (`bash scripts/build.sh --integration`) fixture / Epic 11.2 落地后
-// 自动转为 "都存在" → 路由挂载，无需配置漂移。
+// 为什么仍保留本 helper（r5 后没有"unused code"）：
+//   - 防御部署事故：如果某环境因为 migration 工具配置错 / 手动运维误操作让
+//     0007 / 0008 没跑（schema 与代码版本不一致），fail-fast 让运维**立即**看到
+//     启动失败，而不是 server 起来后客户端在 WS 握手时拿到 close 1011 / 404
+//     才间接发现
+//   - 与 prod / dev / staging 一致：所有环境都期望 rooms / room_members 存在
+//     （migrations 0007 / 0008 已是默认部署集合的一部分）；任何环境表缺都是
+//     部署 bug，应该 fail-fast 而非降级
+//   - 集成测试 fixture（startMySQLWithRoomMemberFixture）在容器内 CREATE TABLE
+//     仍然让 wsTablesReady 通过，集成路径不受影响
 //
-// **不**用 `SHOW TABLES LIKE` + Count（codex review 建议形态）：GORM .Count 实际
-// 翻译为 `SELECT COUNT(*) FROM (...)` 子查询，对 SHOW TABLES 这种元数据 query
-// 不被 MySQL 接受 / 类型不兼容。本函数改用 information_schema.tables + COUNT(*)
-// 子查询，单 query 直出整数计数，与 GORM Raw().Scan(&int64) 类型完全兼容。
+// **不**用 `SHOW TABLES LIKE` + Count：GORM .Count 实际翻译为
+// `SELECT COUNT(*) FROM (...)` 子查询，对 SHOW TABLES 元数据 query 类型不兼容。
+// 本函数用 information_schema.tables + COUNT(*) 子查询，单 query 直出整数计数。
 //
-// information_schema.tables 在 MySQL / MariaDB 都是标准存在的元数据视图；
-// `table_schema = DATABASE()` 自动绑定当前 connection 的 schema（不依赖
-// hardcode schema 名 → dev / staging / prod 多 schema 部署也通用）；
-// `table_name IN ('rooms','room_members')` 一次返回两表的命中数（0/1/2）。
+// information_schema.tables 在 MySQL / MariaDB 标准存在；`table_schema =
+// DATABASE()` 自动绑定当前 connection 的 schema（dev / staging / prod 多 schema
+// 通用）；`table_name IN ('rooms','room_members')` 一次返回两表命中数（0/1/2）。
 //
-// 单 query 走元数据缓存，启动期开销 < 1ms；不引入 N+1 / 不依赖 schema name
-// 注入。
+// 单 query 走元数据缓存，启动期开销 < 1ms。
 //
 // **db nil 安全**：调用方在 `deps.GormDB != nil` 分支内才调本 helper；
 // 单元测试 Deps{} 零值场景由外层 if-guard 拦截，本函数不重复 nil-check。
-func wsTablesReady(db *gorm.DB) bool {
+//
+// **panic 行为契约**：表缺 → log error + panic("ws backing tables missing: ...");
+// 启动期 panic 让进程立即退出（systemd / k8s 重启 → CrashLoopBackOff，运维告警），
+// 而非 silent 起服务后业务路径降级。集成测试 / 单元测试场景如果不挂 rooms /
+// room_members 表，不应该走到本函数（会被外层 deps.SessionMgr if-guard 跳过，
+// 或者集成测试 fixture 已建表）。
+func wsTablesReady(db *gorm.DB) {
 	var hitCount int64
 	if err := db.Raw(
 		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN ('rooms','room_members')",
 	).Scan(&hitCount).Error; err != nil {
-		slog.Warn("ws table sniff failed", slog.Any("error", err))
-		return false
+		slog.Error("ws backing tables sniff failed (information_schema query error)", slog.Any("error", err))
+		panic("ws backing tables sniff failed: " + err.Error())
 	}
-	return hitCount >= 2
+	if hitCount < 2 {
+		slog.Error(
+			"ws backing tables missing: rooms / room_members not found in current schema (migrations 0007 / 0008 must be applied)",
+			slog.Int64("hitCount", hitCount),
+		)
+		panic("ws backing tables missing: rooms / room_members must exist (run migrations 0007 / 0008)")
+	}
 }
 
 // Deps 是 bootstrap 期收集的依赖集合，由 main.go 构造后透传给 Run / NewRouter。
@@ -264,28 +283,25 @@ func NewRouter(deps Deps) *gin.Engine {
 		// 仅当 deps.SessionMgr 非空时挂载（与 GormDB / Signer if-guard 同模式）；
 		// 单元测试 Deps{} 零值场景跳过本路由，与 router_test.go 既有约定一致。
 		//
-		// **review r3 [P1] 加表存在性 gate**：rooms / room_members migration 在
-		// Epic 11.2 才落地（本 story §"本 story 不做" 第 5 条钦定排除），当前
-		// server/migrations/ 只到 0006。任何走 WS 握手的环境会在 RoomMemberRepo
-		// 阶段拿到 SQL "table doesn't exist" → Gateway close 1011 → feature 完全
-		// 不可用。启动期用 wsTablesReady() 探测两张表 —— 都存在才挂路由；任一
-		// 缺失 → 跳过 + log warn 提醒"待 Epic 11.2 落地"。集成测试 fixture
-		// （ws_integration_test.go startMySQLWithRoomMemberFixture）会在容器内
-		// CREATE TABLE，wsTablesReady 返 true → 路由挂载 → 集成测试不受影响。
+		// **review r5 [P1]** 后的形态：
+		//   - migrations 0007 / 0008 已 ship rooms / room_members CREATE TABLE
+		//     （拆自原 Epic 11.2，让 Story 10.3 self-contained 可部署）
+		//   - 路由**总是**挂载（移除 r3 的 warn-and-skip gate；prod 不再静默 404）
+		//   - wsTablesReady() 保留为**防御性早期检测**：表缺 → fail-fast panic
+		//     （让 systemd / k8s CrashLoopBackOff 触发运维告警，而不是 server 起
+		//     来后客户端拿 WS close 1011 才间接发现 schema 漂移）
 		if deps.SessionMgr != nil {
-			if wsTablesReady(deps.GormDB) {
-				roomMemberRepo := mysql.NewRoomMemberRepo(deps.GormDB)
-				gateway := wsapp.NewGateway(
-					deps.Signer,
-					deps.SessionMgr,
-					roomMemberRepo,
-					deps.WSCfg,
-					deps.EnvName, // review r2 P2 加：prod contract override 强制
-				)
-				r.GET("/ws/rooms/:roomId", gateway.Handle)
-			} else {
-				slog.Warn("WS route /ws/rooms/:roomId disabled: rooms/room_members tables not yet migrated (待 Epic 11.2 落地 migration)")
-			}
+			// 防御性 sniff：rooms / room_members 必须存在；缺则 panic 终止启动
+			wsTablesReady(deps.GormDB)
+			roomMemberRepo := mysql.NewRoomMemberRepo(deps.GormDB)
+			gateway := wsapp.NewGateway(
+				deps.Signer,
+				deps.SessionMgr,
+				roomMemberRepo,
+				deps.WSCfg,
+				deps.EnvName, // review r2 P2 加：prod contract override 强制
+			)
+			r.GET("/ws/rooms/:roomId", gateway.Handle)
 		}
 	}
 

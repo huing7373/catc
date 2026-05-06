@@ -2,14 +2,18 @@
 // +build integration
 
 // Story 4.3 集成测试：用 dockertest 起真实 mysql:8.0 容器跑 4 条 case：
-//   1. happy: migrate Up → 6 张表存在 → migrate Down → 6 张表全消失（仅 schema_migrations）
+//   1. happy: migrate Up → 8 张表存在 → migrate Down → 8 张表全消失（仅 schema_migrations）
 //   2. edge: 重复 migrate Up → ErrNoChange 被吞 → 返 nil（幂等）
 //   3. happy: Up 后通过 INFORMATION_SCHEMA 抽样验关键索引 / 字段类型 / 主键约束
-//   4. edge: Up 后 Status 返回 (version=6, dirty=false, nil)
+//   4. edge: Up 后 Status 返回 (version=8, dirty=false, nil)
 //
 // Story 7.2 扩展：把 4 条 case 的断言从 5 张表扩展到 6 张表
 //   （新增 user_step_sync_logs：日志表，含 idx_user_date / idx_user_created_at；
 //    特殊点：sync_date DATE / accepted_delta_steps INT signed / 无 updated_at / PK = id）
+//
+// Story 10.3 review r5 [P1] 扩展：把 4 条 case 的断言从 6 张表扩展到 8 张表
+//   （新增 rooms / room_members：把 Epic 11.2 的"建表"职责拆出来提前到 Story 10.3，
+//    让 WS 网关 self-contained 可部署；JOIN / LEAVE 业务事务仍在 Epic 11.4 / 11.5 落地）
 //
 // build tag `integration` 隔离 → 默认 `bash scripts/build.sh --test` 不跑这些；
 // 只在 `bash scripts/build.sh --integration`（即 `go test -tags=integration`）触发。
@@ -108,8 +112,12 @@ func migrationsPath(t *testing.T) string {
 	return abs
 }
 
-// TestMigrateIntegration_UpThenDown 起容器 → migrate Up → 6 张表存在 →
-// migrate Down → 6 张表全消失（仅 schema_migrations）。
+// TestMigrateIntegration_UpThenDown 起容器 → migrate Up → 8 张表存在 →
+// migrate Down → 8 张表全消失（仅 schema_migrations）。
+//
+// **Story 10.3 review r5 [P1] 扩展**：从 6 改 8（多了 0007_init_rooms +
+// 0008_init_room_members；把 Epic 11.2 的"建表"职责拆出来提前到 Story 10.3，
+// 让 WS 网关骨架 self-contained 可部署）。
 func TestMigrateIntegration_UpThenDown(t *testing.T) {
 	dsn, cleanup := startMySQL(t)
 	defer cleanup()
@@ -127,14 +135,14 @@ func TestMigrateIntegration_UpThenDown(t *testing.T) {
 		t.Fatalf("migrate Up: %v", err)
 	}
 
-	// 验证 5 张表存在
+	// 验证 8 张表存在
 	sqlDB, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	defer sqlDB.Close()
 
-	expectedTables := []string{"users", "user_auth_bindings", "pets", "user_step_accounts", "user_chests", "user_step_sync_logs"}
+	expectedTables := []string{"users", "user_auth_bindings", "pets", "user_step_accounts", "user_chests", "user_step_sync_logs", "rooms", "room_members"}
 	for _, table := range expectedTables {
 		var count int
 		err := sqlDB.QueryRowContext(ctx, `
@@ -166,6 +174,107 @@ func TestMigrateIntegration_UpThenDown(t *testing.T) {
 		if count != 0 {
 			t.Errorf("after Down, table %s: count=%d, want 0 (should be dropped)", table, count)
 		}
+	}
+}
+
+// TestMigrateIntegration_RoomsAndRoomMembers_Schema 验证 Story 10.3 review r5 [P1]
+// 新增的两张表 schema 关键元素：
+//   - rooms: id PK + idx_creator_user_id + idx_status_created_at + 默认值 + 类型
+//   - room_members: id PK + uk_user_id + uk_room_user + idx_room_id + 关键约束
+//
+// 防回归点：rooms / room_members 表存在 + 索引齐 → wsTablesReady() 启动期 sniff
+// 通过 → /ws/rooms/:roomId 路由挂载（不再 r3 时代 silent 404）。
+func TestMigrateIntegration_RoomsAndRoomMembers_Schema(t *testing.T) {
+	dsn, cleanup := startMySQL(t)
+	defer cleanup()
+
+	mig, err := migrate.New(dsn, migrationsPath(t))
+	if err != nil {
+		t.Fatalf("migrate.New: %v", err)
+	}
+	defer mig.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := mig.Up(ctx); err != nil {
+		t.Fatalf("migrate Up: %v", err)
+	}
+
+	sqlDB, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	// 索引存在性检查
+	indexCases := []struct {
+		table     string
+		indexName string
+	}{
+		{"rooms", "idx_creator_user_id"},
+		{"rooms", "idx_status_created_at"},
+		{"room_members", "uk_user_id"},
+		{"room_members", "uk_room_user"},
+		{"room_members", "idx_room_id"},
+	}
+	for _, c := range indexCases {
+		var count int
+		err := sqlDB.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM information_schema.statistics
+			WHERE table_schema = 'cat_test' AND table_name = ? AND index_name = ?`,
+			c.table, c.indexName).Scan(&count)
+		if err != nil {
+			t.Errorf("query index %s.%s: %v", c.table, c.indexName, err)
+			continue
+		}
+		if count == 0 {
+			t.Errorf("index %s.%s: not found", c.table, c.indexName)
+		}
+	}
+
+	// rooms.id PK = id（自增）；与数据库设计 §5.13 钦定一致
+	var pkRooms string
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT column_name FROM information_schema.key_column_usage
+		WHERE table_schema = 'cat_test' AND table_name = 'rooms' AND constraint_name = 'PRIMARY'`).Scan(&pkRooms)
+	if err != nil {
+		t.Errorf("query rooms PK: %v", err)
+	} else if pkRooms != "id" {
+		t.Errorf("rooms PK column = %q, want 'id'", pkRooms)
+	}
+
+	// room_members.id PK = id（与数据库设计 §5.14 钦定一致）
+	var pkRM string
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT column_name FROM information_schema.key_column_usage
+		WHERE table_schema = 'cat_test' AND table_name = 'room_members' AND constraint_name = 'PRIMARY'`).Scan(&pkRM)
+	if err != nil {
+		t.Errorf("query room_members PK: %v", err)
+	} else if pkRM != "id" {
+		t.Errorf("room_members PK column = %q, want 'id'", pkRM)
+	}
+
+	// rooms.max_members 类型 = tinyint unsigned + 默认 4
+	var maxMembersDefault sql.NullString
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT column_default FROM information_schema.columns
+		WHERE table_schema = 'cat_test' AND table_name = 'rooms' AND column_name = 'max_members'`).Scan(&maxMembersDefault)
+	if err != nil {
+		t.Errorf("query rooms.max_members default: %v", err)
+	} else if !maxMembersDefault.Valid || maxMembersDefault.String != "4" {
+		t.Errorf("rooms.max_members default = %v, want '4'", maxMembersDefault)
+	}
+
+	// rooms.status 默认 1（active）
+	var statusDefault sql.NullString
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT column_default FROM information_schema.columns
+		WHERE table_schema = 'cat_test' AND table_name = 'rooms' AND column_name = 'status'`).Scan(&statusDefault)
+	if err != nil {
+		t.Errorf("query rooms.status default: %v", err)
+	} else if !statusDefault.Valid || statusDefault.String != "1" {
+		t.Errorf("rooms.status default = %v, want '1' (=active per §6.12)", statusDefault)
 	}
 }
 
@@ -202,12 +311,12 @@ func TestMigrateIntegration_UpTwice_Idempotent(t *testing.T) {
 	err = sqlDB.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM information_schema.tables
 		WHERE table_schema = 'cat_test' AND table_name IN
-		('users', 'user_auth_bindings', 'pets', 'user_step_accounts', 'user_chests', 'user_step_sync_logs')`).Scan(&tableCount)
+		('users', 'user_auth_bindings', 'pets', 'user_step_accounts', 'user_chests', 'user_step_sync_logs', 'rooms', 'room_members')`).Scan(&tableCount)
 	if err != nil {
 		t.Fatalf("count tables: %v", err)
 	}
-	if tableCount != 6 {
-		t.Errorf("after two Up calls, table count = %d, want 6", tableCount)
+	if tableCount != 8 {
+		t.Errorf("after two Up calls, table count = %d, want 8 (Story 10.3 review r5 [P1] 加 rooms / room_members)", tableCount)
 	}
 }
 
@@ -419,8 +528,10 @@ func TestMigrateIntegration_TablesPresent_AfterUp(t *testing.T) {
 	}
 }
 
-// TestMigrateIntegration_StatusAfterUp 验证 Up 完成后 Status 返回 (version=6, dirty=false, nil)。
+// TestMigrateIntegration_StatusAfterUp 验证 Up 完成后 Status 返回 (version=8, dirty=false, nil)。
 // Story 7.2 扩展：从 5 改 6（多了 0006_init_user_step_sync_logs）
+// Story 10.3 review r5 [P1] 扩展：从 6 改 8（多了 0007_init_rooms +
+// 0008_init_room_members；把 Epic 11.2 的"建表"职责拆出来提前到 Story 10.3）
 func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	dsn, cleanup := startMySQL(t)
 	defer cleanup()
@@ -451,8 +562,8 @@ func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status after Up: %v", err)
 	}
-	if v != 6 {
-		t.Errorf("Status version = %d, want 6", v)
+	if v != 8 {
+		t.Errorf("Status version = %d, want 8", v)
 	}
 	if dirty {
 		t.Errorf("Status dirty = true, want false")

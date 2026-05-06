@@ -453,6 +453,202 @@ func TestSessionManager_Reconnect_TriggersUnregisterHookForOldSession(t *testing
 	}
 }
 
+// TestSessionManager_Reconnect_NoDoubleBroadcastWindow: 同 user 重连同 room
+// 替换路径中场窗口，ListSessionsByRoomID 应当**只返回 NEW 不返回 OLD**。
+//
+// review r5 [P2] 防回归：修复前 Register 锁内**先**把 NEW 加进 sessionsByRoom，
+// **然后**才在锁外调 replaced.Close() → notifyClosed → Unregister 移除 OLD。
+// 在两步之间 ListSessionsByRoomID 同时返 OLD + NEW，BroadcastToRoom（Story 10.5）
+// 在该窗口期会同 user 双发；client 不能 dedupe（sessionID 不外漏）。
+//
+// 修复后 Register 锁内**同时**移除 OLD 在 sessionsByRoom + 添加 NEW；OLD 仅保留在
+// sessionsByID 让后续 oldS.Close() → Unregister 触发 onUnregister 钩子（review r2 P1
+// 不变量）。锁释放后 broadcast 视角立即只见 NEW。
+//
+// 测试用 WithRegisterHook 在 NEW 注册完成的**第一时刻** sample 一次 manager 状态
+// （hook 在锁外调，但 lock 已释放即"OLD 应已不在 byRoom"的正确状态）。
+func TestSessionManager_Reconnect_NoDoubleBroadcastWindow(t *testing.T) {
+	const userID = uint64(1001)
+	const roomID = uint64(3001)
+
+	// sampledOnSecondRegister 存第二次 Register 的 hook 触发时刻 manager
+	// 在 roomID 下的 session 列表（snapshot 切片，不持有 manager 锁）
+	var (
+		sampledMu     sync.Mutex
+		sampledLen    int
+		sampledUIDs   []uint64
+		registerCount atomic.Int32
+	)
+	var mgr wsapp.SessionManager
+	mgr = wsapp.NewSessionManager(
+		wsapp.WithRegisterHook(func(s *wsapp.Session) {
+			n := registerCount.Add(1)
+			if n != 2 {
+				return // 仅在第二次 Register（替换路径）sample
+			}
+			// hook 在 manager 锁外调，可以安全调 ListSessionsByRoomID
+			sessions := mgr.ListSessionsByRoomID(context.Background(), roomID)
+			sampledMu.Lock()
+			sampledLen = len(sessions)
+			sampledUIDs = make([]uint64, 0, len(sessions))
+			for _, s := range sessions {
+				sampledUIDs = append(sampledUIDs, s.UserID())
+			}
+			sampledMu.Unlock()
+		}),
+	)
+	defer mgr.Close()
+
+	repo := &stubRoomMemberRepo{}
+	signer := newSigner(t)
+	wsURL, ts := startGatewayServer(t, signer, mgr, repo)
+	defer ts.Close()
+
+	// 第一次连接（OLD）
+	tokenA, _ := signer.Sign(userID, 3600)
+	urlA := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomID, tokenA)
+	connA, _, err := dialWS(t, urlA)
+	if err != nil {
+		t.Fatalf("dial OLD: %v", err)
+	}
+	defer connA.Close()
+	_ = connA.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := connA.ReadMessage(); err != nil {
+		t.Fatalf("read OLD snapshot: %v", err)
+	}
+
+	// 等第一次 register 钩子触发完
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if registerCount.Load() >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 第二次连接（NEW，触发替换）
+	tokenB, _ := signer.Sign(userID, 3600)
+	urlB := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomID, tokenB)
+	connB, _, err := dialWS(t, urlB)
+	if err != nil {
+		t.Fatalf("dial NEW: %v", err)
+	}
+	defer connB.Close()
+	_ = connB.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := connB.ReadMessage(); err != nil {
+		t.Fatalf("read NEW snapshot: %v", err)
+	}
+
+	// 等第二次 register 钩子完成 sample
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sampledMu.Lock()
+		got := sampledLen
+		sampledMu.Unlock()
+		if got > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	sampledMu.Lock()
+	defer sampledMu.Unlock()
+	if sampledLen != 1 {
+		t.Errorf("ListSessionsByRoomID len at NEW Register hook = %d, want 1 (OLD must be removed from byRoom synchronously with NEW add to avoid double-broadcast window); uids=%v", sampledLen, sampledUIDs)
+	}
+	for _, uid := range sampledUIDs {
+		if uid != userID {
+			t.Errorf("sampled uid = %d, want %d (only NEW session should be visible)", uid, userID)
+		}
+	}
+}
+
+// TestSessionManager_Reconnect_CrossRoom_OldRoomImmediatelyEmpty:
+// review r5 [P2] 防回归 cross-room 变体：user 从 roomA 重连到 roomB，第二次
+// Register 完成后 ListSessionsByRoomID(roomA) 应当**立即**为空（OLD 已在 Register
+// 锁内被从 sessionsByRoom 移除），而不是要等 oldS.Close() → Unregister 跑完。
+//
+// 这覆盖 broadcast 在 roomA 的同窗口期不应再看到 OLD 的语义（虽然 OLD 在
+// sessionsByID 还在等 onUnregister 钩子触发，但 broadcast 走 byRoom 索引）。
+func TestSessionManager_Reconnect_CrossRoom_OldRoomImmediatelyEmpty(t *testing.T) {
+	const userID = uint64(1001)
+	const roomA = uint64(3001)
+	const roomB = uint64(3002)
+
+	var (
+		sampledMu      sync.Mutex
+		sampledRoomALen int
+		registerCount  atomic.Int32
+	)
+	var mgr wsapp.SessionManager
+	mgr = wsapp.NewSessionManager(
+		wsapp.WithRegisterHook(func(s *wsapp.Session) {
+			n := registerCount.Add(1)
+			if n != 2 {
+				return
+			}
+			sessions := mgr.ListSessionsByRoomID(context.Background(), roomA)
+			sampledMu.Lock()
+			sampledRoomALen = len(sessions)
+			sampledMu.Unlock()
+		}),
+	)
+	defer mgr.Close()
+
+	repo := &stubRoomMemberRepo{}
+	signer := newSigner(t)
+	wsURL, ts := startGatewayServer(t, signer, mgr, repo)
+	defer ts.Close()
+
+	tokenA, _ := signer.Sign(userID, 3600)
+	urlA := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomA, tokenA)
+	connA, _, err := dialWS(t, urlA)
+	if err != nil {
+		t.Fatalf("dial roomA: %v", err)
+	}
+	defer connA.Close()
+	_ = connA.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := connA.ReadMessage(); err != nil {
+		t.Fatalf("read roomA snapshot: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if registerCount.Load() >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	tokenB, _ := signer.Sign(userID, 3600)
+	urlB := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomB, tokenB)
+	connB, _, err := dialWS(t, urlB)
+	if err != nil {
+		t.Fatalf("dial roomB: %v", err)
+	}
+	defer connB.Close()
+	_ = connB.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := connB.ReadMessage(); err != nil {
+		t.Fatalf("read roomB snapshot: %v", err)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if registerCount.Load() >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	sampledMu.Lock()
+	defer sampledMu.Unlock()
+	// 修复前：sampledRoomALen = 1（OLD 还在 byRoom[roomA]）
+	// 修复后：sampledRoomALen = 0（OLD 已在 Register 锁内从 byRoom 移除）
+	if sampledRoomALen != 0 {
+		t.Errorf("ListSessionsByRoomID(roomA) at NEW Register hook = %d, want 0 (OLD must be removed from old room's byRoom synchronously with NEW Register)", sampledRoomALen)
+	}
+}
+
 // TestSessionManager_ListSessionsByRoomID_ReturnsAllInRoom: 多 user 在同 room →
 // ListSessionsByRoomID 返回全部。
 func TestSessionManager_ListSessionsByRoomID_ReturnsAllInRoom(t *testing.T) {

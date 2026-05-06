@@ -117,28 +117,34 @@ func NewSessionManager(opts ...SessionManagerOption) SessionManager {
 // 流程：
 //  1. 生成 sessionID（uuid 前 8 字符）
 //  2. 检查同 user 是否已有 active session：
-//     - 是 → 记录 replaced 引用，但**不**在锁内移除旧索引（与 Close 路径同模式：
-//     让旧 session.Close() → notifyClosed → Unregister(oldID) 走标准索引清理 +
-//     onUnregister 钩子触发路径）。
+//     - 是 → 记录 replaced 引用 + **锁内**把 OLD 从 sessionsByRoom 移除
+//     （让 broadcast 不再看到 OLD），但**保留** OLD 在 sessionsByID（让后续
+//     oldS.Close() → notifyClosed → Unregister(oldID) 仍能找到它，触发
+//     onUnregister 钩子走标准路径）
 //  3. 把新 Session 的 sessionID 字段赋值（newSession 时还没有；这里**回填**）
 //     + 重建 contextual logger（带 sessionID）
-//  4. 注入新 Session 的双索引 + userToSessionID（覆盖；旧 oldID 索引仍在，由后
-//     续 oldS.Close() 路径清理）
+//  4. 注入新 Session 的双索引 + userToSessionID（覆盖）
 //  5. 把 manager 自身设为 session.notifier，让 session 自闭时反向通知 manager
 //  6. 锁外调 onRegister 钩子（如有）+ 旧 Session 强制 Close（触发 onUnregister
 //     钩子）
 //
-// **关键不变量**（review r2 P1 修）：reconnect 替换路径**必须**触发旧 Session 的
-// onUnregister 钩子。修复前实装是"锁内 removeFromIndicesLocked(oldS) → 锁外
+// **关键不变量 1**（review r2 P1 修）：reconnect 替换路径**必须**触发旧 Session
+// 的 onUnregister 钩子。修复前实装是"锁内 removeFromIndicesLocked(oldS) → 锁外
 // oldS.Close()"；oldS.Close() → notifyClosed → Unregister 看到索引已空 → 走 no-op
 // 路径 → onUnregister 漏调，10.6 Redis presence cleanup / metrics 计数被永久
-// 遗留。修复同 Close() 路径模式：保留旧索引到 oldS.Close() 跑完。
+// 遗留。
 //
-// 短暂重叠窗口（< 1ms）：在 oldS.Close() 跑完前，sessionsByID 同时含 oldID + newID，
-// sessionsByRoom[oldRoom] 同时含两个；ListSessionsByRoomID 短暂返双倍。可接受 ——
-// userToSessionID[user] 已指向 newID，业务层"按 user 找 session"的查询拿到新的；
-// "按 room 广播"的短暂双发对客户端无副作用（客户端按 sessionID 去重 / 旧 session
-// 紧接着 close 1006 让客户端忽略后续）。详见 docs/lessons/2026-05-06。
+// **关键不变量 2**（review r5 P2 修）：reconnect 替换的中场窗口期 ListSessionsByRoomID
+// **不能**同时返回 OLD 和 NEW（会让 BroadcastToRoom 同 user 双发，client 不能 dedupe
+// 因为 sessionID 不外漏）。修复策略：把 OLD 与 NEW 在 byRoom 索引的生命周期拆分 ——
+// Register lock 内**先**从 sessionsByRoom 移除 OLD（broadcast 立即不再见到 OLD）；
+// 保留 OLD 在 sessionsByID 让后续 Close → Unregister 仍能找到 + 触发钩子；OLD 在
+// sessionsByID 的清理由 Unregister(oldID) 路径接管，**不**再二次动 sessionsByRoom
+// （已被 Register 段移除）。
+//
+// 配合修改：removeFromIndicesLocked 必须 graceful 处理"sessionsByRoom 已不在
+// 但 sessionsByID 在"的状态（只 delete 存在的索引）—— 已就绪（map delete 对
+// missing key 是 no-op，本身就 graceful）。
 func (m *sessionManager) Register(ctx context.Context, s *Session) (string, error) {
 	if s == nil {
 		return "", errors.New("ws: register nil session")
@@ -152,13 +158,24 @@ func (m *sessionManager) Register(ctx context.Context, s *Session) (string, erro
 		return "", errors.New("ws: session manager closed")
 	}
 
-	// 同 user 重连：保留旧 session 的索引，仅记录 replaced 引用 —— 让 oldS.Close()
-	// 路径走标准 Unregister 触发 onUnregister 钩子（review r2 P1 修；之前是锁内
-	// removeFromIndicesLocked(oldS) 导致后续 Unregister 走 no-op 漏调钩子）。
+	// 同 user 重连：记录 replaced 引用 + 锁内**仅**从 sessionsByRoom 移除 OLD
+	// （broadcast 路径立即看不到 OLD，避免重叠窗口双发 —— review r5 P2 修）；
+	// 保留 OLD 在 sessionsByID，让后续 oldS.Close() → notifyClosed → Unregister(oldID)
+	// 仍能找到 + 触发 onUnregister 钩子（review r2 P1 不变量）。
 	var replaced *Session
 	if oldID, ok := m.userToSessionID[s.userID]; ok {
 		if oldS, ok2 := m.sessionsByID[oldID]; ok2 {
 			replaced = oldS
+			// 锁内移除 OLD 在 sessionsByRoom 的索引（**不**触发钩子，钩子在
+			// Unregister(oldID) 路径触发；这里只是让 broadcast 立即不可见）。
+			// 注意：旧 session 的 roomID 可能与新 session 不同（cross-room reconnect），
+			// 用 oldS.roomID 而不是 s.roomID。
+			if room, ok3 := m.sessionsByRoom[oldS.roomID]; ok3 {
+				delete(room, oldID)
+				if len(room) == 0 {
+					delete(m.sessionsByRoom, oldS.roomID)
+				}
+			}
 		}
 	}
 
@@ -171,9 +188,9 @@ func (m *sessionManager) Register(ctx context.Context, s *Session) (string, erro
 	s.logger = s.logger.With(slog.String("sessionID", sessionID))
 	s.notifier = m
 
-	// 注入双索引（覆盖 userToSessionID[user]=newID；旧 oldID 索引仍由 oldS.Close()
-	// 路径的 Unregister(oldID) 清理 —— removeFromIndicesLocked 内 "currentID ==
-	// s.sessionID" 守卫确保 userToSessionID[user] 不被误删回 oldID）。
+	// 注入新 Session 的双索引（覆盖 userToSessionID[user]=newID）。
+	// OLD 在 sessionsByID 的清理交给 Unregister(oldID)，OLD 在 sessionsByRoom
+	// 已在上面 replaced 分支移除（review r5 P2 修：避免 broadcast 重叠窗口双发）。
 	m.sessionsByID[sessionID] = s
 	if _, ok := m.sessionsByRoom[s.roomID]; !ok {
 		m.sessionsByRoom[s.roomID] = map[string]*Session{}
@@ -233,9 +250,25 @@ func (m *sessionManager) Unregister(ctx context.Context, sessionID string) error
 
 // removeFromIndicesLocked 从双索引 + userToSessionID 移除 Session（caller 持
 // m.mu 写锁）。
+//
+// **graceful 不变量**（review r5 P2 修配套）：本函数对"索引已被前置路径移除"
+// 的状态保持 graceful —— Go map delete 对 missing key 是 no-op，所以即便
+// Register 替换路径已经把 OLD 从 sessionsByRoom 移除，本函数二次 delete 仍然
+// 安全（不 panic / 不报错）。
+//
+// 用法场景：
+//  1. 标准 Unregister 路径（session 主动 Close → notifyClosed → Unregister）：
+//     sessionsByID + sessionsByRoom + userToSessionID 都在 → 三处都成功 delete
+//  2. Register 替换路径下旧 Session 的 Close → Unregister：
+//     sessionsByID 在（被 Register 段保留以触发钩子）；sessionsByRoom 已被
+//     Register 段移除 → 本函数 delete missing key no-op；
+//     userToSessionID 已指向 NEW sessionID → currentID != s.sessionID 守卫不删
+//  3. SessionManager.Close() 路径下批量遍历 → 每个 session 走标准 Unregister
 func (m *sessionManager) removeFromIndicesLocked(s *Session) {
 	delete(m.sessionsByID, s.sessionID)
 	if room, ok := m.sessionsByRoom[s.roomID]; ok {
+		// graceful：room map 里不一定有 s.sessionID（如 Register 替换路径已
+		// 提前移除）；map delete 对 missing key 是 no-op，安全。
 		delete(room, s.sessionID)
 		if len(room) == 0 {
 			delete(m.sessionsByRoom, s.roomID)

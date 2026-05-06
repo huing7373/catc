@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
@@ -17,19 +18,26 @@ import (
 	"github.com/huing/cat/server/internal/repo/tx"
 )
 
-// router_ws_test 锁 Story 10.3 review r3 [P1]：WS 路由必须 gate 在
-// rooms / room_members 表存在性之后。两张表是 Epic 11.2 才落地的 migration，
-// 当前 server/migrations/ 只到 0006；任何走 WS 握手的部署环境会在
-// RoomMemberRepo.RoomExists / IsUserInRoom 阶段 SQL 报"table doesn't exist"
-// → Gateway close 1011 → feature 完全不可用。
+// router_ws_test 锁 Story 10.3 review r5 [P1] 后的契约：
 //
-// 测试三个分支：
-//   - 表都存在 → 路由挂载（200/400/4xx 任意 ≠ 404）
-//   - 任一表不存在 → 路由不挂载（404 NotFound）
-//   - SHOW TABLES query 出错（DB 异常）→ 路由不挂载（404）
+// **r5 之前（r3 形态）**：rooms / room_members migration 不在本 story 范围内，
+// 路由用 wsTablesReady() warn-and-skip 兜底；prod 起服务时表缺 → 路由不挂 →
+// client 拿 HTTP 404（不是 documented WS close codes） → Story 10.3 在正常
+// startup 完全不可用。
 //
-// **不**用真实 mysql 容器：sqlmock 注入 GORM，期望 `SHOW TABLES LIKE ...`
-// 查询返回不同结果即可锁住 wsTablesReady 决策路径。
+// **r5 修法**：
+//   - 把 rooms / room_members CREATE TABLE 拆出 Epic 11.2 提前到 Story 10.3
+//     （migrations 0007 / 0008 已 ship）
+//   - WS 路由**总是**挂载（不再 warn-and-skip）
+//   - wsTablesReady() 改为**防御性早期检测**：表缺 → log error + panic（fail-fast）
+//
+// 本测试覆盖三个分支（注意语义都变了）：
+//   - 表都存在 → 路由挂载（NewRouter 正常返回 + /ws/rooms/3001 返非 404）
+//   - 任一表不存在 → NewRouter 启动期 panic（fail-fast，不再 silent skip）
+//   - SHOW / sniff query 出错（DB 异常）→ NewRouter 启动期 panic（同上）
+//
+// 不用真实 mysql 容器：sqlmock 注入 GORM，期望 information_schema query 返回
+// 不同结果即可锁住 wsTablesReady fail-fast 行为。
 
 // newRouterWSTestDeps 构造测试 Deps，包含挂载 WS 路由所需的所有非 nil 字段
 // （GormDB / TxMgr / Signer / RateLimitCfg / SessionMgr / WSCfg / EnvName）。
@@ -76,10 +84,9 @@ func newGormWithMockForRouter(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
 	t.Cleanup(func() {
 		_ = sqlDB.Close()
 		// **不**调 ExpectationsWereMet：NewRouter 内部会触发 4.6 / 4.8 / 7.x
-		// 各业务路由构造期的 repo 初始化（如果有的话）+ wsTablesReady 的两次
-		// SHOW TABLES 查询；本测试只想锁住 wsTablesReady 行为，对其他可能
-		// 出现的查询保持宽松（QueryMatcherRegexp 默认会跳过未声明的查询，
-		// 实际结果以路由是否挂载为准）。
+		// 各业务路由构造期的 repo 初始化（如果有的话）+ wsTablesReady 的 sniff
+		// 查询；本测试只想锁住 wsTablesReady 行为，对其他可能出现的查询保持
+		// 宽松。
 	})
 	gormDB, err := gorm.Open(gormmysql.New(gormmysql.Config{
 		Conn:                      sqlDB,
@@ -105,7 +112,7 @@ func newGormWithMockForRouter(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
 //   - 仅一表存在 → 1
 //   - 两表都不存在 → 0
 //
-// wsTablesReady 阈值 hitCount >= 2 才判定 ready。
+// wsTablesReady 阈值 hitCount >= 2 才判定 ready；不足则 panic（r5 fail-fast）。
 func expectWSTablesShow(mock sqlmock.Sqlmock, roomsExists, membersExists bool) {
 	var hitCount int
 	if roomsExists {
@@ -122,9 +129,7 @@ func expectWSTablesShow(mock sqlmock.Sqlmock, roomsExists, membersExists bool) {
 // rooms / room_members 都存在 → /ws/rooms/3001 路由挂载 → 非 404 响应。
 //
 // **不**做真实 WS 握手（避免拉满 gorilla.Upgrader / hijack 路径）；只验证
-// 路由 dispatch 命中（任何非 404 状态都说明命中了 gateway.Handle，至于
-// gateway 内部因为缺 token 返 4001 还是因为 Gin 协议升级失败返 400 都
-// 不是本测试关注点）。
+// 路由 dispatch 命中（任何非 404 状态都说明命中了 gateway.Handle）。
 func TestRouter_WSRouteMounted_WhenTablesExist(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	gormDB, mock := newGormWithMockForRouter(t)
@@ -141,67 +146,70 @@ func TestRouter_WSRouteMounted_WhenTablesExist(t *testing.T) {
 	}
 }
 
-// TestRouter_WSRouteSkipped_WhenRoomsTableMissing:
-// rooms 表不存在（room_members 存在） → 路由跳过 → /ws/rooms/3001 返 404。
-func TestRouter_WSRouteSkipped_WhenRoomsTableMissing(t *testing.T) {
+// TestRouter_WSRouteFailFast_WhenRoomsTableMissing:
+// rooms 表不存在（room_members 存在） → NewRouter panic（r5 fail-fast）。
+//
+// review r5 [P1] 修法：r3 形态下"表缺 → 跳过路由"是 silent skip，让 prod 拿
+// 404 而非 documented WS close codes；r5 后改为表缺 → log error + panic 让
+// systemd / k8s 立即重启 + 运维告警。
+func TestRouter_WSRouteFailFast_WhenRoomsTableMissing(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	gormDB, mock := newGormWithMockForRouter(t)
 	expectWSTablesShow(mock, false, true)
 
-	r := NewRouter(newRouterWSTestDeps(t, gormDB))
-
-	req := httptest.NewRequest(http.MethodGet, "/ws/rooms/3001", nil)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404 (route should not be mounted when rooms table missing); body=%s", w.Code, w.Body.String())
-	}
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			t.Fatalf("NewRouter did not panic when rooms table missing (r5 fail-fast contract violated)")
+		}
+		msg, _ := rec.(string)
+		if !strings.Contains(msg, "ws backing tables missing") {
+			t.Errorf("panic msg = %q, want contain 'ws backing tables missing'", msg)
+		}
+	}()
+	NewRouter(newRouterWSTestDeps(t, gormDB))
 }
 
-// TestRouter_WSRouteSkipped_WhenRoomMembersTableMissing:
-// room_members 表不存在（rooms 存在） → 路由跳过 → 404。
-func TestRouter_WSRouteSkipped_WhenRoomMembersTableMissing(t *testing.T) {
+// TestRouter_WSRouteFailFast_WhenRoomMembersTableMissing:
+// room_members 表不存在（rooms 存在） → NewRouter panic（同上）。
+func TestRouter_WSRouteFailFast_WhenRoomMembersTableMissing(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	gormDB, mock := newGormWithMockForRouter(t)
 	expectWSTablesShow(mock, true, false)
 
-	r := NewRouter(newRouterWSTestDeps(t, gormDB))
-
-	req := httptest.NewRequest(http.MethodGet, "/ws/rooms/3001", nil)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404 (route should not be mounted when room_members table missing); body=%s", w.Code, w.Body.String())
-	}
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			t.Fatalf("NewRouter did not panic when room_members table missing (r5 fail-fast contract violated)")
+		}
+		msg, _ := rec.(string)
+		if !strings.Contains(msg, "ws backing tables missing") {
+			t.Errorf("panic msg = %q, want contain 'ws backing tables missing'", msg)
+		}
+	}()
+	NewRouter(newRouterWSTestDeps(t, gormDB))
 }
 
-// TestRouter_WSRouteSkipped_WhenBothTablesMissing:
-// 两表都不存在（当前 prod 用 0001-0006 migration 起服务的真实状态） → 路由跳过 → 404。
+// TestRouter_WSRouteFailFast_WhenBothTablesMissing:
+// 两表都不存在（即 r3 时代默认 prod 用 0001-0006 起服务的状态）→ NewRouter
+// 启动期 panic（r5 fail-fast，**不**再 silent 跳过 + 起服务）。
 //
-// 这是本 fix 的核心防回归 case：review r3 P1 描述的 prod 失败场景。
-func TestRouter_WSRouteSkipped_WhenBothTablesMissing(t *testing.T) {
+// 这是本 fix 的核心防回归 case：review r5 P1 描述的"prod 静默 404"场景被
+// 替换为"prod 启动期立即 panic"，让运维通过 CrashLoopBackOff 立即看到。
+func TestRouter_WSRouteFailFast_WhenBothTablesMissing(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	gormDB, mock := newGormWithMockForRouter(t)
 	expectWSTablesShow(mock, false, false)
 
-	r := NewRouter(newRouterWSTestDeps(t, gormDB))
-
-	req := httptest.NewRequest(http.MethodGet, "/ws/rooms/3001", nil)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404 (review r3 P1 防回归: prod build with 0001-0006 migrations should NOT mount ws); body=%s", w.Code, w.Body.String())
-	}
-
-	// 即便 WS 路由跳过 / 业务路由仍然挂载（rooms 表不存在不应阻塞 /ping / /home 等）：
-	// 验证 /ping 仍 200 来确认本 if-else 分支没有顺带砍掉无关路由。
-	pingReq := httptest.NewRequest(http.MethodGet, "/ping", nil)
-	pingW := httptest.NewRecorder()
-	r.ServeHTTP(pingW, pingReq)
-	if pingW.Code != http.StatusOK {
-		t.Errorf("/ping status = %d, want 200 (业务路由不应受 ws gate 影响)", pingW.Code)
-	}
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			t.Fatalf("NewRouter did not panic when both tables missing (r5 fail-fast contract violated)")
+		}
+		msg, _ := rec.(string)
+		if !strings.Contains(msg, "ws backing tables missing") {
+			t.Errorf("panic msg = %q, want contain 'ws backing tables missing'", msg)
+		}
+	}()
+	NewRouter(newRouterWSTestDeps(t, gormDB))
 }
