@@ -178,3 +178,4 @@
 | 2026-05-06 | [WS room 存在性来源 / pong 优先级 buffer / sessionID logger 字段（10-3 r4）](2026-05-06-ws-room-existence-source-and-pong-priority-r4.md) | 3 | architecture, observability | `<pending>` |
 | 2026-05-06 | [WS 路由"表存在性 gate"循环陷阱 + reconnect 替换的 broadcast 重叠窗口](2026-05-06-ws-table-existence-gate-and-reconnect-broadcast-window.md) | 2 | architecture | `<pending>` |
 | 2026-05-06 | [WS 表存在性 sniff 不能依赖 information_schema 权限（r6）](2026-05-06-ws-table-probe-must-not-require-information-schema-privilege.md) | 1 | architecture | `<pending>` |
+| 2026-05-06 | [房间存在校验补 status 过滤 & writeLoop priority 配额防 starvation（10-3 r7）](2026-05-06-ws-room-status-filter-and-priority-quota.md) | 2 | architecture, perf | `<pending>` |

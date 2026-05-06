@@ -1108,6 +1108,157 @@ func TestSession_Send_BufferFull_ReturnsErr(t *testing.T) {
 	}
 }
 
+// TestSession_WriteLoop_DoesNotStarveSendChan: review r7 P3 fix 验证。
+//
+// 背景（r7 P3）：r4 加的 priority chan 让 writeLoop 严格优先 drain
+// sendPriorityChan，导致 buggy / malicious client 高频 ping 持续填 priority
+// → sendChan（业务消息）永不被消费 → client 心跳健康但永远收不到真实业务
+// 更新（典型 starvation bug）。修法是 maxConsecutivePriority 配额。
+//
+// 测试策略：
+//  1. 握手成功后，client **暂停**读取（不 ReadMessage）
+//  2. server-side 通过 manager 拿到 Session，**先**入队若干 normal msg
+//     到 sendChan，**再**入队大量 priority msg 到 sendPriorityChan（混合
+//     交错顺序：normal_1, priority_1, priority_2, ..., priority_N, normal_2）
+//  3. server-side 总投递数 = sendChanCapacity 上限以下（保证 fire-and-forget
+//     不返 buffer full），priority 总数 > maxConsecutivePriority 让 quota 强
+//     制走双分支至少一次
+//  4. client 开始 read N 条消息 → 检查"normal type 出现位置"：旧实装下
+//     writeLoop 严格优先 priority → 所有 priority 在 normal 之前；新实装
+//     下 quota 让 normal 在 priority 流中插队
+//
+// **关键约束**：本测试**不**测精确顺序（go select 多分支随机性 + writeLoop
+// 与 sender 的 race 让顺序不稳定），只测"normal 不会全部排在 priority 之
+// 后"这个不变量。
+func TestSession_WriteLoop_DoesNotStarveSendChan(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{
+		listMembersFn: func(ctx context.Context, roomID uint64) ([]uint64, error) {
+			return []uint64{1001}, nil
+		},
+	}
+	conn, session, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	// 投递策略：让 client 慢读（不读，让 writeLoop 卡在 conn.WriteMessage 一段时间），
+	// 让 server-side enqueue **同时**有 sendChan 待发 + sendPriorityChan 持续被填，
+	// 模拟 reviewer 描述的"buggy client 持续高频 ping → priority chan 持续非空 →
+	// sendChan 永远不被消费"场景。
+	//
+	// 具体：
+	//   1. 先 enqueue 1 条 normal 到 sendChan（让它"等待"，writeLoop 处理它前会
+	//      被 priority 持续抢占）
+	//   2. 短 sleep 让 writeLoop 把 normal_1 drain 走（触发 conn.WriteMessage）；
+	//      writeLoop 接着进入下一轮 select 看 priority + sendChan，此时两者都空
+	//   3. enqueue 1 条 normal 到 sendChan（不会立刻被 drain，因为我们紧接着会
+	//      持续 enqueue priority，让 writeLoop 一直在 fast-path 走 priority 分支）
+	//   4. 持续 enqueue 大量 priority（priority 容量 4 + writeLoop drain 速率 →
+	//      用 retry 让 priority chan **始终有数据**），形成"持续 high-frequency
+	//      ping"模拟。
+	//   5. quota 触发后，writeLoop 会强制走双分支，~50% 概率选 sendChan，让
+	//      normal_2 在 priority 流中间被插入。
+	//
+	// priority 总数 = 32（>> maxConsecutivePriority=4），quota 必触发多次。
+	const priorityCount = 32
+	const normalCount = 2
+
+	// 关键时序：必须让 normal_1 / normal_2 enqueue 进 sendChan 时 **priority chan
+	// 已非空**，否则 writeLoop 阻塞 select 会立刻拿走 normal_1/2，根本不进 fast
+	// path → quota 没机会触发。
+	//
+	// Step 1: 先把 priority chan 填满 4 条（priority 容量）；writeLoop 会立刻开始
+	//         drain，但因为容量小 + 我们紧接着持续 retry，priority chan 始终非空。
+	for i := 0; i < 4; i++ {
+		msg := []byte(fmt.Sprintf(`{"type":"pong","requestId":"p_init_%d","payload":{},"ts":0}`, i))
+		if err := session.SendPriority(msg); err != nil {
+			t.Fatalf("SendPriority p_init_%d: %v", i, err)
+		}
+	}
+	// Step 2: 立刻 enqueue 2 条 normal（priority chan 此刻有数据 → writeLoop 走
+	//         fast path drain priority；normal 在 sendChan 等）
+	if err := session.Send([]byte(`{"type":"normal","requestId":"n_1","payload":{},"ts":0}`)); err != nil {
+		t.Fatalf("Send normal_1: %v", err)
+	}
+	if err := session.Send([]byte(`{"type":"normal","requestId":"n_2","payload":{},"ts":0}`)); err != nil {
+		t.Fatalf("Send normal_2: %v", err)
+	}
+	// Step 3: 持续填 priority chan 直到投完 priorityCount - 4 个（前 4 个在 step
+	//         1 投了）。retry 让填速率与 writeLoop drain 速率匹配，priority chan
+	//         **始终非空** → writeLoop 持续走 fast path → quota 必触发。
+	for i := 4; i < priorityCount; i++ {
+		msg := []byte(fmt.Sprintf(`{"type":"pong","requestId":"p_%d","payload":{},"ts":0}`, i))
+		for {
+			err := session.SendPriority(msg)
+			if err == nil {
+				break
+			}
+			if errors.Is(err, wsapp.ErrSessionSendPriorityBufferFull) {
+				// priority 满 → writeLoop 在 drain，等一下再 retry（让 priority
+				// chan 持续保持 "有数据" 状态）
+				time.Sleep(100 * time.Microsecond)
+				continue
+			}
+			t.Fatalf("SendPriority p_%d: %v", i, err)
+		}
+	}
+
+	// client 读 priorityCount + normalCount 条（normal_1 + normal_2 + 全部
+	// priority 总会到 wire，writeLoop 在 chan 都耗尽前不会停）
+	totalExpected := priorityCount + normalCount
+	receivedTypes := make([]string, 0, totalExpected)
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for i := 0; i < totalExpected; i++ {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("ReadMessage[%d]: %v (received so far: %v)", i, err, receivedTypes)
+		}
+		var env map[string]any
+		if err := json.Unmarshal(msg, &env); err != nil {
+			t.Fatalf("unmarshal[%d]: %v", i, err)
+		}
+		typ, _ := env["type"].(string)
+		receivedTypes = append(receivedTypes, typ)
+	}
+
+	// 不变量：至少有 1 条 normal **出现在 priority 流中间**（即 normal index
+	// 之前与之后都有 priority），证明 quota 让 sendChan 在持续 priority 流下
+	// 仍能被 drain。
+	//   - 旧实装（严格优先）：所有 normal 排在所有 priority 之后 → 找不到任
+	//     何 normal 满足"前后都有 priority"
+	//   - 新实装（quota 让路）：至少 1 条 normal 在 priority 流中间被插入
+	normalSeen := 0
+	firstPriorityIdx := -1
+	lastPriorityIdx := -1
+	normalInMiddle := false
+	for i, typ := range receivedTypes {
+		if typ == "pong" {
+			if firstPriorityIdx == -1 {
+				firstPriorityIdx = i
+			}
+			lastPriorityIdx = i
+		}
+		if typ == "normal" {
+			normalSeen++
+		}
+	}
+	for i, typ := range receivedTypes {
+		if typ == "normal" && i > firstPriorityIdx && i < lastPriorityIdx {
+			normalInMiddle = true
+			break
+		}
+	}
+	if normalSeen != normalCount {
+		t.Fatalf("expected %d normal msgs, got %d (received types: %v)", normalCount, normalSeen, receivedTypes)
+	}
+	if !normalInMiddle {
+		t.Errorf("starvation detected: no normal msg appeared between priority msgs (received types: %v); "+
+			"new writeLoop quota should let sendChan drain at least once during priority flood",
+			receivedTypes)
+	}
+}
+
 // 显式确保 init 时 wg.Wait 被引用（让 testing 不抱怨 sync 未用）；某些 case
 // 用 sync.WaitGroup 但当前实现移除了，留 sync 引用一致。
 var _ = sync.Mutex{}

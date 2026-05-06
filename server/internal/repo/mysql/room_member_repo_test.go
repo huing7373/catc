@@ -8,13 +8,13 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 )
 
-// TestRoomMemberRepo_RoomExists_True：rooms 表中存在该 id → true
-// （review r4 P2 修：查 rooms 不查 room_members）
-func TestRoomMemberRepo_RoomExists_True(t *testing.T) {
+// TestRoomMemberRepo_RoomExists_TrueOnActive：rooms 表中存在该 id 且 status=1 → true
+// （review r4 P2 修：查 rooms 不查 room_members；r7 P2 加 status 过滤）
+func TestRoomMemberRepo_RoomExists_TrueOnActive(t *testing.T) {
 	gormDB, mock := newGormWithMock(t)
 	repo := NewRoomMemberRepo(gormDB)
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM rooms WHERE id = ? LIMIT 1")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM rooms WHERE id = ? AND status = 1 LIMIT 1")).
 		WithArgs(uint64(3001)).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 
@@ -27,13 +27,13 @@ func TestRoomMemberRepo_RoomExists_True(t *testing.T) {
 	}
 }
 
-// TestRoomMemberRepo_RoomExists_FalseOnZeroRows：0 行 → false, nil
+// TestRoomMemberRepo_RoomExists_FalseOnZeroRows：0 行（rooms 表不存在该 id）→ false, nil
 // （review r4 P2 修：查 rooms 不查 room_members）
 func TestRoomMemberRepo_RoomExists_FalseOnZeroRows(t *testing.T) {
 	gormDB, mock := newGormWithMock(t)
 	repo := NewRoomMemberRepo(gormDB)
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM rooms WHERE id = ? LIMIT 1")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM rooms WHERE id = ? AND status = 1 LIMIT 1")).
 		WithArgs(uint64(9999)).
 		WillReturnRows(sqlmock.NewRows([]string{"1"})) // 0 行
 
@@ -55,7 +55,7 @@ func TestRoomMemberRepo_RoomExists_RoomMissingButMembersExist(t *testing.T) {
 
 	// 模拟"rooms 表无该 id（room 已 archived 删除）"；即便 room_members
 	// 表里仍有 (3001, 1001) 的 stale 行，RoomExists 也必须返 false。
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM rooms WHERE id = ? LIMIT 1")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM rooms WHERE id = ? AND status = 1 LIMIT 1")).
 		WithArgs(uint64(3001)).
 		WillReturnRows(sqlmock.NewRows([]string{"1"})) // rooms 0 行
 
@@ -74,7 +74,7 @@ func TestRoomMemberRepo_RoomExists_EmptyRoomStillExists(t *testing.T) {
 	gormDB, mock := newGormWithMock(t)
 	repo := NewRoomMemberRepo(gormDB)
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM rooms WHERE id = ? LIMIT 1")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM rooms WHERE id = ? AND status = 1 LIMIT 1")).
 		WithArgs(uint64(3002)).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 
@@ -84,6 +84,32 @@ func TestRoomMemberRepo_RoomExists_EmptyRoomStillExists(t *testing.T) {
 	}
 	if !got {
 		t.Errorf("got = false, want true (empty room still exists in rooms table)")
+	}
+}
+
+// TestRoomMemberRepo_RoomExists_FalseOnClosedRoom：rooms 表存在该 id 但
+// status=2 (closed) → false, nil（review r7 P2 fix 核心：过滤 closed 房间，
+// 防 archived rooms 仍被 Gateway accept 而错误下发 room.snapshot）。
+//
+// SQL 语义：raw query 中 `status = 1` 直接在 DB 层过滤，sqlmock 模拟"DB 返 0 行"
+// 即可（不需要校验 status 列值，因为 query 已带 status=1 谓词，DB 不会返 closed
+// 行）。这里 expect 的 args 仅 roomID（status=1 是 SQL 字面量谓词，**不**作为
+// `?` 占位）。
+func TestRoomMemberRepo_RoomExists_FalseOnClosedRoom(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	// 模拟"rooms.id=3001 行存在但 status=2"：query 带 `status = 1` 过滤 → DB 返 0 行
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM rooms WHERE id = ? AND status = 1 LIMIT 1")).
+		WithArgs(uint64(3001)).
+		WillReturnRows(sqlmock.NewRows([]string{"1"})) // 0 行（被 status=1 过滤掉）
+
+	got, err := repo.RoomExists(context.Background(), 3001)
+	if err != nil {
+		t.Fatalf("RoomExists: %v", err)
+	}
+	if got {
+		t.Errorf("got = true, want false (closed room must be rejected even if rooms.id row exists)")
 	}
 }
 

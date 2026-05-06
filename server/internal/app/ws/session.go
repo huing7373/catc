@@ -407,15 +407,42 @@ func (s *Session) handlePing(env clientEnvelope) {
 	}
 }
 
+// maxConsecutivePriority 是 writeLoop 中连续消费 sendPriorityChan 的硬上限
+// （review r7 P3 加）。
+//
+// **背景**（review r7 P3）：r4 给 writeLoop 加了 priority 优先消费模式 ——
+// `select { priority }` 优先于 `select { priority / normal }`。该模式在 happy
+// path 下让 pong 在业务 buffer 压力下快速送达。但**严格**优先 + 没有上限会让
+// buggy / malicious client 持续高频 ping → handlePing 不断填 sendPriorityChan
+// → priority 始终非空 → writeLoop 永远走"优先"分支，sendChan（业务消息：
+// snapshot / broadcast / emoji 等）**永不被消费**。connection 心跳层看起来健康
+// 但 client 永远收不到真实业务更新（典型 starvation bug）。
+//
+// **修法**（方案 a，review r7 推荐）：连续 drain priority 不超过 N 次后强制走
+// 一次"双分支阻塞 select"，让 sendChan 至少有一次被命中机会。N = 4 与
+// sendPriorityChanCapacity 对齐 —— 即"一次 priority buffer 容量 worth 的
+// pong 发完，就给业务消息一次让路机会"。go select 多分支随机性保证让路那次
+// 不偏 priority（约 50% 概率给 sendChan）。
+//
+// **不**选其它方案：
+//   - 方案 b（select 多分支不带 priority 偏序）：破坏 r4 的 priority 设计 ——
+//     pong 在业务 buffer 32 满载时不再快速响应；
+//   - 方案 c（handlePing 入口限流）：违反 V1 §12.3 钦定的"pong 必发"协议
+//     语义，client 自然超时 reconnect → 重连风暴。
+const maxConsecutivePriority = 4
+
 // writeLoop 是写 goroutine 主循环（私有方法）。
 //
-// 主流程（review r4 P2 加 priority chan 后）：
+// 主流程（review r4 P2 加 priority chan，r7 P3 加 starvation 防护）：
 //  1. for { select { sendPriorityChan / sendChan }; conn.WriteMessage(...) }
 //  2. **优先**消费 sendPriorityChan（pong 等 protocol-level msg）：用 nested
 //     select + non-blocking priority drain → 业务 sendChan 与 priority chan 都
-//     有数据时**总是**先发 priority msg
-//  3. 两个 chan 都关闭 → loop 退出
-//  4. 写错 → log warn + s.Close()（wire 错通常意味着 conn 已死）
+//     有数据时**通常**先发 priority msg
+//  3. 但连续 priority drain 超过 maxConsecutivePriority 次后，**强制**走双分支
+//     阻塞 select 一次，避免 high-frequency ping 持续填 priority 让 sendChan
+//     starve（review r7 P3）
+//  4. 两个 chan 都关闭 → loop 退出
+//  5. 写错 → log warn + s.Close()（wire 错通常意味着 conn 已死）
 //
 // **关键约束**：
 //   - 必须用 TextMessage（V1 §12.2 关键约束钦定）
@@ -424,41 +451,60 @@ func (s *Session) handlePing(env clientEnvelope) {
 //     继续 writeLoop 也会持续失败）
 //   - 必须双 chan 都耗尽才能退出（防 priority 还有数据但 sendChan 已关 → 漏发
 //     最后的 pong / 协议错误 msg）
+//   - sendChan 不能 starve（review r7 P3，maxConsecutivePriority 上限）
 func (s *Session) writeLoop() {
 	defer func() {
 		_ = s.Close()
 	}()
+	// consecutivePriority 跟踪连续命中 priority 分支的次数；命中 sendChan 或
+	// 走"强制让路"分支后清零。
+	consecutivePriority := 0
 	for {
-		// 优先级 select：先 nested 非阻塞 select 检查 priority chan；为空才走
-		// 阻塞 select 等任意一边来消息。Go 没有内建优先级 select 语法，这是
-		// 标准的两段式 priority 模式。
+		if consecutivePriority < maxConsecutivePriority {
+			// 优先级 select：先 nested 非阻塞 select 检查 priority chan；为空才走
+			// 阻塞 select 等任意一边来消息。Go 没有内建优先级 select 语法，这是
+			// 标准的两段式 priority 模式。
+			select {
+			case msg, ok := <-s.sendPriorityChan:
+				if !ok {
+					// priority chan 关 → Close 路径在跑，退出 loop
+					return
+				}
+				if err := s.writeFrame(msg); err != nil {
+					return
+				}
+				consecutivePriority++
+				continue
+			default:
+				// priority 没数据 → 阻塞等任意一边
+			}
+		}
+		// 三种到达本分支的情况，都走"双分支阻塞 select"（priority + normal 平等）：
+		//   1) priority chan 当前为空（fast path 让出）
+		//   2) 已经连续 drain 了 maxConsecutivePriority 个 priority，强制让 sendChan
+		//      有一次被选中机会（review r7 P3 starvation 防护）
+		// Go select 多分支自带随机选择 → 两边都有数据时 ~50/50 命中。
 		select {
 		case msg, ok := <-s.sendPriorityChan:
 			if !ok {
-				// priority chan 关 → Close 路径在跑，退出 loop
 				return
 			}
 			if err := s.writeFrame(msg); err != nil {
 				return
 			}
-		default:
-			// priority 没数据 → 阻塞等任意一边
-			select {
-			case msg, ok := <-s.sendPriorityChan:
-				if !ok {
-					return
-				}
-				if err := s.writeFrame(msg); err != nil {
-					return
-				}
-			case msg, ok := <-s.sendChan:
-				if !ok {
-					return
-				}
-				if err := s.writeFrame(msg); err != nil {
-					return
-				}
+			// 走到此分支说明刚才 fast path 看到 priority 空（或刚好 quota 用完
+			// 进双分支随机选中 priority）；都视为 priority 流不再"连续"，重置
+			// 计数让下一轮 fast path 重新积累，避免 quota 永久卡死。
+			consecutivePriority = 0
+		case msg, ok := <-s.sendChan:
+			if !ok {
+				return
 			}
+			if err := s.writeFrame(msg); err != nil {
+				return
+			}
+			// 命中 sendChan → priority 不再"连续"，清零让下一轮 fast path 重新生效。
+			consecutivePriority = 0
 		}
 	}
 }

@@ -41,12 +41,15 @@ import (
 // startMySQLWithRoomMemberFixture 起一个 mysql:8.0 容器 + 临时建表 + 插入
 // fixture（roomID=3001 内有 userID=1001 / 1002 两个 member）。
 //
-// **临时建表**：本 story 阶段 migrations 没有 rooms / room_members（Epic 11.2
-// 才做）；集成测试用以下 SQL 在 setup 时建临时表：
+// **临时建表**：本 story 阶段 room_members migration 还没落地（Epic 11.2 才做）；
+// 0007_init_rooms migration 已在 r5 落地（rooms.status 用 TINYINT，1=active /
+// 2=closed，对齐数据库设计.md §6.12）。集成测试用以下 SQL 在 setup 时建临时表
+// （rooms schema 与 0007 migration **保持一致**，让 RoomExists 的
+// `WHERE status = 1` 谓词（review r7 P2 加）在测试与 prod 行为等价）：
 //
 //	CREATE TABLE rooms (
 //	    id BIGINT UNSIGNED NOT NULL,
-//	    status VARCHAR(16) NOT NULL DEFAULT 'active',
+//	    status TINYINT NOT NULL DEFAULT 1,
 //	    max_members INT NOT NULL DEFAULT 4,
 //	    member_count INT NOT NULL DEFAULT 0,
 //	    PRIMARY KEY (id)
@@ -60,7 +63,7 @@ import (
 //	    INDEX idx_user_room (user_id, room_id)
 //	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 //
-//	INSERT INTO rooms (id, status, max_members, member_count) VALUES (3001, 'active', 4, 2);
+//	INSERT INTO rooms (id, status, max_members, member_count) VALUES (3001, 1, 4, 2);
 //	INSERT INTO room_members (room_id, user_id) VALUES (3001, 1001), (3001, 1002);
 //
 // **Epic 11.2 落地后**：删除本 helper 的 inline DDL，改为跑 official migration。
@@ -121,7 +124,7 @@ func startMySQLWithRoomMemberFixture(t *testing.T) (*gorm.DB, func()) {
 	stmts := []string{
 		`CREATE TABLE rooms (
 		    id BIGINT UNSIGNED NOT NULL,
-		    status VARCHAR(16) NOT NULL DEFAULT 'active',
+		    status TINYINT NOT NULL DEFAULT 1,
 		    max_members INT NOT NULL DEFAULT 4,
 		    member_count INT NOT NULL DEFAULT 0,
 		    PRIMARY KEY (id)
@@ -133,7 +136,7 @@ func startMySQLWithRoomMemberFixture(t *testing.T) (*gorm.DB, func()) {
 		    PRIMARY KEY (room_id, user_id),
 		    INDEX idx_user_room (user_id, room_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`INSERT INTO rooms (id, status, max_members, member_count) VALUES (3001, 'active', 4, 2)`,
+		`INSERT INTO rooms (id, status, max_members, member_count) VALUES (3001, 1, 4, 2)`,
 		`INSERT INTO room_members (room_id, user_id) VALUES (3001, 1001), (3001, 1002)`,
 	}
 	for _, stmt := range stmts {
