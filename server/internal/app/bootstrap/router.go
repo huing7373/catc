@@ -1,9 +1,12 @@
 package bootstrap
 
 import (
+	stderrors "errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
 
 	"github.com/huing/cat/server/internal/app/http/devtools"
@@ -14,12 +17,18 @@ import (
 	"github.com/huing/cat/server/internal/infra/metrics"
 	redisinfra "github.com/huing/cat/server/internal/infra/redis"
 	"github.com/huing/cat/server/internal/pkg/auth"
-	"github.com/huing/cat/server/internal/repo/mysql"
+	repomysql "github.com/huing/cat/server/internal/repo/mysql"
 	"github.com/huing/cat/server/internal/repo/tx"
 	"github.com/huing/cat/server/internal/service"
 )
 
-// wsTablesReady 探测 rooms / room_members 两张表是否在当前 schema 下存在。
+// mysqlErrCodeNoSuchTable 是 MySQL "Table 'xxx.yyy' doesn't exist" 的 error number
+// （ER_NO_SUCH_TABLE = 1146）。go-sql-driver/mysql 把 server 端错误号原样填到
+// *mysql.MySQLError.Number；与 repo/mysql/auth_binding_repo.go 用 1062 / user_repo.go
+// 用 1062 同模式，只比 Number 不解析 Message 字符串（locale / 版本不稳）。
+const mysqlErrCodeNoSuchTable = 1146
+
+// wsTablesReady 探测 rooms / room_members 两张表是否在当前 schema 下可用。
 //
 // **历史**（Story 10.3 多轮 review）：
 //   - r3 [P1] 引入：当时 rooms / room_members migration 还没落地（钦定 Epic 11.2
@@ -29,55 +38,80 @@ import (
 //     WS close codes，Story 10.3 在正常 server startup 完全不可用 →
 //     **真正的修法**：把 rooms / room_members 的 CREATE TABLE 拆出 Epic 11.2
 //     提前到 Story 10.3（migrations 0007 / 0008 已 ship），让 Story 10.3
-//     self-contained 可部署；JOIN / LEAVE 等业务事务仍由 Epic 11.4 / 11.5 接管
+//     self-contained 可部署；JOIN / LEAVE 等业务事务仍由 Epic 11.4 / 11.5 接管。
+//     r5 实装用 `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema =
+//     DATABASE() AND table_name IN ('rooms','room_members')` 单 query sniff，
+//     缺表 → panic（fail-fast）。
+//   - r6 [P2] 改写：r5 的 information_schema query 在 prod hardened DB user（最小
+//     权限原则：只授权 app schema，**不**授权 information_schema）下会失败 →
+//     wsTablesReady panic → 整个 HTTP server 启动失败（不只是 /ws，所有 HTTP
+//     端点 /ping / /version / 业务 API 也挂）。改用**直接 probe 表**的方案：
+//     `SELECT 1 FROM rooms LIMIT 1` / `SELECT 1 FROM room_members LIMIT 1`
+//     走和 RoomExists 同一条 app schema 权限路径，不引入额外 privilege 要求。
 //
-// **当前职责（r5 后）**：保留**防御性早期检测**语义；**表不存在 → log error
-// 并 panic（fail-fast）**，**不**再 silent skip 跳过路由挂载。
+// **r6 后语义（与 r5 panic 行为相比的差别）**：
 //
-// 为什么仍保留本 helper（r5 后没有"unused code"）：
+// 错误分流（基于 MySQL error number，而非字符串匹配）：
+//   - err == nil（query 成功，包括空表 / 有数据两种结果）→ 表存在 → continue
+//   - err 是 ER_NO_SUCH_TABLE (1146) → **真正的 schema 漂移** → 返 false →
+//     调用方 panic（fail-fast，让 systemd / k8s CrashLoopBackOff 告警）
+//   - 其他 err（连接断 / 权限错 1142 / 等）→ log warn → continue（视为表存在但
+//     当前访问失败）。理由：把 "权限/连接 transient 错误" 当作 "缺表" 处理会让
+//     启动期假阳性 panic（如 r6 review 描述的 hardened DB user 场景）；让后续
+//     RoomExists 调用时再失败 → client 拿到 documented WS close 1011 close →
+//     fail-fast 仍然成立，只是从启动期推迟到 first request
+//
+// 为什么仍保留本 helper（r6 后没有"unused code"）：
 //   - 防御部署事故：如果某环境因为 migration 工具配置错 / 手动运维误操作让
 //     0007 / 0008 没跑（schema 与代码版本不一致），fail-fast 让运维**立即**看到
 //     启动失败，而不是 server 起来后客户端在 WS 握手时拿到 close 1011 / 404
-//     才间接发现
+//     才间接发现 schema 漂移
 //   - 与 prod / dev / staging 一致：所有环境都期望 rooms / room_members 存在
 //     （migrations 0007 / 0008 已是默认部署集合的一部分）；任何环境表缺都是
 //     部署 bug，应该 fail-fast 而非降级
 //   - 集成测试 fixture（startMySQLWithRoomMemberFixture）在容器内 CREATE TABLE
 //     仍然让 wsTablesReady 通过，集成路径不受影响
 //
-// **不**用 `SHOW TABLES LIKE` + Count：GORM .Count 实际翻译为
-// `SELECT COUNT(*) FROM (...)` 子查询，对 SHOW TABLES 元数据 query 类型不兼容。
-// 本函数用 information_schema.tables + COUNT(*) 子查询，单 query 直出整数计数。
-//
-// information_schema.tables 在 MySQL / MariaDB 标准存在；`table_schema =
-// DATABASE()` 自动绑定当前 connection 的 schema（dev / staging / prod 多 schema
-// 通用）；`table_name IN ('rooms','room_members')` 一次返回两表命中数（0/1/2）。
-//
-// 单 query 走元数据缓存，启动期开销 < 1ms。
+// **不**用 `SHOW TABLES LIKE`：GORM .Count 翻译为子查询，元数据 query 类型不兼容；
+// 而且 SHOW TABLES 在某些 hardened 环境下也可能受限。直 probe 表是最稳的方案。
 //
 // **db nil 安全**：调用方在 `deps.GormDB != nil` 分支内才调本 helper；
 // 单元测试 Deps{} 零值场景由外层 if-guard 拦截，本函数不重复 nil-check。
 //
-// **panic 行为契约**：表缺 → log error + panic("ws backing tables missing: ...");
-// 启动期 panic 让进程立即退出（systemd / k8s 重启 → CrashLoopBackOff，运维告警），
-// 而非 silent 起服务后业务路径降级。集成测试 / 单元测试场景如果不挂 rooms /
-// room_members 表，不应该走到本函数（会被外层 deps.SessionMgr if-guard 跳过，
-// 或者集成测试 fixture 已建表）。
-func wsTablesReady(db *gorm.DB) {
-	var hitCount int64
-	if err := db.Raw(
-		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN ('rooms','room_members')",
-	).Scan(&hitCount).Error; err != nil {
-		slog.Error("ws backing tables sniff failed (information_schema query error)", slog.Any("error", err))
-		panic("ws backing tables sniff failed: " + err.Error())
-	}
-	if hitCount < 2 {
-		slog.Error(
-			"ws backing tables missing: rooms / room_members not found in current schema (migrations 0007 / 0008 must be applied)",
-			slog.Int64("hitCount", hitCount),
+// **返回值契约**：true = 表可用（或访问失败但不是缺表，留给后续 request 处理）；
+// false = 真的缺表（MySQL 1146）→ 调用方应 panic 终止启动。
+func wsTablesReady(db *gorm.DB) bool {
+	for _, table := range []string{"rooms", "room_members"} {
+		var dummy int
+		// SELECT 1 FROM <table> LIMIT 1：query 走和 RoomExists / 业务事务相同的
+		// app schema 权限路径，不需要 information_schema 权限。空表也返 nil error
+		// （只是 row 集合为空），故 err == nil 即视为表可访问。
+		err := db.Raw(fmt.Sprintf("SELECT 1 FROM %s LIMIT 1", table)).Scan(&dummy).Error
+		if err == nil {
+			continue
+		}
+		// 真的缺表（ER_NO_SUCH_TABLE 1146）→ schema 漂移 → fail-fast。
+		var mysqlErr *mysql.MySQLError
+		if stderrors.As(err, &mysqlErr) && mysqlErr.Number == mysqlErrCodeNoSuchTable {
+			slog.Error(
+				"ws backing table missing: schema drift detected (MySQL error 1146)",
+				slog.String("table", table),
+				slog.Any("error", err),
+			)
+			return false
+		}
+		// 其他错误（权限错 1142 / 连接失败 / context 取消 / 等）→ 不阻断启动。
+		// 视为"表存在但当前 probe 访问失败"，让后续 request 阶段 RoomExists 自然 fail
+		// 走 documented close 1011 close。把 transient / privilege 错误当作"缺表"
+		// 处理会引入假阳性 panic（如 prod hardened DB user 不授权 information_schema
+		// 的场景，原 r5 实装会在此误判而 r6 修正）。
+		slog.Warn(
+			"ws backing table probe non-fatal error (treating as table exists; will defer to request-time RoomExists)",
+			slog.String("table", table),
+			slog.Any("error", err),
 		)
-		panic("ws backing tables missing: rooms / room_members must exist (run migrations 0007 / 0008)")
 	}
+	return true
 }
 
 // Deps 是 bootstrap 期收集的依赖集合，由 main.go 构造后透传给 Run / NewRouter。
@@ -221,12 +255,12 @@ func NewRouter(deps Deps) *gin.Engine {
 	// <= 0 → panic）；与 4.5 fail-fast 模式一致。
 	if deps.GormDB != nil && deps.TxMgr != nil && deps.Signer != nil {
 		// 6 个 mysql repo（Story 7.3 加 stepSyncLogRepo）
-		userRepo := mysql.NewUserRepo(deps.GormDB)
-		authBindingRepo := mysql.NewAuthBindingRepo(deps.GormDB)
-		petRepo := mysql.NewPetRepo(deps.GormDB)
-		stepAccountRepo := mysql.NewStepAccountRepo(deps.GormDB)
-		chestRepo := mysql.NewChestRepo(deps.GormDB)
-		stepSyncLogRepo := mysql.NewStepSyncLogRepo(deps.GormDB)
+		userRepo := repomysql.NewUserRepo(deps.GormDB)
+		authBindingRepo := repomysql.NewAuthBindingRepo(deps.GormDB)
+		petRepo := repomysql.NewPetRepo(deps.GormDB)
+		stepAccountRepo := repomysql.NewStepAccountRepo(deps.GormDB)
+		chestRepo := repomysql.NewChestRepo(deps.GormDB)
+		stepSyncLogRepo := repomysql.NewStepSyncLogRepo(deps.GormDB)
 
 		// auth service：5 repo + txMgr + signer
 		authSvc := service.NewAuthService(
@@ -291,9 +325,13 @@ func NewRouter(deps Deps) *gin.Engine {
 		//     （让 systemd / k8s CrashLoopBackOff 触发运维告警，而不是 server 起
 		//     来后客户端拿 WS close 1011 才间接发现 schema 漂移）
 		if deps.SessionMgr != nil {
-			// 防御性 sniff：rooms / room_members 必须存在；缺则 panic 终止启动
-			wsTablesReady(deps.GormDB)
-			roomMemberRepo := mysql.NewRoomMemberRepo(deps.GormDB)
+			// 防御性 sniff：rooms / room_members 必须存在；MySQL 1146（真的缺表） →
+			// 返 false → panic 终止启动；其他错误（权限 / 连接）由 wsTablesReady 内部
+			// log warn 后视为表存在，让后续 request 阶段自然处理。
+			if !wsTablesReady(deps.GormDB) {
+				panic("ws backing tables missing: rooms / room_members must exist (run migrations 0007 / 0008)")
+			}
+			roomMemberRepo := repomysql.NewRoomMemberRepo(deps.GormDB)
 			gateway := wsapp.NewGateway(
 				deps.Signer,
 				deps.SessionMgr,
