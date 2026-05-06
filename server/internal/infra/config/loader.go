@@ -47,6 +47,15 @@ const (
 	// epics.md §Story 10.2 行 1671 钦定 `pool_size` 字段；节点 4 阶段 Redis QPS 不高，
 	// 10 足够；节点 9+ 上 prod 按观测调整。Story 10.2 引入。
 	defaultRedisPoolSize = 10
+	// defaultWSHeartbeatTimeoutSec 是 WS Session 心跳超时阈值（秒）。
+	// V1 §12.2 钦定 60s；prod 必须使用默认值（契约一部分）；Story 10.3 引入。
+	defaultWSHeartbeatTimeoutSec = 60
+	// defaultWSMaxMessageSizeBytes 是 WS 单条 frame 最大字节数。
+	// V1 §12.2 关键约束钦定 16 KB；prod 必须使用默认值（契约一部分）；Story 10.3 引入。
+	defaultWSMaxMessageSizeBytes = 16384
+	// defaultWSWriteTimeoutSec 是 WS writeLoop conn.WriteMessage 的 deadline。
+	// 非契约字段；prod / dev 都可调。Story 10.3 引入。
+	defaultWSWriteTimeoutSec = 5
 )
 
 func Load(path string) (*Config, error) {
@@ -148,6 +157,20 @@ func Load(path string) (*Config, error) {
 	// Redis Addr / DB 不在 loader 兜底：
 	//   - Addr == "" 让 fail-fast 在 redis.Open 层暴露（与 mysql.dsn 同模式）
 	//   - DB == 0 是合法值（默认 db）；YAML 显式 0 与缺字段都是 0，无需区分
+
+	// WS 三字段默认值兜底（Story 10.3 引入；与 RedisPoolSize <= 0 → 默认 同模式）：
+	// YAML 缺字段 / 显式 0 / 显式负数都视为"用默认值"（HeartbeatTimeoutSec / MaxMessageSizeBytes /
+	// WriteTimeoutSec 都没有"显式 0 = 禁用功能"的合法语义；与 StepsConfig 同模式 —— zero-value
+	// + 负值兜底语义清晰）。
+	if cfg.WS.HeartbeatTimeoutSec <= 0 {
+		cfg.WS.HeartbeatTimeoutSec = defaultWSHeartbeatTimeoutSec
+	}
+	if cfg.WS.MaxMessageSizeBytes <= 0 {
+		cfg.WS.MaxMessageSizeBytes = defaultWSMaxMessageSizeBytes
+	}
+	if cfg.WS.WriteTimeoutSec <= 0 {
+		cfg.WS.WriteTimeoutSec = defaultWSWriteTimeoutSec
+	}
 
 	return &cfg, nil
 }

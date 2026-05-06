@@ -125,6 +125,27 @@ CAT_HTTP_PORT=18090 CAT_LOG_LEVEL=debug ./build/catserver -config server/configs
 
 `bind_host: 127.0.0.1` 是本地开发默认值：Windows Defender 对 loopback 免检，不会因为每次重编译 binary 产生新 hash 弹"允许专用网络访问"窗。生产部署改 `0.0.0.0` 或删此行让 server 监听所有网卡。详见 [Troubleshooting #2](#troubleshooting)。
 
+### WebSocket 网关本地烟雾测试（Story 10.3 起需要）
+
+server 启动后挂 `GET /ws/rooms/{roomId}?token=<token>`（V1 §12.1 钦定）。
+
+最小本地烟雾测试（需先 `POST /api/v1/auth/guest-login` 拿 token、并让 user 加入房间 —— Epic 11 落地前可手动 `INSERT room_members` fixture）：
+
+```bash
+# 1. 起 server（已含 Redis + MySQL）
+./build/catserver
+
+# 2. 拨连 WS（用 wscat / websocat 等工具）
+wscat -c "ws://127.0.0.1:8080/ws/rooms/3001?token=<bearer>"
+
+# 期望：握手成功后立即收到一条 type="room.snapshot" 消息
+# 然后发 {"type":"ping","requestId":"p1","payload":{}} 应收到对应 pong
+```
+
+握手失败时服务端按 V1 §12.1 close code 表 emit 4001（token 缺失 / 无效 / 过期）/ 4002（roomId 非数字）/ 4003（user 不在房间）/ 4004（room 不存在）/ 1011（snapshot 构建失败 / 内部错误）。
+
+**ws 配置字段**：`ws.heartbeat_timeout_sec`（默认 60；prod 不可覆盖，V1 §12.2 钦定）/ `ws.max_message_size_bytes`（默认 16384；prod 不可覆盖）/ `ws.write_timeout_sec`（默认 5；非契约可调）。详见 [`server/internal/infra/config/config.go`](internal/infra/config/config.go) `WSConfig` struct。
+
 ---
 
 ## 跑测试

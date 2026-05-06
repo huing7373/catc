@@ -11,6 +11,7 @@ import (
 
 	"github.com/huing/cat/server/internal/app/bootstrap"
 	"github.com/huing/cat/server/internal/app/http/devtools"
+	wsapp "github.com/huing/cat/server/internal/app/ws"
 	"github.com/huing/cat/server/internal/cli"
 	"github.com/huing/cat/server/internal/infra/config"
 	"github.com/huing/cat/server/internal/infra/db"
@@ -195,6 +196,17 @@ func main() {
 		slog.Int("db", cfg.Redis.DB),
 	)
 
+	// Story 10.3：WS SessionManager 构造。
+	// 本 story 阶段不挂任何 lifecycle 钩子（10.6 才挂 Redis presence 钩子）。
+	// SessionManager 是纯内存对象（map + sync.RWMutex），构造无 IO；不需要 timeout ctx。
+	sessionMgr := wsapp.NewSessionManager()
+	defer func() {
+		if cerr := sessionMgr.Close(); cerr != nil {
+			slog.Error("session manager close failed", slog.Any("error", cerr))
+		}
+	}()
+	slog.Info("ws session manager ready")
+
 	// Story 4.4：JWT signer 构造 fail-fast。
 	//
 	// auth.New 校验：secret 空 / < 16 字节 / expireSec ≤ 0 / expireSec > 30 天 → 返 error。
@@ -230,9 +242,11 @@ func main() {
 		TxMgr:        txMgr,
 		Signer:       signer,
 		RateLimitCfg: cfg.RateLimit,
-		StepsCfg:     cfg.Steps, // Story 7.3 加：步数同步防作弊阈值
-		EnvName:      envName,   // Story 7.3 review r6 [P2] 加：prod cap override 强制
+		StepsCfg:     cfg.Steps,   // Story 7.3 加：步数同步防作弊阈值
+		EnvName:      envName,     // Story 7.3 review r6 [P2] 加：prod cap override 强制
 		RedisClient:  redisClient, // Story 10.2 加：Redis 单例 client
+		SessionMgr:   sessionMgr,  // Story 10.3 加：WS Session 注册中心
+		WSCfg:        cfg.WS,      // Story 10.3 加：WS 配置（心跳超时 / max message size / write timeout）
 	}
 	if err := bootstrap.Run(ctx, cfg, deps); err != nil {
 		slog.Error("server run failed", slog.Any("error", err))

@@ -1,0 +1,303 @@
+package ws
+
+import (
+	"context"
+	"errors"
+	"sort"
+	"sync"
+
+	"github.com/google/uuid"
+)
+
+// SessionManager 是进程内全局 Session 注册中心。
+//
+// 设计目的：
+//   - 让 BroadcastToRoom（Story 10.5）通过 ListSessionsByRoomID 拿到目标 Session
+//     列表
+//   - 让 Story 10.6 Redis presence repo 挂在 OnSessionRegister / OnSessionUnregister
+//     钩子上
+//   - 让 graceful shutdown（Epic 36+）批量遍历所有 Session 主动 close 1001
+//
+// 范围边界：
+//   - 进程内 in-memory（map[sessionID]*Session + map[roomID]map[sessionID]*Session
+//     双索引）
+//   - **不**做跨实例 / Pub/Sub（节点 9+ 多实例部署才考虑）
+//   - **不**直接消费 Redis client（钩子模式让 Story 10.6 注入，避免直接耦合）
+//
+// 钩子注入：用 functional option 模式让 bootstrap 期注入：
+//
+//	mgr := ws.NewSessionManager(
+//	    ws.WithRegisterHook(func(s *Session) { presenceRepo.AddOnline(...) }),
+//	    ws.WithUnregisterHook(func(s *Session) { presenceRepo.RemoveOnline(...) }),
+//	)
+//
+// 本 story 阶段两个钩子默认 no-op（10.6 落地时才注入具体实现）。
+type SessionManager interface {
+	// Register 注册 Session 到 manager；触发 OnRegister 钩子（如挂的话）。
+	// sessionID 由 manager 内部生成（uuid 短串），返回供 Session 持有作为 logger
+	// 的关联字段。
+	//
+	// 同一 user 重复 Register（如重连） → 旧 Session 被强制 Close（用 sentinel
+	// ErrSessionReplaced 标识；调用方可在 close hook 里区分日志）。
+	// 节点 4 阶段单 user 单 session 假设由本约束兜底；多 session 抢占语义留给
+	// Epic 36+。
+	//
+	// **关键**：本方法**先**生成 sessionID + 把 sessionID 注入 Session 的 logger
+	// （让 register 钩子日志已经能看到 sessionID），再注入双索引；保证 Register
+	// 返回时 ListSessionsByRoomID 能立即看到该 Session。
+	Register(ctx context.Context, s *Session) (sessionID string, err error)
+
+	// Unregister 注销 Session；触发 OnUnregister 钩子。
+	// sessionID 不存在 → 返 nil（idempotent；与 Session.Close 多次调用一致）。
+	Unregister(ctx context.Context, sessionID string) error
+
+	// ListSessionsByRoomID 返回 roomID 对应的所有 active Session（按 sessionID
+	// 字典序，让 BroadcastToRoom 调用时遍历顺序确定，便于排障）。
+	//
+	// roomID 没有任何 Session → 返 ([], nil)。
+	// 调用方**不应**修改返回的切片（manager 返回 snapshot，但内部 *Session 共享 ——
+	// 修改字段需通过 Session 自身的方法）。
+	ListSessionsByRoomID(ctx context.Context, roomID uint64) []*Session
+
+	// Close 关闭 manager：批量 close 所有 Session（不主动推 close 1001 frame，
+	// graceful shutdown 业务由 Epic 36 接管）。
+	// 必须幂等（与 *sql.DB.Close 一致）。
+	Close() error
+}
+
+// SessionManagerOption 是 functional option（让 bootstrap 期注入钩子）。
+type SessionManagerOption func(*sessionManager)
+
+// WithRegisterHook 注入 Session 注册时的回调钩子（Story 10.6 用来加 Redis
+// presence）。**禁止**在钩子内调 manager 接口（自调死锁）；钩子应只做"轻量
+// side-effect"如 Redis SADD / metrics counter inc。
+func WithRegisterHook(fn func(s *Session)) SessionManagerOption {
+	return func(m *sessionManager) {
+		m.onRegister = fn
+	}
+}
+
+// WithUnregisterHook 注入 Session 销毁时的回调钩子。
+// 与 WithRegisterHook 同约束（不要在钩子内反向调 manager）。
+func WithUnregisterHook(fn func(s *Session)) SessionManagerOption {
+	return func(m *sessionManager) {
+		m.onUnregister = fn
+	}
+}
+
+// sessionManager 是 SessionManager 的默认实装。
+type sessionManager struct {
+	mu              sync.RWMutex
+	sessionsByID    map[string]*Session
+	sessionsByRoom  map[uint64]map[string]*Session
+	userToSessionID map[uint64]string // 单 user 单 session 索引（节点 4 阶段假设）
+	onRegister      func(s *Session)
+	onUnregister    func(s *Session)
+	closed          bool
+	closeOnce       sync.Once
+}
+
+// NewSessionManager 构造 SessionManager；本 story 阶段默认无钩子（10.6 落地时
+// 通过 WithRegisterHook / WithUnregisterHook 注入）。
+func NewSessionManager(opts ...SessionManagerOption) SessionManager {
+	m := &sessionManager{
+		sessionsByID:    map[string]*Session{},
+		sessionsByRoom:  map[uint64]map[string]*Session{},
+		userToSessionID: map[uint64]string{},
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// Register 实装 SessionManager.Register。
+//
+// 流程：
+//  1. 生成 sessionID（uuid 前 8 字符）
+//  2. 检查同 user 是否已有 active session：
+//     - 是 → 找到旧 sessionID → unregisterLocked 移除旧索引 → 旧 session.Close()
+//     （在锁外调，详见函数末尾 oldSession.Close() 注释）
+//  3. 把新 Session 的 sessionID 字段赋值（newSession 时还没有；这里**回填**）
+//     + 重建 contextual logger（带 sessionID）
+//  4. 注入双索引 + userToSessionID
+//  5. 把 manager 自身设为 session.notifier，让 session 自闭时反向通知 manager
+//  6. 锁外调 onRegister 钩子（如有）
+func (m *sessionManager) Register(ctx context.Context, s *Session) (string, error) {
+	if s == nil {
+		return "", errors.New("ws: register nil session")
+	}
+
+	sessionID := shortUUID()
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return "", errors.New("ws: session manager closed")
+	}
+
+	// 同 user 重连：找旧 session 强制 Close。
+	var replaced *Session
+	if oldID, ok := m.userToSessionID[s.userID]; ok {
+		if oldS, ok2 := m.sessionsByID[oldID]; ok2 {
+			replaced = oldS
+			m.removeFromIndicesLocked(oldS)
+		}
+	}
+
+	// 把 sessionID 回填到 Session（newSession 构造时还没分配）+ 重建 logger
+	s.sessionID = sessionID
+	s.logger = s.logger.With("sessionID_replay", sessionID) // 保留原 logger 字段同时叠加新 sessionID
+	s.notifier = m
+
+	// 注入双索引
+	m.sessionsByID[sessionID] = s
+	if _, ok := m.sessionsByRoom[s.roomID]; !ok {
+		m.sessionsByRoom[s.roomID] = map[string]*Session{}
+	}
+	m.sessionsByRoom[s.roomID][sessionID] = s
+	m.userToSessionID[s.userID] = sessionID
+	onRegister := m.onRegister
+	m.mu.Unlock()
+
+	// 锁外做：
+	//   1. 旧 Session 强制 Close（避免 Close → notifyClosed → manager.Unregister
+	//      在锁内重入死锁）
+	//   2. 注册钩子（10.6 Redis presence；外部 IO 可能慢，不能持锁）
+	if replaced != nil {
+		// 旧 Session 主动关；调用方可通过 ErrSessionReplaced 标识本次关闭语义
+		_ = replaced.Close()
+	}
+	if onRegister != nil {
+		onRegister(s)
+	}
+
+	if replaced != nil {
+		// 返非空 sessionID 但用 ErrSessionReplaced 标识"成功 + 替换" —— 上层 logger
+		// 可借此区分是否走了重连路径
+		return sessionID, ErrSessionReplaced
+	}
+	return sessionID, nil
+}
+
+// Unregister 实装 SessionManager.Unregister。
+//
+// 流程：
+//  1. 锁内查 sessionsByID；不存在 → 返 nil（幂等）
+//  2. 锁内移除双索引 + userToSessionID
+//  3. 锁外调 onUnregister 钩子（如有）
+//
+// **关键**：本方法**不**调 session.Close —— Close 由 readLoop / writeLoop /
+// 外部调用方触发；Unregister 只清理 manager 内的索引。否则 Close → notifyClosed
+// → Unregister → Close 形成循环。
+func (m *sessionManager) Unregister(ctx context.Context, sessionID string) error {
+	m.mu.Lock()
+	s, ok := m.sessionsByID[sessionID]
+	if !ok {
+		m.mu.Unlock()
+		return nil
+	}
+	m.removeFromIndicesLocked(s)
+	onUnregister := m.onUnregister
+	m.mu.Unlock()
+
+	if onUnregister != nil {
+		onUnregister(s)
+	}
+	return nil
+}
+
+// removeFromIndicesLocked 从双索引 + userToSessionID 移除 Session（caller 持
+// m.mu 写锁）。
+func (m *sessionManager) removeFromIndicesLocked(s *Session) {
+	delete(m.sessionsByID, s.sessionID)
+	if room, ok := m.sessionsByRoom[s.roomID]; ok {
+		delete(room, s.sessionID)
+		if len(room) == 0 {
+			delete(m.sessionsByRoom, s.roomID)
+		}
+	}
+	// 注意：userToSessionID 可能已被 Register 替换路径覆盖；只在指向当前 sessionID
+	// 时才删除（防止 race 1: A 重连 → manager 替换 userToSessionID[u]=B；race 2:
+	// 旧 Session A 在 Close 路径触发 Unregister(A) → 这里 sessionID=A，但
+	// userToSessionID[u]=B 不应该被误删）
+	if currentID, ok := m.userToSessionID[s.userID]; ok && currentID == s.sessionID {
+		delete(m.userToSessionID, s.userID)
+	}
+}
+
+// ListSessionsByRoomID 实装 SessionManager.ListSessionsByRoomID。
+//
+// 锁内 read-lock copy 切片返回（避免遍历过程中 manager 改 map 的并发问题）；
+// 按 sessionID 字典序排序（让 BroadcastToRoom 调用时遍历顺序确定，便于排障）。
+func (m *sessionManager) ListSessionsByRoomID(ctx context.Context, roomID uint64) []*Session {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	room, ok := m.sessionsByRoom[roomID]
+	if !ok || len(room) == 0 {
+		return []*Session{}
+	}
+	out := make([]*Session, 0, len(room))
+	ids := make([]string, 0, len(room))
+	for id := range room {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		out = append(out, room[id])
+	}
+	return out
+}
+
+// Close 实装 SessionManager.Close。批量 close 所有 Session + 清空索引（idempotent）。
+//
+// **关键**：必须**保留**索引到 s.Close() 跑完之后再清空 —— 否则 s.Close() →
+// notifyClosed → Unregister 进 sessionsByID 找不到 sessionID 走 no-op 路径，
+// onUnregister 钩子不会触发，所有挂在 WithUnregisterHook 上的 caller（10.6 Redis
+// presence cleanup / metrics 计数等）会漏调，外部状态被泄漏到 stale。
+//
+// 顺序：
+//  1. 锁内拿快照 + 标 closed=true（拒绝新 Register）；**不**清索引
+//  2. 锁外逐个 s.Close() —— 每个 Close 触发 notifyClosed → Unregister(sessionID)
+//     → 锁内 removeFromIndicesLocked + 锁外调 onUnregister 钩子
+//  3. 全部 Close 跑完后再锁内清空残留索引（防御兜底；正常路径上 Unregister 已
+//     把它清光了）
+func (m *sessionManager) Close() error {
+	m.closeOnce.Do(func() {
+		m.mu.Lock()
+		m.closed = true
+		all := make([]*Session, 0, len(m.sessionsByID))
+		for _, s := range m.sessionsByID {
+			all = append(all, s)
+		}
+		m.mu.Unlock()
+
+		// 锁外逐个 Close。每个 Close → notifyClosed → Unregister(sessionID) →
+		// onUnregister 钩子。Unregister 自身拿写锁，与上面 m.mu.Unlock 不冲突。
+		for _, s := range all {
+			_ = s.Close()
+		}
+
+		// 防御兜底：理论上 Unregister 已把所有 session 从索引清出；如果钩子里
+		// 抛 panic / 或 Session 没注入 notifier，残余索引在这一步整体重置。
+		m.mu.Lock()
+		m.sessionsByID = map[string]*Session{}
+		m.sessionsByRoom = map[uint64]map[string]*Session{}
+		m.userToSessionID = map[uint64]string{}
+		m.mu.Unlock()
+	})
+	return nil
+}
+
+// notifyClosed 实装 closeNotifier 接口；Session.Close 调本方法触发 manager 自动
+// Unregister。锁内只移除索引，钩子在锁外调。
+func (m *sessionManager) notifyClosed(sessionID string) {
+	// 复用 Unregister 路径，但避免 ctx 依赖（这是 Session 内部触发的 close path）
+	_ = m.Unregister(context.Background(), sessionID)
+}
+
+// shortUUID 返回 uuid v4 前 8 个字符（约 32 bit 熵；节点 4 阶段单实例 + 单进程
+// 同时活跃 Session 远小于 4 万 → 32 bit 碰撞概率可忽略）。
+func shortUUID() string {
+	return uuid.NewString()[:8]
+}

@@ -4,6 +4,7 @@ type Config struct {
 	Server    ServerConfig    `yaml:"server"`
 	MySQL     MySQLConfig     `yaml:"mysql"`
 	Redis     RedisConfig     `yaml:"redis"` // Story 10.2 加
+	WS        WSConfig        `yaml:"ws"`    // Story 10.3 加
 	Auth      AuthConfig      `yaml:"auth"`
 	RateLimit RateLimitConfig `yaml:"ratelimit"`
 	Log       LogConfig       `yaml:"log"`
@@ -105,6 +106,39 @@ type RedisConfig struct {
 	// 0 / 负值视为"用 go-redis 默认"（10 * NumCPU），但 loader.go 兜底默认 10
 	// 让"YAML 缺字段" → 行为可预测。
 	PoolSize int `yaml:"pool_size"`
+}
+
+// WSConfig 是 WebSocket 配置参数。Story 10.3 引入；选型 / 默认值 / 契约语义
+// 由 V1 §12.2 关键约束 + V1 §12.1 close code 4005 行 + Go 项目结构 §12.2 钦定。
+//
+// **关键**：默认值（HeartbeatTimeoutSec=60 / MaxMessageSizeBytes=16384）属契约
+// 一部分（V1 §1 节点 4 冻结声明 + §12.2 关键约束）；**prod 部署必须使用默认值**，
+// 不允许通过 YAML 覆盖（避免不同 prod 实例阈值漂移引发跨端契约不一致，与
+// StepsConfig 同模式）。**dev / test 环境**可通过 YAML 覆盖（仅供单测 / 调试 /
+// fixture），**不**视为契约变更。
+//
+// **prod gate 强制**（与 Story 7.3 review r6 [P2] StepsConfig 同模式）：
+// gateway / session 实装层在启动期检查 env var `CAT_ENV`，节点 4 阶段本 story
+// 仅在 NewGateway 工厂内做 prod cap override 校验。
+//
+// 字段类型用 `int`（不是 `*int`）：与 StepsConfig 同模式 —— "缺字段" / "显式 0"
+// 都视为"用默认值"，loader.go 兜底 `<= 0 → default`；不存在"显式 0 = 禁用"的
+// 合法用法（HeartbeatTimeoutSec=0 / MaxMessageSizeBytes=0 没有业务含义）。
+type WSConfig struct {
+	// HeartbeatTimeoutSec 是 Session 心跳超时阈值（秒）。
+	// 默认 60；prod 不可覆盖（V1 §1 + §12.2 钦定）；dev / test 可覆盖。
+	// 本 story（10.3）阶段**字段定义即可，不消费**（10.4 心跳超时扫描 goroutine
+	// 才读这个值）。
+	HeartbeatTimeoutSec int `yaml:"heartbeat_timeout_sec"`
+
+	// MaxMessageSizeBytes 是单条 frame 最大字节数。
+	// 默认 16384（16 KB；V1 §1 + §12.2 关键约束钦定）；prod 不可覆盖。
+	// 本 story 实装：在 Session 构造时调 conn.SetReadLimit(cfg.MaxMessageSizeBytes)。
+	MaxMessageSizeBytes int `yaml:"max_message_size_bytes"`
+
+	// WriteTimeoutSec 是 writeLoop conn.WriteMessage 的 deadline。
+	// 默认 5（5 秒）；非契约字段（仅 server 内部容错），prod / dev 都可调。
+	WriteTimeoutSec int `yaml:"write_timeout_sec"`
 }
 
 // AuthConfig 是 JWT 签发 / 校验配置。Story 4.4 引入；选型 / 默认值 / fail-fast

@@ -172,3 +172,4 @@
 | 2026-05-06 | [`room.snapshot` authoritative-but-non-destructive merge 契约 + WS roomId 来源按场景分两路 (r10 收官)](2026-05-06-ws-snapshot-merge-contract-and-roomid-source-r10.md) | 2 | architecture, docs | `65b98f2` |
 | 2026-05-06 | [Redis PoolSize 负值绕过 fail-fast，go-redis NewClient panic](2026-05-06-redis-poolsize-negative-makechan-panic.md) | 1 | error-handling, config | `b7c8dad` |
 | 2026-05-06 | [go-redis ContextTimeoutEnabled 默认 false 让 ctx 形同虚设 + 抽象层 Close 真·幂等需要 sync.Once 兜底](2026-05-06-go-redis-context-timeout-and-close-idempotency.md) | 2 | config, architecture | `9acf65f` |
+| 2026-05-06 | [WS Session.Send/Close 并发 panic & SessionManager 关停时 unregister hook 漏调](2026-05-06-ws-session-send-close-race-and-shutdown-hooks.md) | 2 | concurrency, error-handling, architecture | `<pending>` |

@@ -7,6 +7,7 @@ import (
 	"github.com/huing/cat/server/internal/app/http/devtools"
 	"github.com/huing/cat/server/internal/app/http/handler"
 	"github.com/huing/cat/server/internal/app/http/middleware"
+	wsapp "github.com/huing/cat/server/internal/app/ws"
 	"github.com/huing/cat/server/internal/infra/config"
 	"github.com/huing/cat/server/internal/infra/metrics"
 	redisinfra "github.com/huing/cat/server/internal/infra/redis"
@@ -45,6 +46,21 @@ type Deps struct {
 	// 那些字段已有 handler 消费，必须 nil-tolerant）。Future Story 10.6 引入 presence
 	// handler 时再加 `if deps.RedisClient != nil` 前置 if-guard。
 	RedisClient redisinfra.RedisClient
+
+	// SessionMgr 是 Story 10.3 引入的 WS Session 注册中心。
+	//
+	// 单元测试 Deps{} 零值场景下 SessionMgr 是 nil；NewRouter 内 WS 路由挂载段
+	// 用 `&& deps.SessionMgr != nil` 前置 if-guard 兜底（与 GormDB / Signer 的
+	// if-guard 同模式）。生产 main.go 已 fail-fast wire（mgr 是纯内存构造，理论
+	// 不会失败）。
+	SessionMgr wsapp.SessionManager
+
+	// WSCfg 是 Story 10.3 引入的 WS 配置（心跳超时 / max message size / write
+	// timeout）。Deps{} 零值场景下 WSCfg 是 zero-value WSConfig；NewGateway 内部
+	// 对零值字段做了兜底（writeTimeout <= 0 → 5s）；其他字段（HeartbeatTimeoutSec /
+	// MaxMessageSizeBytes）仅 10.4 / Session.SetReadLimit 消费，零值即 0 = "不
+	// 设置上限"，单元测试场景安全。
+	WSCfg config.WSConfig
 }
 
 // NewRouter 构造挂好四件套中间件的 Gin engine。
@@ -193,8 +209,26 @@ func NewRouter(deps Deps) *gin.Engine {
 			middleware.RateLimit(deps.RateLimitCfg, middleware.RateLimitByUserID),
 		)
 		authedGroup.GET("/home", homeHandler.LoadHome)
-		authedGroup.POST("/steps/sync", stepsHandler.PostSync)    // Story 7.3 加
+		authedGroup.POST("/steps/sync", stepsHandler.PostSync)     // Story 7.3 加
 		authedGroup.GET("/steps/account", stepsHandler.GetAccount) // Story 7.4 加
+
+		// Story 10.3 加：WS 网关路由
+		// **不**挂在 /api/v1 前缀下（V1 §12.1 钦定 path 是 /ws/rooms/{roomId}）；
+		// **不**挂 RateLimit / Auth 中间件（V1 §12.1 行 1275 钦定 WS 不走 HTTP rate_limit；
+		// 鉴权在 Gateway.Handle 内部按 §12.1 校验顺序实装，校验失败发 close frame
+		// 而非 HTTP 401）。
+		// 仅当 deps.SessionMgr 非空时挂载（与 GormDB / Signer if-guard 同模式）；
+		// 单元测试 Deps{} 零值场景跳过本路由，与 router_test.go 既有约定一致。
+		if deps.SessionMgr != nil {
+			roomMemberRepo := mysql.NewRoomMemberRepo(deps.GormDB)
+			gateway := wsapp.NewGateway(
+				deps.Signer,
+				deps.SessionMgr,
+				roomMemberRepo,
+				deps.WSCfg,
+			)
+			r.GET("/ws/rooms/:roomId", gateway.Handle)
+		}
 	}
 
 	// dev 模式下挂 /dev/* 路由组；未启用时本调用完全透明。

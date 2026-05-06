@@ -1,0 +1,7 @@
+server:
+  http_port: 8080
+
+ws:
+  heartbeat_timeout_sec: 30
+  max_message_size_bytes: 8192
+  write_timeout_sec: 10

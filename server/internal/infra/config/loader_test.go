@@ -410,6 +410,81 @@ func TestLoad_RedisYAMLParsing(t *testing.T) {
 	}
 }
 
+// TestLoad_WSDefaults 验证 fixture 没显式写 ws: 段时，loader 兜底
+// HeartbeatTimeoutSec=60 / MaxMessageSizeBytes=16384 / WriteTimeoutSec=5。
+// Story 10.3 引入；V1 §12.2 钦定 60s / 16 KB；WriteTimeoutSec 5s 非契约。
+func TestLoad_WSDefaults(t *testing.T) {
+	cfg, err := Load(fixturePath) // local.yaml fixture 没 ws 段
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.WS.HeartbeatTimeoutSec != 60 {
+		t.Errorf("WS.HeartbeatTimeoutSec = %d, want 60 (default)", cfg.WS.HeartbeatTimeoutSec)
+	}
+	if cfg.WS.MaxMessageSizeBytes != 16384 {
+		t.Errorf("WS.MaxMessageSizeBytes = %d, want 16384 (default)", cfg.WS.MaxMessageSizeBytes)
+	}
+	if cfg.WS.WriteTimeoutSec != 5 {
+		t.Errorf("WS.WriteTimeoutSec = %d, want 5 (default)", cfg.WS.WriteTimeoutSec)
+	}
+}
+
+// TestLoad_WSYAMLParsing 验证 YAML 显式写 ws: 段时正确解析。Story 10.3 引入。
+func TestLoad_WSYAMLParsing(t *testing.T) {
+	cfg, err := Load("testdata/ws.yaml")
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.WS.HeartbeatTimeoutSec != 30 {
+		t.Errorf("WS.HeartbeatTimeoutSec = %d, want 30 (explicit YAML)", cfg.WS.HeartbeatTimeoutSec)
+	}
+	if cfg.WS.MaxMessageSizeBytes != 8192 {
+		t.Errorf("WS.MaxMessageSizeBytes = %d, want 8192 (explicit YAML)", cfg.WS.MaxMessageSizeBytes)
+	}
+	if cfg.WS.WriteTimeoutSec != 10 {
+		t.Errorf("WS.WriteTimeoutSec = %d, want 10 (explicit YAML)", cfg.WS.WriteTimeoutSec)
+	}
+}
+
+// TestLoad_WSExplicitZero_FallbackToDefault 验证 YAML 显式写 0 时 loader 兜底
+// 默认值（HeartbeatTimeoutSec / MaxMessageSizeBytes / WriteTimeoutSec 都没有
+// "显式 0 = 禁用功能"的合法语义；与 RedisPoolSize <= 0 → 默认 同模式）。
+// Story 10.3 引入。
+func TestLoad_WSExplicitZero_FallbackToDefault(t *testing.T) {
+	cfg, err := Load("testdata/ws_zero.yaml")
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.WS.HeartbeatTimeoutSec != 60 {
+		t.Errorf("WS.HeartbeatTimeoutSec = %d, want 60 (zero YAML must fallback to default)", cfg.WS.HeartbeatTimeoutSec)
+	}
+	if cfg.WS.MaxMessageSizeBytes != 16384 {
+		t.Errorf("WS.MaxMessageSizeBytes = %d, want 16384 (zero YAML must fallback to default)", cfg.WS.MaxMessageSizeBytes)
+	}
+	if cfg.WS.WriteTimeoutSec != 5 {
+		t.Errorf("WS.WriteTimeoutSec = %d, want 5 (zero YAML must fallback to default)", cfg.WS.WriteTimeoutSec)
+	}
+}
+
+// TestLoad_WSNegative_FallbackToDefault 验证 YAML 显式写负值时 loader 兜底默认值。
+// 与 RedisPoolSizeNegative 同模式 —— 防 K8s ConfigMap 注入异常 / YAML 拼错让 server
+// 起来后行为异常（如 SetReadLimit(-1) 行为不定）。Story 10.3 引入。
+func TestLoad_WSNegative_FallbackToDefault(t *testing.T) {
+	cfg, err := Load("testdata/ws_negative.yaml")
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.WS.HeartbeatTimeoutSec != 60 {
+		t.Errorf("WS.HeartbeatTimeoutSec = %d, want 60 (negative YAML must fallback)", cfg.WS.HeartbeatTimeoutSec)
+	}
+	if cfg.WS.MaxMessageSizeBytes != 16384 {
+		t.Errorf("WS.MaxMessageSizeBytes = %d, want 16384 (negative YAML must fallback)", cfg.WS.MaxMessageSizeBytes)
+	}
+	if cfg.WS.WriteTimeoutSec != 5 {
+		t.Errorf("WS.WriteTimeoutSec = %d, want 5 (negative YAML must fallback)", cfg.WS.WriteTimeoutSec)
+	}
+}
+
 // itoa64 是简化版 strconv.FormatInt（避免在 _test.go 引入额外 import）。
 func itoa64(i int64) string {
 	if i == 0 {

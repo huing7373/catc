@@ -27,6 +27,14 @@ redis:
   db: 0
   pool_size: 10
 
+ws:
+  # Story 10.3 接入。本地 dev 用默认值；prod 不可覆盖（V1 §1 节点 4 冻结声明 +
+  # §12.2 关键约束钦定）；dev / test 可覆盖（仅供单测 / fixture）。
+  # 字段说明详见 internal/infra/config/config.go WSConfig struct 注释。
+  heartbeat_timeout_sec: 60      # V1 §12.2 ping 钦定；prod 必须 60
+  max_message_size_bytes: 16384  # V1 §12.2 关键约束钦定 16 KB；prod 必须 16384
+  write_timeout_sec: 5           # 非契约；prod / dev 都可调
+
 auth:
   # JWT signing secret（HS256；Story 4.4 接入）。
   #
