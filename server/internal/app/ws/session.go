@@ -42,8 +42,8 @@ import (
 //     保持内存占用合理（每 Session 32 * pointer-sized = ~256B）
 const sendChanCapacity = 32
 
-// closeFrameWriteDeadline 是 Session.CloseWithCode 写 close frame 的 deadline
-// （Story 10.4 引入）。
+// closeFrameWriteDeadline 是 Session.CloseWithCode **WriteControl close frame**
+// 步骤的 deadline（Story 10.4 引入）。
 //
 // 与 gateway.go 包级 const `closeWriteDeadline` 同 semantics（500ms），但因为不同
 // 包内 const 不能直接复用，复制一份并显式标注：未来有人重构合并时一并改两处即可。
@@ -51,7 +51,28 @@ const sendChanCapacity = 32
 // 选 500ms 的理由：写 control frame 是单 packet 操作；超时通常意味着对端已掉线，
 // 此时 close frame 已无意义 —— 与其等到 5s+ 才放手，不如快速 Close 让上层流程推进。
 // lesson 2026-04-26-startup-blocking-io-needs-deadline 钦定 IO 必须有本地 timeout。
+//
+// **不复用为 wait writeLoopDone 的上限**（review r3 P2 修）：原版用同一个 500ms
+// 既做 wait 上限又做 WriteControl deadline 是 bug —— writeLoop 内部
+// conn.WriteMessage 的 deadline 是 writeTimeout（默认 5s），意味着慢/卡住的 client
+// 会让 writeLoop 在最坏情况下阻塞到 writeTimeout 才退出。500ms < 5s 让 wait 提前
+// 超时 → closeInternal 误以为 writeLoop 已退出 → 走 WriteControl 写 close frame
+// → 之后 writeLoop 才真正结束 conn.WriteMessage 写出 data frame，造成 V1 §12.1
+// 钦定的"close frame 必须是 connection 最后一个 frame"反过来。修法：用单独的
+// closeWaitTimeout = writeTimeout + 200ms 做 wait 上限（详见 Session.closeWaitTimeout
+// 字段注释）。
 const closeFrameWriteDeadline = 500 * time.Millisecond
+
+// closeWaitBufferDuration 是 closeInternal 等 writeLoop 退出的额外缓冲时间
+// （review r3 P2 加）。closeWaitTimeout = writeTimeout + closeWaitBufferDuration。
+//
+// 选 200ms 的理由：writeLoop 内 conn.WriteMessage 命中 writeTimeout 触发 deadline
+// 错误后 → writeFrame 返 error → writeLoop break + close(writeLoopDone)。这条路径
+// 是纯 in-process 操作（无 IO），200ms buffer 足够 cover Windows / CI 时序抖动 +
+// goroutine 调度延迟，**不**至于让正常 cleanup 也付不必要的 200ms tax —— 正常
+// cleanup 走 sendChan close → writeLoop select 立即命中关闭分支退出，远在 buffer
+// 用完之前就解锁 wait。
+const closeWaitBufferDuration = 200 * time.Millisecond
 
 // sendPriorityChanCapacity 是 Session.sendPriorityChan 容量（review r4 P2 加）。
 //
@@ -164,8 +185,14 @@ type closeNotifier interface {
 //   - writeLoopStarted 是 writeLoop 是否已启动的 flag（review r2 P2 加）。
 //     Gateway.Handle 的 handshake 失败路径会在启动 readLoop/writeLoop **之前**
 //     调 session.Close 释放资源；此时 writeLoop 从未运行，writeLoopDone 永远不
-//     close → wait 必然落到 500ms timeout。该 flag 让 closeInternal 区分
+//     close → wait 必然落到 closeWaitTimeout。该 flag 让 closeInternal 区分
 //     "writeLoop 跑过了，必须等它收尾" vs "writeLoop 没启动，直接跳过 wait"
+//   - closeWaitTimeout 是 closeInternal 等 writeLoop 退出的上限（review r3 P2 加）。
+//     必须 ≥ writeTimeout + 一些 buffer，否则 writeLoop 可能仍卡在 conn.WriteMessage
+//     里没退出 → wait 提前超时 → WriteControl 写出 close frame，之后 writeLoop
+//     才结束写完 data frame → wire 上 close frame 后跟 data frame，违反 V1 §12.1
+//     "close frame 是 connection 最后一个 frame"。closeFrameWriteDeadline 仍仅
+//     用于 WriteControl 自身的 deadline（500ms 写一帧足够）。
 //
 // 不导出字段：所有字段小写；外部访问通过 Send / Close。
 type Session struct {
@@ -183,6 +210,7 @@ type Session struct {
 	writeLoopStarted  atomic.Bool   // writeLoop 是否已经启动（review r2 P2 加：handshake 失败路径调 Close 时 writeLoop 没启动 → 不需要 wait）
 	logger            *slog.Logger
 	writeTimeout      time.Duration
+	closeWaitTimeout  time.Duration // closeInternal 等 writeLoop 退出的上限（review r3 P2 加）
 	notifier          closeNotifier // SessionManager 注入；nil 安全（不通知）
 	ctx               context.Context
 	cancelCtx         context.CancelFunc
@@ -213,6 +241,18 @@ func newSession(
 	writeTimeout time.Duration,
 ) *Session {
 	ctx, cancel := context.WithCancel(context.Background())
+	// closeWaitTimeout = writeTimeout + 200ms（review r3 P2 加）。**必须** ≥
+	// writeTimeout，否则 closeInternal wait writeLoopDone 可能在 writeLoop 还卡在
+	// conn.WriteMessage 内时提前超时，让 WriteControl close frame 与之后写出的
+	// data frame 在 wire 上顺序错乱。
+	// writeTimeout ≤ 0 防御性兜底：fall back 到 closeFrameWriteDeadline + buffer，
+	// 与原版 500ms 行为相近（writeTimeout=0 = 不设 deadline，writeLoop 不会因
+	// timeout 主动退；此时 wait 几乎只能等 sendChan 被 closeInternal 关 → 立刻
+	// 命中关 chan 分支，无需大 buffer）。
+	closeWait := writeTimeout + closeWaitBufferDuration
+	if writeTimeout <= 0 {
+		closeWait = closeFrameWriteDeadline + closeWaitBufferDuration
+	}
 	s := &Session{
 		sessionID:        sessionID,
 		userID:           userID,
@@ -223,10 +263,11 @@ func newSession(
 		writeLoopDone:    make(chan struct{}),
 		// **不**在此处 With sessionID（review r4 P3 修）：让 Register 拿到真实
 		// sessionID 后再 With 叠加，保证 logger 不出现 "sessionID="" 空字段。
-		logger:       logger.With(slog.Uint64("userID", userID), slog.Uint64("roomID", roomID)),
-		writeTimeout: writeTimeout,
-		ctx:          ctx,
-		cancelCtx:    cancel,
+		logger:           logger.With(slog.Uint64("userID", userID), slog.Uint64("roomID", roomID)),
+		writeTimeout:     writeTimeout,
+		closeWaitTimeout: closeWait,
+		ctx:              ctx,
+		cancelCtx:        cancel,
 	}
 	s.lastHeartbeatAt.Store(time.Now().UnixMilli())
 	if maxMessageSize > 0 {
@@ -337,12 +378,16 @@ func (s *Session) Close() error {
 // 收到 close code 4005 + reason "heartbeat timeout"，触发 iOS Story 12.5 指数
 // 退避自动重连路径（V1 §12.1 钦定 4005 = transient network failure，应自动重连）。
 //
-// 行为（review r1 P2 修后）：
+// 行为（review r1 P2 引入，r3 P2 收紧 wait 上限）：
 //  1. atomic CAS 翻 closed flag + 关 sendChan + 关 sendPriorityChan（与 Close
 //     共用 closeInternal）—— 让 writeLoop 立即看到 chan 关闭、退出循环
-//  2. **等** writeLoop 退出（writeLoopDone）—— 此后没有任何 goroutine 会再
-//     conn.WriteMessage data frame
-//  3. WriteControl close frame —— 此时是 wire 上的唯一写者，没有 race
+//  2. **等** writeLoop 退出（writeLoopDone），上限 closeWaitTimeout =
+//     writeTimeout + 200ms —— 此后没有任何 goroutine 会再 conn.WriteMessage
+//     data frame；选 writeTimeout + buffer 作为上限的原因：writeLoop 在最坏
+//     情况会被 conn.WriteMessage 卡到 writeTimeout 才超时退出，wait 上限**必须**
+//     ≥ 这个时间，否则 wait 提前超时让 close frame 写在 data frame 之前
+//  3. WriteControl close frame（deadline=closeFrameWriteDeadline=500ms）—— 此时
+//     是 wire 上的唯一写者，没有 race；500ms 写一帧足够
 //  4. cancelCtx + conn.Close + notifier.notifyClosed
 //
 // 错误：
@@ -398,23 +443,38 @@ func (s *Session) closeInternal(emitClose bool, code int, reason string) error {
 		// handshake 失败路径（ListMembers / buildSnapshot / WriteMessage / Register
 		// 失败）会在启动 readLoop/writeLoop **之前**调 session.Close 释放资源。
 		// 此时 writeLoop 从没运行 → writeLoopDone 永远不会 close → 走 wait 分支
-		// 必然落到 500ms timeout 才返回。Story 10.3 之前的实装没有此 wait，所以
+		// 必然落到 timeout 才返回。Story 10.3 之前的实装没有此 wait，所以
 		// 失败 handshake cleanup 是亚毫秒级；r1 引入 wait 让每个 handshake 失败
-		// 路径都付 +500ms tax，把 socket 释放从亚毫秒拖到亚秒。
+		// 路径都付不必要的 tax，把 socket 释放从亚毫秒拖到亚秒。
 		// 修法：用 writeLoopStarted atomic.Bool 标记 writeLoop 是否启动；只有
 		// started=true 才等 writeLoopDone，否则直接跳过 —— 没启动的 goroutine
 		// 不会写 wire，没必要等任何东西。
+		// **review r3 P2 修**：wait 上限改用 closeWaitTimeout = writeTimeout + 200ms
+		// 而非 closeFrameWriteDeadline（500ms）。原版 500ms < writeTimeout (默认 5s)
+		// → writeLoop 卡在 conn.WriteMessage 时 wait 提前超时，WriteControl 写出
+		// close frame 后 writeLoop 才结束写出 data frame，wire 上 close frame 后
+		// 跟 data frame 违反 V1 §12.1。closeWaitTimeout 取 writeTimeout + 200ms
+		// 是 writeLoop 实际最坏退出时间（writeMessage 最多卡 writeTimeout 后超时
+		// 返 error，writeLoop 立即 break）+ goroutine 调度 buffer。
 		// 防御性兜底：writeLoopDone 可能为 nil（极端测试场景未走 newSession
 		// 构造直接 zero-init Session 的路径），nil channel select 永远阻塞 ——
 		// 用 non-nil 检查 + 超时让本路径在异常 fixture 下不死锁。
 		if s.writeLoopStarted.Load() && s.writeLoopDone != nil {
+			waitTimeout := s.closeWaitTimeout
+			if waitTimeout <= 0 {
+				// zero-init Session（测试 fixture）兜底：用 closeFrameWriteDeadline
+				// 作为最后防线，至少不死锁
+				waitTimeout = closeFrameWriteDeadline
+			}
 			select {
 			case <-s.writeLoopDone:
 				// writeLoop 已退出
-			case <-time.After(closeFrameWriteDeadline):
+			case <-time.After(waitTimeout):
 				// 防御性兜底：writeLoop 卡住（理论不发生，sendChan 已关 → select
 				// 应立即命中关闭分支返回；超时仅用于防止异常 conn 卡 WriteMessage）
-				s.logger.Warn("ws closeInternal writeLoop wait timeout")
+				s.logger.Warn("ws closeInternal writeLoop wait timeout",
+					slog.Duration("waitTimeout", waitTimeout),
+				)
 			}
 		}
 

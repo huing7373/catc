@@ -2531,3 +2531,49 @@ func TestSession_CloseWithCode_ConcurrentSend_StopsImmediately(t *testing.T) {
 	// client 仍应能读到 close frame（顺序由实装层保证）
 	readCloseError(t, conn, 4005, "heartbeat timeout")
 }
+
+// TestHeartbeatScanner_ScanOnce_FanoutGoroutineRespectsCtxCancel：review r3 P2
+// regression。
+//
+// 背景（r3 P2）：scanner 的 fanout goroutine 不响应 ctx —— scanner.Run 在
+// ctx.Done 后主循环立即退出，但已 dispatch 的 per-session goroutines 仍在跑，
+// 仍 emit CloseWithCode 4005。预期 shutdown 时 sessionMgr.Close 走标准 close
+// 路径（无 4005），实际是 race。修法：fanout goroutine 入口 + recheck 后再
+// check 一次 ctx.Done，遇到 cancel 直接 return 不 emit 4005。
+//
+// 测试策略：
+//  1. 起 session，把 lastHeartbeatAt 拖到很久之前（让 idle > timeoutMs 必成立）
+//  2. 构造已 cancel 的 ctx 传给 scanOnce
+//  3. scanOnce 主循环遍历完，dispatch fanout goroutine；goroutine 入口 ctx.Done
+//     立即 return → session **不**被 close → Send 仍能成功
+//
+// **关键**：scanOnce 主循环本身不 check ctx（保留对历史 ListAllSessions 已 cancel
+// 的 ctx 的容忍）；本测试的真实保证 = fanout goroutine 拿 ctx 后入口先 check。
+func TestHeartbeatScanner_ScanOnce_FanoutGoroutineRespectsCtxCancel(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, session, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	// 把 lastHeartbeatAt 拖到很久之前 → idle 必 > timeoutMs
+	staleMs := time.Now().UnixMilli() - 10_000 // 10s 前
+	session.SetLastHeartbeatAtForTest(staleMs)
+
+	// 构造已 cancel 的 ctx
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 立即 cancel
+
+	scanner := wsapp.NewHeartbeatScannerForTest(mgr, 50, 200*time.Millisecond, idleTestLogger())
+	scanner.ScanOnceForTest(ctx, time.Now())
+
+	// 给 fanout goroutine 充足窗口期跑完（它应该入口立即 return，不 close session）
+	time.Sleep(300 * time.Millisecond)
+
+	// session 应仍 active：Send 不返 ErrSessionClosed
+	if err := session.Send([]byte(`{"type":"custom","requestId":"","payload":{},"ts":0}`)); err != nil {
+		t.Errorf("session was closed despite ctx.Done before fanout: Send err = %v, want nil (review r3 P2: fanout goroutine must check ctx.Done at entry)", err)
+	}
+}
+

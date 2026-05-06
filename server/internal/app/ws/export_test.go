@@ -39,3 +39,14 @@ func (s *HeartbeatScanner) TimeoutMsForTest() int64 {
 func (s *Session) SetLastHeartbeatAtForTest(unixMs int64) {
 	s.lastHeartbeatAt.Store(unixMs)
 }
+
+// CloseWaitTimeoutForTest 暴露 internal closeWaitTimeout 给 ws_test 包断言
+// （review r3 P2：closeWaitTimeout = writeTimeout + 200ms 不变量）。
+func (s *Session) CloseWaitTimeoutForTest() time.Duration {
+	return s.closeWaitTimeout
+}
+
+// WriteTimeoutForTest 暴露 internal writeTimeout 给单测断言对照用。
+func (s *Session) WriteTimeoutForTest() time.Duration {
+	return s.writeTimeout
+}

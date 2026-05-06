@@ -50,6 +50,9 @@ const heartbeatScanIntervalSec = 30
 //     网络抖动场景下日志噪声暴涨）
 //   - close 路径走 Session.CloseWithCode → Session.Close → notifier.notifyClosed
 //     → manager.Unregister → onUnregister 钩子（review 10-3 r2 P1 不变量保留）
+//   - **fanout goroutine 必须 ctx-aware**（review r3 P2）：scanner.Run 退出后已
+//     dispatched 的 per-session goroutine 不能再 emit 4005，否则 shutdown 期间
+//     正常下线的 client 会错误地收到 "heartbeat timeout" 触发自动重连
 type HeartbeatScanner struct {
 	mgr      SessionManager
 	cfg      heartbeatScannerConfig
@@ -154,8 +157,8 @@ func (s *HeartbeatScanner) Run(ctx context.Context) {
 // 流程：
 //  1. mgr.ListAllSessions(ctx) → 拿当前所有 active Session 切片
 //  2. 对每个 Session 计算 idle = now.UnixMilli() - s.LastHeartbeatAt()
-//  3. idle > timeoutMs → 并发 go { 重新校验 idle > timeoutMs（review r1 P1
-//     TOCTOU 修） → s.CloseWithCode(4005, "heartbeat timeout") }
+//  3. idle > timeoutMs → 并发 go { ctx-check → 重新校验 idle > timeoutMs（review
+//     r1 P1 TOCTOU 修） → ctx-check → s.CloseWithCode(4005, "heartbeat timeout") }
 //     （并发避免某一 Session 写 close frame 慢阻塞其他 Session 检测）
 //  4. log info（V1 §12.1 钦定 4005 写 log info，因为心跳超时是常态网络抖动 /
 //     切后台）
@@ -176,6 +179,15 @@ func (s *HeartbeatScanner) Run(ctx context.Context) {
 //     lastHeartbeatAt（典型场景：client 在阈值边界附近发 ping，server 端 readLoop
 //     已经处理完更新了 atomic，但 scanner 主循环已经读到旧值）。如果不重新校验，
 //     会把刚刚发了心跳的健康连接误踢，触发 client 不必要的 reconnect。
+//   - **shutdown race 防护**（review r3 P2）：fanout goroutine 必须监听 ctx —— 入口
+//     check + recheck 后 close 之前再 check。原因：scanner.Run 在 ctx.Done 后主
+//     循环立即退出，但已经 dispatch 的 per-session goroutines 仍然在跑。如果
+//     SIGTERM 落在 tick 与 fanout 之间，goroutine 会在 cancelHeartbeat 之后继续
+//     调 CloseWithCode 写 4005 close frame，与 main.go defer LIFO 钦定的
+//     "scanner 先停 → sessionMgr.Close 走标准 close 路径"流程 race —— 用户
+//     SIGTERM 期间正常下线却收到 4005 错误地触发自动重连。修法：在 fanout
+//     goroutine 入口 select ctx.Done → return，绕过 close path；recheck 之后再
+//     check 一次防 sleep 在 nanos 间被 cancel。
 func (s *HeartbeatScanner) scanOnce(ctx context.Context, now time.Time) {
 	sessions := s.mgr.ListAllSessions(ctx)
 	if len(sessions) == 0 {
@@ -194,10 +206,17 @@ func (s *HeartbeatScanner) scanOnce(ctx context.Context, now time.Time) {
 		// 启动 fire-and-forget goroutine 写 close frame + 释放本地资源。
 		// 不等待 — 单 Session close frame 写超时 500ms，1000 个 Session 同时超时
 		// 串行写会卡 500s；fanout 后整个 scanOnce 不超过 500ms。
-		// **不**捕获 ctx：CloseWithCode 内部用 conn.WriteControl + deadline，不
-		// 走 ctx-aware 路径；scanner.Run 退出后的尾部 fanout 也能跑完（fire-and-forget
-		// 语义本身允许，Close 幂等）。
+		// **review r3 P2**：必须捕获 ctx，让 shutdown 期间已 dispatched 的 goroutine
+		// 不再 emit 4005（避免与 sessionMgr.Close 标准路径 race）。
 		go func(target *Session) {
+			// review r3 P2 入口 ctx check：scanner.Run 退出（cancelHeartbeat()
+			// 在 main.go defer 内被调）后 ctx 已 Done，本 goroutine 应放弃 close
+			// path，让 sessionMgr.Close 走标准 close 流程而不是 4005。
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			// review r1 P1 TOCTOU 防护：在执行 CloseWithCode 之前**重新**读
 			// LastHeartbeatAt。主循环读时刻与本 goroutine 实际执行 close 之间，
 			// readLoop 仍可能收到 client 心跳并刷新 lastHeartbeatAt —— 那种情况下
@@ -207,6 +226,14 @@ func (s *HeartbeatScanner) scanOnce(ctx context.Context, now time.Time) {
 			if idleMs <= timeoutMs {
 				// race 窗口期内 client 已刷新心跳；本次 fanout 跳过，下一轮再判
 				return
+			}
+			// review r3 P2 二次 ctx check：recheck 与 CloseWithCode 之间还有
+			// goroutine 调度间隙，shutdown 信号可能在此期间到达。再 check 一次
+			// 让 close-vs-shutdown race 窗口尽可能小。
+			select {
+			case <-ctx.Done():
+				return
+			default:
 			}
 			s.logger.Info("ws session heartbeat timeout",
 				slog.String("sessionID", target.SessionID()),

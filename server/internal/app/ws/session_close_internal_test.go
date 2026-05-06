@@ -106,6 +106,65 @@ func TestSession_Close_AfterWriteLoopStarted_StillWaits(t *testing.T) {
 	}
 }
 
+// TestSession_CloseWaitTimeout_EqualsWriteTimeoutPlusBuffer: review r3 P2 不变量
+// 单测。
+//
+// 不变量：closeWaitTimeout = writeTimeout + closeWaitBufferDuration（200ms）。
+// 原因（详见 session.go closeFrameWriteDeadline 注释）：closeInternal 等
+// writeLoop 退出的上限**必须** ≥ writeTimeout，否则 writeLoop 在 conn.WriteMessage
+// 卡住时 wait 提前超时 → WriteControl 写出 close frame 后 writeLoop 才结束写出
+// data frame，wire 上 close frame 后跟 data frame 违反 V1 §12.1 协议。
+func TestSession_CloseWaitTimeout_EqualsWriteTimeoutPlusBuffer(t *testing.T) {
+	conn, cleanup := newPipeWebsocketConn(t)
+	defer cleanup()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	cases := []struct {
+		name         string
+		writeTimeout time.Duration
+		want         time.Duration
+	}{
+		{"5s default", 5 * time.Second, 5*time.Second + 200*time.Millisecond},
+		{"2s startGatewayServer", 2 * time.Second, 2*time.Second + 200*time.Millisecond},
+		{"100ms small (single-test)", 100 * time.Millisecond, 100*time.Millisecond + 200*time.Millisecond},
+		// writeTimeout=0 → fall back 到 closeFrameWriteDeadline + buffer (500ms+200ms = 700ms)
+		{"0 fallback", 0, 500*time.Millisecond + 200*time.Millisecond},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSession("", 1001, 3001, conn, logger, 16384, tc.writeTimeout)
+			if got := s.closeWaitTimeout; got != tc.want {
+				t.Errorf("closeWaitTimeout = %v with writeTimeout=%v, want %v (review r3 P2: must = writeTimeout + 200ms)", got, tc.writeTimeout, tc.want)
+			}
+		})
+	}
+}
+
+// TestSession_CloseWaitTimeout_GreaterThanCloseFrameWriteDeadline_ForProductionWriteTimeout：
+// 关键不变量（review r3 P2）：production 配置（writeTimeout ≥ 1s）下，closeWaitTimeout
+// **必须**严格大于 closeFrameWriteDeadline (500ms)，否则 r3 修复无效（wait 仍可能
+// 提前于 writeLoop 真正退出，让 close frame 与 data frame 顺序错乱）。
+//
+// 注：production 默认 writeTimeout = 5s（gateway.go cfg.WriteTimeoutSec 兜底），
+// startGatewayServer 测试配置 = 2s；两者都远大于 500ms，本不变量自然成立。
+// 本测试是 documentation + 回归保护：未来如果有人把 closeWaitBufferDuration
+// 改成 ≤ 0 或者把公式改成减号，本测试会立即捕获。
+func TestSession_CloseWaitTimeout_GreaterThanCloseFrameWriteDeadline_ForProductionWriteTimeout(t *testing.T) {
+	conn, cleanup := newPipeWebsocketConn(t)
+	defer cleanup()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// 用 production 默认 writeTimeout=5s
+	s := newSession("", 1001, 3001, conn, logger, 16384, 5*time.Second)
+	if s.closeWaitTimeout <= closeFrameWriteDeadline {
+		t.Errorf("closeWaitTimeout %v <= closeFrameWriteDeadline %v with production writeTimeout=5s: r3 fix did not actually extend wait beyond original 500ms",
+			s.closeWaitTimeout, closeFrameWriteDeadline)
+	}
+}
+
+
 // newPipeWebsocketConn 用 net.Pipe + httptest.Server 构造一个真实的
 // *websocket.Conn（server 侧）+ cleanup，用于不需要真实 wire IO 的 Session
 // 单测。Session 关心的字段（conn / sendChan / writeLoopDone / writeLoopStarted）

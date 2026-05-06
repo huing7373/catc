@@ -184,3 +184,4 @@
 | 2026-05-06 | [reconnect 路径 destructive Register 必须延后到 transient IO 之后（10-3 r10）](2026-05-06-ws-handshake-register-after-snapshot-r10.md) | 1 | architecture | `8718b3f` |
 | 2026-05-06 | [心跳超时扫描 TOCTOU & 4005 close frame 顺序保证（10-4 r1）](2026-05-06-ws-heartbeat-toctou-and-close-frame-ordering-10-4-r1.md) | 2 | concurrency | `<pending>` |
 | 2026-05-06 | [closeInternal 必须 gate writeLoopDone wait 在 writeLoopStarted（10-4 r2）](2026-05-06-ws-close-skip-wait-when-writeloop-not-started-10-4-r2.md) | 1 | perf, concurrency | `<pending>` |
+| 2026-05-06 | [closeInternal wait 上限不足 cover writeTimeout & scanner fanout 不响应 ctx（10-4 r3）](2026-05-06-ws-close-wait-timeout-and-shutdown-fanout-10-4-r3.md) | 2 | concurrency | `<pending>` |
