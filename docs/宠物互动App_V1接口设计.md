@@ -34,6 +34,7 @@
   4. 在本 story 文件 + epics.md 同步标注变更原因 + 影响范围
 - `ws.heartbeat_timeout_sec`（默认 60s）/ `ws.max_message_size_bytes`（默认 16 KB）两个配置 key 的**默认值**属契约一部分：**prod 部署必须使用默认值**，不允许通过配置文件覆盖 —— 否则不同 prod 实例会在不同心跳超时 / message 大小上限上踢人，重新引入跨端契约漂移；**dev / test 环境**可通过配置文件覆盖默认值（仅用于单测 / 调试 / fixture），**不**视为契约变更（这些环境不对外提供 prod 体验，跨端契约一致性不受影响）；**修改默认值本身**视为契约变更走完整冻结流程。
 - WS 业务消息（`member.joined` / `member.left` / `pet.state.changed` / `emoji.send` / `emoji.received` 等）的字段层契约**不**在节点 4 协议骨架冻结范围内，由对应 Epic 的 §X.1 story（Story 11.1 / 14.1 / 17.1）独立锚定 + 独立冻结 —— 即"协议骨架在 Epic 10 冻结，业务消息按 epic 顺序逐步冻结"。
+- **server / client active message set 的冻结范围**：本 story（Story 10.1）冻结的"server → client 仅 `room.snapshot` / `pong` / `error`"与"client → server 仅 `ping`"声明（见 §12.1.3 / §12.2 / §12.3 对应注解块）**仅适用于 Epic 10 阶段**（Story 10.1 ~ 10.7）；Epic 11 / 14 / 17 起，对应 §X.1 锚定 story（Story 11.1 / 14.1 / 17.1）按各自语义把新业务消息（如 `member.joined` / `member.left` / `pet.state.changed` / `emoji.received` / `emoji.send`）合法加入对应方向的 active message set，**不**视为本 story 冻结的违反。Epic 10 之后的 server / client active message set 由对应 epic §X.1 story 各自负责，本 story 不预先锁定。
 
 ---
 
@@ -1306,7 +1307,7 @@ GET /ws/rooms/{roomId}?token=xxx
 
 1. **第一条**：`room.snapshot`（payload schema 见 §12.3，节点 4 阶段为 placeholder：room 三字段 + members 数组反映 `room_members` 全部成员行 —— 单表查询不 JOIN，丰富字段 `nickname` / `pet.petId` 在 placeholder 阶段允许空字符串，详见 §12.3 placeholder 示例与字段表 placeholder 行为）
 
-> 节点 4 阶段服务端 → 客户端**只**会主动发送 `room.snapshot` / `pong` / `error` 三种消息（与本节末 §12.3 业务消息延后锚定块 + §1 节点 4 协议骨架冻结声明一致）；`member.joined` 等业务广播消息的字段层契约与"是否在握手时广播"的语义由 Story 11.1（Epic 11）锚定，**不**在本 story 范围内 —— 即节点 4 阶段服务端**不**在握手时广播 `member.joined`。
+> **Epic 10 阶段**（即本 story 范围 / Story 10.1 ~ 10.7）服务端 → 客户端**只**会主动发送 `room.snapshot` / `pong` / `error` 三种消息（与本节末 §12.3 业务消息延后锚定块 + §1 节点 4 协议骨架冻结声明一致）；`member.joined` 等业务广播消息的字段层契约与"是否在握手时广播"的语义由 Story 11.1（Epic 11）锚定 —— 即 Epic 10 阶段服务端**不**在握手时广播 `member.joined`，但 Epic 11 起按对应 story 锚定的语义扩展消息集合（Story 11.1 锚定 `member.joined` / `member.left` 加入消息集，Story 14.1 锚定 `pet.state.changed`，Story 17.1 锚定 `emoji.received`）；本声明仅冻结 Epic 10 阶段的 server-active message set，不阻止后续 epic 的合法扩展。
 
 服务端不要求 client 在握手后发送任何"我准备好了"的初始化消息，握手成功 = 服务端可以推快照。
 
@@ -1408,7 +1409,7 @@ JSON 通用骨架：
 
 > **业务消息延后锚定**：上文 `### 发送表情`（`emoji.send`）为节点 4 之前的协议草稿示例，**不**在节点 4 / Epic 10 范围内。该消息字段层契约的正式锚定由 **Story 17.1**（Epic 17 表情广播契约）负责，节点 6 落地。
 >
-> 节点 4 阶段（Epic 10 ~ 13）客户端 → 服务端**只**有 `ping` 一种合法消息；客户端**不**应在节点 4 阶段发送 `emoji.send`（即使协议草稿示例存在），server 收到非 `ping` 消息当前阶段**忽略**（log warn + 不 close 连接，避免兼容性问题；具体行为 Story 10.3 实装时锁定）。
+> **Epic 10 阶段**（即本 story 范围 / Story 10.1 ~ 10.7）客户端 → 服务端**只**有 `ping` 一种合法消息；客户端**不**应在 Epic 10 阶段发送 `emoji.send`（即使协议草稿示例存在），server 收到非 `ping` 消息当前阶段**忽略**（log warn + 不 close 连接，避免兼容性问题；具体行为 Story 10.3 实装时锁定）。Epic 17 起按 Story 17.1 锚定将 `emoji.send` 加入合法 client-active 消息集合 —— 本声明仅冻结 Epic 10 阶段的 client-active message set，不阻止后续 epic 合法扩展。
 
 ### ping（心跳）
 
@@ -1691,7 +1692,7 @@ JSON 示例（与本节字段表对齐，含 `requestId`）：
 > - `pet.state.changed` → **Story 14.1**（Epic 14 宠物状态同步契约，节点 5）—— **注意**：现有 §12.3 草稿中**不存在** `pet.state.changed` 消息示例（仅在 epics.md 业务消息列表里出现），Story 14.1 落地时**需新增**该小节
 > - `emoji.received` → **Story 17.1**（Epic 17 表情广播契约，节点 6）
 >
-> 节点 4 阶段（Epic 10 ~ 13）服务端 → 客户端**只**会主动发送 `room.snapshot` / `pong` / `error` 三种消息（其中 `error` 仅在节点 4 阶段适用错误码场景下出现）；客户端 Story 12.3 解析层在节点 4 阶段**应**对未识别的 `type` 值（如收到不该到达的 `emoji.received`）走"安全忽略 + log warn"路径，**不**因未识别消息 close 连接 / crash app（避免后续 epic 灰度上线时跨版本兼容问题）。
+> **Epic 10 阶段**（即本 story 范围 / Story 10.1 ~ 10.7）服务端 → 客户端**只**会主动发送 `room.snapshot` / `pong` / `error` 三种消息（其中 `error` 仅在节点 4 阶段适用错误码场景下出现）；Epic 11 起按对应 story 锚定的语义扩展（Story 11.1 锚定 `member.joined` / `member.left` 加入 server-active 集合 + 节点 4 中段允许 server 在加入 / 退出房间事务提交后广播；Story 14.1 锚定 `pet.state.changed`，节点 5；Story 17.1 锚定 `emoji.received`，节点 6）—— 即"Epic 10 阶段三类消息冻结"**不**阻止后续 epic 按 §X.1 锚定 story 合法扩展 server → client 消息集合。客户端 Story 12.3 解析层在节点 4 阶段**应**对未识别的 `type` 值（如收到不该到达的 `emoji.received`）走"安全忽略 + log warn"路径，**不**因未识别消息 close 连接 / crash app（避免后续 epic 灰度上线时跨版本兼容问题）。
 
 ---
 

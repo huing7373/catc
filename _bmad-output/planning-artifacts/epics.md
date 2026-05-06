@@ -1788,16 +1788,16 @@ So that Session 建立后立即推送 room.snapshot 给客户端，后续 Epic 1
 **Given** Story 10.5 BroadcastToRoom + Story 10.6 Presence 都就绪
 **When** 完成本 story
 **Then** `internal/app/ws/snapshot.go` 提供 `SendRoomSnapshot(ctx, session, roomID)`:
-- 调用 SnapshotBuilder 接口（接口定义在本 Story，**实现是 placeholder**：返回 `{room: {id: roomID, maxMembers: 4, memberCount: 0}, members: []}`）
+- 调用 SnapshotBuilder 接口（接口定义在本 Story，**实现是 placeholder**：执行 `SELECT * FROM room_members WHERE roomId=?` 单表查询，把全部成员行映射成 `members[]`；丰富字段（`nickname` / `pet.petId` 等）在 placeholder 阶段允许空字符串降级 —— 详见 V1 §12.3 placeholder 字段表行为；`memberCount` 必须等于 `len(members)`，**禁止**写死为 0）
 - 通过 session.Send 发出 `room.snapshot` 消息
 **And** SnapshotBuilder 接口签名: `BuildSnapshot(ctx, roomID) (Snapshot, error)`
-**And** Epic 11 Story 11.7 会提供真实 SnapshotBuilder 实现（基于 room_members + presence）
+**And** Epic 11 Story 11.7 会提供真实 SnapshotBuilder 实现（同样基于 `room_members`，差异仅在 JOIN `users` / `pets` 聚合丰富字段；成员条目数量在 placeholder 与真实实装之间一致）
 **And** Session 创建后（Story 10.3 lifecycle 钩子）自动调用 SendRoomSnapshot
 **And** **单元测试覆盖**（≥3 case，mocked SnapshotBuilder + Session）:
-- happy: SnapshotBuilder 返回 placeholder snapshot → Session 收到 room.snapshot 消息
-- edge: SnapshotBuilder 抛 error → Session 收到 error 消息（type=error, code=6005 房间状态异常）
+- happy: SnapshotBuilder 返回含 N 条成员行的 placeholder snapshot（如 N=2，含 `userId` 真值 + `nickname=""` / `pet.petId=""` 降级）→ Session 收到 room.snapshot 消息，`payload.members` 长度 = N，`payload.room.memberCount` = N
+- edge: SnapshotBuilder 抛 error → Session **不**走"推 type=error 消息"路径，而是被 close 1011（reason=`"snapshot build failed"`）—— 测试 close frame 的 code 与 reason，**不**测 error 消息 message 字段值（错误码 6005 保留给 Story 11.x / 14.x 业务流程的运行时状态错误推送，**不**用于初始 snapshot 失败场景；锁定 V1 §12.3 §12.1 close code 表 1011 行 + §12.3 "snapshot 构建失败的处理路径" 注）
 - happy: 同一 Session 收到 snapshot 后再触发 SendRoomSnapshot → 正常发出（幂等）
-**And** **集成测试覆盖**: WS 客户端连接 → 立即收到 placeholder room.snapshot 消息（room.id = 请求的 roomID, members = []）
+**And** **集成测试覆盖**: WS 客户端连接（roomId 已在 `room_members` 中预置 ≥2 条 fixture 成员行）→ 立即收到 placeholder `room.snapshot` 消息，`payload.room.id` = 请求的 roomID，`payload.members` 长度 = fixture 行数（**禁止**断言 `members: []` —— V1 §12.3 字段表 placeholder 行为已钦定全 roster 返回），丰富字段（`nickname` / `pet.petId`）允许空字符串降级
 
 ## Epic 11: Server - 房间 CRUD + 房间快照内容 + 成员事件广播
 
