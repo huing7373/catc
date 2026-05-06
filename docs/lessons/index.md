@@ -174,3 +174,4 @@
 | 2026-05-06 | [go-redis ContextTimeoutEnabled 默认 false 让 ctx 形同虚设 + 抽象层 Close 真·幂等需要 sync.Once 兜底](2026-05-06-go-redis-context-timeout-and-close-idempotency.md) | 2 | config, architecture | `9acf65f` |
 | 2026-05-06 | [WS Session.Send/Close 并发 panic & SessionManager 关停时 unregister hook 漏调](2026-05-06-ws-session-send-close-race-and-shutdown-hooks.md) | 2 | concurrency, error-handling, architecture | `<pending>` |
 | 2026-05-06 | [WS reconnect 替换路径漏触发 onUnregister 钩子 + WSConfig 契约字段缺 prod 强制](2026-05-06-ws-reconnect-unregister-hook-and-prod-contract-gate.md) | 2 | architecture, config | `<pending>` |
+| 2026-05-06 | [WS 路由必须 gate 在 backing tables migration 落地之后（启动期表存在性 sniff）](2026-05-06-ws-route-table-existence-gate.md) | 1 | architecture | `<pending>` |

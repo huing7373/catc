@@ -1,6 +1,8 @@
 package bootstrap
 
 import (
+	"log/slog"
+
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
@@ -16,6 +18,48 @@ import (
 	"github.com/huing/cat/server/internal/repo/tx"
 	"github.com/huing/cat/server/internal/service"
 )
+
+// wsTablesReady 探测 rooms / room_members 两张表是否在当前 schema 下存在。
+//
+// **背景**（Story 10.3 review r3 [P1]）：本 story 范围红线钦定**不**做 rooms /
+// room_members migration（Epic 11.2 才落地）。当前 server/migrations/ 只到
+// 0006_init_user_step_sync_logs；任何走 WS 握手的部署环境（用 repo 现存
+// migration 拉起的 prod / staging）会在 RoomMemberRepo.RoomExists / IsUserInRoom
+// 阶段拿到 SQL "Table 'cat.rooms' doesn't exist" / "Table 'cat.room_members'
+// doesn't exist" → Gateway close 1011 → feature 完全不可用。
+//
+// **修法**：启动期 sniff 两张表存在性 —— 都存在才挂 /ws/rooms/:roomId 路由；
+// 任一不存在则跳过路由挂载并 log warn 提醒"待 Epic 11.2 落地 migration"。
+//
+// 不 fail-fast 改 warn-and-skip 的原因：本阶段 0001-0006 跑完是**预期状态**；
+// 集成测试 (`bash scripts/build.sh --integration`) fixture / Epic 11.2 落地后
+// 自动转为 "都存在" → 路由挂载，无需配置漂移。
+//
+// **不**用 `SHOW TABLES LIKE` + Count（codex review 建议形态）：GORM .Count 实际
+// 翻译为 `SELECT COUNT(*) FROM (...)` 子查询，对 SHOW TABLES 这种元数据 query
+// 不被 MySQL 接受 / 类型不兼容。本函数改用 information_schema.tables + COUNT(*)
+// 子查询，单 query 直出整数计数，与 GORM Raw().Scan(&int64) 类型完全兼容。
+//
+// information_schema.tables 在 MySQL / MariaDB 都是标准存在的元数据视图；
+// `table_schema = DATABASE()` 自动绑定当前 connection 的 schema（不依赖
+// hardcode schema 名 → dev / staging / prod 多 schema 部署也通用）；
+// `table_name IN ('rooms','room_members')` 一次返回两表的命中数（0/1/2）。
+//
+// 单 query 走元数据缓存，启动期开销 < 1ms；不引入 N+1 / 不依赖 schema name
+// 注入。
+//
+// **db nil 安全**：调用方在 `deps.GormDB != nil` 分支内才调本 helper；
+// 单元测试 Deps{} 零值场景由外层 if-guard 拦截，本函数不重复 nil-check。
+func wsTablesReady(db *gorm.DB) bool {
+	var hitCount int64
+	if err := db.Raw(
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN ('rooms','room_members')",
+	).Scan(&hitCount).Error; err != nil {
+		slog.Warn("ws table sniff failed", slog.Any("error", err))
+		return false
+	}
+	return hitCount >= 2
+}
 
 // Deps 是 bootstrap 期收集的依赖集合，由 main.go 构造后透传给 Run / NewRouter。
 //
@@ -219,16 +263,29 @@ func NewRouter(deps Deps) *gin.Engine {
 		// 而非 HTTP 401）。
 		// 仅当 deps.SessionMgr 非空时挂载（与 GormDB / Signer if-guard 同模式）；
 		// 单元测试 Deps{} 零值场景跳过本路由，与 router_test.go 既有约定一致。
+		//
+		// **review r3 [P1] 加表存在性 gate**：rooms / room_members migration 在
+		// Epic 11.2 才落地（本 story §"本 story 不做" 第 5 条钦定排除），当前
+		// server/migrations/ 只到 0006。任何走 WS 握手的环境会在 RoomMemberRepo
+		// 阶段拿到 SQL "table doesn't exist" → Gateway close 1011 → feature 完全
+		// 不可用。启动期用 wsTablesReady() 探测两张表 —— 都存在才挂路由；任一
+		// 缺失 → 跳过 + log warn 提醒"待 Epic 11.2 落地"。集成测试 fixture
+		// （ws_integration_test.go startMySQLWithRoomMemberFixture）会在容器内
+		// CREATE TABLE，wsTablesReady 返 true → 路由挂载 → 集成测试不受影响。
 		if deps.SessionMgr != nil {
-			roomMemberRepo := mysql.NewRoomMemberRepo(deps.GormDB)
-			gateway := wsapp.NewGateway(
-				deps.Signer,
-				deps.SessionMgr,
-				roomMemberRepo,
-				deps.WSCfg,
-				deps.EnvName, // review r2 P2 加：prod contract override 强制
-			)
-			r.GET("/ws/rooms/:roomId", gateway.Handle)
+			if wsTablesReady(deps.GormDB) {
+				roomMemberRepo := mysql.NewRoomMemberRepo(deps.GormDB)
+				gateway := wsapp.NewGateway(
+					deps.Signer,
+					deps.SessionMgr,
+					roomMemberRepo,
+					deps.WSCfg,
+					deps.EnvName, // review r2 P2 加：prod contract override 强制
+				)
+				r.GET("/ws/rooms/:roomId", gateway.Handle)
+			} else {
+				slog.Warn("WS route /ws/rooms/:roomId disabled: rooms/room_members tables not yet migrated (待 Epic 11.2 落地 migration)")
+			}
 		}
 	}
 
