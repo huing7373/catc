@@ -1,6 +1,6 @@
 # Story 10.2: Redis 接入（连接池 + 配置 + fail-fast + RedisClient 抽象）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
