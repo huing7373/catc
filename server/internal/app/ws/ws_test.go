@@ -1847,3 +1847,687 @@ func TestNewGateway_ProdEnv_AcceptsContractValues(t *testing.T) {
 		t.Error("NewGateway returned nil in prod env with contract values")
 	}
 }
+
+// ---------- Story 10.4：Session.CloseWithCode 测试 ----------
+
+// readCloseError 是测试 helper：从 conn 读直到 close error，校验 code + reason。
+// 与既有 expectCloseError 不同的是：本 helper 在已经握手成功并读完 snapshot 后用，
+// 而 expectCloseError 是握手期就直接读拿 close（没有 snapshot 在前）。
+func readCloseError(t *testing.T, conn *websocket.Conn, wantCode int, wantReason string) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		_, _, err := conn.ReadMessage()
+		if err == nil {
+			// 还有非-close 消息（如刚才的 snapshot 残留 / pong），继续读
+			continue
+		}
+		closeErr, ok := err.(*websocket.CloseError)
+		if !ok {
+			t.Fatalf("err = %T %v, want *websocket.CloseError", err, err)
+		}
+		if closeErr.Code != wantCode {
+			t.Errorf("CloseError.Code = %d, want %d (text=%q)", closeErr.Code, wantCode, closeErr.Text)
+		}
+		if wantReason != "" && closeErr.Text != wantReason {
+			t.Errorf("CloseError.Text = %q, want %q", closeErr.Text, wantReason)
+		}
+		return
+	}
+}
+
+// TestSession_CloseWithCode_HappyPath：
+// CloseWithCode(4005, "heartbeat timeout") → client conn 收到 close frame
+// code=4005 reason="heartbeat timeout"。
+func TestSession_CloseWithCode_HappyPath(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, session, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	if err := session.CloseWithCode(4005, "heartbeat timeout"); err != nil {
+		t.Fatalf("CloseWithCode: %v", err)
+	}
+
+	readCloseError(t, conn, 4005, "heartbeat timeout")
+}
+
+// TestSession_CloseWithCode_AlreadyClosed_ReturnsErr：
+// Session 已 Close → CloseWithCode 返 ErrSessionClosed sentinel + 不写 close frame。
+func TestSession_CloseWithCode_AlreadyClosed_ReturnsErr(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, session, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	// 先 Close（已 close 的 Session）
+	if err := session.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// 再 CloseWithCode → 应返 ErrSessionClosed
+	err := session.CloseWithCode(4005, "heartbeat timeout")
+	if !errors.Is(err, wsapp.ErrSessionClosed) {
+		t.Errorf("CloseWithCode after Close: err = %v, want ErrSessionClosed", err)
+	}
+}
+
+// TestSession_CloseWithCode_Idempotent：
+// 调两次 CloseWithCode → 第一次写 close frame + 关 conn，第二次返 ErrSessionClosed。
+func TestSession_CloseWithCode_Idempotent(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, session, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	// 第一次：成功
+	if err := session.CloseWithCode(4005, "heartbeat timeout"); err != nil {
+		t.Errorf("first CloseWithCode: err = %v, want nil", err)
+	}
+
+	// 第二次：返 ErrSessionClosed
+	err := session.CloseWithCode(4005, "heartbeat timeout")
+	if !errors.Is(err, wsapp.ErrSessionClosed) {
+		t.Errorf("second CloseWithCode: err = %v, want ErrSessionClosed", err)
+	}
+
+	// client 仍能读到 close frame（第一次写的）
+	readCloseError(t, conn, 4005, "heartbeat timeout")
+}
+
+// ---------- Story 10.4：SessionManager.ListAllSessions 测试 ----------
+
+// TestSessionManager_ListAllSessions_ReturnsAll：
+// 注册 3 user 在 2 个不同 room → ListAllSessions 返 3 个 Session（按 sessionID 字典序）。
+func TestSessionManager_ListAllSessions_ReturnsAll(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+
+	signer := newSigner(t)
+	wsURL, ts := startGatewayServer(t, signer, mgr, repo)
+	defer ts.Close()
+
+	type want struct {
+		userID uint64
+		roomID uint64
+	}
+	wants := []want{
+		{1001, 3001},
+		{1002, 3001},
+		{1003, 3002}, // 跨 room
+	}
+	var conns []*websocket.Conn
+	for _, w := range wants {
+		token, _ := signer.Sign(w.userID, 3600)
+		url := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, w.roomID, token)
+		conn, _, err := dialWS(t, url)
+		if err != nil {
+			t.Fatalf("dial uid=%d room=%d: %v", w.userID, w.roomID, err)
+		}
+		conns = append(conns, conn)
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		if _, _, err := conn.ReadMessage(); err != nil {
+			t.Fatalf("read snapshot uid=%d: %v", w.userID, err)
+		}
+	}
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+
+	// 等所有 Session 注册到 manager
+	deadline := time.Now().Add(2 * time.Second)
+	var sessions []*wsapp.Session
+	for time.Now().Before(deadline) {
+		sessions = mgr.ListAllSessions(context.Background())
+		if len(sessions) >= len(wants) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := len(sessions); got != len(wants) {
+		t.Fatalf("ListAllSessions len = %d, want %d", got, len(wants))
+	}
+
+	// 校验字典序：sessionID 应严格递增
+	for i := 1; i < len(sessions); i++ {
+		if sessions[i-1].SessionID() >= sessions[i].SessionID() {
+			t.Errorf("ListAllSessions not sorted by sessionID: [%d]=%q [%d]=%q",
+				i-1, sessions[i-1].SessionID(), i, sessions[i].SessionID())
+		}
+	}
+
+	// 校验 user 集合（不依赖顺序）
+	gotUsers := map[uint64]bool{}
+	for _, s := range sessions {
+		gotUsers[s.UserID()] = true
+	}
+	for _, w := range wants {
+		if !gotUsers[w.userID] {
+			t.Errorf("ListAllSessions missing userID=%d", w.userID)
+		}
+	}
+}
+
+// TestSessionManager_ListAllSessions_EmptyManager_ReturnsEmpty：
+// manager 无 session → ListAllSessions 返空切片（非 nil）。
+func TestSessionManager_ListAllSessions_EmptyManager_ReturnsEmpty(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+
+	sessions := mgr.ListAllSessions(context.Background())
+	if sessions == nil {
+		t.Errorf("ListAllSessions = nil, want non-nil empty slice")
+	}
+	if got := len(sessions); got != 0 {
+		t.Errorf("ListAllSessions len = %d, want 0", got)
+	}
+}
+
+// ---------- Story 10.4：HeartbeatScanner 测试 ----------
+
+// idleTestLogger 返回一个写到 io.Discard 的 slog.Logger，让 scanner 测试不污染
+// stdout（与 session_manager_internal_test 同模式）。
+func idleTestLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(testDiscard{}, nil))
+}
+
+// testDiscard 实装 io.Writer，丢弃所有写入（与 io.Discard 等价但不引入 io 依赖）。
+type testDiscard struct{}
+
+func (testDiscard) Write(p []byte) (int, error) { return len(p), nil }
+
+// readCloseFrameLoose 是 readCloseError 的宽松版：仅校验 close code + reason，
+// 不 t.Fatal —— 适合 scanner 测试中"可能 read 阻塞"的场景，给短 timeout 让
+// scanner 异步触发 close 后能读到。
+func readCloseFrameLoose(t *testing.T, conn *websocket.Conn, timeout time.Duration) (int, string) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
+	for {
+		_, _, err := conn.ReadMessage()
+		if err == nil {
+			continue
+		}
+		closeErr, ok := err.(*websocket.CloseError)
+		if !ok {
+			t.Fatalf("err = %T %v, want *websocket.CloseError", err, err)
+		}
+		return closeErr.Code, closeErr.Text
+	}
+}
+
+// TestHeartbeatScanner_ScanOnce_IdleSession_ClosesWith4005：
+// manager 含 1 Session（lastHeartbeatAt = now-70s）→ scanner.scanOnce →
+// Session.CloseWithCode 被调（client 收到 4005 frame）。
+func TestHeartbeatScanner_ScanOnce_IdleSession_ClosesWith4005(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, session, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	// 强制把 lastHeartbeatAt 拖回 70 秒前 —— 通过测试用的 ResetHeartbeat helper
+	// （Session 自身没 setter，用 wire 路径不发消息让 lastHeartbeatAt 自然停留也行，
+	// 但更可控的是直接写 idleTimeout 短到比 wallclock 间隔小）。
+	//
+	// 实际策略：scanner 用 timeoutMs=10ms（极短），now=time.Now()；只要
+	// session 不在过去 10ms 内收到消息就视为 idle。useGatewayDial 后立刻调
+	// scanOnce → idle = (now - handshake_time).UnixMilli() > 10ms 必成立（因为
+	// useGatewayDial 内部至少 sleep 几 ms 等 manager 注册）。
+	scanner := wsapp.NewHeartbeatScannerForTest(mgr, 10, 200*time.Millisecond, idleTestLogger())
+
+	// 等 useGatewayDial 后至少 50ms 让 idle 远超 10ms threshold
+	time.Sleep(50 * time.Millisecond)
+
+	scanner.ScanOnceForTest(context.Background(), time.Now())
+
+	// scanner 是 fanout goroutine 触发 CloseWithCode；等 close 写到 wire
+	code, text := readCloseFrameLoose(t, conn, 2*time.Second)
+	if code != 4005 {
+		t.Errorf("close code = %d, want 4005", code)
+	}
+	if text != "heartbeat timeout" {
+		t.Errorf("close reason = %q, want \"heartbeat timeout\"", text)
+	}
+
+	// session 此后应进入 closed 状态（Send 返 ErrSessionClosed）
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := session.Send([]byte("test")); errors.Is(err, wsapp.ErrSessionClosed) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("session not closed after scanner timeout fanout")
+}
+
+// TestHeartbeatScanner_ScanOnce_ActiveSession_DoesNotClose：
+// manager 含 1 Session（lastHeartbeatAt 刚刚更新）→ scanner.scanOnce → Session 不被 close。
+func TestHeartbeatScanner_ScanOnce_ActiveSession_DoesNotClose(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, session, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	// scanner timeoutMs=10s（远大于刚握手完的 idle 时间）→ 不应触发 close
+	scanner := wsapp.NewHeartbeatScannerForTest(mgr, 10*1000, 200*time.Millisecond, idleTestLogger())
+
+	scanner.ScanOnceForTest(context.Background(), time.Now())
+
+	// 给 fanout goroutine 一些时间（如果它真的会跑也会是异步的）；scanner 不应 fanout
+	time.Sleep(200 * time.Millisecond)
+
+	// session 应仍在工作 —— Send 不返 ErrSessionClosed
+	if err := session.Send([]byte(`{"type":"custom","requestId":"","payload":{},"ts":0}`)); err != nil {
+		t.Errorf("Send after scanOnce on active session: err = %v, want nil", err)
+	}
+}
+
+// TestHeartbeatScanner_ScanOnce_MultipleSessions_OnlyIdleClosed：
+// manager 含 3 Session（idle/active/idle）→ scanOnce → 仅 2 个 idle 被 close +
+// 1 active 仍存活（保护 close fanout 并发安全）。
+func TestHeartbeatScanner_ScanOnce_MultipleSessions_OnlyIdleClosed(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+
+	signer := newSigner(t)
+	wsURL, ts := startGatewayServer(t, signer, mgr, repo)
+	defer ts.Close()
+
+	// 起 3 个 Session（不同 user），全部在同一 room 简化 fixture
+	type connSess struct {
+		conn *websocket.Conn
+		uid  uint64
+	}
+	var all []connSess
+	for _, uid := range []uint64{1001, 1002, 1003} {
+		token, _ := signer.Sign(uid, 3600)
+		url := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, 3001, token)
+		conn, _, err := dialWS(t, url)
+		if err != nil {
+			t.Fatalf("dial uid=%d: %v", uid, err)
+		}
+		all = append(all, connSess{conn, uid})
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		if _, _, err := conn.ReadMessage(); err != nil {
+			t.Fatalf("read snapshot uid=%d: %v", uid, err)
+		}
+	}
+	defer func() {
+		for _, cs := range all {
+			cs.conn.Close()
+		}
+	}()
+
+	// 等所有注册
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(mgr.ListAllSessions(context.Background())) >= 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 让 1002 的 Session "active" —— 给它发条 ping 让 lastHeartbeatAt 刷新到 now
+	if err := all[1].conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"ping","requestId":"refresh","payload":{}}`)); err != nil {
+		t.Fatalf("write ping uid=1002: %v", err)
+	}
+	// 读掉 pong 让 read deadline 不过期
+	_ = all[1].conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := all[1].conn.ReadMessage(); err != nil {
+		t.Fatalf("read pong uid=1002: %v", err)
+	}
+
+	// 等 server 端 lastHeartbeatAt 刷新到当前时间附近（receive ping → readLoop
+	// 内 lastHeartbeatAt.Store(time.Now().UnixMilli()) 是在 ReadMessage 收到消息
+	// 之后；client 这边 ReadMessage(pong) 返回时 server 端早已刷新）
+
+	// 现在让 timeoutMs=20ms：
+	//   - uid=1002 刚刷新 → idle ≈ 0~20ms → 不一定触发；为了稳定先 sleep 一段足以
+	//     让 1001/1003 idle，但 1002 的 lastHeartbeat 也会越来越久 —— 改策略：
+	//
+	// **更稳的策略**：scan 调 now=time.Now() 让所有 Session 都按"现在"判断；
+	// timeoutMs 设置为：1002 在 active 之后过去的 idle ms 之上的某个值。
+	//
+	// 实操：sleep 100ms 让 useGatewayDial-time 过去更久 → 1001/1003 idle ≈
+	// 几百 ms；然后立即给 1002 发 ping 刷新 → 1002 idle ≈ 几 ms；scan timeoutMs=50ms
+	// → 1001/1003 命中（idle > 50ms），1002 不命中（idle < 50ms）
+
+	// 重新刷新 1002 让它非常 active
+	if err := all[1].conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"ping","requestId":"refresh2","payload":{}}`)); err != nil {
+		t.Fatalf("write ping2 uid=1002: %v", err)
+	}
+	_ = all[1].conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := all[1].conn.ReadMessage(); err != nil {
+		t.Fatalf("read pong2 uid=1002: %v", err)
+	}
+
+	// 不 sleep —— 立即扫，timeoutMs 设的足够大让 1001/1003 都还不超时（避免本测试
+	// 太脆弱）。改策略：直接 verify scanner 行为通过手工设 lastHeartbeatAt。
+	//
+	// 由于 Session 上没有 SetLastHeartbeatAt setter，本测试只能用真实时间。
+	// 折中：sleep 100ms，让 1001/1003 长时间没动 → idle ≈ 100ms+；再瞬间 ping 1002；
+	// 立即 scanOnce timeoutMs=80ms，1002 idle ≈ 0ms 不命中，1001/1003 idle ≈ 100ms+
+	// 命中。
+
+	time.Sleep(100 * time.Millisecond)
+	if err := all[1].conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"ping","requestId":"r3","payload":{}}`)); err != nil {
+		t.Fatalf("write ping3 uid=1002: %v", err)
+	}
+	_ = all[1].conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := all[1].conn.ReadMessage(); err != nil {
+		t.Fatalf("read pong3 uid=1002: %v", err)
+	}
+
+	// scan
+	scanner := wsapp.NewHeartbeatScannerForTest(mgr, 80, 200*time.Millisecond, idleTestLogger())
+	scanner.ScanOnceForTest(context.Background(), time.Now())
+
+	// 1001 / 1003 应被 close（4005）
+	c1Code, _ := readCloseFrameLoose(t, all[0].conn, 2*time.Second)
+	if c1Code != 4005 {
+		t.Errorf("uid=1001 close code = %d, want 4005", c1Code)
+	}
+	c3Code, _ := readCloseFrameLoose(t, all[2].conn, 2*time.Second)
+	if c3Code != 4005 {
+		t.Errorf("uid=1003 close code = %d, want 4005", c3Code)
+	}
+
+	// 1002 应仍 active —— 发条消息看能不能收到
+	if err := all[1].conn.WriteMessage(websocket.TextMessage,
+		[]byte(`{"type":"ping","requestId":"survive","payload":{}}`)); err != nil {
+		t.Errorf("uid=1002 write after scan: %v (should still be alive)", err)
+	}
+	_ = all[1].conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := all[1].conn.ReadMessage(); err != nil {
+		t.Errorf("uid=1002 read after scan: %v (should still be alive)", err)
+	}
+}
+
+// TestHeartbeatScanner_Run_CtxCancel_ExitsGracefully：
+// scanner.Run(ctx) 启动 → cancel(ctx) → Run 返回，无 goroutine leak（用
+// channel close 信号探测）。
+func TestHeartbeatScanner_Run_CtxCancel_ExitsGracefully(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+
+	scanner := wsapp.NewHeartbeatScannerForTest(mgr, 100, 50*time.Millisecond, idleTestLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		scanner.Run(ctx)
+		close(done)
+	}()
+
+	// 让 scanner 跑几个 tick
+	time.Sleep(150 * time.Millisecond)
+
+	// cancel → Run 应在 100ms 内退出
+	cancel()
+	select {
+	case <-done:
+		// good
+	case <-time.After(2 * time.Second):
+		t.Errorf("scanner.Run did not return within 2s after ctx cancel (goroutine leak)")
+	}
+}
+
+// TestHeartbeatScanner_ScanOnce_IdleClose_TriggersOnUnregisterHook：
+// scanner 触发的 close 必须走 Session.Close → notifier.notifyClosed → manager.Unregister →
+// onUnregister 钩子（review 10-3 r2 P1 不变量）。
+func TestHeartbeatScanner_ScanOnce_IdleClose_TriggersOnUnregisterHook(t *testing.T) {
+	var unregisterCount atomic.Int32
+	var unregisteredIDs sync.Map
+	mgr := wsapp.NewSessionManager(
+		wsapp.WithUnregisterHook(func(s *wsapp.Session) {
+			unregisteredIDs.Store(s.SessionID(), struct{}{})
+			unregisterCount.Add(1)
+		}),
+	)
+	defer mgr.Close()
+
+	repo := &stubRoomMemberRepo{}
+	conn, session, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	// 等握手完成 + 等几 ms 让 idle 超过 1ms threshold
+	time.Sleep(50 * time.Millisecond)
+
+	scanner := wsapp.NewHeartbeatScannerForTest(mgr, 1, 100*time.Millisecond, idleTestLogger())
+	scanner.ScanOnceForTest(context.Background(), time.Now())
+
+	// 等 fanout goroutine 完成 close 路径
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if unregisterCount.Load() >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := unregisterCount.Load(); got != 1 {
+		t.Errorf("onUnregister hook fired %d times, want 1 (scanner-triggered close must go through hook chain)", got)
+	}
+	if _, ok := unregisteredIDs.Load(session.SessionID()); !ok {
+		t.Errorf("onUnregister hook did not fire for sessionID=%q", session.SessionID())
+	}
+}
+
+// TestHeartbeatScanner_ScanOnce_AlreadyClosedSession_Skipped：
+// scanner 看到 closed=true 的 Session 调 CloseWithCode 应返 ErrSessionClosed
+// 不二次写 close frame；onUnregister 钩子也不会重复触发。
+func TestHeartbeatScanner_ScanOnce_AlreadyClosedSession_Skipped(t *testing.T) {
+	var unregisterCount atomic.Int32
+	mgr := wsapp.NewSessionManager(
+		wsapp.WithUnregisterHook(func(s *wsapp.Session) {
+			unregisterCount.Add(1)
+		}),
+	)
+	defer mgr.Close()
+
+	repo := &stubRoomMemberRepo{}
+	conn, session, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	// 主动 Close（让 Session 进 closed 状态 + 触发 onUnregister 1 次）
+	if err := session.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// 等钩子触发
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if unregisterCount.Load() >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := unregisterCount.Load(); got != 1 {
+		t.Fatalf("baseline unregister count = %d, want 1 (session.Close should fire hook once)", got)
+	}
+
+	// 此时 manager 内已经没有该 Session（Unregister 已清出）；为模拟"scanner
+	// 看到 closed Session"的窗口，把已 close 的 Session 直接喂给 scanner 的
+	// fanout goroutine —— 用 NewHeartbeatScannerForTest 不直接帮我们注入裸
+	// session，但 scanOnce 走 ListAllSessions 已经看不到这个 session。
+	//
+	// 所以本测试的真实保证：scanOnce 看到 manager 里没有 session（已被 Unregister
+	// 清出）→ 自然 skip → 钩子计数保持 1，不会重复触发。
+	scanner := wsapp.NewHeartbeatScannerForTest(mgr, 1, 100*time.Millisecond, idleTestLogger())
+	scanner.ScanOnceForTest(context.Background(), time.Now())
+
+	// 给 fanout 短时间窗口（如果有 race 让 scanOnce 看到了 session）
+	time.Sleep(200 * time.Millisecond)
+
+	if got := unregisterCount.Load(); got != 1 {
+		t.Errorf("unregister count = %d after scanOnce on already-closed session, want 1 (no duplicate trigger)", got)
+	}
+}
+
+// TestHeartbeatScanner_NewHeartbeatScanner_ZeroTimeoutSec_FallbacksTo60：
+// NewHeartbeatScanner(mgr, 0, logger) → 内部 timeoutMs == 60_000（防御性兜底）。
+func TestHeartbeatScanner_NewHeartbeatScanner_ZeroTimeoutSec_FallbacksTo60(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+
+	scanner := wsapp.NewHeartbeatScanner(mgr, 0, idleTestLogger())
+	if got := scanner.TimeoutMsForTest(); got != 60_000 {
+		t.Errorf("timeoutMs = %d, want 60_000 (zero/negative input should fallback to 60s)", got)
+	}
+
+	scanner2 := wsapp.NewHeartbeatScanner(mgr, -5, idleTestLogger())
+	if got := scanner2.TimeoutMsForTest(); got != 60_000 {
+		t.Errorf("negative input: timeoutMs = %d, want 60_000", got)
+	}
+}
+
+// TestHeartbeatScanner_ScanOnce_RaceRefreshAfterListing_NotClosed：
+// review r1 P1 regression：scanOnce 主循环判定 idle > timeoutMs，但**进入
+// goroutine 之前** lastHeartbeatAt 被 readLoop 刷新（client 在阈值边界附近
+// 发了 ping）→ goroutine 内重新校验应跳过 close，session 不被踢。
+//
+// 测试策略（用 SetLastHeartbeatAtForTest 模拟 race，不走真实 wire）：
+//  1. 起 session；强制把 lastHeartbeatAt 拖到 100ms 之前 → idle ≈ 100ms
+//  2. scanner timeoutMs=50ms → 主循环判定 idle > timeoutMs，spawn fanout
+//  3. 在 fanout goroutine 实际执行前，立即把 lastHeartbeatAt 刷新回 now
+//     → goroutine 内重新读 idle ≈ 0ms ≤ 50ms → **应跳过** close
+//  4. 等一段窗口期后 verify session 仍 active（Send 不返 ErrSessionClosed）
+func TestHeartbeatScanner_ScanOnce_RaceRefreshAfterListing_NotClosed(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, session, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	// 把 lastHeartbeatAt 拖到 100ms 之前，让主循环判定为 idle
+	staleMs := time.Now().UnixMilli() - 100
+	session.SetLastHeartbeatAtForTest(staleMs)
+
+	// 立刻在主循环判定后 + fanout goroutine 真正执行前刷新 lastHeartbeatAt 到 now
+	// **难点**：scanOnce 主循环是同步遍历，spawn goroutine 后立即返回；本测试
+	// 在 ScanOnceForTest 返回后立即 SetLastHeartbeatAt = now 模拟 race（fanout
+	// goroutine 大概率还没执行到 recheck 行）。
+	scanner := wsapp.NewHeartbeatScannerForTest(mgr, 50, 200*time.Millisecond, idleTestLogger())
+	scanner.ScanOnceForTest(context.Background(), time.Now())
+
+	// 立即刷新 —— 模拟 readLoop 刚刚收到 client ping 的 race 窗口
+	session.SetLastHeartbeatAtForTest(time.Now().UnixMilli())
+
+	// 等一段时间让 fanout goroutine 跑完 recheck（它读到 idle ≈ 0ms 应跳过 close）
+	time.Sleep(300 * time.Millisecond)
+
+	// session 应仍 active：Send 不返 ErrSessionClosed
+	if err := session.Send([]byte(`{"type":"custom","requestId":"","payload":{},"ts":0}`)); err != nil {
+		t.Errorf("session was closed despite race-refresh: Send err = %v, want nil (TOCTOU recheck should have spared it)", err)
+	}
+}
+
+// TestSession_CloseWithCode_SendReturnsErrAfterCloseWithCode：
+// review r1 P2 regression：CloseWithCode 必须**在** WriteControl 之前先把 closed
+// flag 翻 true + 关 sendChan / sendPriorityChan，让并发 Send / SendPriority 立即
+// 看到 closed=true → ErrSessionClosed。原版实装在 WriteControl 与 Close() 之间
+// 仍可入队业务消息，存在 close frame 之后 data frame 写到 wire 的窗口。
+//
+// 测试策略：
+//  1. 起 session
+//  2. 启动并发 goroutine：循环调 Send（业务消息）
+//  3. 主 goroutine 调 CloseWithCode
+//  4. **CloseWithCode 返回后**所有 Send 必须立即返 ErrSessionClosed（不再有
+//     新消息能入队 sendChan）
+//
+// 这是 close frame 顺序约束的**充分条件**：如果 Send 在 CloseWithCode 返回后
+// 仍能入队成功，那必然存在 "close frame 已写但 sendChan 还能塞业务消息" 的窗口；
+// 反之只要 Send 立即返 ErrSessionClosed，writeLoop 看到的 sendChan 就只可能是
+// "已 close + drain 完已入队的消息" → CloseWithCode 内 wait writeLoopDone 后
+// WriteControl 才不会与 data frame race。
+func TestSession_CloseWithCode_SendReturnsErrAfterCloseWithCode(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, session, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	// 调 CloseWithCode 完成后，Send 应立即返 ErrSessionClosed
+	if err := session.CloseWithCode(4005, "heartbeat timeout"); err != nil {
+		t.Fatalf("CloseWithCode: %v", err)
+	}
+
+	if err := session.Send([]byte(`{"type":"x"}`)); !errors.Is(err, wsapp.ErrSessionClosed) {
+		t.Errorf("Send after CloseWithCode: err = %v, want ErrSessionClosed", err)
+	}
+	if err := session.SendPriority([]byte(`{"type":"pong"}`)); !errors.Is(err, wsapp.ErrSessionClosed) {
+		t.Errorf("SendPriority after CloseWithCode: err = %v, want ErrSessionClosed", err)
+	}
+
+	// client 仍应能读到 close frame
+	readCloseError(t, conn, 4005, "heartbeat timeout")
+}
+
+// TestSession_CloseWithCode_ConcurrentSend_StopsImmediately：
+// review r1 P2 regression（高并发版）：N 个 goroutine 并发 Send，与 CloseWithCode
+// race。CloseWithCode 返回后**任何**新 Send 必须立即拿到 ErrSessionClosed
+// （而不是侥幸入队进 sendChan）。
+//
+// 不直接断言 wire 顺序（gorilla ReadMessage 收到 close 后即 surface CloseError，
+// 之后的帧不会被 user code 看到 —— 顺序保证由 closeInternal 内"先关 chan + 等
+// writeLoop 退出 + 再 WriteControl"实装级保证；本测试覆盖入口面）。
+func TestSession_CloseWithCode_ConcurrentSend_StopsImmediately(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, session, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	// 启动 4 个 goroutine 并发 Send 1s
+	stopFlag := atomic.Bool{}
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for !stopFlag.Load() {
+				_ = session.Send([]byte(`{"type":"x"}`))
+			}
+		}()
+	}
+
+	// 短暂跑一会让 sendChan 持续 churn
+	time.Sleep(20 * time.Millisecond)
+
+	// 触发 CloseWithCode
+	if err := session.CloseWithCode(4005, "heartbeat timeout"); err != nil {
+		t.Fatalf("CloseWithCode: %v", err)
+	}
+
+	// CloseWithCode 已返回 → 此后任何 Send 必须立即 ErrSessionClosed
+	if err := session.Send([]byte(`{"type":"x"}`)); !errors.Is(err, wsapp.ErrSessionClosed) {
+		t.Errorf("Send after CloseWithCode return: err = %v, want ErrSessionClosed", err)
+	}
+
+	stopFlag.Store(true)
+	wg.Wait()
+
+	// client 仍应能读到 close frame（顺序由实装层保证）
+	readCloseError(t, conn, 4005, "heartbeat timeout")
+}

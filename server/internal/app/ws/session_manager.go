@@ -60,6 +60,19 @@ type SessionManager interface {
 	// 修改字段需通过 Session 自身的方法）。
 	ListSessionsByRoomID(ctx context.Context, roomID uint64) []*Session
 
+	// ListAllSessions 返回 manager 内所有 active Session（按 sessionID 字典序，
+	// 让 HeartbeatScanner（Story 10.4） / 未来 graceful shutdown 遍历顺序确定）。
+	//
+	// 内部实装：与 ListSessionsByRoomID 同语义 —— 锁内 read-lock copy 切片返回；
+	// 调用方拿到的切片在 manager 改 map 后保持不变（避免遍历期 manager 改 map
+	// 的并发问题）。
+	//
+	// 0 个 Session → 返 ([], nil)。
+	//
+	// ctx 当前不消费（list 操作纯内存）；保留参数让未来 distributed manager 抽象
+	// 时可以走 ctx-aware 实装。
+	ListAllSessions(ctx context.Context) []*Session
+
 	// Close 关闭 manager：批量 close 所有 Session（不主动推 close 1001 frame，
 	// graceful shutdown 业务由 Epic 36 接管）。
 	// 必须幂等（与 *sql.DB.Close 一致）。
@@ -304,6 +317,29 @@ func (m *sessionManager) ListSessionsByRoomID(ctx context.Context, roomID uint64
 	sort.Strings(ids)
 	for _, id := range ids {
 		out = append(out, room[id])
+	}
+	return out
+}
+
+// ListAllSessions 实装 SessionManager.ListAllSessions（Story 10.4 加）。
+//
+// 与 ListSessionsByRoomID 同模式：锁内 read-lock copy 切片返回 + sessionID
+// 字典序排序。HeartbeatScanner 拿到切片后并发 CloseWithCode 安全（manager 内部
+// map 改动不影响切片）。
+func (m *sessionManager) ListAllSessions(ctx context.Context) []*Session {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if len(m.sessionsByID) == 0 {
+		return []*Session{}
+	}
+	ids := make([]string, 0, len(m.sessionsByID))
+	for id := range m.sessionsByID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]*Session, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, m.sessionsByID[id])
 	}
 	return out
 }

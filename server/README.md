@@ -146,6 +146,25 @@ wscat -c "ws://127.0.0.1:8080/ws/rooms/3001?token=<bearer>"
 
 **ws 配置字段**：`ws.heartbeat_timeout_sec`（默认 60；prod 不可覆盖，V1 §12.2 钦定）/ `ws.max_message_size_bytes`（默认 16384；prod 不可覆盖）/ `ws.write_timeout_sec`（默认 5；非契约可调）。详见 [`server/internal/infra/config/config.go`](internal/infra/config/config.go) `WSConfig` struct。
 
+#### 心跳超时本地烟雾测试（Story 10.4 起需要）
+
+server 启动后内置一个 HeartbeatScanner 后台 goroutine（30s 扫描周期 + 60s 阈值 → 最大 90s 检测延迟），对超时未活跃 Session 主动 close 4005 frame：
+
+```bash
+# 1. 起 server（含 Redis + MySQL + heartbeat scanner）
+./build/catserver
+
+# 2. 拨连 WS 成功后**静默** 65+ 秒（不发 ping）
+wscat -c "ws://127.0.0.1:8080/ws/rooms/3001?token=<bearer>"
+# （收到 room.snapshot 后保持沉默）
+
+# 3. 等 ~90 秒（30s 扫描周期 + 60s 阈值）
+# 期望：wscat 收到 close 4005 + reason "heartbeat timeout" → 自动断开
+# server log: "ws session heartbeat timeout"（log level info）
+```
+
+V1 §12.1 钦定 4005 = transient network failure；客户端**应**自动重连（指数退避，参考 iOS Story 12.5）。
+
 ---
 
 ## 跑测试

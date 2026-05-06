@@ -42,6 +42,17 @@ import (
 //     保持内存占用合理（每 Session 32 * pointer-sized = ~256B）
 const sendChanCapacity = 32
 
+// closeFrameWriteDeadline 是 Session.CloseWithCode 写 close frame 的 deadline
+// （Story 10.4 引入）。
+//
+// 与 gateway.go 包级 const `closeWriteDeadline` 同 semantics（500ms），但因为不同
+// 包内 const 不能直接复用，复制一份并显式标注：未来有人重构合并时一并改两处即可。
+//
+// 选 500ms 的理由：写 control frame 是单 packet 操作；超时通常意味着对端已掉线，
+// 此时 close frame 已无意义 —— 与其等到 5s+ 才放手，不如快速 Close 让上层流程推进。
+// lesson 2026-04-26-startup-blocking-io-needs-deadline 钦定 IO 必须有本地 timeout。
+const closeFrameWriteDeadline = 500 * time.Millisecond
+
 // sendPriorityChanCapacity 是 Session.sendPriorityChan 容量（review r4 P2 加）。
 //
 // 用途：让 protocol-level 消息（pong / 内部 close error）走独立 buffer，**不**
@@ -146,6 +157,10 @@ type closeNotifier interface {
 //       Close 拿 Lock → 写 closed flag → close(sendChan)。
 //     RWMutex 让多 Send 并发（RLock 可重入），但 Close 与所有 Send 互斥。
 //   - closeOnce 包裹整个关闭副作用（cancelCtx + close(sendChan) + conn.Close）
+//   - writeLoopDone 是 writeLoop 退出信号（review r1 P2 加）；CloseWithCode
+//     需要在 WriteControl close frame 之前**等** writeLoop 退出，确保没有任何
+//     data frame 会跟在 close frame 之后写到 wire（V1 §12.1 协议钦定 close
+//     frame 是 connection 上的最后一个 frame）
 //
 // 不导出字段：所有字段小写；外部访问通过 Send / Close。
 type Session struct {
@@ -159,6 +174,7 @@ type Session struct {
 	lastHeartbeatAt  atomic.Int64
 	closed           atomic.Bool
 	closeOnce        sync.Once
+	writeLoopDone    chan struct{} // writeLoop 退出信号（review r1 P2 加：CloseWithCode 在 WriteControl 前等 writeLoop 退出）
 	logger           *slog.Logger
 	writeTimeout     time.Duration
 	notifier         closeNotifier // SessionManager 注入；nil 安全（不通知）
@@ -198,6 +214,7 @@ func newSession(
 		conn:             conn,
 		sendChan:         make(chan []byte, sendChanCapacity),
 		sendPriorityChan: make(chan []byte, sendPriorityChanCapacity),
+		writeLoopDone:    make(chan struct{}),
 		// **不**在此处 With sessionID（review r4 P3 修）：让 Register 拿到真实
 		// sessionID 后再 With 叠加，保证 logger 不出现 "sessionID="" 空字段。
 		logger:       logger.With(slog.Uint64("userID", userID), slog.Uint64("roomID", roomID)),
@@ -293,25 +310,129 @@ func (s *Session) SendPriority(msg []byte) error {
 //   - 通知 SessionManager 触发 OnSessionUnregister 钩子（如有 notifier）
 //
 // 多次调用不 panic / 不返 error（与 *sql.DB.Close / RedisClient.Close 一致）。
+//
+// **注**：与 CloseWithCode 不同 —— Close 在已 Close 的 Session 上仍返 nil（既有
+// 入口语义；TestSession_Close_Idempotent 钦定）；CloseWithCode 在已 Close 上
+// 返 ErrSessionClosed。差别原因：CloseWithCode 是 scanner / 协议错误路径调用，
+// caller 需要区分"我刚 close" vs "已经被别人 close 了"做日志；Close 是常态收尾
+// 路径（readLoop / writeLoop defer），不需要这种区分。
 func (s *Session) Close() error {
+	// closeInternal 在已关 Session 上返 ErrSessionClosed —— Close 路径
+	// **吞掉**该 sentinel 保留入口"幂等不返错"语义。
+	if err := s.closeInternal(false, 0, ""); err != nil && !errors.Is(err, ErrSessionClosed) {
+		return err
+	}
+	return nil
+}
+
+// CloseWithCode 先写 WS close frame（code + reason）再释放本地资源。
+//
+// 用途（Story 10.4 引入）：HeartbeatScanner 在心跳超时时调本方法，让 client
+// 收到 close code 4005 + reason "heartbeat timeout"，触发 iOS Story 12.5 指数
+// 退避自动重连路径（V1 §12.1 钦定 4005 = transient network failure，应自动重连）。
+//
+// 行为（review r1 P2 修后）：
+//  1. atomic CAS 翻 closed flag + 关 sendChan + 关 sendPriorityChan（与 Close
+//     共用 closeInternal）—— 让 writeLoop 立即看到 chan 关闭、退出循环
+//  2. **等** writeLoop 退出（writeLoopDone）—— 此后没有任何 goroutine 会再
+//     conn.WriteMessage data frame
+//  3. WriteControl close frame —— 此时是 wire 上的唯一写者，没有 race
+//  4. cancelCtx + conn.Close + notifier.notifyClosed
+//
+// 错误：
+//   - Session 已 Close → 返 ErrSessionClosed（不 emit close frame；scanner 看到
+//     closed=true 就 skip，避免在已死 conn 上写无意义 close frame）
+//   - WriteControl 失败 → log warn 但**不**返 error 给 caller（close frame 是
+//     best-effort；wire 已死时 client 收不到也是预期）；继续释放本地资源
+//   - 入口成功 → nil
+//
+// 并发：与 Close 安全并发（共用 closed atomic.Bool + sync.Once 兜底）。
+//
+// **顺序约束**（review r1 P2 修，原版有 race）：必须**先**关 sendChan/Priority
+// + 等 writeLoop 退出，**再** WriteControl —— 顺序反了的话 writeLoop 仍可能在
+// WriteControl 完成与 conn.Close 之间继续 drain 业务 sendChan / pong 数据，
+// 让 client 看到 "close frame → data frame" 的协议错误（V1 §12.1 钦定 close
+// frame 必须是 connection 最后一个 frame）。
+func (s *Session) CloseWithCode(code int, reason string) error {
+	return s.closeInternal(true, code, reason)
+}
+
+// closeInternal 是 Close / CloseWithCode 共用的 close 路径（review r1 P2 重构）。
+//
+// emitClose=true → CloseWithCode 路径，关 channel + 等 writeLoop 退出后**才**
+// WriteControl 写 close frame；
+// emitClose=false → Close 路径，跳过 WriteControl（仅释放本地资源）。
+//
+// 全部副作用包在 closeOnce 内部，多次调用幂等（第二次返 ErrSessionClosed）。
+func (s *Session) closeInternal(emitClose bool, code int, reason string) error {
+	if s.closed.Load() {
+		return ErrSessionClosed
+	}
+	first := false
 	notify := false
 	s.closeOnce.Do(func() {
-		// 锁内：原子地把 closed flag 翻 true + close(sendChan) + close(sendPriorityChan)。
-		// 任何并发 Send / SendPriority 此刻要么还没拿到 RLock（被本写锁阻塞），要
-		// 么已经完成入队释放了 RLock。Send / SendPriority 拿到 RLock 后会先看
-		// closed=true 立即 return ErrSessionClosed —— 不再触达 select 的 send case。
+		first = true
+		// Step 1: 锁内原子翻 closed flag + 关 sendChan / sendPriorityChan。
+		// 任何并发 Send / SendPriority 此刻要么还没拿到 RLock（被本写锁阻塞），
+		// 要么已经完成入队释放了 RLock；拿到 RLock 后看到 closed=true 立即返
+		// ErrSessionClosed，不会再触达 select 的 send case。
 		s.sendMu.Lock()
 		s.closed.Store(true)
 		close(s.sendChan)
 		close(s.sendPriorityChan)
 		s.sendMu.Unlock()
 
+		// Step 2: 等 writeLoop 退出（review r1 P2 加）。channel 已关，writeLoop
+		// 在下一次 select 命中关 chan 立即 return；defer 内 _=s.Close() 走幂等
+		// 路径直接返 ErrSessionClosed 不会重入本 closeOnce。
+		// **关键**：必须**先** wait writeLoop done，**才** WriteControl —— 否则
+		// 仍可能 close frame 与 writeLoop 最后一帧并发写到 wire 触发协议错误。
+		// 防御性兜底：writeLoopDone 可能为 nil（极端测试场景未走 newSession 构造
+		// 直接 zero-init Session 的路径），nil channel select 永远阻塞 —— 用
+		// non-nil 检查 + 超时让本路径在异常 fixture 下不死锁。
+		if s.writeLoopDone != nil {
+			select {
+			case <-s.writeLoopDone:
+				// writeLoop 已退出
+			case <-time.After(closeFrameWriteDeadline):
+				// 防御性兜底：writeLoop 卡住（理论不发生，sendChan 已关 → select
+				// 应立即命中关闭分支返回；超时仅用于防止异常 conn 卡 WriteMessage）
+				s.logger.Warn("ws closeInternal writeLoop wait timeout")
+			}
+		}
+
+		// Step 3: WriteControl close frame（仅 CloseWithCode 路径）。
+		// 此时 writeLoop 已退出，WriteControl 是 conn 上的唯一写者，没有 race。
+		if emitClose {
+			deadline := time.Now().Add(closeFrameWriteDeadline)
+			if err := s.conn.WriteControl(
+				websocket.CloseMessage,
+				websocket.FormatCloseMessage(code, reason),
+				deadline,
+			); err != nil {
+				s.logger.Warn("ws CloseWithCode write frame failed",
+					slog.Int("code", code),
+					slog.String("reason", reason),
+					slog.Any("error", err),
+				)
+				// 不 return；继续释放本地资源（close frame 是 best-effort）
+			}
+		}
+
+		// Step 4: cancel ctx + 关底层 conn + 触发 notifier 钩子。
 		s.cancelCtx()
 		// gorilla/websocket Close() 在已 close 的 conn 上是幂等的（返 net.ErrClosed
 		// 或 nil；无 panic）；忽略错误 —— 关连接的具体失败模式与 Session 行为无关
 		_ = s.conn.Close()
 		notify = true
 	})
+
+	if !first {
+		// closeOnce 已经被另一个 caller 进入过；本次返 ErrSessionClosed 与
+		// "已 Close 的 Session 调 Close*" 入口语义一致
+		return ErrSessionClosed
+	}
+
 	// 通知 manager unregister；仅在**第一次** Close 触发（与 closeOnce 语义对齐）；
 	// 放在 closeOnce 外让 notifier 调用不持 sessionMu 写锁，避免 manager 钩子若反
 	// 向调 Session 接口形成锁顺序死锁。manager.Unregister 自身不调 Session.Close
@@ -452,8 +573,17 @@ const maxConsecutivePriority = 4
 //   - 必须双 chan 都耗尽才能退出（防 priority 还有数据但 sendChan 已关 → 漏发
 //     最后的 pong / 协议错误 msg）
 //   - sendChan 不能 starve（review r7 P3，maxConsecutivePriority 上限）
+//   - 退出时**必须先** close(writeLoopDone) **再** 调 s.Close()（review r1 P2 加）：
+//     CloseWithCode 路径在 closeOnce.Do 内 wait writeLoopDone；如果 writeLoop
+//     defer 顺序反了（先 Close 后 close(writeLoopDone)），sync.Once 会让 defer
+//     的 Close 阻塞等 closeOnce.Do 跑完，而 closeOnce.Do 又在等 writeLoopDone
+//     —— 死锁。把 close(writeLoopDone) 放最前确保 wait 路径先解锁。
 func (s *Session) writeLoop() {
 	defer func() {
+		// **顺序关键**：先 close writeLoopDone 让 closeInternal 的 wait 解锁，
+		// 再 _=s.Close()（幂等；如果 closeInternal 已在跑，sync.Once 让本 Close
+		// 走 fast-path 返 ErrSessionClosed 被 Close 包装吞掉返 nil）。
+		close(s.writeLoopDone)
 		_ = s.Close()
 	}()
 	// consecutivePriority 跟踪连续命中 priority 分支的次数；命中 sendChan 或

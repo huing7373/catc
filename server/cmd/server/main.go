@@ -200,12 +200,38 @@ func main() {
 	// 本 story 阶段不挂任何 lifecycle 钩子（10.6 才挂 Redis presence 钩子）。
 	// SessionManager 是纯内存对象（map + sync.RWMutex），构造无 IO；不需要 timeout ctx。
 	sessionMgr := wsapp.NewSessionManager()
+	// **defer LIFO 顺序约束**（Story 10.4 引入；详见 heartbeat scanner 段注释）：
+	// sessionMgr.Close 必须**先**注册（后执行）；scanner 的 cancel 必须**后**注册（先执行）。
 	defer func() {
 		if cerr := sessionMgr.Close(); cerr != nil {
 			slog.Error("session manager close failed", slog.Any("error", cerr))
 		}
 	}()
 	slog.Info("ws session manager ready")
+
+	// Story 10.4：HeartbeatScanner 构造 + 启动后台 goroutine。
+	// scanner 周期性扫描 SessionManager 内所有 Session，超时（cfg.WS.HeartbeatTimeoutSec）
+	// 触发 close 4005 frame + 释放本地 Session 资源（V1 §12.1 钦定 4005 = transient
+	// network failure，触发 iOS Story 12.5 自动重连指数退避路径）。
+	//
+	// 用 ctx + cancel 让 scanner 在 main 退出（graceful shutdown）时优雅退出；
+	// 不需要 .Stop() 方法（与 Story 8.5 步数同步触发器同模式）。
+	//
+	// **defer LIFO 顺序**：cancelHeartbeat 在 sessionMgr.Close 之后注册 → main 退出时
+	// 先执行（LIFO）→ scanner 先停 ticker / 不再 fanout 新 close → 再 sessionMgr.Close
+	// 批量清理 Session。反序会让 sessionMgr.Close 跑批量 s.Close() 同时 scanner 还在
+	// fanout CloseWithCode → 双方对同 Session 并发 close（虽然 Close 幂等不 panic，但
+	// 日志噪声 + onUnregister 钩子可能多调）。
+	heartbeatCtx, cancelHeartbeat := context.WithCancel(context.Background())
+	heartbeatScanner := wsapp.NewHeartbeatScanner(sessionMgr, cfg.WS.HeartbeatTimeoutSec, slog.Default())
+	go heartbeatScanner.Run(heartbeatCtx)
+	defer func() {
+		cancelHeartbeat()
+		slog.Info("ws heartbeat scanner cancel signaled")
+	}()
+	slog.Info("ws heartbeat scanner ready",
+		slog.Int("heartbeatTimeoutSec", cfg.WS.HeartbeatTimeoutSec),
+	)
 
 	// Story 4.4：JWT signer 构造 fail-fast。
 	//

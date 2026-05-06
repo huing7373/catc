@@ -364,3 +364,80 @@ func TestWSIntegration_PingPongRoundtrip(t *testing.T) {
 
 // 让 ws_test 包能 compile: ListSessions 需要 ctx import；引用一次让 lint 不报。
 var _ = context.Background
+
+// TestWSIntegration_HeartbeatTimeout_Closes4005（Story 10.4 集成测试）：
+//   - 启 mysql + room_members fixture（与既有 case 同 fixture）
+//   - 用 newHeartbeatScannerForTest 注入 timeoutMs=2000ms / interval=200ms
+//   - 启动 httptest gateway + go scanner.Run
+//   - WS Dial 拨连成功 → 收 snapshot → **静默** 3 秒（不发 ping）
+//   - conn.ReadMessage 应返 *websocket.CloseError，Code=4005, Text="heartbeat timeout"
+//   - SessionManager.ListAllSessions 应为空（scanner 已清理）
+//
+// V1 §12.1 钦定 4005 = transient network failure；客户端**应**自动重连
+// （iOS Story 12.5 落地）。
+func TestWSIntegration_HeartbeatTimeout_Closes4005(t *testing.T) {
+	gormDB, cleanup := startMySQLWithRoomMemberFixture(t)
+	defer cleanup()
+
+	wsURL, signer, mgr, ts := startGatewayWithRealMySQL(t, gormDB)
+	defer mgr.Close()
+	defer ts.Close()
+
+	// 用同包内的 unexported helper newHeartbeatScannerForTest 注入小 interval +
+	// 小 timeoutMs（这里 ws_integration_test.go 与 heartbeat_scanner.go 同
+	// package ws_test —— 等等，本文件是 package ws_test 黑盒测试包，需要走 export_test.go
+	// 的 exported helper）。改用 wsapp.NewHeartbeatScannerForTest（与 ws_test.go 一致）。
+	scanner := wsapp.NewHeartbeatScannerForTest(mgr, 2000 /*ms*/, 200*time.Millisecond, nil)
+
+	scannerCtx, scannerCancel := context.WithCancel(context.Background())
+	defer scannerCancel()
+	go scanner.Run(scannerCtx)
+
+	token, err := signer.Sign(1001, 3600)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	url := fmt.Sprintf("%s/ws/rooms/3001?token=%s", wsURL, token)
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+
+	// 读 snapshot
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+
+	// **静默** —— 不发 ping，让 server 端 lastHeartbeatAt 停留在握手 + readLoop
+	// 收到首条 message（不会有，因为不发）的状态。timeoutMs=2s + interval=200ms
+	// → 至多 ~2.2s 后 scanner 触发 close 4005。
+	//
+	// 5s read deadline 给足窗口。
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, _, err = conn.ReadMessage()
+	closeErr, ok := err.(*websocket.CloseError)
+	if !ok {
+		t.Fatalf("expected *websocket.CloseError, got %T %v", err, err)
+	}
+	if closeErr.Code != 4005 {
+		t.Errorf("close code = %d, want 4005 (V1 §12.1 heartbeat timeout)", closeErr.Code)
+	}
+	if closeErr.Text != "heartbeat timeout" {
+		t.Errorf("close reason = %q, want %q (V1 §12.1 字面量)", closeErr.Text, "heartbeat timeout")
+	}
+
+	// SessionManager.ListAllSessions 应为空（scanner 已触发 CloseWithCode →
+	// Session.Close → notifier.notifyClosed → manager.Unregister 清出索引）
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(mgr.ListAllSessions(context.Background())) == 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := len(mgr.ListAllSessions(context.Background())); got != 0 {
+		t.Errorf("ListAllSessions len = %d after timeout close, want 0 (Unregister hook 未触发？)", got)
+	}
+}
