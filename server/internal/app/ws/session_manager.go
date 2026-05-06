@@ -116,13 +116,28 @@ func NewSessionManager(opts ...SessionManagerOption) SessionManager {
 // 流程：
 //  1. 生成 sessionID（uuid 前 8 字符）
 //  2. 检查同 user 是否已有 active session：
-//     - 是 → 找到旧 sessionID → unregisterLocked 移除旧索引 → 旧 session.Close()
-//     （在锁外调，详见函数末尾 oldSession.Close() 注释）
+//     - 是 → 记录 replaced 引用，但**不**在锁内移除旧索引（与 Close 路径同模式：
+//     让旧 session.Close() → notifyClosed → Unregister(oldID) 走标准索引清理 +
+//     onUnregister 钩子触发路径）。
 //  3. 把新 Session 的 sessionID 字段赋值（newSession 时还没有；这里**回填**）
 //     + 重建 contextual logger（带 sessionID）
-//  4. 注入双索引 + userToSessionID
+//  4. 注入新 Session 的双索引 + userToSessionID（覆盖；旧 oldID 索引仍在，由后
+//     续 oldS.Close() 路径清理）
 //  5. 把 manager 自身设为 session.notifier，让 session 自闭时反向通知 manager
-//  6. 锁外调 onRegister 钩子（如有）
+//  6. 锁外调 onRegister 钩子（如有）+ 旧 Session 强制 Close（触发 onUnregister
+//     钩子）
+//
+// **关键不变量**（review r2 P1 修）：reconnect 替换路径**必须**触发旧 Session 的
+// onUnregister 钩子。修复前实装是"锁内 removeFromIndicesLocked(oldS) → 锁外
+// oldS.Close()"；oldS.Close() → notifyClosed → Unregister 看到索引已空 → 走 no-op
+// 路径 → onUnregister 漏调，10.6 Redis presence cleanup / metrics 计数被永久
+// 遗留。修复同 Close() 路径模式：保留旧索引到 oldS.Close() 跑完。
+//
+// 短暂重叠窗口（< 1ms）：在 oldS.Close() 跑完前，sessionsByID 同时含 oldID + newID，
+// sessionsByRoom[oldRoom] 同时含两个；ListSessionsByRoomID 短暂返双倍。可接受 ——
+// userToSessionID[user] 已指向 newID，业务层"按 user 找 session"的查询拿到新的；
+// "按 room 广播"的短暂双发对客户端无副作用（客户端按 sessionID 去重 / 旧 session
+// 紧接着 close 1006 让客户端忽略后续）。详见 docs/lessons/2026-05-06。
 func (m *sessionManager) Register(ctx context.Context, s *Session) (string, error) {
 	if s == nil {
 		return "", errors.New("ws: register nil session")
@@ -136,12 +151,13 @@ func (m *sessionManager) Register(ctx context.Context, s *Session) (string, erro
 		return "", errors.New("ws: session manager closed")
 	}
 
-	// 同 user 重连：找旧 session 强制 Close。
+	// 同 user 重连：保留旧 session 的索引，仅记录 replaced 引用 —— 让 oldS.Close()
+	// 路径走标准 Unregister 触发 onUnregister 钩子（review r2 P1 修；之前是锁内
+	// removeFromIndicesLocked(oldS) 导致后续 Unregister 走 no-op 漏调钩子）。
 	var replaced *Session
 	if oldID, ok := m.userToSessionID[s.userID]; ok {
 		if oldS, ok2 := m.sessionsByID[oldID]; ok2 {
 			replaced = oldS
-			m.removeFromIndicesLocked(oldS)
 		}
 	}
 
@@ -150,7 +166,9 @@ func (m *sessionManager) Register(ctx context.Context, s *Session) (string, erro
 	s.logger = s.logger.With("sessionID_replay", sessionID) // 保留原 logger 字段同时叠加新 sessionID
 	s.notifier = m
 
-	// 注入双索引
+	// 注入双索引（覆盖 userToSessionID[user]=newID；旧 oldID 索引仍由 oldS.Close()
+	// 路径的 Unregister(oldID) 清理 —— removeFromIndicesLocked 内 "currentID ==
+	// s.sessionID" 守卫确保 userToSessionID[user] 不被误删回 oldID）。
 	m.sessionsByID[sessionID] = s
 	if _, ok := m.sessionsByRoom[s.roomID]; !ok {
 		m.sessionsByRoom[s.roomID] = map[string]*Session{}
@@ -162,7 +180,8 @@ func (m *sessionManager) Register(ctx context.Context, s *Session) (string, erro
 
 	// 锁外做：
 	//   1. 旧 Session 强制 Close（避免 Close → notifyClosed → manager.Unregister
-	//      在锁内重入死锁）
+	//      在锁内重入死锁）；Close → notifyClosed → Unregister(oldID) 走标准
+	//      removeFromIndicesLocked + onUnregister 钩子触发路径
 	//   2. 注册钩子（10.6 Redis presence；外部 IO 可能慢，不能持锁）
 	if replaced != nil {
 		// 旧 Session 主动关；调用方可通过 ErrSessionReplaced 标识本次关闭语义

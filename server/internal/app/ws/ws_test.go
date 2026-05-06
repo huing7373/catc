@@ -78,7 +78,7 @@ func startGatewayServer(t *testing.T, signer *auth.Signer, mgr wsapp.SessionMana
 		MaxMessageSizeBytes: 16384,
 		WriteTimeoutSec:     2,
 	}
-	gateway := wsapp.NewGateway(signer, mgr, repo, cfg)
+	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "test")
 	r := gin.New()
 	r.GET("/ws/rooms/:roomId", gateway.Handle)
 	ts := httptest.NewServer(r)
@@ -330,6 +330,109 @@ func TestSessionManager_SameUser_Reconnect_ReplacesOldSession(t *testing.T) {
 	}
 	if !strings.Contains(string(msg), `"room.snapshot"`) {
 		t.Errorf("conn2 first message = %q, want room.snapshot", string(msg))
+	}
+}
+
+// TestSessionManager_Reconnect_TriggersUnregisterHookForOldSession:
+// 同 user 重连替换路径必须为旧 Session 触发 onUnregister 钩子**恰好一次**。
+// review r2 P1 修：修复前 Register 锁内 removeFromIndicesLocked(oldS) → 锁外
+// oldS.Close() 路径走 Unregister(oldID) no-op → 钩子漏调；修复后保留旧索引到
+// oldS.Close() 跑完，让 Unregister 走标准触发钩子路径。
+//
+// 关键场景：reconnect from room A to room B（旧 Session 在 room A，新 Session
+// 进 room B）—— 旧 Session 的 onUnregister 必须触发，否则 room A 的 presence /
+// metrics 状态被泄漏。
+func TestSessionManager_Reconnect_TriggersUnregisterHookForOldSession(t *testing.T) {
+	var unregisterCount atomic.Int32
+	var unregisteredSessionIDs sync.Map // sessionID → struct{}
+	mgr := wsapp.NewSessionManager(
+		wsapp.WithUnregisterHook(func(s *wsapp.Session) {
+			unregisteredSessionIDs.Store(s.SessionID(), struct{}{})
+			unregisterCount.Add(1)
+		}),
+	)
+	defer mgr.Close()
+
+	repo := &stubRoomMemberRepo{}
+	signer := newSigner(t)
+	wsURL, ts := startGatewayServer(t, signer, mgr, repo)
+	defer ts.Close()
+
+	const userID = uint64(1001)
+	const roomA = uint64(3001)
+	const roomB = uint64(3002)
+
+	// 第一次连接到 roomA
+	tokenA, _ := signer.Sign(userID, 3600)
+	urlA := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomA, tokenA)
+	connA, _, err := dialWS(t, urlA)
+	if err != nil {
+		t.Fatalf("dial roomA: %v", err)
+	}
+	defer connA.Close()
+	_ = connA.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := connA.ReadMessage(); err != nil {
+		t.Fatalf("read snapshot roomA: %v", err)
+	}
+
+	// 拿到旧 session 的 sessionID（用于断言钩子收到的就是旧那个）
+	deadline := time.Now().Add(2 * time.Second)
+	var oldSessionID string
+	for time.Now().Before(deadline) {
+		sessions := mgr.ListSessionsByRoomID(context.Background(), roomA)
+		for _, s := range sessions {
+			if s.UserID() == userID {
+				oldSessionID = s.SessionID()
+				break
+			}
+		}
+		if oldSessionID != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if oldSessionID == "" {
+		t.Fatalf("old session not found in roomA")
+	}
+
+	// 第二次连接到 roomB（同 user，不同 room → 触发 reconnect 替换）
+	tokenB, _ := signer.Sign(userID, 3600)
+	urlB := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomB, tokenB)
+	connB, _, err := dialWS(t, urlB)
+	if err != nil {
+		t.Fatalf("dial roomB: %v", err)
+	}
+	defer connB.Close()
+	_ = connB.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := connB.ReadMessage(); err != nil {
+		t.Fatalf("read snapshot roomB: %v", err)
+	}
+
+	// 等 onUnregister 钩子异步触发完毕（oldS.Close() → notifyClosed → Unregister(oldID)
+	// → onUnregister）
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if unregisterCount.Load() >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 断言钩子触发**恰好一次**（不是 0 次也不是 2 次）
+	if got := unregisterCount.Load(); got != 1 {
+		t.Errorf("unregister hook fired %d times, want exactly 1 (reconnect replace path)", got)
+	}
+	// 断言钩子收到的是**旧** sessionID（而非新的）
+	if _, ok := unregisteredSessionIDs.Load(oldSessionID); !ok {
+		t.Errorf("unregister hook did not fire for old session %q", oldSessionID)
+	}
+
+	// 旧 sessionID 不应再在 manager 索引中
+	sessionsA := mgr.ListSessionsByRoomID(context.Background(), roomA)
+	for _, s := range sessionsA {
+		if s.SessionID() == oldSessionID {
+			t.Errorf("old session %q still in roomA index after replace", oldSessionID)
+		}
 	}
 }
 
@@ -739,7 +842,7 @@ func TestSession_Send_BufferFull_ReturnsErr(t *testing.T) {
 		MaxMessageSizeBytes: 16384,
 		WriteTimeoutSec:     30, // 长 timeout 让写 goroutine 卡住更稳定
 	}
-	gateway := wsapp.NewGateway(signer, mgr, repo, cfg)
+	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "test")
 	r := gin.New()
 	r.GET("/ws/rooms/:roomId", gateway.Handle)
 	ts := httptest.NewServer(r)
@@ -1006,5 +1109,126 @@ func TestSessionManager_Close_TriggersUnregisterHookForAllSessions(t *testing.T)
 	}
 	if now := unregisterCount.Load(); now != prev {
 		t.Errorf("second mgr.Close re-triggered hooks: %d → %d", prev, now)
+	}
+}
+
+// ---------- Gateway prod-contract gate（review r2 P2 修） ----------
+
+// TestNewGateway_ProdEnv_RejectsNonContractHeartbeat: env=prod 配
+// heartbeat_timeout_sec=30（非契约值 60）应 panic。
+func TestNewGateway_ProdEnv_RejectsNonContractHeartbeat(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("NewGateway should panic with non-contract heartbeat in prod env")
+		} else {
+			msg := fmt.Sprintf("%v", r)
+			if !strings.Contains(msg, "heartbeat_timeout_sec") {
+				t.Errorf("panic message %q should mention heartbeat_timeout_sec", msg)
+			}
+		}
+	}()
+
+	signer := newSigner(t)
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	cfg := config.WSConfig{
+		HeartbeatTimeoutSec: 30, // 非契约值
+		MaxMessageSizeBytes: 16384,
+		WriteTimeoutSec:     5,
+	}
+	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "prod")
+}
+
+// TestNewGateway_ProdEnv_RejectsNonContractMaxMessageSize: env=prod 配
+// max_message_size_bytes=8192（非契约值 16384）应 panic。
+func TestNewGateway_ProdEnv_RejectsNonContractMaxMessageSize(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("NewGateway should panic with non-contract max_message_size_bytes in prod env")
+		} else {
+			msg := fmt.Sprintf("%v", r)
+			if !strings.Contains(msg, "max_message_size_bytes") {
+				t.Errorf("panic message %q should mention max_message_size_bytes", msg)
+			}
+		}
+	}()
+
+	signer := newSigner(t)
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	cfg := config.WSConfig{
+		HeartbeatTimeoutSec: 60,
+		MaxMessageSizeBytes: 8192, // 非契约值
+		WriteTimeoutSec:     5,
+	}
+	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "prod")
+}
+
+// TestNewGateway_EmptyEnv_BehavesAsProd: env="" 应按 prod 严格策略
+// （safe-by-default：未注入 CAT_ENV 视为 prod，避免 dev YAML 静默流到 prod）。
+func TestNewGateway_EmptyEnv_BehavesAsProd(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("NewGateway should panic with non-contract heartbeat when env is empty (safe-by-default)")
+		}
+	}()
+
+	signer := newSigner(t)
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	cfg := config.WSConfig{
+		HeartbeatTimeoutSec: 30, // 非契约值
+		MaxMessageSizeBytes: 16384,
+		WriteTimeoutSec:     5,
+	}
+	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "")
+}
+
+// TestNewGateway_DevEnv_AcceptsOverride: env=dev 应允许 YAML 覆盖契约字段。
+func TestNewGateway_DevEnv_AcceptsOverride(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("NewGateway should NOT panic with override in dev env; got panic: %v", r)
+		}
+	}()
+
+	signer := newSigner(t)
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	cfg := config.WSConfig{
+		HeartbeatTimeoutSec: 30, // 非契约值，但 dev 允许
+		MaxMessageSizeBytes: 8192,
+		WriteTimeoutSec:     5,
+	}
+	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "dev")
+	if gateway == nil {
+		t.Error("NewGateway returned nil in dev env")
+	}
+}
+
+// TestNewGateway_ProdEnv_AcceptsContractValues: env=prod + 契约默认值应正常构造。
+func TestNewGateway_ProdEnv_AcceptsContractValues(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("NewGateway should NOT panic with contract values in prod; got panic: %v", r)
+		}
+	}()
+
+	signer := newSigner(t)
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	cfg := config.WSConfig{
+		HeartbeatTimeoutSec: 60,
+		MaxMessageSizeBytes: 16384,
+		WriteTimeoutSec:     5,
+	}
+	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "prod")
+	if gateway == nil {
+		t.Error("NewGateway returned nil in prod env with contract values")
 	}
 }

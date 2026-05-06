@@ -165,7 +165,7 @@ func startGatewayWithRealMySQL(t *testing.T, gormDB *gorm.DB) (string, *auth.Sig
 		MaxMessageSizeBytes: 16384,
 		WriteTimeoutSec:     5,
 	}
-	gateway := wsapp.NewGateway(signer, mgr, repo, cfg)
+	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "test")
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.GET("/ws/rooms/:roomId", gateway.Handle)

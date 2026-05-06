@@ -226,6 +226,7 @@ func NewRouter(deps Deps) *gin.Engine {
 				deps.SessionMgr,
 				roomMemberRepo,
 				deps.WSCfg,
+				deps.EnvName, // review r2 P2 加：prod contract override 强制
 			)
 			r.GET("/ws/rooms/:roomId", gateway.Handle)
 		}

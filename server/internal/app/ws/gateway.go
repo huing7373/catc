@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -16,6 +17,15 @@ import (
 	"github.com/huing/cat/server/internal/infra/config"
 	"github.com/huing/cat/server/internal/pkg/auth"
 	"github.com/huing/cat/server/internal/repo/mysql"
+)
+
+// WS 契约 prod 不可变值（V1 §1 节点 4 冻结声明 + §12.2 关键约束钦定）。
+// prod 部署必须用这两个值；YAML 覆盖会引发跨实例 / 跨端契约漂移（不同节点心跳
+// 阈值不同 → presence 抖动；max_message_size_bytes 不同 → 一边能收一边超 limit
+// 静默断连）。Story 10.3 review r2 P2 引入。
+const (
+	wsProdHeartbeatTimeoutSec = 60
+	wsProdMaxMessageSizeBytes = 16384
 )
 
 // closeWriteDeadline 是 closeWithCode 写 close frame 的 deadline。
@@ -41,12 +51,48 @@ type Gateway struct {
 //
 // upgrader 内部构造（CheckOrigin 节点 4 阶段返 true 让 iOS / dev 联调免 CORS；
 // 节点 9+ prod launch 阶段改成白名单，与 RateLimit 切 Redis 同期）。
+//
+// envName 是部署环境名（"prod" / "staging" / "dev" / "test"，默认 "prod"），
+// 由 main.go 从环境变量 `CAT_ENV` 读取传入；用于"prod 必须用契约默认值"强制
+// （review r2 P2 引入；与 NewStepService 同模式）：
+//   - envName == "prod"（含空 / 不识别值，按 prod 严格策略）+ HeartbeatTimeoutSec
+//     != 60 → panic
+//   - envName == "prod" + MaxMessageSizeBytes != 16384 → panic
+//   - envName ∈ {"dev", "staging", "test"} → 接受 YAML 任何值覆盖（仅供单测 / 调试）
+//
+// 为什么 fail-fast：V1 §12.2 钦定 heartbeat_timeout_sec=60 + max_message_size_bytes=
+// 16384 是跨节点 / 跨端协议契约一部分。生产配置错（如 K8s ConfigMap 误注入）会让
+// 该节点和其他节点 / iOS 客户端的协议漂移 —— heartbeat 不匹配让 presence 状态抖动；
+// max_frame_size 不匹配让一边能收一边超 limit 静默断连。这正是 NewStepService prod-cap
+// 强制的同类问题。WriteTimeoutSec 不在契约，不强制。
 func NewGateway(
 	signer *auth.Signer,
 	mgr SessionManager,
 	roomMember mysql.RoomMemberRepo,
 	cfg config.WSConfig,
+	envName string,
 ) *Gateway {
+	// **prod 配置覆盖强制**（review r2 P2；与 Story 7.3 NewStepService 同模式）：
+	// envName 归一化为小写；只有显式 "dev" / "staging" / "test" 才允许 contract 字段
+	// 覆盖。**空 / 未知 / "prod" / "production"** 全部按 prod 严格策略（safe-by-default：
+	// 未注入 CAT_ENV 或 typo 都视为 prod）。
+	envLower := strings.ToLower(strings.TrimSpace(envName))
+	isOverrideAllowed := envLower == "dev" || envLower == "staging" || envLower == "test"
+	if !isOverrideAllowed {
+		if cfg.HeartbeatTimeoutSec != wsProdHeartbeatTimeoutSec {
+			panic(fmt.Sprintf(
+				"ws gateway: prod env (CAT_ENV=%q) must use default heartbeat_timeout_sec=%d; got %d (V1 §12.2 钦定；dev/test 覆盖必须 export CAT_ENV=dev|staging|test)",
+				envName, wsProdHeartbeatTimeoutSec, cfg.HeartbeatTimeoutSec,
+			))
+		}
+		if cfg.MaxMessageSizeBytes != wsProdMaxMessageSizeBytes {
+			panic(fmt.Sprintf(
+				"ws gateway: prod env (CAT_ENV=%q) must use default max_message_size_bytes=%d; got %d (V1 §12.2 钦定；dev/test 覆盖必须 export CAT_ENV=dev|staging|test)",
+				envName, wsProdMaxMessageSizeBytes, cfg.MaxMessageSizeBytes,
+			))
+		}
+	}
+
 	upgrader := &websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
