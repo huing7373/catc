@@ -167,3 +167,4 @@
 | 2026-05-06 | [WS close code 必须用 4xxx 应用自定义段隔离 §3 应用错误码 + 跨文档配置 key 双向锚定 (r5)](2026-05-06-ws-close-code-segment-discipline-r5.md) | 2 | architecture, docs, config | `<pending>` |
 | 2026-05-06 | [Redis presence 不能替代 membership 授权 + room.snapshot 单一视图原则 + close code 表 1006 数字冲突清理 (r6)](2026-05-06-ws-frozen-section-authz-and-snapshot-coherence-r6.md) | 3 | architecture, docs | `<pending>` |
 | 2026-05-06 | [握手 first-snapshot 契约的"启动时序原子性"+ placeholder 必须给真实可用最小值 + 跨文档时序图必须随冻结声明同步 (r7)](2026-05-06-ws-snapshot-startup-order-and-placeholder-r7.md) | 3 | architecture, docs | `<pending>` |
+| 2026-05-06 | [room.snapshot placeholder 必须反映 room_members 全表（仅丰富字段降级）+ 节点 4 断连分支同样不广播 member.left (r8)](2026-05-06-ws-snapshot-placeholder-full-roster-and-disconnect-broadcast-r8.md) | 2 | architecture, docs | `<pending>` |

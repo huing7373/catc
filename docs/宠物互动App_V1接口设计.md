@@ -1304,7 +1304,7 @@ GET /ws/rooms/{roomId}?token=xxx
 
 成功握手后服务端必须**主动**推送：
 
-1. **第一条**：`room.snapshot`（payload schema 见 §12.3，节点 4 阶段为 placeholder：room 三字段 + members 数组**至少**含当前握手用户自身条目，详见 §12.3 placeholder 示例）
+1. **第一条**：`room.snapshot`（payload schema 见 §12.3，节点 4 阶段为 placeholder：room 三字段 + members 数组反映 `room_members` 全部成员行 —— 单表查询不 JOIN，丰富字段 `nickname` / `pet.petId` 在 placeholder 阶段允许空字符串，详见 §12.3 placeholder 示例与字段表 placeholder 行为）
 
 > 节点 4 阶段服务端 → 客户端**只**会主动发送 `room.snapshot` / `pong` / `error` 三种消息（与本节末 §12.3 业务消息延后锚定块 + §1 节点 4 协议骨架冻结声明一致）；`member.joined` 等业务广播消息的字段层契约与"是否在握手时广播"的语义由 Story 11.1（Epic 11）锚定，**不**在本 story 范围内 —— 即节点 4 阶段服务端**不**在握手时广播 `member.joined`。
 
@@ -1482,12 +1482,12 @@ JSON 通用骨架：
 | `requestId` | string | 必填 | 固定 `""`（主动推送类消息） |
 | `payload.room.id` | string | 必填 | 房间 ID（BIGINT 字符串化下发，遵循 §2.5 全局约定） |
 | `payload.room.maxMembers` | number (int) | 必填 | 房间容量上限（节点 4 阶段固定 4，由 Story 11.3 创建房间事务写入；本接口仅返回当前值） |
-| `payload.room.memberCount` | number (int) | 必填 | 房间总成员数（**含离线成员**，与下文 `payload.members` 数组长度严格相等，见本节末"不变量"小节）；节点 4 阶段 Story 10.7 placeholder 实现 = 当前握手用户自身的单成员快照（`memberCount: 1`，**不**写 0 —— 详见本节末 placeholder 示例与解释）；Story 11.7 真实实现 = `room_members` 行数（与 `payload.members` 同一次 JOIN 聚合产出，**禁止**单独查询导致 drift） |
-| `payload.members` | array | 必填 | 房间全成员列表（**含离线成员**，节点 4 阶段不区分在线 / 离线，所有 `room_members` 记录都返回；"在线态"由后续 epic 通过 presence 推送类消息单独维护，不混入 snapshot）；节点 4 阶段 Story 10.7 placeholder 实现 = 单成员数组（仅当前握手用户自身条目，复用 §12.1 第 5 步已查到的 `room_members` 行；其他成员的 `nickname` / `pet` 等字段在 Story 14.x / 26.x 真实驱动前**不**枚举）；Story 11.7 真实实现按 `room_members` JOIN `users` JOIN `pets` 聚合 |
-| `payload.members[].userId` | string | 必填 | 成员用户 ID（BIGINT 字符串化） |
-| `payload.members[].nickname` | string | 必填 | 成员昵称 |
-| `payload.members[].pet.petId` | string | 必填 | 成员当前宠物 ID（BIGINT 字符串化） |
-| `payload.members[].pet.currentState` | number (int) | 必填 | 宠物当前状态枚举：`1 = stationary_or_unknown` / `2 = walking` / `3 = running`（与数据库设计 §6.5 motion_state 同义，复用枚举不另起）；**节点 4 阶段 Story 11.7 真实实现固定返回 1**（Epic 14 才真实驱动） |
+| `payload.room.memberCount` | number (int) | 必填 | 房间总成员数（**含离线成员**，与下文 `payload.members` 数组长度严格相等，见本节末"不变量"小节）；节点 4 阶段 Story 10.7 placeholder 实现 = `SELECT COUNT(*) FROM room_members WHERE roomId=?` 的真实行数（或同一次 query 直接取 `len(members)`，二者必须一致），即**真实反映 room_members 全表的成员数**，**禁止**写死为 1；Story 11.7 真实实现 = 同样的 `room_members` 行数，差异仅在于 placeholder 阶段不 JOIN `users` / `pets`（丰富字段降级），**不**在成员数量上与真实实装区分 |
+| `payload.members` | array | 必填 | 房间全成员列表（**含离线成员**，节点 4 阶段不区分在线 / 离线，所有 `room_members` 记录都返回；"在线态"由后续 epic 通过 presence 推送类消息单独维护，不混入 snapshot）；节点 4 阶段 Story 10.7 placeholder 实现 = `SELECT * FROM room_members WHERE roomId=?` 的全部行（**禁止**只返回当前握手用户自己 —— 房间已有 ≥2 成员时漏返其他成员会让 client 把 snapshot 当 authoritative state 错误清空已加载的 roster），单表查询不依赖 JOIN，本身已足够简单；丰富字段在 placeholder 阶段降级（`nickname` / `pet.*` 行为见各字段 placeholder 行）；Story 11.7 真实实现按 `room_members` JOIN `users` JOIN `pets` 聚合，**仅丰富字段差异**，成员条目数量与 placeholder 一致 |
+| `payload.members[].userId` | string | 必填 | 成员用户 ID（BIGINT 字符串化）；node-4 placeholder 阶段直接来自 `room_members.userId`，**所有成员行都返回**（不限于握手用户） |
+| `payload.members[].nickname` | string | 必填 | 成员昵称；node-4 placeholder 阶段（Story 10.7）允许返回**空字符串** `""`（不 JOIN `users` 表，避免 placeholder 过度耦合 Story 11.7 的多表 JOIN）；client 解析为 `String` 但渲染时空串可降级为占位文案；Story 11.x（具体由 Story 11.7 真实 SnapshotBuilder 实装）由 `users.nickname` 真实回填 |
+| `payload.members[].pet.petId` | string | 必填 | 成员当前宠物 ID（BIGINT 字符串化）；node-4 placeholder 阶段（Story 10.7）允许返回**空字符串** `""`（不 JOIN `pets` 表）；Story 14.x（pet 真实驱动时由 Story 11.7 同步扩展）回填真实 `pets.id` |
+| `payload.members[].pet.currentState` | number (int) | 必填 | 宠物当前状态枚举：`1 = stationary_or_unknown` / `2 = walking` / `3 = running`（与数据库设计 §6.5 motion_state 同义，复用枚举不另起）；node-4 placeholder 阶段（Story 10.7）固定返回 `1`；Story 11.7 真实实现亦固定返回 `1`（Epic 14 才真实驱动） |
 | `ts` | number (int64) | 必填 | 服务端发送时间戳（ms） |
 
 > **Future Fields（节点 4 阶段为占位 / 节点 5 / 9 落地）**：
@@ -1531,9 +1531,9 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 }
 ```
 
-> **不变量（snapshot 内部一致性）**：`memberCount` 必须**严格等于** `members[]` 数组长度。两者**统一表示房间全成员（含离线）**，**不**做"在线态过滤"—— 即 snapshot 是房间的 full roster view，**不是** online-only view。理由：(a) 若 `memberCount` 与 `members[].length` 任一方做"在线态过滤"而另一方不做，违反不变量；(b) 节点 4 阶段服务端**不**在握手时广播 `member.joined`（详见 §12.1 末尾 placeholder 注），客户端无法靠后续推送补齐离线成员，snapshot 必须自包含房间全部成员；(c) 在线 / 离线状态由后续 epic 的独立 presence 推送通道维护，不混入 snapshot 字段。节点 4 阶段 Story 10.7 placeholder 实装时**至少**包含当前握手用户自身的单成员条目（`memberCount: 1`，`members: [{当前用户}]`，详见下方 placeholder 示例）—— **禁止**写"全零 placeholder"（`memberCount: 0` + `members: []`），因为：(i) §12.1 第 5 步握手成功**充分条件**就是当前用户已在 `room_members` 表中，握手成功 = 房间里**至少**有一个合法成员；(ii) 推荐房间进入流程要求 client 先 `GET /api/v1/rooms/{roomId}` 加载房间状态后再开 WS（详见 §11.5 客户端推荐调用顺序），client 已经持有合法 roster 视图，再收到一个"零成员"snapshot 会清空已加载的合法状态，房间页错误渲染为空；(iii) §12.1.3 钦定 `room.snapshot` 是握手成功后**必发**的第一条 authoritative 消息，client 把它作为权威态采用，placeholder 必须给出真实可用的最小快照。Story 11.7 真实实装时由**同一次** `room_members` JOIN `users` JOIN `pets` 聚合产出 `members[]`，`memberCount` 取该数组长度（或同一次 query 的 `COUNT(*)`），server 实装层面**禁止**让两者出现 drift。
+> **不变量（snapshot 内部一致性）**：`memberCount` 必须**严格等于** `members[]` 数组长度。两者**统一表示房间全成员（含离线）**，**不**做"在线态过滤"—— 即 snapshot 是房间的 full roster view，**不是** online-only view。理由：(a) 若 `memberCount` 与 `members[].length` 任一方做"在线态过滤"而另一方不做，违反不变量；(b) 节点 4 阶段服务端**不**在握手时广播 `member.joined`（详见 §12.1 末尾 placeholder 注），客户端无法靠后续推送补齐离线成员，snapshot 必须自包含房间全部成员；(c) 在线 / 离线状态由后续 epic 的独立 presence 推送通道维护，不混入 snapshot 字段。节点 4 阶段 Story 10.7 placeholder 实装时 `members[]` 必须**反映 `room_members` 全部成员行**（最少 1 个，即握手用户自己；房间已有 ≥2 成员时必须返回全部）—— **禁止**写"全零 placeholder"（`memberCount: 0` + `members: []`），也**禁止**写"单成员快照"（仅当前握手用户自己，`memberCount` 写死为 1），因为：(i) §12.1 第 5 步握手成功**充分条件**只校验"当前用户已在 `room_members` 表中"，**不**保证房间只有 1 个成员；房间已有 ≥2 成员时单成员 snapshot 会让 client 把首条 authoritative 消息当成"房间被清空"，错误清空已加载的合法 roster；(ii) 推荐房间进入流程要求 client 先 `GET /api/v1/rooms/{roomId}` 加载房间状态后再开 WS（详见 §11.5 客户端推荐调用顺序），client 已经持有合法 roster 视图，再收到一个比真实成员少的 snapshot 同样会错误覆盖（无论是零成员还是单成员都属于"少返"）；(iii) §12.1.3 钦定 `room.snapshot` 是握手成功后**必发**的第一条 authoritative 消息，client 把它作为权威态采用，placeholder 必须给出**结构上真实**的快照（成员条目齐全），仅在丰富字段（`nickname` / `pet.*`）层面降级为占位默认值，**不**在成员数量上偷工。Story 11.7 真实实装时由**同一次** `room_members` JOIN `users` JOIN `pets` 聚合产出 `members[]`，`memberCount` 取该数组长度（或同一次 query 的 `COUNT(*)`），server 实装层面**禁止**让两者出现 drift；与 Story 10.7 placeholder 的差异**仅在丰富字段**（`nickname` / `pet.*` 真实回填），**不在成员数量**。
 
-**节点 4 阶段 placeholder 示例**（Story 10.7 实装；与上述真实示例的差异是 `members[]` 仅含当前握手用户自身条目，其他离线成员的 `nickname` / `pet` 字段在 Story 14.x / 26.x 真实驱动之前**不**枚举；`memberCount` 与 `members[].length` 仍严格相等，不变量不破）：
+**节点 4 阶段 placeholder 示例**（Story 10.7 实装；与上述真实示例的差异**仅在丰富字段**（`nickname` / `pet.petId` 在 placeholder 阶段允许空字符串），`members[]` 必须反映 `room_members` 全部成员行；下例为房间已有 2 成员的场景 —— `userId: "1001"` 为当前握手用户、`userId: "1002"` 为另一已加入但离线的成员；`memberCount` = `members[].length` = 2，不变量不破）：
 
 ```json
 {
@@ -1543,14 +1543,22 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
     "room": {
       "id": "3001",
       "maxMembers": 4,
-      "memberCount": 1
+      "memberCount": 2
     },
     "members": [
       {
         "userId": "1001",
-        "nickname": "A",
+        "nickname": "",
         "pet": {
-          "petId": "2001",
+          "petId": "",
+          "currentState": 1
+        }
+      },
+      {
+        "userId": "1002",
+        "nickname": "",
+        "pet": {
+          "petId": "",
           "currentState": 1
         }
       }
@@ -1560,7 +1568,7 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 }
 ```
 
-> **placeholder 字段值来源说明**：上例 `members[0]` 为当前握手用户自身条目 —— `userId` / `nickname` 来自 §12.1 第 5 步 `room_members` JOIN `users` 已查到的当前用户记录；`pet.petId` 来自当前用户的 `pets.id`（节点 4 阶段每个用户固定一只宠物）；`pet.currentState` 节点 4 阶段固定 `1`（stationary_or_unknown，Epic 14 才真实驱动 motion_state）。Story 10.7 SnapshotBuilder placeholder 实装路径：**禁止**额外查询其它成员（避免 placeholder 阶段过度耦合 Story 11.7 的多表 JOIN），仅复用 §12.1 第 5 步已查的当前用户行；其他离线 / 在线成员条目由 Story 11.7 真实实装时一次性补全。
+> **placeholder 字段值来源说明**：上例 `members[]` 直接来自 `SELECT * FROM room_members WHERE roomId=?` 的全部行（**单表查询，不 JOIN `users` / `pets`**）—— `userId` 取 `room_members.userId`；`nickname` 在 placeholder 阶段返回空字符串 `""`（避免 JOIN `users`，由 Story 11.7 真实实装时由 `users.nickname` 回填）；`pet.petId` 在 placeholder 阶段返回空字符串 `""`（避免 JOIN `pets`，由 Story 14.x 真实驱动时由 Story 11.7 同步扩展）；`pet.currentState` 节点 4 阶段固定 `1`（stationary_or_unknown，Epic 14 才真实驱动 motion_state）。Story 10.7 SnapshotBuilder placeholder 实装路径：用单表查询 `SELECT * FROM room_members WHERE roomId=?` 取全部成员行（这是 placeholder 必须做的，**禁止**只取当前握手用户）；JOIN `users` / `pets` 由 Story 11.7 真实实装时再加，**不**在 Story 10.7 范围内 —— 这样 placeholder 反映真实 roster **结构**（成员 ID 全到位），仅丰富字段降级为 placeholder 默认值。
 
 ### 成员加入
 
