@@ -57,11 +57,11 @@ curl http://127.0.0.1:8080/version    # → {"code":0,"data":{"commit":"<short h
 | 服务 | 启用节点 | 推荐本地启动方式 |
 |---|---|---|
 | MySQL 8.0 | Epic 4（Auth + 五张表 migration） | `docker run -d --name cat-mysql -e MYSQL_ROOT_PASSWORD=catdev -e MYSQL_USER=cat -e MYSQL_PASSWORD=catdev -e MYSQL_DATABASE=cat -p 3306:3306 mysql:8.0`<br>或 `brew install mysql@8.0` (macOS) / `winget install Oracle.MySQL` (Windows)（非 docker 路径需手动 `CREATE USER 'cat'@'%' IDENTIFIED BY 'catdev'; CREATE DATABASE cat; GRANT ALL ON cat.* TO 'cat'@'%';`） |
-| Redis 6+ | Epic 10（WS gateway + presence） | `docker run -d --name cat-redis -p 6379:6379 redis:6-alpine`<br>或 `brew install redis` (macOS) / `winget install Redis.Redis-x64` (Windows) |
+| Redis 7+ | Epic 10（WS gateway + presence；Story 10.2 起 server 启动期 ping 失败 fail-fast） | `docker run -d --name cat-redis -p 6379:6379 redis:7-alpine`<br>或 `brew install redis && brew services start redis` (macOS) / `winget install Redis.Redis-x64` (Windows) |
 
 > 端口 3306 / 6379 是 MySQL/Redis 标准端口；本地多实例冲突时自行改 `-p 13306:3306` / `-p 16379:6379`。
 >
-> **节点 1 跑 server 不需要这两个**：[`server/configs/local.yaml`](configs/local.yaml) 也尚无 MySQL/Redis 配置项（Epic 4 Story 4-2 / Epic 10 Story 10-2 才加）。
+> **节点 4 起跑 server 必须有 Redis**：Story 10.2 起 server 启动期 ping Redis；连接失败 fail-fast（`os.Exit(1)` + log `redis open failed`）。生产 / staging 通过 `CAT_REDIS_ADDR` / `CAT_REDIS_PASSWORD` 环境变量注入，密码含密钥语义不入仓 YAML，部署侧用 K8s Secret 注入。
 
 ### 测试依赖
 
@@ -85,6 +85,10 @@ curl http://127.0.0.1:8080/version    # → {"code":0,"data":{"commit":"<short h
 | `server.write_timeout_sec` | `10` | int | HTTP response 写超时（秒） | server-side 流式响应 / 大文件下载时调大；MVP 阶段保持默认 |
 | `auth.token_secret` | `""`（**故意留空，启动必须 export `CAT_AUTH_TOKEN_SECRET`**） | string | JWT HS256 签名 secret；空串 / `<16` 字节启动 fail-fast | **任何环境**（dev / staging / prod）都用 env `CAT_AUTH_TOKEN_SECRET` 注入；checked-in 不放 fallback 是为了让 misconfiguration fail-fast，参考 [`docs/lessons/2026-04-26-checked-in-secret-must-fail-fast.md`](../docs/lessons/2026-04-26-checked-in-secret-must-fail-fast.md) |
 | `auth.token_expire_sec` | `604800`（7 天） | int | 默认 token 过期时间；`<=0` 或 `> 30天` 启动 fail-fast | dev 想短到 1 小时方便测试可改 `3600`；生产保持默认 |
+| `redis.addr` | `127.0.0.1:6379` | string | Story 10.2 加：Redis 连接地址 | 生产 / staging 用 `CAT_REDIS_ADDR` 环境变量注入；空串 → `redis open failed` fail-fast |
+| `redis.password` | `""` | string | Story 10.2 加：Redis AUTH 密码；空串 = 无密码（与本地 docker-run redis 默认行为一致） | 生产用 `CAT_REDIS_PASSWORD` 环境变量注入；密钥不入仓 YAML |
+| `redis.db` | `0` | int | Story 10.2 加：Redis 逻辑数据库索引（0~15）；MVP 单实例保持 0 | 生产建议保持 0；多 db 设计在 Cluster / Sentinel 后行为不一致 |
+| `redis.pool_size` | `10` | int | Story 10.2 加：go-redis 连接池最大连接数；0 / 缺字段兜底 10 | 节点 4 阶段 10 足够；节点 9+ 上 prod 按观测调整 |
 | `log.level` | `info` | string | slog level（`debug` / `info` / `warn` / `error`） | 本地排障改 `debug`；生产保持 `info` |
 
 > **不在 README 直接放 `local.yaml` 全文**：避免双源不一致。需要看完整内容直接打开 [`server/configs/local.yaml`](configs/local.yaml)。
@@ -97,6 +101,8 @@ curl http://127.0.0.1:8080/version    # → {"code":0,"data":{"commit":"<short h
 | `CAT_LOG_LEVEL` | `log.level` | `debug` / `info` / `warn` / `error` | CI / 临时 demo 调级用 |
 | `CAT_MYSQL_DSN` | `mysql.dsn` | 完整 DSN 串（含密码） | **生产必走**：DSN 不入仓库 YAML，部署侧用 K8s Secret / Vault 注入；空串 = 不覆盖 |
 | `CAT_AUTH_TOKEN_SECRET` | `auth.token_secret` | ≥16 字节字符串 | **所有环境必走**（含本地 dev）：`local.yaml` 留空时唯一注入 secret 的方式；不 export 启动直接 fail-fast；空串 = 不覆盖（等价于完全没设） |
+| `CAT_REDIS_ADDR` | `redis.addr` | host:port 串（如 `prod-redis.example.com:6380`） | Story 10.2 加：staging / prod 部署注入 Redis 地址；空串 = 不覆盖 |
+| `CAT_REDIS_PASSWORD` | `redis.password` | Redis AUTH 密码 | Story 10.2 加：含密钥语义不入仓 YAML；部署侧用 K8s Secret 注入；空串 = 不覆盖（等价于无密码） |
 
 完整命令例：
 

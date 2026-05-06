@@ -1,0 +1,10 @@
+server:
+  http_port: 8080
+
+# Story 10.2 测试 fixture：YAML 显式写 redis 段，验证 loader 解析 4 字段全部正确。
+# 与 testdata/auth.yaml / testdata/ratelimit.yaml 同风格（专属 fixture）。
+redis:
+  addr: "127.0.0.1:6379"
+  password: "yaml-only-pass"
+  db: 3
+  pool_size: 25

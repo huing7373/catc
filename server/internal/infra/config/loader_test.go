@@ -298,6 +298,118 @@ func TestLoad_RateLimitOmitted_DefaultedTo60(t *testing.T) {
 	}
 }
 
+// TestLoad_RedisAddrEnvOverride 验证 CAT_REDIS_ADDR 环境变量覆盖 YAML 的 redis.addr。
+// 这是 staging / prod 部署注入 Redis 连接地址的标准入口。Story 10.2 引入；
+// 与 mysql.dsn / auth.token_secret 同模式（CLAUDE.md "配置格式：YAML，支持环境变量覆盖"）。
+func TestLoad_RedisAddrEnvOverride(t *testing.T) {
+	const overrideAddr = "prod-redis.example.com:6380"
+	t.Setenv(envRedisAddr, overrideAddr)
+
+	cfg, err := Load(fixturePath)
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.Redis.Addr != overrideAddr {
+		t.Errorf("Redis.Addr = %q, want %q (env override should win)", cfg.Redis.Addr, overrideAddr)
+	}
+}
+
+// TestLoad_RedisPasswordEnvOverride 验证 CAT_REDIS_PASSWORD 环境变量覆盖
+// YAML 的 redis.password。Story 10.2 引入；密码含密钥语义不入仓 YAML，部署侧
+// 用 K8s Secret 注入 env，与 mysql.dsn / auth.token_secret 同模式。
+func TestLoad_RedisPasswordEnvOverride(t *testing.T) {
+	const overridePass = "prod-redis-secret-from-vault"
+	t.Setenv(envRedisPassword, overridePass)
+
+	cfg, err := Load(fixturePath)
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.Redis.Password != overridePass {
+		t.Errorf("Redis.Password = %q, want %q (env override should win)", cfg.Redis.Password, overridePass)
+	}
+}
+
+// TestLoad_RedisNoEnv_KeepsYAMLDefault 验证未设 CAT_REDIS_ADDR / CAT_REDIS_PASSWORD 时
+// loader 不动 cfg.Redis.{Addr,Password}（保留 YAML 默认或留空让 redis.Open fail-fast）。
+// fixturePath 没 redis 段 → Addr 默认空、Password 默认空，PoolSize 兜底默认 10。
+func TestLoad_RedisNoEnv_KeepsYAMLDefault(t *testing.T) {
+	t.Setenv(envRedisAddr, "")
+	t.Setenv(envRedisPassword, "")
+
+	cfg, err := Load(fixturePath)
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.Redis.Addr != "" {
+		t.Errorf("Redis.Addr = %q, want empty (fixture has no redis section + env empty)", cfg.Redis.Addr)
+	}
+	if cfg.Redis.Password != "" {
+		t.Errorf("Redis.Password = %q, want empty", cfg.Redis.Password)
+	}
+}
+
+// TestLoad_RedisPoolSizeDefault 验证 fixture 没显式写 redis.pool_size 时，
+// loader 兜底为 10（Story 10.2 引入；epics.md §Story 10.2 行 1671 钦定）。
+// fixturePath 没 redis 段 → cfg.Redis.PoolSize 是 zero-value 0 → loader 兜底成 10。
+func TestLoad_RedisPoolSizeDefault(t *testing.T) {
+	cfg, err := Load(fixturePath)
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.Redis.PoolSize != 10 {
+		t.Errorf("Redis.PoolSize = %d, want 10 (fixture has no redis section → loader default)", cfg.Redis.PoolSize)
+	}
+	// DB 没兜底（0 是合法值），fixture 没 redis 段 → DB == 0 也是预期
+	if cfg.Redis.DB != 0 {
+		t.Errorf("Redis.DB = %d, want 0 (default db, no fallback in loader)", cfg.Redis.DB)
+	}
+}
+
+// TestLoad_RedisPoolSizeNegative_FallbackToDefault 验证 YAML 显式写
+// `redis.pool_size: -1`（或任何负数）时，loader 必须兜底成默认值 10。
+//
+// 这是 10.2 round 1 [P2] 拦下的正确性修复：go-redis NewClient(Options{PoolSize: -1})
+// 内部 makechan 会 panic("makechan: size out of range")，绕过 redis.Open 的
+// fail-fast 路径 → 进程 SIGABRT 而不是 startup error。loader 必须把负值（YAML
+// 拼错 / ConfigMap 注入异常）挤到合法范围，让 server 用默认 pool 启动。
+//
+// 与 TestLoad_RedisPoolSizeDefault 配对：== 0 兜底 + 负值兜底 = 注释里"<=0 → 默认"
+// 的实现。
+func TestLoad_RedisPoolSizeNegative_FallbackToDefault(t *testing.T) {
+	cfg, err := Load("testdata/redis_negative_pool.yaml")
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.Redis.PoolSize != 10 {
+		t.Errorf("Redis.PoolSize = %d, want 10 (negative YAML value must fallback to default)", cfg.Redis.PoolSize)
+	}
+}
+
+// TestLoad_RedisYAMLParsing 验证 YAML 含 redis: 段时正确解析（用专属 fixture）。
+// Story 10.2 引入。
+func TestLoad_RedisYAMLParsing(t *testing.T) {
+	t.Setenv(envRedisAddr, "")     // 防 host 环境污染
+	t.Setenv(envRedisPassword, "") // 防 host 环境污染
+
+	cfg, err := Load("testdata/redis.yaml")
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.Redis.Addr != "127.0.0.1:6379" {
+		t.Errorf("Redis.Addr = %q, want %q", cfg.Redis.Addr, "127.0.0.1:6379")
+	}
+	if cfg.Redis.Password != "yaml-only-pass" {
+		t.Errorf("Redis.Password = %q, want %q", cfg.Redis.Password, "yaml-only-pass")
+	}
+	if cfg.Redis.DB != 3 {
+		t.Errorf("Redis.DB = %d, want 3 (explicit YAML)", cfg.Redis.DB)
+	}
+	if cfg.Redis.PoolSize != 25 {
+		t.Errorf("Redis.PoolSize = %d, want 25 (explicit YAML; not defaulted)", cfg.Redis.PoolSize)
+	}
+}
+
 // itoa64 是简化版 strconv.FormatInt（避免在 _test.go 引入额外 import）。
 func itoa64(i int64) string {
 	if i == 0 {

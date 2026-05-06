@@ -3,6 +3,7 @@ package config
 type Config struct {
 	Server    ServerConfig    `yaml:"server"`
 	MySQL     MySQLConfig     `yaml:"mysql"`
+	Redis     RedisConfig     `yaml:"redis"` // Story 10.2 加
 	Auth      AuthConfig      `yaml:"auth"`
 	RateLimit RateLimitConfig `yaml:"ratelimit"`
 	Log       LogConfig       `yaml:"log"`
@@ -61,6 +62,49 @@ type MySQLConfig struct {
 	//
 	// 0 = 不限制（连接永远不主动 refresh，不推荐生产用）。
 	ConnMaxLifetimeSec int `yaml:"conn_max_lifetime_sec"`
+}
+
+// RedisConfig 是 Redis 接入参数。Story 10.2 引入；选型 / 默认值 / fail-fast 模式
+// 由 epics.md §Story 10.2（行 1671）+ Go 项目结构 §12.2（行 926-929）钦定。
+//
+// 字段不在 config 包做业务校验（无 Validate 方法），fail-fast 由
+// `internal/infra/redis.Open` 承担：Addr 为空或 ping 失败时直接返 error，
+// main.go 走 `slog.Error + os.Exit(1)`。
+type RedisConfig struct {
+	// Addr 是 Redis 连接地址（host:port 格式）。
+	//
+	// 本地默认（local.yaml）：127.0.0.1:6379
+	// 生产 / staging：通过环境变量 `CAT_REDIS_ADDR` 覆盖（loader.go 已挂 env 优先级；
+	// 与 mysql.dsn / auth.token_secret 同模式）。
+	Addr string `yaml:"addr"`
+
+	// Password 是 Redis AUTH 密码。
+	//
+	// 本地默认（local.yaml）：""（空串 = 无密码，与本地 docker-run redis 默认行为一致）
+	// 生产 / staging：通过环境变量 `CAT_REDIS_PASSWORD` 覆盖；含密钥语义不入仓 YAML，
+	// 部署侧用 K8s Secret 注入（与 mysql.dsn / auth.token_secret 同模式）。
+	//
+	// 空串视为"无密码"（不调 AUTH 命令）；非空时 go-redis 自动在握手期发 AUTH。
+	Password string `yaml:"password"`
+
+	// DB 是 Redis 逻辑数据库索引（0 ~ 15，Redis 默认 16 个 logical db）。
+	//
+	// 默认 0；生产建议保持 0（与本地 dev 一致）。
+	//
+	// 注意：miniredis 默认只暴露 db 0（无多 db 概念），单测代码**不应**基于多 db
+	// 设计 key 布局（会在 miniredis 下跑通但在真 Redis / 切 Cluster 后行为不一致）。
+	// 详见 internal/pkg/testing/helpers.go NewMiniRedis 顶部注释。
+	DB int `yaml:"db"`
+
+	// PoolSize 是 go-redis 连接池最大连接数。
+	//
+	// 默认 10（go-redis 默认 = 10 * runtime.NumCPU()，但项目锁定具体值避免环境差异）。
+	// 节点 4 阶段 Redis QPS 不高（每连接 / 心跳 / 广播都是轻量操作），10 足够；
+	// 节点 9+ 上 prod 后按观测 QPS 调整。
+	//
+	// 0 / 负值视为"用 go-redis 默认"（10 * NumCPU），但 loader.go 兜底默认 10
+	// 让"YAML 缺字段" → 行为可预测。
+	PoolSize int `yaml:"pool_size"`
 }
 
 // AuthConfig 是 JWT 签发 / 校验配置。Story 4.4 引入；选型 / 默认值 / fail-fast

@@ -1,0 +1,8 @@
+server:
+  http_port: 8080
+
+# Story 10.2 round 1 [P2] 测试 fixture：YAML 显式写 redis.pool_size 负数，
+# 验证 loader 兜底成默认值 10（防 go-redis NewClient panic）。
+redis:
+  addr: "127.0.0.1:6379"
+  pool_size: -1

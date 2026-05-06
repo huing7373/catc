@@ -25,6 +25,14 @@ const (
 	// Story 4.4 引入。token_secret 含密钥语义 → 不入仓库 YAML，部署侧用 K8s
 	// Secret / Vault 注入；与 4.2 mysql.dsn env override 同模式。
 	envAuthTokenSecret = "CAT_AUTH_TOKEN_SECRET"
+	// envRedisAddr 是 staging / prod 注入 Redis 连接地址的标准入口。Story 10.2 引入。
+	// 与 mysql.dsn / auth.token_secret 同模式（CLAUDE.md "配置格式：YAML，支持环境变量覆盖"）。
+	envRedisAddr = "CAT_REDIS_ADDR"
+	// envRedisPassword 是 staging / prod 注入 Redis AUTH 密码的标准入口。Story 10.2 引入。
+	// 含密钥语义 → 不入仓 YAML；部署侧用 K8s Secret 注入。
+	// 注意：未给 CAT_REDIS_DB / CAT_REDIS_POOL_SIZE 加 env override —— 这两个字段非
+	// secret 且 prod / dev 一致，YAML 配置足够；保持 env 表面积小（详见 story §AC4）。
+	envRedisPassword = "CAT_REDIS_PASSWORD"
 
 	defaultHTTPPort       = 8080
 	defaultLogLevel       = "info"
@@ -35,6 +43,10 @@ const (
 	// defaultRateLimitBucketsLimit 是 rate_limit 中间件内存 bucket 数上限（防 IP 洪泛 OOM）。
 	// 约 1MB 内存（每 limiter ~100 字节）。Story 4.5 引入。
 	defaultRateLimitBucketsLimit = 10000
+	// defaultRedisPoolSize 是 go-redis 连接池默认大小。
+	// epics.md §Story 10.2 行 1671 钦定 `pool_size` 字段；节点 4 阶段 Redis QPS 不高，
+	// 10 足够；节点 9+ 上 prod 按观测调整。Story 10.2 引入。
+	defaultRedisPoolSize = 10
 )
 
 func Load(path string) (*Config, error) {
@@ -74,6 +86,16 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv(envAuthTokenSecret); v != "" {
 		cfg.Auth.TokenSecret = v
 	}
+	// Redis addr 通过 CAT_REDIS_ADDR 覆盖；空串视为 "不覆盖"（保留 YAML 默认或留空让
+	// redis.Open fail-fast）。Story 10.2 引入；与 mysql.dsn / auth.token_secret 同模式。
+	if v := os.Getenv(envRedisAddr); v != "" {
+		cfg.Redis.Addr = v
+	}
+	// Redis password 含密钥语义不入仓 → 部署侧通过 CAT_REDIS_PASSWORD 注入；
+	// 空串视为 "不覆盖"（保留 YAML 默认空串 = 无密码）。Story 10.2 引入。
+	if v := os.Getenv(envRedisPassword); v != "" {
+		cfg.Redis.Password = v
+	}
 
 	if cfg.Server.HTTPPort == 0 {
 		cfg.Server.HTTPPort = defaultHTTPPort
@@ -107,6 +129,25 @@ func Load(path string) (*Config, error) {
 		v := int64(defaultRateLimitBucketsLimit)
 		cfg.RateLimit.BucketsLimit = &v
 	}
+
+	// Redis PoolSize 默认值兜底（Story 10.2 引入；10.2 round 1 [P2] 把 == 0 改成 <= 0）：
+	// YAML 缺字段 / 显式 0 / 显式负数都视为"用默认值"（zero-value + 负值兜底；与 RateLimit
+	// *int64 模式不同 —— PoolSize 没有"用户想禁用连接池"的真实业务语义，与 ≤0 → 兜底一致）。
+	//
+	// 为什么必须涵盖负数（不能只兜 == 0）：go-redis NewClient(Options{PoolSize: -1}) 会在
+	// 内部 makechan 处直接 panic("makechan: size out of range")，绕过 redis.Open 的 fail-fast
+	// 路径 → 启动时进程 SIGABRT 而不是返回 startup error。loader 兜底必须把负值挤到合法
+	// 范围（默认值），让 server 用 default pool 起来；YAML 拼错 / K8s ConfigMap 注入异常
+	// 不能让 server panic。
+	//
+	// 与 docs/lessons/2026-04-26-yaml-default-must-not-mask-explicit-invalid.md 一致：
+	// 本字段无"显式 0 = 禁用功能"的合法用法，不需要区分 nil / *0。
+	if cfg.Redis.PoolSize <= 0 {
+		cfg.Redis.PoolSize = defaultRedisPoolSize
+	}
+	// Redis Addr / DB 不在 loader 兜底：
+	//   - Addr == "" 让 fail-fast 在 redis.Open 层暴露（与 mysql.dsn 同模式）
+	//   - DB == 0 是合法值（默认 db）；YAML 显式 0 与缺字段都是 0，无需区分
 
 	return &cfg, nil
 }

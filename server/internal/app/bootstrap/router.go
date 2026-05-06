@@ -9,6 +9,7 @@ import (
 	"github.com/huing/cat/server/internal/app/http/middleware"
 	"github.com/huing/cat/server/internal/infra/config"
 	"github.com/huing/cat/server/internal/infra/metrics"
+	redisinfra "github.com/huing/cat/server/internal/infra/redis"
 	"github.com/huing/cat/server/internal/pkg/auth"
 	"github.com/huing/cat/server/internal/repo/mysql"
 	"github.com/huing/cat/server/internal/repo/tx"
@@ -33,6 +34,17 @@ type Deps struct {
 	// Story 7.3 review r6 [P2] 加：传给 service.NewStepService 强制 prod 必须用默认 cap。
 	// 未注入 / 不识别值时 service 按 prod 严格策略（safe-by-default）。
 	EnvName string
+	// RedisClient 是 Story 10.2 引入的 Redis 单例 client。
+	//
+	// 本 story 阶段**不**有业务 handler 消费（10.6 / Epic 20 / 32 才挂 presence /
+	// idempotency repo）；这里只让依赖在 main.go 透传到 Deps，让 future story 加业务
+	// 路由时直接用 deps.RedisClient 而不是再扩 Deps 字段。
+	//
+	// 单元测试 Deps{} 零值场景下 RedisClient 是 nil；当前没有业务 handler 消费 →
+	// 不需要在 NewRouter 内部加 if-guard 兜底（与 GormDB / Signer 的 if-guard 区分：
+	// 那些字段已有 handler 消费，必须 nil-tolerant）。Future Story 10.6 引入 presence
+	// handler 时再加 `if deps.RedisClient != nil` 前置 if-guard。
+	RedisClient redisinfra.RedisClient
 }
 
 // NewRouter 构造挂好四件套中间件的 Gin engine。

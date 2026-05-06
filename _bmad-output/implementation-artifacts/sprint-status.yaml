@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-05-06  # Story 10.1 done (epic-loop 10 轮 fix-review 收官 + lesson commit hash 回填)
+last_updated: 2026-05-06  # Story 10.2 review (dev-story 完工：Redis 接入实装；--test + --integration 全绿)
 # Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
 # 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
@@ -135,7 +135,7 @@ development_status:
   epic-9-retrospective: optional
   epic-10: in-progress
   10-1-接口契约最终化: done
-  10-2-redis-接入: backlog
+  10-2-redis-接入: review
   10-3-ws-网关骨架: backlog
   10-4-心跳框架: backlog
   10-5-broadcasttoroom-primitive: backlog

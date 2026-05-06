@@ -15,6 +15,7 @@ import (
 	"github.com/huing/cat/server/internal/infra/config"
 	"github.com/huing/cat/server/internal/infra/db"
 	"github.com/huing/cat/server/internal/infra/logger"
+	redisinfra "github.com/huing/cat/server/internal/infra/redis"
 	"github.com/huing/cat/server/internal/pkg/auth"
 	"github.com/huing/cat/server/internal/repo/tx"
 )
@@ -33,6 +34,13 @@ import (
 // 短 timeout 仅作用于 db.Open；后续 bootstrap.Run 仍用主 signal-ctx，正常 server
 // lifecycle 不受影响。详见 docs/lessons/2026-04-26-startup-blocking-io-needs-deadline.md。
 const dbOpenTimeout = 5 * time.Second
+
+// redisOpenTimeout 是启动阶段调 redis.Open 的最大等待。
+//
+// 与 dbOpenTimeout 同模式（详见上文）：主 signal-ctx 没 deadline，碰到 blackhole
+// host / 慢 DNS 时 PingContext 会被 driver 卡 30s+，fail-fast 实际不快。
+// Story 10.2 引入。
+const redisOpenTimeout = 5 * time.Second
 
 func main() {
 	// Bootstrap logger 先拿 "info" level 的 JSON handler（filePath 留空 → 只写 stdout），
@@ -162,6 +170,31 @@ func main() {
 	txMgr := tx.NewManager(gormDB)
 	slog.Info("mysql connected", slog.Int("max_open_conns", cfg.MySQL.MaxOpenConns))
 
+	// Story 10.2：Redis 接入。失败必须 fail-fast：
+	//   - addr 空（local.yaml 漏配）→ "redis.addr is empty"
+	//   - 连接失败 / authentication failed / wrong db → fmt.Errorf("redis ping: %w", err)
+	//
+	// 与 db.Open 同模式：本地短 timeout ctx 强制 5s 内见结果，避免 blackhole host /
+	// 慢 DNS 卡 30s+。本 story 阶段 router / handler 暂不消费 RedisClient（Story 10.6
+	// 才挂 presence repo）—— 这里只确保依赖能 wire 起来。
+	redisOpenCtx, redisOpenCancel := context.WithTimeout(ctx, redisOpenTimeout)
+	redisClient, err := redisinfra.Open(redisOpenCtx, cfg.Redis)
+	redisOpenCancel()
+	if err != nil {
+		slog.Error("redis open failed", slog.Any("error", err))
+		os.Exit(1)
+	}
+	defer func() {
+		if cerr := redisClient.Close(); cerr != nil {
+			slog.Error("redis close failed", slog.Any("error", cerr))
+		}
+	}()
+	slog.Info("redis connected",
+		slog.String("addr", cfg.Redis.Addr),
+		slog.Int("pool_size", cfg.Redis.PoolSize),
+		slog.Int("db", cfg.Redis.DB),
+	)
+
 	// Story 4.4：JWT signer 构造 fail-fast。
 	//
 	// auth.New 校验：secret 空 / < 16 字节 / expireSec ≤ 0 / expireSec > 30 天 → 返 error。
@@ -199,6 +232,7 @@ func main() {
 		RateLimitCfg: cfg.RateLimit,
 		StepsCfg:     cfg.Steps, // Story 7.3 加：步数同步防作弊阈值
 		EnvName:      envName,   // Story 7.3 review r6 [P2] 加：prod cap override 强制
+		RedisClient:  redisClient, // Story 10.2 加：Redis 单例 client
 	}
 	if err := bootstrap.Run(ctx, cfg, deps); err != nil {
 		slog.Error("server run failed", slog.Any("error", err))

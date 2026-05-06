@@ -17,6 +17,16 @@ mysql:
   max_idle_conns: 10
   conn_max_lifetime_sec: 1800
 
+redis:
+  # Story 10.2 接入。本地 docker-run redis 默认无密码 / db=0。
+  # 生产 / staging 通过环境变量 CAT_REDIS_ADDR / CAT_REDIS_PASSWORD 覆盖
+  # （loader.go 已挂 env 优先级；密码含密钥语义不入仓 YAML，部署侧用 K8s Secret 注入）。
+  # 字段说明详见 internal/infra/config/config.go RedisConfig struct 注释。
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 0
+  pool_size: 10
+
 auth:
   # JWT signing secret（HS256；Story 4.4 接入）。
   #
