@@ -2,7 +2,7 @@
 date: 2026-05-06
 source_review: codex review of Story 10.3 (review file `/tmp/epic-loop-review-10-3-r5.md`, r5)
 story: 10-3-ws-网关骨架
-commit: <pending>
+commit: ea60fbc
 lesson_count: 2
 ---
 

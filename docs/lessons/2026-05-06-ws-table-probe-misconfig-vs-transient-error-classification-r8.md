@@ -2,7 +2,7 @@
 date: 2026-05-06
 source_review: codex review on Story 10-3-ws-网关骨架 (epic-loop r8)
 story: 10-3-ws-网关骨架
-commit: <pending>
+commit: 248adc7
 lesson_count: 1
 ---
 

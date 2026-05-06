@@ -172,13 +172,13 @@
 | 2026-05-06 | [`room.snapshot` authoritative-but-non-destructive merge 契约 + WS roomId 来源按场景分两路 (r10 收官)](2026-05-06-ws-snapshot-merge-contract-and-roomid-source-r10.md) | 2 | architecture, docs | `65b98f2` |
 | 2026-05-06 | [Redis PoolSize 负值绕过 fail-fast，go-redis NewClient panic](2026-05-06-redis-poolsize-negative-makechan-panic.md) | 1 | error-handling, config | `b7c8dad` |
 | 2026-05-06 | [go-redis ContextTimeoutEnabled 默认 false 让 ctx 形同虚设 + 抽象层 Close 真·幂等需要 sync.Once 兜底](2026-05-06-go-redis-context-timeout-and-close-idempotency.md) | 2 | config, architecture | `9acf65f` |
-| 2026-05-06 | [WS Session.Send/Close 并发 panic & SessionManager 关停时 unregister hook 漏调](2026-05-06-ws-session-send-close-race-and-shutdown-hooks.md) | 2 | concurrency, error-handling, architecture | `<pending>` |
-| 2026-05-06 | [WS reconnect 替换路径漏触发 onUnregister 钩子 + WSConfig 契约字段缺 prod 强制](2026-05-06-ws-reconnect-unregister-hook-and-prod-contract-gate.md) | 2 | architecture, config | `<pending>` |
-| 2026-05-06 | [WS 路由必须 gate 在 backing tables migration 落地之后（启动期表存在性 sniff）](2026-05-06-ws-route-table-existence-gate.md) | 1 | architecture | `<pending>` |
-| 2026-05-06 | [WS room 存在性来源 / pong 优先级 buffer / sessionID logger 字段（10-3 r4）](2026-05-06-ws-room-existence-source-and-pong-priority-r4.md) | 3 | architecture, observability | `<pending>` |
-| 2026-05-06 | [WS 路由"表存在性 gate"循环陷阱 + reconnect 替换的 broadcast 重叠窗口](2026-05-06-ws-table-existence-gate-and-reconnect-broadcast-window.md) | 2 | architecture | `<pending>` |
-| 2026-05-06 | [WS 表存在性 sniff 不能依赖 information_schema 权限（r6）](2026-05-06-ws-table-probe-must-not-require-information-schema-privilege.md) | 1 | architecture | `<pending>` |
-| 2026-05-06 | [房间存在校验补 status 过滤 & writeLoop priority 配额防 starvation（10-3 r7）](2026-05-06-ws-room-status-filter-and-priority-quota.md) | 2 | architecture, perf | `<pending>` |
-| 2026-05-06 | [WS 表 probe 错误分流：misconfig 必须 fail-fast，transient 才能 warn-and-continue（r8 收窄 r6）](2026-05-06-ws-table-probe-misconfig-vs-transient-error-classification-r8.md) | 1 | error-handling | `<pending>` |
-| 2026-05-06 | [sessionID 截断 8 字符 = birthday paradox 内存腐败（10-3 r9）](2026-05-06-ws-session-id-truncation-collision-r9.md) | 1 | architecture | `<pending>` |
-| 2026-05-06 | [reconnect 路径 destructive Register 必须延后到 transient IO 之后（10-3 r10）](2026-05-06-ws-handshake-register-after-snapshot-r10.md) | 1 | architecture | `<pending>` |
+| 2026-05-06 | [WS Session.Send/Close 并发 panic & SessionManager 关停时 unregister hook 漏调](2026-05-06-ws-session-send-close-race-and-shutdown-hooks.md) | 2 | concurrency, error-handling, architecture | `63f505c` |
+| 2026-05-06 | [WS reconnect 替换路径漏触发 onUnregister 钩子 + WSConfig 契约字段缺 prod 强制](2026-05-06-ws-reconnect-unregister-hook-and-prod-contract-gate.md) | 2 | architecture, config | `a5afc6c` |
+| 2026-05-06 | [WS 路由必须 gate 在 backing tables migration 落地之后（启动期表存在性 sniff）](2026-05-06-ws-route-table-existence-gate.md) | 1 | architecture | `723fd99` |
+| 2026-05-06 | [WS room 存在性来源 / pong 优先级 buffer / sessionID logger 字段（10-3 r4）](2026-05-06-ws-room-existence-source-and-pong-priority-r4.md) | 3 | architecture, observability | `e7cca25` |
+| 2026-05-06 | [WS 路由"表存在性 gate"循环陷阱 + reconnect 替换的 broadcast 重叠窗口](2026-05-06-ws-table-existence-gate-and-reconnect-broadcast-window.md) | 2 | architecture | `ea60fbc` |
+| 2026-05-06 | [WS 表存在性 sniff 不能依赖 information_schema 权限（r6）](2026-05-06-ws-table-probe-must-not-require-information-schema-privilege.md) | 1 | architecture | `5b88006` |
+| 2026-05-06 | [房间存在校验补 status 过滤 & writeLoop priority 配额防 starvation（10-3 r7）](2026-05-06-ws-room-status-filter-and-priority-quota.md) | 2 | architecture, perf | `eeb3d11` |
+| 2026-05-06 | [WS 表 probe 错误分流：misconfig 必须 fail-fast，transient 才能 warn-and-continue（r8 收窄 r6）](2026-05-06-ws-table-probe-misconfig-vs-transient-error-classification-r8.md) | 1 | error-handling | `248adc7` |
+| 2026-05-06 | [sessionID 截断 8 字符 = birthday paradox 内存腐败（10-3 r9）](2026-05-06-ws-session-id-truncation-collision-r9.md) | 1 | architecture | `d063230` |
+| 2026-05-06 | [reconnect 路径 destructive Register 必须延后到 transient IO 之后（10-3 r10）](2026-05-06-ws-handshake-register-after-snapshot-r10.md) | 1 | architecture | `8718b3f` |

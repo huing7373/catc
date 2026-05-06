@@ -2,7 +2,7 @@
 date: 2026-05-06
 source_review: codex review r4 on Story 10-3 (WS Gateway Skeleton)
 story: 10-3-ws-网关骨架
-commit: <pending>
+commit: e7cca25
 lesson_count: 3
 ---
 

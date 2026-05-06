@@ -2,7 +2,7 @@
 date: 2026-05-06
 source_review: codex review of Story 10.3 r1（review_findings file: /tmp/epic-loop-review-10-3-r1.md，dev-story 留下的 dirty 工作区一并入 commit）
 story: 10-3-ws-网关骨架
-commit: <pending>
+commit: 63f505c
 lesson_count: 2
 ---
 
