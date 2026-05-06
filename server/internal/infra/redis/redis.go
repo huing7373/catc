@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -36,6 +37,20 @@ func Open(ctx context.Context, cfg config.RedisConfig) (RedisClient, error) {
 		Password: cfg.Password,
 		DB:       cfg.DB,
 		PoolSize: cfg.PoolSize,
+		// ContextTimeoutEnabled 必须显式开启 —— go-redis/v9 默认 false，此时
+		// baseClient.context() 直接 fallback 到 context.Background()，所有命令
+		// **忽略** caller 传入的 ctx（cancel / deadline 都不生效）。
+		//
+		// 后果（如果不开）：
+		//   - main.go redisOpenTimeout = 5s 的 ctx 对 Ping 不生效，碰 blackhole
+		//     host 实际卡到 socket-level timeout（ReadTimeout/DialTimeout，默认 3s/5s
+		//     但与 ctx deadline 解耦）—— fail-fast 表现退化到驱动 socket timeout
+		//   - handler 收到 client cancel / request timeout 后，下游 RedisClient
+		//     方法仍裸跑命令到底，违反 ADR-0007 "ctx 必传 + 必生效" 钦定
+		//
+		// v9.7.0 源码参考：redis.go baseClient.context() 在该选项 false 时返回
+		// context.Background()，命令路径完全绕开传入 ctx 的 deadline / cancel 检查。
+		ContextTimeoutEnabled: true,
 	})
 
 	// fail-fast：ping 失败必须启动失败。失败原因可能是 network unreachable / auth /
@@ -57,8 +72,15 @@ func Open(ctx context.Context, cfg config.RedisConfig) (RedisClient, error) {
 // 7 命令外的能力，**新增** RedisClient 接口方法 + 在本 struct 加实现，而非破抽象。
 //
 // 与 db.Open 不导出底层 *gorm.DB / *sql.DB 同思路（mysql.go 顶部注释钦定）。
+//
+// closeOnce 保证 Close 幂等（多次调用都返 nil / 第一次的 err）。go-redis 自身
+// Close 在第二次调用会返 "redis: client is closed"，与本接口注释承诺的"多次调用
+// 不报错"冲突 —— 用 sync.Once 在抽象层补齐契约（main.go defer + test t.Cleanup
+// + 业务 caller 自己再 Close 都安全）。
 type redisClient struct {
-	client *goredis.Client
+	client    *goredis.Client
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Get 实装 RedisClient.Get。
@@ -142,8 +164,16 @@ func (c *redisClient) SMembers(ctx context.Context, key string) ([]string, error
 
 // Close 实装 RedisClient.Close。
 //
-// go-redis Client.Close 自身已经幂等（多次调用不 panic / 不返 error），
-// 本层直接 wrap。与 *sql.DB.Close 行为一致。
+// **真·幂等**（review r2 修法）：go-redis Client.Close 实际**不**幂等 —— 第二次
+// 调用会返 "redis: client is closed"（v9.7.0 baseClient.Close 不挡重复关闭）。
+// 本层用 sync.Once 包装：第一次真关 + 记 err；后续调用直接返第一次的 err（通常 nil）。
+//
+// 这样 caller 不需要关心调用次数：main.go 的 defer Close + test 的 t.Cleanup +
+// 业务自己的 cleanup 路径可以叠加，**不**会拿到 spurious "client is closed" 错误。
+// 与接口注释"必须幂等"承诺一致。
 func (c *redisClient) Close() error {
-	return c.client.Close()
+	c.closeOnce.Do(func() {
+		c.closeErr = c.client.Close()
+	})
+	return c.closeErr
 }

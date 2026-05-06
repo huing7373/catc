@@ -75,6 +75,10 @@ type RedisClient interface {
 	SMembers(ctx context.Context, key string) ([]string, error)
 
 	// Close 关闭底层连接池；进程退出前由 main.go defer 调用一次。
-	// 必须幂等（多次调用不报错）—— 与 *sql.DB.Close() 行为一致。
+	//
+	// 必须**真·幂等**：多次调用全部返 nil（或第一次的 error），**不**返 spurious
+	// "client is closed" 错误。与 *sql.DB.Close() 行为对齐。注意 go-redis 自身的
+	// Close 不满足该契约（第二次返 "redis: client is closed"），所以实装层必须用
+	// sync.Once 等机制补齐 —— review 2026-05-06 r2 钦定。
 	Close() error
 }

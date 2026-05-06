@@ -239,6 +239,11 @@ func TestRedisClient_Expire_NonExistKey_ReturnsFalse(t *testing.T) {
 
 // TestRedisClient_CtxCancel_CommandAborts 验证传入已 cancel 的 ctx → Get/Set 必须返
 // ctx.Err()，**不**裸跑命令到底。ADR-0007 ctx 传播契约。
+//
+// review r2 强化：本 case 同时锚定 ContextTimeoutEnabled: true 必须开启 —— go-redis/v9
+// 默认 false 时 baseClient.context() 直接返 context.Background()，已 cancel 的 ctx
+// 也会被忽略，命令裸跑到 socket timeout 才返 error（不是返 context.Canceled）。
+// 本 case 用 errors.Is(err, context.Canceled) 严格断言，能在该选项被回退时立刻挂掉。
 func TestRedisClient_CtxCancel_CommandAborts(t *testing.T) {
 	client, _ := newClient(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -246,45 +251,76 @@ func TestRedisClient_CtxCancel_CommandAborts(t *testing.T) {
 
 	_, err := client.Get(ctx, "anything")
 	if err == nil {
-		t.Errorf("Get with canceled ctx returned nil error, want ctx.Err() or wrapped")
+		t.Fatalf("Get with canceled ctx returned nil error, want ctx.Canceled wrapped")
 	}
-	// go-redis 实际返回的 err 会包装 context.Canceled；用 errors.Is 兜底
-	if err != nil && !errors.Is(err, context.Canceled) {
-		// 注：某些 go-redis 版本可能在已 cancel ctx 时直接返 context.Canceled 或包装错误；
-		// 主要验证"是 error 且能识别为取消"，不严卡具体类型。
-		t.Logf("Get error type: %T value: %v (期望 errors.Is(err, context.Canceled) = true)", err, err)
+	if !errors.Is(err, context.Canceled) {
+		// 严格断言：ContextTimeoutEnabled: true 必须让 ctx.Canceled 透传上来。
+		// 如果这里挂了，大概率是 redis.Open 里的 Options 漏配 ContextTimeoutEnabled。
+		t.Errorf("Get with canceled ctx err = %v (type %T), want errors.Is context.Canceled = true (检查 redis.Open 是否设了 ContextTimeoutEnabled: true)", err, err)
 	}
 
 	_, err = client.Set(ctx, "k", "v", 0, false)
 	if err == nil {
-		t.Errorf("Set with canceled ctx returned nil error, want ctx.Err() or wrapped")
+		t.Fatalf("Set with canceled ctx returned nil error, want ctx.Canceled wrapped")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Set with canceled ctx err = %v (type %T), want errors.Is context.Canceled = true", err, err)
 	}
 }
 
-// TestRedisClient_Close_Idempotent 验证 Close 调两次不 panic / 不返 error。
-// 与 *sql.DB.Close 行为一致语义。
+// TestRedisClient_CtxDeadline_CommandAborts 验证传入已超时的 ctx (DeadlineExceeded) →
+// Get/Set 必须立即返 context.DeadlineExceeded（包装），**不**等 socket-level timeout。
 //
-// 注意：因为 NewRedisClientFromMiniredis 已经在 t.Cleanup 注册了 client.Close，
-// 本测试**额外**手动调一次 Close —— 等于 Close 被调两次（手动一次 + cleanup 一次）。
+// review r2 新增：与 _CtxCancel_CommandAborts 互补，专门锚 ContextTimeoutEnabled: true
+// 让 deadline 路径也生效。go-redis 默认 false 时 deadline 完全失效，命令会卡到
+// DialTimeout / ReadTimeout（默认 3s / 5s）才返 socket error，不是 ctx.DeadlineExceeded。
+func TestRedisClient_CtxDeadline_CommandAborts(t *testing.T) {
+	client, _ := newClient(t)
+	// 用一个已经过期的 deadline（过去时间），等于第一次命令调用就立刻超时
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
+	defer cancel()
+
+	_, err := client.Get(ctx, "anything")
+	if err == nil {
+		t.Fatalf("Get with expired deadline ctx returned nil error, want ctx.DeadlineExceeded wrapped")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Get with expired deadline ctx err = %v (type %T), want errors.Is context.DeadlineExceeded = true (检查 redis.Open 是否设了 ContextTimeoutEnabled: true)", err, err)
+	}
+
+	_, err = client.Set(ctx, "k", "v", 0, false)
+	if err == nil {
+		t.Fatalf("Set with expired deadline ctx returned nil error, want ctx.DeadlineExceeded wrapped")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Set with expired deadline ctx err = %v (type %T), want errors.Is context.DeadlineExceeded = true", err, err)
+	}
+}
+
+// TestRedisClient_Close_Idempotent 验证 Close 调两次都返 nil（review r2 加强）。
+//
+// 之前版本只断言"不 panic"接受第二次返 error。但接口注释（client.go 行 78-79）
+// 承诺"多次调用不报错"，所以第二次也必须返 nil（与 *sql.DB.Close 行为对齐）。
+// 实装用 sync.Once 包了 close 调用 —— 第一次关 + 记 err；后续调用直接返第一次的 err。
+//
+// 注意：NewRedisClientFromMiniredis 在 t.Cleanup 注册了 client.Close，所以本测试
+// 手动调两次后，cleanup 还会再调一次（共三次）—— 三次都不应 panic / 不应返 error。
 func TestRedisClient_Close_Idempotent(t *testing.T) {
 	client, _ := newClient(t)
 
-	// 第一次 Close
+	// 第一次 Close —— 真关
 	if err := client.Close(); err != nil {
 		t.Errorf("first Close returned %v, want nil", err)
 	}
 
-	// 第二次 Close（手动）—— 应该不 panic / 不返 error
+	// 第二次 Close（手动）—— sync.Once 短路，仍返 nil
 	defer func() {
 		if r := recover(); r != nil {
 			t.Errorf("second Close panicked: %v", r)
 		}
 	}()
 	if err := client.Close(); err != nil {
-		// go-redis Client.Close 第二次调用确实可能返 "redis: client is closed" 类错误；
-		// 接受任何 error 但**不**接受 panic。如返 error，记 log 即可（本接口契约只
-		// 要求"不 panic"）。
-		t.Logf("second Close returned %v (acceptable, no panic 即可)", err)
+		t.Errorf("second Close returned %v, want nil (接口承诺幂等；sync.Once 应短路)", err)
 	}
-	// 注：t.Cleanup 之后还会再调一次 Close，三次总调用，仍不应该 panic。
+	// 注：t.Cleanup 之后还会再调一次 Close（第三次），仍应返 nil（不 panic / 不报错）。
 }
