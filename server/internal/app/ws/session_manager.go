@@ -35,8 +35,8 @@ import (
 // 本 story 阶段两个钩子默认 no-op（10.6 落地时才注入具体实现）。
 type SessionManager interface {
 	// Register 注册 Session 到 manager；触发 OnRegister 钩子（如挂的话）。
-	// sessionID 由 manager 内部生成（uuid 短串），返回供 Session 持有作为 logger
-	// 的关联字段。
+	// sessionID 由 manager 内部生成（完整 uuid v4 = 36 字符，128 bit 熵；单实例
+	// 进程内可视碰撞为 0），返回供 Session 持有作为 logger 的关联字段。
 	//
 	// 同一 user 重复 Register（如重连） → 旧 Session 被强制 Close（用 sentinel
 	// ErrSessionReplaced 标识；调用方可在 close hook 里区分日志）。
@@ -115,7 +115,9 @@ func NewSessionManager(opts ...SessionManagerOption) SessionManager {
 // Register 实装 SessionManager.Register。
 //
 // 流程：
-//  1. 生成 sessionID（uuid 前 8 字符）
+//  1. 生成 sessionID（完整 uuid v4 = 36 字符；review r9 P3 修：早期实装截 8 字符
+//     前缀，几千 session 起 birthday paradox 碰撞概率非平凡；改全 UUID 后单实例
+//     进程内 128 bit 熵可视碰撞为 0）
 //  2. 检查同 user 是否已有 active session：
 //     - 是 → 记录 replaced 引用 + **锁内**把 OLD 从 sessionsByRoom 移除
 //     （让 broadcast 不再看到 OLD），但**保留** OLD 在 sessionsByID（让后续
@@ -150,7 +152,7 @@ func (m *sessionManager) Register(ctx context.Context, s *Session) (string, erro
 		return "", errors.New("ws: register nil session")
 	}
 
-	sessionID := shortUUID()
+	sessionID := newSessionID()
 
 	m.mu.Lock()
 	if m.closed {
@@ -353,8 +355,13 @@ func (m *sessionManager) notifyClosed(sessionID string) {
 	_ = m.Unregister(context.Background(), sessionID)
 }
 
-// shortUUID 返回 uuid v4 前 8 个字符（约 32 bit 熵；节点 4 阶段单实例 + 单进程
-// 同时活跃 Session 远小于 4 万 → 32 bit 碰撞概率可忽略）。
-func shortUUID() string {
-	return uuid.NewString()[:8]
+// newSessionID 返回完整的 uuid v4（36 字符，128 bit 熵；单实例进程内永不碰撞）。
+//
+// review r9 P3 修：之前实装是 `uuid.NewString()[:8]`，截 8 字符前缀 ≈ 32 bit 熵，
+// 几千 session 起 birthday paradox 碰撞概率非平凡（4 万活跃 ~50%）。碰撞会让
+// sessionsByID/sessionsByRoom 静默覆盖旧 entry，后续 Unregister/replacement 误删
+// 错 session → 原始连接 leak。改全 UUID 是结构性修法（128 bit 熵单实例可视碰撞为 0）；
+// 日志多 28 字符（一行 36 vs 8）的开销完全可接受，grep 仍能用前缀搜索。
+func newSessionID() string {
+	return uuid.NewString()
 }
