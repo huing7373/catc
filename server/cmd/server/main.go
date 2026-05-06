@@ -222,7 +222,17 @@ func main() {
 	// 批量清理 Session。反序会让 sessionMgr.Close 跑批量 s.Close() 同时 scanner 还在
 	// fanout CloseWithCode → 双方对同 Session 并发 close（虽然 Close 幂等不 panic，但
 	// 日志噪声 + onUnregister 钩子可能多调）。
-	heartbeatCtx, cancelHeartbeat := context.WithCancel(context.Background())
+	//
+	// **review r4 P1 修**：heartbeatCtx 必须从 main 的 signal ctx 派生（而非
+	// context.Background()）。原版用 Background → SIGTERM 只 cancel main ctx 让
+	// bootstrap.Run 退出，scanner 仍然在跑直到 main 返回执行 deferred cancelHeartbeat。
+	// 这个 graceful-shutdown window 内（bootstrap.Run 收尾期间），任何 idle ws session
+	// 仍可能被 scanner 走 4005 "heartbeat timeout" 关闭，触发 client 的指数退避自动
+	// 重连 —— 与 sessionMgr.Close 钦定的"标准下线（无 4005）"路径直接冲突。改成
+	// WithCancel(ctx) 后，SIGTERM 立即 cancel scanner.Run 主循环 + 已 dispatched
+	// fanout goroutines（fanout 内部本就有 ctx.Done() 入口 check / recheck）。
+	// 详见 docs/lessons/2026-05-06-heartbeat-scanner-ctx-tie-to-shutdown-signal.md。
+	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
 	heartbeatScanner := wsapp.NewHeartbeatScanner(sessionMgr, cfg.WS.HeartbeatTimeoutSec, slog.Default())
 	go heartbeatScanner.Run(heartbeatCtx)
 	defer func() {

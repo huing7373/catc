@@ -185,3 +185,4 @@
 | 2026-05-06 | [心跳超时扫描 TOCTOU & 4005 close frame 顺序保证（10-4 r1）](2026-05-06-ws-heartbeat-toctou-and-close-frame-ordering-10-4-r1.md) | 2 | concurrency | `<pending>` |
 | 2026-05-06 | [closeInternal 必须 gate writeLoopDone wait 在 writeLoopStarted（10-4 r2）](2026-05-06-ws-close-skip-wait-when-writeloop-not-started-10-4-r2.md) | 1 | perf, concurrency | `<pending>` |
 | 2026-05-06 | [closeInternal wait 上限不足 cover writeTimeout & scanner fanout 不响应 ctx（10-4 r3）](2026-05-06-ws-close-wait-timeout-and-shutdown-fanout-10-4-r3.md) | 2 | concurrency | `<pending>` |
+| 2026-05-06 | [heartbeat scanner ctx 必须挂主 signal ctx & closeInternal wait 仅限 emitClose 路径（10-4 r4）](2026-05-06-ws-heartbeat-shutdown-ctx-and-close-wait-only-emit-10-4-r4.md) | 2 | architecture, perf | `<pending>` |

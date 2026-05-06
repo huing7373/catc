@@ -67,12 +67,16 @@ func TestSession_CloseWithCode_FastWhenWriteLoopNotStarted(t *testing.T) {
 	}
 }
 
-// TestSession_Close_AfterWriteLoopStarted_StillWaits: review r2 P2 不能 regress
-// r1 P2 —— writeLoop 已启动的场景下 Close 必须仍然等 writeLoop 退出（防 close
-// frame 与 data frame 顺序错乱）。
+// TestSession_CloseWithCode_AfterWriteLoopStarted_StillWaits: review r1 P2 +
+// r4 P1 联合不变量。
 //
-// 断言：writeLoop 启动 → 调 Close → writeLoopDone 在 Close 返回前已 close。
-func TestSession_Close_AfterWriteLoopStarted_StillWaits(t *testing.T) {
+// CloseWithCode（emitClose=true）路径**必须**等 writeLoop 退出后再 WriteControl
+// close frame（V1 §12.1 协议钦定 close frame 必须是 wire 最后一帧）。r4 P1 把
+// plain Close 路径的 wait 拆掉了，但 CloseWithCode 路径必须保留 wait。
+//
+// 断言：writeLoop 启动 → 调 CloseWithCode → writeLoopDone 在 CloseWithCode
+// 返回前已 close。
+func TestSession_CloseWithCode_AfterWriteLoopStarted_StillWaits(t *testing.T) {
 	conn, cleanup := newPipeWebsocketConn(t)
 	defer cleanup()
 
@@ -93,16 +97,126 @@ func TestSession_Close_AfterWriteLoopStarted_StillWaits(t *testing.T) {
 		t.Fatal("writeLoop did not start within 500ms")
 	}
 
-	if err := s.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if err := s.CloseWithCode(4005, "heartbeat timeout"); err != nil {
+		t.Fatalf("CloseWithCode: %v", err)
 	}
 
-	// Close 返回时 writeLoopDone 必须已 close（wait 分支生效）。
+	// CloseWithCode 返回时 writeLoopDone 必须已 close（wait 分支生效）。
 	select {
 	case <-s.writeLoopDone:
 		// 期望路径
 	default:
-		t.Error("writeLoopDone not closed after Close returned (review r1 P2 regression: wait branch did not fire)")
+		t.Error("writeLoopDone not closed after CloseWithCode returned (review r1 P2 regression: wait branch did not fire)")
+	}
+}
+
+// TestSession_Close_AfterWriteLoopStarted_DoesNotWait: review r4 P1 回归。
+//
+// **背景**（r4 P1）：原版 closeInternal 无论 emitClose=true（CloseWithCode）还是
+// false（plain Close）都 wait writeLoopDone 直到 closeWaitTimeout（writeTimeout +
+// 200ms ≈ 5.2s）。CloseWithCode 需要 wait 是为了保证 close frame ordering，但
+// plain Close 没有 close frame 要写 → 不需要任何 frame ordering 保证 → wait 是
+// pure overhead。让 plain Close 等 5s+ 直接拖垮：
+//   - SessionManager.Register 替换路径调 replaced.Close()
+//   - SessionManager.Close 批量 s.Close()
+// 两个 production 关键路径都被 5.2s tax 拖慢一倍。
+//
+// 修法：closeInternal 仅在 emitClose=true 时 wait writeLoopDone；emitClose=false
+// 直接跳过 wait，sendChan 已关 → writeLoop 下次 select 自然命中关闭分支退出。
+//
+// 测试策略：起 session + writeLoop，调 plain Close()。Close 应在 50ms 内返回 ——
+// **不**等 writeLoop 退出（writeLoop 自己后台慢慢退出无所谓，调用方不被卡住）。
+//
+// 关键不变量（与上面 CloseWithCode 测试合起来）：
+//   - emitClose=true → wait writeLoopDone（协议正确性）
+//   - emitClose=false → 不 wait（性能正确性）
+func TestSession_Close_AfterWriteLoopStarted_DoesNotWait(t *testing.T) {
+	conn, cleanup := newPipeWebsocketConn(t)
+	defer cleanup()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s := newSession("", 1001, 3001, conn, logger, 16384, 2*time.Second)
+
+	// 启动 writeLoop（writeLoopStarted 入口立即翻 true）
+	go s.writeLoop()
+	// 等 writeLoop 真正进入循环（writeLoopStarted=true）
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if s.writeLoopStarted.Load() {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !s.writeLoopStarted.Load() {
+		t.Fatal("writeLoop did not start within 500ms")
+	}
+
+	start := time.Now()
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// 50ms 上限：plain Close 不需要 wait 任何 frame ordering，关 sendChan + cancel
+	// ctx + close conn 是纯本地操作，亚毫秒级。50ms 给 Windows / CI 时序抖动留余量。
+	// 任何 >100ms 都说明 wait 分支被错误命中（r4 P1 regression）。
+	if elapsed > 50*time.Millisecond {
+		t.Errorf("Close took %v with writeLoop started, want < 50ms (review r4 P1: plain Close must skip writeLoopDone wait — it has no close frame ordering needs)", elapsed)
+	}
+}
+
+// TestSession_Close_FastEvenWhenWriteLoopBlockedOnWrite: review r4 P1 强化场景。
+//
+// 极端场景：writeLoop 当前卡在 conn.WriteMessage（client 死掉但 TCP 还没 RST）。
+// 此时 writeLoop 在 writeTimeout(2s) 内不会退出。原版 closeInternal 让 plain
+// Close 等到 closeWaitTimeout = writeTimeout + 200ms = 2.2s 才返回。r4 修后
+// plain Close 应立即返回（不再等 writeLoop）。
+//
+// 测试策略：起 session，**手工**入队一个数据让 writeLoop 在 net.Pipe 卡住
+// （pipe peer 不读取 → conn.WriteMessage 走 SetWriteDeadline 挂到 writeTimeout）；
+// 主测试 thread 调 plain Close → 必须 <= writeTimeout 一个数量级内返回（< 100ms
+// 给抖动余量）。
+func TestSession_Close_FastEvenWhenWriteLoopBlockedOnWrite(t *testing.T) {
+	conn, cleanup := newPipeWebsocketConn(t)
+	defer cleanup()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// writeTimeout=2s 让对照清晰：原版会等 2.2s，r4 后应 < 100ms
+	s := newSession("", 1001, 3001, conn, logger, 16384, 2*time.Second)
+
+	// 启动 writeLoop
+	go s.writeLoop()
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if s.writeLoopStarted.Load() {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !s.writeLoopStarted.Load() {
+		t.Fatal("writeLoop did not start within 500ms")
+	}
+
+	// 入队一个 frame；client 在 newPipeWebsocketConn 里 dial 了但**不**主动读 ——
+	// gorilla 的 net.Conn 用底层 net.Dial("tcp")，read 不发生时 OS 内核 socket
+	// buffer 容量决定 server 多久卡住。本测试不强求"必卡到 writeTimeout 整段"
+	// （那依赖 OS）；只要 writeLoop 此刻**正在** WriteMessage 内（goroutine
+	// 不在 select），plain Close 都不应该 wait —— writeLoop 退出独立于本调用。
+	//
+	// 注：哪怕 writeLoop 立即写完，r4 修复后 plain Close 也跳过 wait（不等
+	// writeLoopDone），所以这条路径在 fast/slow client 下都应该 < 100ms。
+	_ = s.Send([]byte(`{"type":"x","requestId":"","payload":{},"ts":0}`))
+
+	start := time.Now()
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// 100ms 上限：r4 修后 plain Close 是纯本地操作（关 chan + cancel + close conn），
+	// 与 writeLoop 是否仍卡在 WriteMessage 解耦。原版会卡 writeTimeout+200ms=2.2s。
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("Close took %v with writeLoop in-progress, want < 100ms (review r4 P1: plain Close must NOT wait writeLoopDone)", elapsed)
 	}
 }
 

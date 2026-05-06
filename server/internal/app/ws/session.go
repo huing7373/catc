@@ -433,9 +433,9 @@ func (s *Session) closeInternal(emitClose bool, code int, reason string) error {
 		close(s.sendPriorityChan)
 		s.sendMu.Unlock()
 
-		// Step 2: 等 writeLoop 退出（review r1 P2 加 / r2 P2 修）。channel 已关，
-		// writeLoop 在下一次 select 命中关 chan 立即 return；defer 内 _=s.Close()
-		// 走幂等路径直接返 ErrSessionClosed 不会重入本 closeOnce。
+		// Step 2: 等 writeLoop 退出（review r1 P2 加 / r2 P2 修 / r4 P1 收紧）。channel
+		// 已关，writeLoop 在下一次 select 命中关 chan 立即 return；defer 内
+		// _=s.Close() 走幂等路径直接返 ErrSessionClosed 不会重入本 closeOnce。
 		// **关键**：必须**先** wait writeLoop done，**才** WriteControl —— 否则
 		// 仍可能 close frame 与 writeLoop 最后一帧并发写到 wire 触发协议错误。
 		//
@@ -456,10 +456,26 @@ func (s *Session) closeInternal(emitClose bool, code int, reason string) error {
 		// 跟 data frame 违反 V1 §12.1。closeWaitTimeout 取 writeTimeout + 200ms
 		// 是 writeLoop 实际最坏退出时间（writeMessage 最多卡 writeTimeout 后超时
 		// 返 error，writeLoop 立即 break）+ goroutine 调度 buffer。
-		// 防御性兜底：writeLoopDone 可能为 nil（极端测试场景未走 newSession
-		// 构造直接 zero-init Session 的路径），nil channel select 永远阻塞 ——
-		// 用 non-nil 检查 + 超时让本路径在异常 fixture 下不死锁。
-		if s.writeLoopStarted.Load() && s.writeLoopDone != nil {
+		//
+		// **review r4 P1 修**：wait 仅在 emitClose=true（CloseWithCode 路径）时执行。
+		// 原版无论 emitClose 是 true 还是 false 都 wait writeLoopDone：
+		//   - CloseWithCode 路径需要 wait —— 保证 close frame 是 wire 上最后一帧
+		//     （V1 §12.1 协议钦定）
+		//   - 但 plain Close 路径**不需要**任何 frame ordering 保证 —— 它只关 chan
+		//     让 writeLoop 自然退出，没有 close frame 写要排在 writeLoop 之后
+		// 让 plain Close 也 wait 会让以下场景退化：
+		//   - SessionManager.Register 替换路径：调 replaced.Close() 接力新连接注册；
+		//     这条路径如果卡到 writeTimeout(5s)+200ms，reconnect 整体延迟 5s+
+		//   - SessionManager.Close 批量循环：每个 s.Close() 都付 5.2s tax，shutdown
+		//     被拖慢一倍
+		// 修法：plain Close 直接跳过 wait —— sendChan 已关 → writeLoop 下次 select
+		// 立即命中关闭分支自然退出（甚至不需要等它，反正没有 frame ordering 约束）。
+		// CloseWithCode 仍然 wait（保留 r1/r3 修复的协议正确性）。
+		//
+		// 防御性兜底：writeLoopDone 可能为 nil（极端测试场景未走 newSession 构造
+		// 直接 zero-init Session 的路径），nil channel select 永远阻塞 —— 用
+		// non-nil 检查 + 超时让本路径在异常 fixture 下不死锁。
+		if emitClose && s.writeLoopStarted.Load() && s.writeLoopDone != nil {
 			waitTimeout := s.closeWaitTimeout
 			if waitTimeout <= 0 {
 				// zero-init Session（测试 fixture）兜底：用 closeFrameWriteDeadline
