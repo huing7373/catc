@@ -22,11 +22,30 @@ import (
 	"github.com/huing/cat/server/internal/service"
 )
 
-// mysqlErrCodeNoSuchTable 是 MySQL "Table 'xxx.yyy' doesn't exist" 的 error number
-// （ER_NO_SUCH_TABLE = 1146）。go-sql-driver/mysql 把 server 端错误号原样填到
+// MySQL server 错误号常量。go-sql-driver/mysql 把 server 端错误号原样填到
 // *mysql.MySQLError.Number；与 repo/mysql/auth_binding_repo.go 用 1062 / user_repo.go
 // 用 1062 同模式，只比 Number 不解析 Message 字符串（locale / 版本不稳）。
-const mysqlErrCodeNoSuchTable = 1146
+//
+// 这三个号在 wsTablesReady 中被视为 **misconfig fail-fast 信号**（不是 transient）：
+//   - 1146 ER_NO_SUCH_TABLE：表本身不存在 → schema 漂移
+//   - 1142 ER_TABLEACCESS_DENIED_ERROR：DB role 连得上但没有该表的 SELECT 权限
+//   - 1044 ER_DBACCESS_DENIED_ERROR：DB role 没有该 schema 的访问权限
+//
+// **r8 [P1] 修订**（与 r6 后语义相比的收窄）：
+// r6 把"非 1146 错误"全部归为"transient / 非致命"warn + continue。但 r8 反指：当 probe
+// 改为直接打 app table 后，1142 / 1044 已经不是 information_schema sniff 的"假阳性
+// 权限拒绝"，而是**真正的 misconfig** —— DB role 连得上但 SELECT rooms/room_members
+// 都被拒，每次 WS 握手都会以 close 1011 失败，feature 完全不可用，但 healthcheck
+// 看着健康（静默灾难）。这种场景应该启动期立即 fail-fast，让 systemd / k8s
+// CrashLoopBackOff 告警，而不是 warn-and-continue。
+//
+// 1040 (ER_CON_COUNT_ERROR, too many connections) / 网络抖动 / context 取消等才是
+// 真正的 transient infrastructure 问题，那些保持 warn + continue。
+const (
+	mysqlErrCodeNoSuchTable       = 1146
+	mysqlErrCodeTableAccessDenied = 1142
+	mysqlErrCodeDBAccessDenied    = 1044
+)
 
 // wsTablesReady 探测 rooms / room_members 两张表是否在当前 schema 下可用。
 //
@@ -49,17 +68,29 @@ const mysqlErrCodeNoSuchTable = 1146
 //     `SELECT 1 FROM rooms LIMIT 1` / `SELECT 1 FROM room_members LIMIT 1`
 //     走和 RoomExists 同一条 app schema 权限路径，不引入额外 privilege 要求。
 //
-// **r6 后语义（与 r5 panic 行为相比的差别）**：
+// **r8 后语义**（与 r6 行为相比的收窄）：
 //
 // 错误分流（基于 MySQL error number，而非字符串匹配）：
 //   - err == nil（query 成功，包括空表 / 有数据两种结果）→ 表存在 → continue
-//   - err 是 ER_NO_SUCH_TABLE (1146) → **真正的 schema 漂移** → 返 false →
-//     调用方 panic（fail-fast，让 systemd / k8s CrashLoopBackOff 告警）
-//   - 其他 err（连接断 / 权限错 1142 / 等）→ log warn → continue（视为表存在但
-//     当前访问失败）。理由：把 "权限/连接 transient 错误" 当作 "缺表" 处理会让
-//     启动期假阳性 panic（如 r6 review 描述的 hardened DB user 场景）；让后续
-//     RoomExists 调用时再失败 → client 拿到 documented WS close 1011 close →
-//     fail-fast 仍然成立，只是从启动期推迟到 first request
+//   - err 是 ER_NO_SUCH_TABLE (1146) → **schema 漂移** → 返 false →
+//     调用方 panic（fail-fast）
+//   - err 是 ER_TABLEACCESS_DENIED_ERROR (1142) → **app-table SELECT 权限缺失**
+//     misconfig → 返 false → 调用方 panic（fail-fast）。r8 [P1] 新增。
+//   - err 是 ER_DBACCESS_DENIED_ERROR (1044) → **schema-level access 缺失**
+//     misconfig → 返 false → 调用方 panic（fail-fast）。r8 [P1] 新增。
+//   - 其他 err（连接断 / too-many-connections 1040 / context 取消 / 非 mysql
+//     driver-level 错误 / 等）→ log warn → continue（视为表存在但当前访问失败）。
+//     这些是 transient infrastructure 问题，不是 misconfig；让后续 RoomExists
+//     调用时再失败 → client 拿到 documented WS close 1011 → fail-fast 仍成立，
+//     只是从启动期推迟到 first request
+//
+// 为什么 r8 把 1142 / 1044 收窄成 fail-fast（推翻 r6 的"非 1146 一律 warn"）：
+// r6 的原理由是"information_schema sniff 在 hardened DB user 下假阳性 panic"。但 r6
+// 已经把 probe 改成直接打 app table（rooms / room_members），不再走 information_schema。
+// 这种 probe 路径下 1142 / 1044 不是"information_schema 权限副作用"，而是**真正的**
+// app-table 权限缺失 —— 部署到这种环境，每次 WS 握手都会在 RoomExists / IsUserInRoom
+// 处以 close 1011 失败，feature 完全不可用 + healthcheck 看着健康 = 静默灾难。
+// 这种场景应该启动期立即 fail-fast。
 //
 // 为什么仍保留本 helper（r6 后没有"unused code"）：
 //   - 防御部署事故：如果某环境因为 migration 工具配置错 / 手动运维误操作让
@@ -78,8 +109,8 @@ const mysqlErrCodeNoSuchTable = 1146
 // **db nil 安全**：调用方在 `deps.GormDB != nil` 分支内才调本 helper；
 // 单元测试 Deps{} 零值场景由外层 if-guard 拦截，本函数不重复 nil-check。
 //
-// **返回值契约**：true = 表可用（或访问失败但不是缺表，留给后续 request 处理）；
-// false = 真的缺表（MySQL 1146）→ 调用方应 panic 终止启动。
+// **返回值契约**：true = 表可用（或访问失败但属于 transient 类，留给后续 request 处理）；
+// false = misconfig（缺表 1146 / 表权限 1142 / schema 权限 1044）→ 调用方应 panic 终止启动。
 func wsTablesReady(db *gorm.DB) bool {
 	for _, table := range []string{"rooms", "room_members"} {
 		var dummy int
@@ -90,21 +121,38 @@ func wsTablesReady(db *gorm.DB) bool {
 		if err == nil {
 			continue
 		}
-		// 真的缺表（ER_NO_SUCH_TABLE 1146）→ schema 漂移 → fail-fast。
+		// MySQL server 错误分流：misconfig 类（缺表 / 权限缺失）→ fail-fast。
 		var mysqlErr *mysql.MySQLError
-		if stderrors.As(err, &mysqlErr) && mysqlErr.Number == mysqlErrCodeNoSuchTable {
-			slog.Error(
-				"ws backing table missing: schema drift detected (MySQL error 1146)",
-				slog.String("table", table),
-				slog.Any("error", err),
-			)
-			return false
+		if stderrors.As(err, &mysqlErr) {
+			switch mysqlErr.Number {
+			case mysqlErrCodeNoSuchTable:
+				slog.Error(
+					"ws backing table missing: schema drift detected (MySQL 1146)",
+					slog.String("table", table),
+					slog.Any("error", err),
+				)
+				return false
+			case mysqlErrCodeTableAccessDenied:
+				slog.Error(
+					"ws backing table SELECT denied: app role lacks privilege (MySQL 1142) — startup fail-fast to surface misconfig",
+					slog.String("table", table),
+					slog.Any("error", err),
+				)
+				return false
+			case mysqlErrCodeDBAccessDenied:
+				slog.Error(
+					"ws backing table DB-level access denied: app role lacks schema privilege (MySQL 1044) — startup fail-fast to surface misconfig",
+					slog.String("table", table),
+					slog.Any("error", err),
+				)
+				return false
+			}
 		}
-		// 其他错误（权限错 1142 / 连接失败 / context 取消 / 等）→ 不阻断启动。
-		// 视为"表存在但当前 probe 访问失败"，让后续 request 阶段 RoomExists 自然 fail
-		// 走 documented close 1011 close。把 transient / privilege 错误当作"缺表"
-		// 处理会引入假阳性 panic（如 prod hardened DB user 不授权 information_schema
-		// 的场景，原 r5 实装会在此误判而 r6 修正）。
+		// 其他错误（连接失败 / 1040 too-many-connections / context 取消 / 非 mysql
+		// driver-level error / 等）→ 不阻断启动。视为"表存在但当前 probe 访问失败
+		// 的 transient 状况"，让后续 request 阶段 RoomExists 自然 fail 走 documented
+		// close 1011。这些不是 misconfig，启动期 fail-fast 反而会把 transient
+		// infrastructure flap 升级成 CrashLoopBackOff。
 		slog.Warn(
 			"ws backing table probe non-fatal error (treating as table exists; will defer to request-time RoomExists)",
 			slog.String("table", table),

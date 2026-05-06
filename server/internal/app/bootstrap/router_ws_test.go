@@ -21,35 +21,37 @@ import (
 	"github.com/huing/cat/server/internal/repo/tx"
 )
 
-// router_ws_test 锁 Story 10.3 review r6 [P2] 后的契约：
+// router_ws_test 锁 Story 10.3 review r8 [P1] 后的契约（覆盖 r6 → r8 的 error 分流演进）：
 //
-// **r5 形态（前一轮）**：wsTablesReady 用 `SELECT COUNT(*) FROM information_schema.tables
-// WHERE table_schema = DATABASE() AND table_name IN ('rooms','room_members')` 单 query
-// 走 information_schema sniff，命中数 < 2 panic；query 出错也 panic。
+// **r5 形态**：wsTablesReady 用 information_schema sniff，缺表 / query 出错都 panic。
 //
-// **r6 [P2] 反指**：prod hardened DB user 通常**没有** information_schema 访问权
-// （最小权限原则：只授权 app schema），导致 wsTablesReady 在生产部署 panic →
-// 整个 HTTP server 启动失败（不只是 /ws，所有端点 /ping / /version / 业务 API 都挂）。
+// **r6 [P2] 反指**：hardened DB user 没有 information_schema 权限 → 启动假阳性 panic。
+// r6 修法：改直 probe app table（`SELECT 1 FROM rooms LIMIT 1`）+ 把所有非 1146
+// 错误都视为 transient warn-and-continue。
 //
-// **r6 修法**（Option A，直 probe + error 分流）：
-//   - 改用 `SELECT 1 FROM rooms LIMIT 1` / `SELECT 1 FROM room_members LIMIT 1` 直接
-//     探表（走和 RoomExists 同一条 app schema 权限路径）
-//   - err == nil（query 成功，含空表）→ 表存在 → continue
-//   - MySQL 1146 (ER_NO_SUCH_TABLE) → 真的缺表 → 返 false → 调用方 panic（fail-fast 仍成立）
-//   - 其他 err（权限 1142 / 连接断 / 等）→ log warn + continue（视为表存在但当前 probe
-//     失败）；让后续 request 阶段 RoomExists 自然 fail 走 documented close 1011，
-//     **不**在启动期假阳性 panic
+// **r8 [P1] 反指**：r6 把 1142 / 1044 也归到"transient warn"是错的。直 probe app table
+// 路径下 1142 (ER_TABLEACCESS_DENIED_ERROR) / 1044 (ER_DBACCESS_DENIED_ERROR) 不再
+// 是 information_schema 副作用，而是**真的 misconfig** —— DB role 连得上但 SELECT
+// rooms/room_members 都被拒，每次 WS 握手都会 close 1011，feature 完全不可用而
+// healthcheck 看着健康 = 静默灾难。这种应该启动期立即 fail-fast。
 //
-// 本测试覆盖六个分支：
+// **r8 修法**（error 分流收窄）：
+//   - err == nil → continue
+//   - 1146 (ER_NO_SUCH_TABLE) → return false → 调用方 panic（schema drift fail-fast）
+//   - 1142 (ER_TABLEACCESS_DENIED_ERROR) → return false → panic（permission misconfig）
+//   - 1044 (ER_DBACCESS_DENIED_ERROR) → return false → panic（schema-level access denied）
+//   - 其他 mysql err（如 1040 too-many-connections，transient）→ log warn + continue
+//   - 非 *mysql.MySQLError（如 driver-level "bad connection"）→ log warn + continue
+//
+// 本测试覆盖以下分支：
 //   - 表都存在（两次 probe 均空表 OK）→ 路由挂载（NewRouter 正常返回 + 非 404）
 //   - rooms 表不存在（MySQL 1146）→ NewRouter panic
 //   - room_members 表不存在（rooms OK，members 1146）→ NewRouter panic
 //   - 两表都不存在（rooms 1146）→ NewRouter panic（在 rooms probe 即返 false）
-//   - rooms probe 拿 MySQL 1142（access denied，模拟 hardened DB user）→ **不** panic
+//   - rooms probe 拿 MySQL 1142（access denied）→ NewRouter panic（r8 [P1] 新契约）
+//   - rooms probe 拿 MySQL 1044（DB access denied）→ NewRouter panic（r8 [P1] 新契约）
+//   - rooms probe 拿 MySQL 1040（too many connections，transient）→ **不** panic
 //   - rooms probe 拿非 mysql error（连接断）→ **不** panic
-//
-// 后两个 case 是 r6 修复的核心防回归 case：r5 形态下这两种错误都会 panic，让
-// hardened deployment 不可用；r6 改为视为"表存在"，让请求阶段处理。
 //
 // 不用真实 mysql 容器：sqlmock 注入 GORM，期望 SELECT 1 query 返回不同结果 / error
 // 即可锁住 wsTablesReady 行为。
@@ -136,13 +138,39 @@ func expectTableProbeNoSuchTable(mock sqlmock.Sqlmock, table string) {
 }
 
 // expectTableProbeAccessDenied 模拟 MySQL ER_TABLEACCESS_DENIED_ERROR (1142)：
-// hardened DB user 没有该表 SELECT 权限。这是 r6 [P2] 修复要避免的"假阳性 panic"
-// 场景 —— wsTablesReady 应 log warn + continue（视为表存在），**不** panic。
+// DB role 连得上但没有该表 SELECT 权限。
+//
+// **r8 [P1] 契约变更**：r6 时这被视为"transient warn + continue"；r8 反指这种场景
+// 在直 probe app-table 路径下是真的 misconfig（每次 WS 握手都会 close 1011），
+// 必须启动期 fail-fast。wsTablesReady 应返 false → 调用方 panic。
 func expectTableProbeAccessDenied(mock sqlmock.Sqlmock, table string) {
 	mock.ExpectQuery(regexp.QuoteMeta(fmt.Sprintf("SELECT 1 FROM %s LIMIT 1", table))).
 		WillReturnError(&driverMysql.MySQLError{
 			Number:  1142,
 			Message: fmt.Sprintf("SELECT command denied to user 'app'@'%%' for table '%s'", table),
+		})
+}
+
+// expectTableProbeDBAccessDenied 模拟 MySQL ER_DBACCESS_DENIED_ERROR (1044)：
+// DB role 没有 schema 级访问权限。这是 r8 [P1] 新加的 fail-fast 场景：app role
+// 连上 server 但访问不了目标 schema → 完全不可用 → 启动期 panic。
+func expectTableProbeDBAccessDenied(mock sqlmock.Sqlmock, table string) {
+	mock.ExpectQuery(regexp.QuoteMeta(fmt.Sprintf("SELECT 1 FROM %s LIMIT 1", table))).
+		WillReturnError(&driverMysql.MySQLError{
+			Number:  1044,
+			Message: "Access denied for user 'app'@'%' to database 'testdb'",
+		})
+}
+
+// expectTableProbeTooManyConnections 模拟 MySQL ER_CON_COUNT_ERROR (1040)：
+// transient infrastructure flap（连接池耗尽，等会儿就好）。这种**不**应该让启动
+// 期 fail-fast；wsTablesReady 应 log warn + continue。这是 r8 [P1] 收窄后仍保持
+// "transient warn"的代表性 case：和 1142 / 1044 misconfig 形成对比。
+func expectTableProbeTooManyConnections(mock sqlmock.Sqlmock, table string) {
+	mock.ExpectQuery(regexp.QuoteMeta(fmt.Sprintf("SELECT 1 FROM %s LIMIT 1", table))).
+		WillReturnError(&driverMysql.MySQLError{
+			Number:  1040,
+			Message: "Too many connections",
 		})
 }
 
@@ -246,44 +274,93 @@ func TestRouter_WSRouteFailFast_WhenBothTablesMissing(t *testing.T) {
 	NewRouter(newRouterWSTestDeps(t, gormDB))
 }
 
-// TestRouter_WSRoute_DoesNotPanic_OnAccessDenied:
-// rooms probe 返 MySQL 1142（hardened DB user 没有 SELECT 权限）→
-// wsTablesReady 视为表存在 → **不** panic → 路由仍挂载（让 request 阶段
-// RoomExists 自然处理）。
+// TestRouter_WSRouteFailFast_OnTableAccessDenied:
+// rooms probe 返 MySQL 1142 (ER_TABLEACCESS_DENIED_ERROR) → wsTablesReady 返 false →
+// NewRouter panic。
 //
-// 这是 r6 [P2] 修复的核心防回归 case：r5 形态下 information_schema query 在 hardened
-// DB user 下会失败 → panic → 整个 HTTP server 启动挂。r6 改用直 probe + error 分流：
-// 非 1146 错误（含权限错）→ log warn + continue。
+// **r8 [P1] 契约**（推翻 r6 的 warn-and-continue）：直 probe app-table 路径下 1142 不
+// 是 information_schema 副作用而是真的"app role 没该表 SELECT 权限"，每次握手都会
+// close 1011 → feature 不可用 + healthcheck 健康 = 静默灾难。启动期 fail-fast。
 //
-// rooms 的 probe 1142 后仍会探 room_members，故配两条 expect。
-func TestRouter_WSRoute_DoesNotPanic_OnAccessDenied(t *testing.T) {
+// 第一个 probe 即返 1142 → wsTablesReady 立即 return false（不再继续探 room_members）→
+// 调用方 panic。
+func TestRouter_WSRouteFailFast_OnTableAccessDenied(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	gormDB, mock := newGormWithMockForRouter(t)
 	expectTableProbeAccessDenied(mock, "rooms")
-	expectTableProbeAccessDenied(mock, "room_members")
+
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			t.Fatalf("NewRouter did not panic when rooms SELECT denied (r8 P1 fail-fast contract violated)")
+		}
+		msg, _ := rec.(string)
+		if !strings.Contains(msg, "ws backing tables missing") {
+			t.Errorf("panic msg = %q, want contain 'ws backing tables missing'", msg)
+		}
+	}()
+	NewRouter(newRouterWSTestDeps(t, gormDB))
+}
+
+// TestRouter_WSRouteFailFast_OnDBAccessDenied:
+// rooms probe 返 MySQL 1044 (ER_DBACCESS_DENIED_ERROR) → wsTablesReady 返 false →
+// NewRouter panic。
+//
+// **r8 [P1] 契约**：app role 没有 schema 级访问权限，和 1142 同属 misconfig，应启动
+// 期 fail-fast 而非 warn。
+func TestRouter_WSRouteFailFast_OnDBAccessDenied(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gormDB, mock := newGormWithMockForRouter(t)
+	expectTableProbeDBAccessDenied(mock, "rooms")
+
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			t.Fatalf("NewRouter did not panic when rooms DB-level access denied (r8 P1 fail-fast contract violated)")
+		}
+		msg, _ := rec.(string)
+		if !strings.Contains(msg, "ws backing tables missing") {
+			t.Errorf("panic msg = %q, want contain 'ws backing tables missing'", msg)
+		}
+	}()
+	NewRouter(newRouterWSTestDeps(t, gormDB))
+}
+
+// TestRouter_WSRoute_DoesNotPanic_OnTransientTooManyConnections:
+// rooms probe 返 MySQL 1040 (ER_CON_COUNT_ERROR, too many connections) →
+// wsTablesReady 视为 transient → log warn + continue → **不** panic → 路由仍挂载。
+//
+// 这是 r8 [P1] 收窄后仍保留的"transient warn"代表 case：与 1142/1044 (misconfig
+// fail-fast) 形成对比，证明 r8 不是把所有 mysql 错误都升级成 fail-fast，而是只针对
+// "明确指向 misconfig 的错误号"（1146/1142/1044）；其他 mysql 错误（包括 1040
+// 这种连接池抖动）保持 warn-and-continue，避免把 transient flap 升级成 CrashLoopBackOff。
+func TestRouter_WSRoute_DoesNotPanic_OnTransientTooManyConnections(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	gormDB, mock := newGormWithMockForRouter(t)
+	expectTableProbeTooManyConnections(mock, "rooms")
+	expectTableProbeTooManyConnections(mock, "room_members")
 
 	defer func() {
 		if rec := recover(); rec != nil {
-			t.Fatalf("NewRouter panicked on access-denied probe (r6 P2 contract violated): %v", rec)
+			t.Fatalf("NewRouter panicked on transient too-many-connections probe (r8 P1 contract violated — should warn + continue): %v", rec)
 		}
 	}()
 
 	r := NewRouter(newRouterWSTestDeps(t, gormDB))
-	// 路由仍挂载：probe 失败不阻断 NewRouter 完成；request 阶段 RoomExists 才会失败。
 	req := httptest.NewRequest(http.MethodGet, "/ws/rooms/3001", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	if w.Code == http.StatusNotFound {
-		t.Errorf("status = 404, want non-404 (route should still be mounted despite probe access-denied); body=%s", w.Body.String())
+		t.Errorf("status = 404, want non-404 (route should still be mounted despite transient probe error); body=%s", w.Body.String())
 	}
 }
 
 // TestRouter_WSRoute_DoesNotPanic_OnConnError:
 // rooms probe 返非 mysql error（如 driver: bad connection）→ wsTablesReady 视为
-// 表存在 → **不** panic（同上 access-denied case，验证非 mysql error 路径）。
+// 表存在 → **不** panic（验证非 mysql.MySQLError 路径，errors.As → false）。
 //
-// 与 access-denied case 的差别：access-denied 是 *mysql.MySQLError（Number != 1146），
-// conn error 是普通 error（errors.As → false）。两者都应走 log warn + continue。
+// 与 misconfig fail-fast case 对比：misconfig (1146/1142/1044) 是 *mysql.MySQLError
+// + 特定 Number；conn error 是普通 error（errors.As → false），走 transient warn 分支。
 func TestRouter_WSRoute_DoesNotPanic_OnConnError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	gormDB, mock := newGormWithMockForRouter(t)
@@ -292,7 +369,7 @@ func TestRouter_WSRoute_DoesNotPanic_OnConnError(t *testing.T) {
 
 	defer func() {
 		if rec := recover(); rec != nil {
-			t.Fatalf("NewRouter panicked on conn-error probe (r6 P2 contract violated): %v", rec)
+			t.Fatalf("NewRouter panicked on conn-error probe (transient contract violated): %v", rec)
 		}
 	}()
 
