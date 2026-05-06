@@ -1283,7 +1283,10 @@ JSON 示例：
 
 - `ws_scheme`：生产环境 **`wss`**（TLS）；dev / test 环境 **`ws`**（明文，仅本地）
 - `host`：与 HTTP 接口同 host（不分离 WS 域名，简化 Info.plist / CORS 配置）
-- `roomId`：路径参数，必须是用户当前所在房间的 ID（client 从 `GET /home.room.currentRoomId` 拿 —— **不要**使用 `GET /me.user.currentRoomId`，该字段是永久 `null` schema 占位，详见 §4.3 Future Fields 引用块；当前节点 4 阶段也可以用 client 已知的 roomId，如刚 `POST /rooms/{roomId}/join` 成功后立即建连）
+- `roomId`：路径参数，必须是用户当前所在房间的 ID。client 端 roomId 来源**按场景分两路**（**不要**使用 `GET /me.user.currentRoomId` —— 该字段是永久 `null` schema 占位，无后续节点回填计划，详见 §4.3 Future Fields 引用块）：
+  - **首次连接 / 刚完成房间动作（热路径）**：client 直接从 **本次会话内的房间动作响应** 取 roomId —— `POST /rooms` 创建房间响应的 `data.room.id`、`POST /rooms/{roomId}/join` 加入房间响应的 `data.roomId`、用户点击外部分享链接 / 主动输入 roomId 等显式输入路径，建连前 client 内存中已经持有 roomId
+  - **冷启 / token 刷新 reconnect（Epic 12 reconnect 场景）**：client **本地持久化**最近一次成功 WS 连接的 roomId（iOS Story 12.5 实装：UserDefaults / Keychain 存最近一次 `roomId`，由"成功握手并接受 `room.snapshot`"事件触发写入；用户主动 `POST /rooms/{roomId}/leave` 或服务端 close 4003 / 4004 时清除）。app 冷启 / token 刷新后从本地读取，发起 WS 连接验证：服务端按 §12.1 校验顺序判定，4003 = 用户已不在该房间（按 close code 表回退到主界面），4004 = 房间已不存在（同样回退）
+  - **未来增强**：节点 4 之后 Story 11.10 真实实装 `GET /home.room.currentRoomId`（详见 §5.1 `GET /home` 字段表 + Future Fields）后，client 可以用 server 端权威来源**替代**本地持久化作为冷启场景的 roomId 来源；在此之前，**禁止**依赖该字段，因为它返回 `null`
 - `token`：query 参数，URL-encoded（必须 url-encode，避免 token 中 `+` `/` `=` 等字符影响 query 解析）；token 来自 §2.3 Bearer token 同源（`POST /auth/guest-login` 返回的 `token`）
 
 兼容性 / 简化形式（保留旧 README 中的写法，等价于上方完整模板）：
@@ -1306,6 +1309,8 @@ GET /ws/rooms/{roomId}?token=xxx
 成功握手后服务端必须**主动**推送：
 
 1. **第一条**：`room.snapshot`（payload schema 见 §12.3，节点 4 阶段为 placeholder：room 三字段 + members 数组反映 `room_members` 全部成员行 —— 单表查询不 JOIN，丰富字段 `nickname` / `pet.petId` 在 placeholder 阶段允许空字符串，详见 §12.3 placeholder 示例与字段表 placeholder 行为）
+
+> **权威性 + Merge 语义（client 必读）**：`room.snapshot` 是握手成功后**必发**的第一条 authoritative 消息，但其权威性是 **enrich/correct** 而**非** wipe-out —— client **必须**对每个 `members[]` entry 做**字段级 merge**（详见 §12.3 "client merge contract" 小节）。简言之：snapshot 中**非空**字段覆盖 client 已有值（这是真实 authoritative 数据）；snapshot 中**空字符串**字段（`""`）保留 client 已有值（空字符串 = "我不知道这个值" 的 placeholder 信号，**不是** "请清空")；snapshot 中**未出现**的字段保留 client 已有值。该契约让 Story 10.7 placeholder 阶段（部分字段空）和 Story 11.7 真实阶段（全字段非空）行为一致：snapshot 永远只能 enrich/correct client state，**禁止** wipe out client 已通过 §15.6 推荐流程从 `GET /api/v1/rooms/{roomId}` 加载的真实丰富字段。
 
 > **Epic 10 阶段**（即本 story 范围 / Story 10.1 ~ 10.7）服务端 → 客户端**只**会主动发送 `room.snapshot` / `pong` / `error` 三种消息（与本节末 §12.3 业务消息延后锚定块 + §1 节点 4 协议骨架冻结声明一致）；`member.joined` 等业务广播消息的字段层契约与"是否在握手时广播"的语义由 Story 11.1（Epic 11）锚定 —— 即 Epic 10 阶段服务端**不**在握手时广播 `member.joined`，但 Epic 11 起按对应 story 锚定的语义扩展消息集合（Story 11.1 锚定 `member.joined` / `member.left` 加入消息集，Story 14.1 锚定 `pet.state.changed`，Story 17.1 锚定 `emoji.received`）；本声明仅冻结 Epic 10 阶段的 server-active message set，不阻止后续 epic 的合法扩展。
 
@@ -1486,16 +1491,16 @@ JSON 通用骨架：
 | `payload.room.memberCount` | number (int) | 必填 | 房间总成员数（**含离线成员**，与下文 `payload.members` 数组长度严格相等，见本节末"不变量"小节）；节点 4 阶段 Story 10.7 placeholder 实现 = `SELECT COUNT(*) FROM room_members WHERE roomId=?` 的真实行数（或同一次 query 直接取 `len(members)`，二者必须一致），即**真实反映 room_members 全表的成员数**，**禁止**写死为 1；Story 11.7 真实实现 = 同样的 `room_members` 行数，差异仅在于 placeholder 阶段不 JOIN `users` / `pets`（丰富字段降级），**不**在成员数量上与真实实装区分 |
 | `payload.members` | array | 必填 | 房间全成员列表（**含离线成员**，节点 4 阶段不区分在线 / 离线，所有 `room_members` 记录都返回；"在线态"由后续 epic 通过 presence 推送类消息单独维护，不混入 snapshot）；节点 4 阶段 Story 10.7 placeholder 实现 = `SELECT * FROM room_members WHERE roomId=?` 的全部行（**禁止**只返回当前握手用户自己 —— 房间已有 ≥2 成员时漏返其他成员会让 client 把 snapshot 当 authoritative state 错误清空已加载的 roster），单表查询不依赖 JOIN，本身已足够简单；丰富字段在 placeholder 阶段降级（`nickname` / `pet.*` 行为见各字段 placeholder 行）；Story 11.7 真实实现按 `room_members` JOIN `users` JOIN `pets` 聚合，**仅丰富字段差异**，成员条目数量与 placeholder 一致 |
 | `payload.members[].userId` | string | 必填 | 成员用户 ID（BIGINT 字符串化）；node-4 placeholder 阶段直接来自 `room_members.userId`，**所有成员行都返回**（不限于握手用户） |
-| `payload.members[].nickname` | string | 必填 | 成员昵称；node-4 placeholder 阶段（Story 10.7）允许返回**空字符串** `""`（不 JOIN `users` 表，避免 placeholder 过度耦合 Story 11.7 的多表 JOIN）；client 解析为 `String` 但渲染时空串可降级为占位文案；Story 11.x（具体由 Story 11.7 真实 SnapshotBuilder 实装）由 `users.nickname` 真实回填 |
-| `payload.members[].pet.petId` | string | 必填 | 成员当前宠物 ID（BIGINT 字符串化）；node-4 placeholder 阶段（Story 10.7）允许返回**空字符串** `""`（不 JOIN `pets` 表）；Story 14.x（pet 真实驱动时由 Story 11.7 同步扩展）回填真实 `pets.id` |
+| `payload.members[].nickname` | string | 必填 | 成员昵称；node-4 placeholder 阶段（Story 10.7）允许返回**空字符串** `""`（不 JOIN `users` 表，避免 placeholder 过度耦合 Story 11.7 的多表 JOIN）；**空字符串语义 = "我不知道这个值"**，client 按本节末"client merge contract"**保留** client 已有真实昵称（如来自 `GET /api/v1/rooms/{roomId}` 响应），**禁止**用空串覆盖；client 渲染时若本地无真实值，空串可降级为占位文案；Story 11.x（具体由 Story 11.7 真实 SnapshotBuilder 实装）由 `users.nickname` 真实回填 |
+| `payload.members[].pet.petId` | string | 必填 | 成员当前宠物 ID（BIGINT 字符串化）；node-4 placeholder 阶段（Story 10.7）允许返回**空字符串** `""`（不 JOIN `pets` 表）；**空字符串语义 = "我不知道这个值"**，client 按本节末"client merge contract"**保留** client 已有真实 petId（如来自 `GET /api/v1/rooms/{roomId}` 响应），**禁止**用空串覆盖；Story 14.x（pet 真实驱动时由 Story 11.7 同步扩展）回填真实 `pets.id` |
 | `payload.members[].pet.currentState` | number (int) | 必填 | 宠物当前状态枚举：`1 = stationary_or_unknown` / `2 = walking` / `3 = running`（与数据库设计 §6.5 motion_state 同义，复用枚举不另起）；node-4 placeholder 阶段（Story 10.7）固定返回 `1`；Story 11.7 真实实现亦固定返回 `1`（Epic 14 才真实驱动） |
 | `ts` | number (int64) | 必填 | 服务端发送时间戳（ms） |
 
 > **Future Fields（节点 4 阶段为占位 / 节点 5 / 9 落地）**：
 >
-> - `payload.members[].avatarUrl`（成员头像 URL）：Story 11.7 真实实现时启用；节点 4 阶段 placeholder 不返回该字段（不要在 §12.3 字段表添加；client 解析为 `String?` 可选字段）
-> - `payload.members[].pet.equips`（成员当前装备）：Epic 26 / Story 26.6 落地后由 Story 11.7 同步扩展；节点 4 阶段不返回
-> - `payload.members[].pet.equips[].renderConfig`（装备渲染配置）：Epic 29 / Story 29.6 落地后由 Story 11.7 同步扩展；节点 4 阶段不返回
+> - `payload.members[].avatarUrl`（成员头像 URL）：Story 11.7 真实实现时启用；节点 4 阶段 placeholder 不返回该字段（不要在 §12.3 字段表添加；client 解析为 `String?` 可选字段）；按本节末 "client merge contract" 中"未出现字段保留 client 已有值"规则，client **不**清空已通过 `GET /api/v1/rooms/{roomId}` 加载的真实 avatarUrl
+> - `payload.members[].pet.equips`（成员当前装备）：Epic 26 / Story 26.6 落地后由 Story 11.7 同步扩展；节点 4 阶段不返回（按 merge contract 保留 client 已有值）
+> - `payload.members[].pet.equips[].renderConfig`（装备渲染配置）：Epic 29 / Story 29.6 落地后由 Story 11.7 同步扩展；节点 4 阶段不返回（按 merge contract 保留 client 已有值）
 
 JSON 示例（真实示例，Story 11.7 落地后形态）：
 
@@ -1534,7 +1539,7 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 
 > **不变量（snapshot 内部一致性）**：`memberCount` 必须**严格等于** `members[]` 数组长度。两者**统一表示房间全成员（含离线）**，**不**做"在线态过滤"—— 即 snapshot 是房间的 full roster view，**不是** online-only view。理由：(a) 若 `memberCount` 与 `members[].length` 任一方做"在线态过滤"而另一方不做，违反不变量；(b) 节点 4 阶段服务端**不**在握手时广播 `member.joined`（详见 §12.1 末尾 placeholder 注），客户端无法靠后续推送补齐离线成员，snapshot 必须自包含房间全部成员；(c) 在线 / 离线状态由后续 epic 的独立 presence 推送通道维护，不混入 snapshot 字段。节点 4 阶段 Story 10.7 placeholder 实装时 `members[]` 必须**反映 `room_members` 全部成员行**（最少 1 个，即握手用户自己；房间已有 ≥2 成员时必须返回全部）—— **禁止**写"全零 placeholder"（`memberCount: 0` + `members: []`），也**禁止**写"单成员快照"（仅当前握手用户自己，`memberCount` 写死为 1），因为：(i) §12.1 第 5 步握手成功**充分条件**只校验"当前用户已在 `room_members` 表中"，**不**保证房间只有 1 个成员；房间已有 ≥2 成员时单成员 snapshot 会让 client 把首条 authoritative 消息当成"房间被清空"，错误清空已加载的合法 roster；(ii) 推荐房间进入流程要求 client 先 `GET /api/v1/rooms/{roomId}` 加载房间状态后再开 WS（详见 §11.5 客户端推荐调用顺序），client 已经持有合法 roster 视图，再收到一个比真实成员少的 snapshot 同样会错误覆盖（无论是零成员还是单成员都属于"少返"）；(iii) §12.1.3 钦定 `room.snapshot` 是握手成功后**必发**的第一条 authoritative 消息，client 把它作为权威态采用，placeholder 必须给出**结构上真实**的快照（成员条目齐全），仅在丰富字段（`nickname` / `pet.*`）层面降级为占位默认值，**不**在成员数量上偷工。Story 11.7 真实实装时由**同一次** `room_members` JOIN `users` JOIN `pets` 聚合产出 `members[]`，`memberCount` 取该数组长度（或同一次 query 的 `COUNT(*)`），server 实装层面**禁止**让两者出现 drift；与 Story 10.7 placeholder 的差异**仅在丰富字段**（`nickname` / `pet.*` 真实回填），**不在成员数量**。
 
-**节点 4 阶段 placeholder 示例**（Story 10.7 实装；与上述真实示例的差异**仅在丰富字段**（`nickname` / `pet.petId` 在 placeholder 阶段允许空字符串），`members[]` 必须反映 `room_members` 全部成员行；下例为房间已有 2 成员的场景 —— `userId: "1001"` 为当前握手用户、`userId: "1002"` 为另一已加入但离线的成员；`memberCount` = `members[].length` = 2，不变量不破）：
+**节点 4 阶段 placeholder 示例**（Story 10.7 实装；与上述真实示例的差异**仅在丰富字段**（`nickname` / `pet.petId` 在 placeholder 阶段允许空字符串），`members[]` 必须反映 `room_members` 全部成员行；下例为房间已有 2 成员的场景 —— `userId: "1001"` 为当前握手用户、`userId: "1002"` 为另一已加入但离线的成员；`memberCount` = `members[].length` = 2，不变量不破）。**注意**：下例中 `nickname: ""` / `pet.petId: ""` 是"server 不知道"的 placeholder 信号 —— client 按下方 "client merge contract" **保留** 已通过 `GET /api/v1/rooms/{roomId}` 加载的真实值，**禁止**用空串覆盖；若 client 此前未加载真实值（如直接由 `POST /rooms/{roomId}/join` 进入未走 §15.6 流程），则保留空值，渲染时降级为占位文案：
 
 ```json
 {
@@ -1570,6 +1575,20 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 ```
 
 > **placeholder 字段值来源说明**：上例 `members[]` 直接来自 `SELECT * FROM room_members WHERE roomId=?` 的全部行（**单表查询，不 JOIN `users` / `pets`**）—— `userId` 取 `room_members.userId`；`nickname` 在 placeholder 阶段返回空字符串 `""`（避免 JOIN `users`，由 Story 11.7 真实实装时由 `users.nickname` 回填）；`pet.petId` 在 placeholder 阶段返回空字符串 `""`（避免 JOIN `pets`，由 Story 14.x 真实驱动时由 Story 11.7 同步扩展）；`pet.currentState` 节点 4 阶段固定 `1`（stationary_or_unknown，Epic 14 才真实驱动 motion_state）。Story 10.7 SnapshotBuilder placeholder 实装路径：用单表查询 `SELECT * FROM room_members WHERE roomId=?` 取全部成员行（这是 placeholder 必须做的，**禁止**只取当前握手用户）；JOIN `users` / `pets` 由 Story 11.7 真实实装时再加，**不**在 Story 10.7 范围内 —— 这样 placeholder 反映真实 roster **结构**（成员 ID 全到位），仅丰富字段降级为 placeholder 默认值。
+
+> **Client merge contract（client 解析 `room.snapshot` 时必须遵守）**：snapshot 是握手后**必发**的第一条 authoritative 消息（§12.1 握手成功流程），但其权威性是 **enrich/correct** 而**非** wipe-out。client 在收到 `room.snapshot` 时，**禁止**做 "把 `members[]` 整体替换 client 当前 roster" 的暴力赋值，**必须**对每个 member entry 做**字段级 merge**，规则如下：
+>
+> 1. **roster 集合层（`members[]` 数组本身）**：以 snapshot 的 `userId` 集合为权威集合 —— snapshot 没有的 `userId` → client 应**移除**（视为已离开房间的真实 authoritative 信号）；snapshot 有但 client 之前没有的 `userId` → client 应**新增** entry（用 snapshot 的字段值填充，空字符串字段保持空，由后续 `member.joined` / 重新 `GET /api/v1/rooms/{roomId}` enrich）。"成员存在性"是结构信息，snapshot 在这一层是 authoritative。
+> 2. **字段级（每个 entry 的字段值）**：
+>    - **非空值**（如 `nickname: "Alice"` / `pet.petId: "2002"` / `pet.currentState: 2`）：用 snapshot 的值**覆盖** client 已有值（这是真实 authoritative 数据，覆盖正确）。
+>    - **空字符串**（`""`）：**保留** client 已有值。空字符串 = "server 不知道这个值"的 placeholder 信号（节点 4 placeholder 阶段 / 任何未来未 enrich 的字段同义），**不是** "请清空" 的指令；若 client 通过 §15.6 推荐流程从 `GET /api/v1/rooms/{roomId}` 已加载真实昵称 / petId，必须保留这些真实值，避免"每次重连退化为空昵称 / 空 petId"。
+>    - **`null` 值**：与空字符串语义不同 —— `null` 在本协议中保留给"明确无值"语义（如 §4.3 `currentRoomId: null` = 用户当前不在任何房间）；snapshot 字段表中**未出现** `null` 取值的字段（成员级别字段不 null），故节点 4 阶段不需要处理 null case。
+>    - **未出现的字段**（如 placeholder 阶段不下发 `avatarUrl` / `pet.equips`）：**保留** client 已有值（与空字符串等价处理）。
+> 3. **数值字段**（`pet.currentState`）：节点 4 阶段 placeholder 与 Story 11.7 真实实装均固定 `1`（Epic 14 才真实驱动 motion_state）；client 收到该值时**应**直接覆盖 client 已有值（无 placeholder 信号约定 —— 数值字段不存在"空字符串"语义；当未来 Epic 14 真实驱动后，server 下发 2/3 即真实值）。
+>
+> **rationale**：在 placeholder 阶段（Story 10.7）和真实阶段（Story 11.7）应用同一套 merge 规则，行为一致：snapshot 永远只能 enrich/correct client state。Story 11.7 真实实装时，`nickname` / `pet.petId` 等字段都会下发非空值，触发 "覆盖" 路径；placeholder 阶段下发空字符串，触发 "保留" 路径 —— **server 实装层无需为两个阶段写不同 client merge 代码**，只需 client 始终按本契约执行。
+>
+> **client 实装位置**：iOS 侧由 Story 12.3（WS 消息解码层）+ Story 12.4（房间 ViewModel 状态合并层）实装；server 实装层（Story 10.7 SnapshotBuilder placeholder / Story 11.7 真实实装）只保证下发字段语义符合本契约，**不**关心 client 如何 merge。
 
 ### 成员加入
 

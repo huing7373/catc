@@ -169,3 +169,4 @@
 | 2026-05-06 | [握手 first-snapshot 契约的"启动时序原子性"+ placeholder 必须给真实可用最小值 + 跨文档时序图必须随冻结声明同步 (r7)](2026-05-06-ws-snapshot-startup-order-and-placeholder-r7.md) | 3 | architecture, docs | `<pending>` |
 | 2026-05-06 | [room.snapshot placeholder 必须反映 room_members 全表（仅丰富字段降级）+ 节点 4 断连分支同样不广播 member.left (r8)](2026-05-06-ws-snapshot-placeholder-full-roster-and-disconnect-broadcast-r8.md) | 2 | architecture, docs | `<pending>` |
 | 2026-05-06 | [V1 协议骨架冻结声明的范围必须收窄到具体 epic 阶段（不用"节点 X 阶段"）+ planning artifact 同步是契约最终化的最后一公里 (r9)](2026-05-06-ws-narrow-frozen-scope-and-planning-sync-r9.md) | 3 | architecture, docs | `<pending>` |
+| 2026-05-06 | [`room.snapshot` authoritative-but-non-destructive merge 契约 + WS roomId 来源按场景分两路 (r10 收官)](2026-05-06-ws-snapshot-merge-contract-and-roomid-source-r10.md) | 2 | architecture, docs | `<pending>` |
