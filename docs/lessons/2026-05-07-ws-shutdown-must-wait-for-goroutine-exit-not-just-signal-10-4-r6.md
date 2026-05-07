@@ -2,7 +2,7 @@
 date: 2026-05-07
 source_review: file:/tmp/epic-loop-review-10-4-r6.md
 story: 10-4-心跳框架
-commit: <pending>
+commit: d4cfc90
 lesson_count: 1
 ---
 

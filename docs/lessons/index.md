@@ -182,9 +182,9 @@
 | 2026-05-06 | [WS 表 probe 错误分流：misconfig 必须 fail-fast，transient 才能 warn-and-continue（r8 收窄 r6）](2026-05-06-ws-table-probe-misconfig-vs-transient-error-classification-r8.md) | 1 | error-handling | `248adc7` |
 | 2026-05-06 | [sessionID 截断 8 字符 = birthday paradox 内存腐败（10-3 r9）](2026-05-06-ws-session-id-truncation-collision-r9.md) | 1 | architecture | `d063230` |
 | 2026-05-06 | [reconnect 路径 destructive Register 必须延后到 transient IO 之后（10-3 r10）](2026-05-06-ws-handshake-register-after-snapshot-r10.md) | 1 | architecture | `8718b3f` |
-| 2026-05-06 | [心跳超时扫描 TOCTOU & 4005 close frame 顺序保证（10-4 r1）](2026-05-06-ws-heartbeat-toctou-and-close-frame-ordering-10-4-r1.md) | 2 | concurrency | `<pending>` |
-| 2026-05-06 | [closeInternal 必须 gate writeLoopDone wait 在 writeLoopStarted（10-4 r2）](2026-05-06-ws-close-skip-wait-when-writeloop-not-started-10-4-r2.md) | 1 | perf, concurrency | `<pending>` |
-| 2026-05-06 | [closeInternal wait 上限不足 cover writeTimeout & scanner fanout 不响应 ctx（10-4 r3）](2026-05-06-ws-close-wait-timeout-and-shutdown-fanout-10-4-r3.md) | 2 | concurrency | `<pending>` |
-| 2026-05-06 | [heartbeat scanner ctx 必须挂主 signal ctx & closeInternal wait 仅限 emitClose 路径（10-4 r4）](2026-05-06-ws-heartbeat-shutdown-ctx-and-close-wait-only-emit-10-4-r4.md) | 2 | architecture, perf | `<pending>` |
-| 2026-05-07 | [heartbeat fanout 必须用 WaitGroup drain & List 操作把 sort 移到 RUnlock 之后（10-4 r5）](2026-05-07-ws-heartbeat-fanout-drain-and-list-sort-outside-lock-10-4-r5.md) | 2 | architecture, perf | `<pending>` |
-| 2026-05-07 | [shutdown 必须 wait goroutine 退出而不是只 signal cancel（10-4 r6）](2026-05-07-ws-shutdown-must-wait-for-goroutine-exit-not-just-signal-10-4-r6.md) | 1 | architecture | `<pending>` |
+| 2026-05-06 | [心跳超时扫描 TOCTOU & 4005 close frame 顺序保证（10-4 r1）](2026-05-06-ws-heartbeat-toctou-and-close-frame-ordering-10-4-r1.md) | 2 | concurrency | `0b68956` |
+| 2026-05-06 | [closeInternal 必须 gate writeLoopDone wait 在 writeLoopStarted（10-4 r2）](2026-05-06-ws-close-skip-wait-when-writeloop-not-started-10-4-r2.md) | 1 | perf, concurrency | `50f7cb5` |
+| 2026-05-06 | [closeInternal wait 上限不足 cover writeTimeout & scanner fanout 不响应 ctx（10-4 r3）](2026-05-06-ws-close-wait-timeout-and-shutdown-fanout-10-4-r3.md) | 2 | concurrency | `a9fd61b` |
+| 2026-05-06 | [heartbeat scanner ctx 必须挂主 signal ctx & closeInternal wait 仅限 emitClose 路径（10-4 r4）](2026-05-06-ws-heartbeat-shutdown-ctx-and-close-wait-only-emit-10-4-r4.md) | 2 | architecture, perf | `b23aff3` |
+| 2026-05-07 | [heartbeat fanout 必须用 WaitGroup drain & List 操作把 sort 移到 RUnlock 之后（10-4 r5）](2026-05-07-ws-heartbeat-fanout-drain-and-list-sort-outside-lock-10-4-r5.md) | 2 | architecture, perf | `33c7a5d` |
+| 2026-05-07 | [shutdown 必须 wait goroutine 退出而不是只 signal cancel（10-4 r6）](2026-05-07-ws-shutdown-must-wait-for-goroutine-exit-not-just-signal-10-4-r6.md) | 1 | architecture | `d4cfc90` |

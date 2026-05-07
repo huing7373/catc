@@ -2,7 +2,7 @@
 date: 2026-05-06
 source_review: codex review (file: /tmp/epic-loop-review-10-4-r1.md, codex 段)
 story: 10-4-心跳框架
-commit: <pending>
+commit: 0b68956
 lesson_count: 2
 ---
 
