@@ -189,3 +189,4 @@
 | 2026-05-07 | [heartbeat fanout 必须用 WaitGroup drain & List 操作把 sort 移到 RUnlock 之后（10-4 r5）](2026-05-07-ws-heartbeat-fanout-drain-and-list-sort-outside-lock-10-4-r5.md) | 2 | architecture, perf | `33c7a5d` |
 | 2026-05-07 | [shutdown 必须 wait goroutine 退出而不是只 signal cancel（10-4 r6）](2026-05-07-ws-shutdown-must-wait-for-goroutine-exit-not-just-signal-10-4-r6.md) | 1 | architecture | `d4cfc90` |
 | 2026-05-07 | [WS BroadcastToRoom 同步 fanout + msg buffer ownership 隔离（10-5 r1）](2026-05-07-ws-broadcast-sync-fanout-and-msg-ownership-10-5-r1.md) | 2 | architecture | `<pending>` |
+| 2026-05-07 | [WS BroadcastToRoom 跨 goroutine 序一致性 & 大 N 性能测试 fixture 必须脱离 httptest（10-5 r2）](2026-05-07-ws-broadcast-cross-goroutine-ordering-and-stub-session-test-fixture-10-5-r2.md) | 2 | architecture, testing | `<pending>` |

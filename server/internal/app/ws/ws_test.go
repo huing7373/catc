@@ -3573,53 +3573,8 @@ func TestBroadcastToRoom_R1_CallerMayMutateMsgAfterReturn(t *testing.T) {
 	}
 }
 
-// TestBroadcastToRoom_R1_LargeN_SyncFanoutFastEnough：
-//
-//	review 10-5 r1 性能验证：同步 fanout 在 N=100 session 下应仍快速完成
-//	（<100ms 量级，证明同步无性能回归）。
-//
-// 实装关键：Session.Send 是非阻塞 select-default 入队 O(1) → N 个 session
-// 同步遍历总耗时 = O(N) × O(1) = ~µs 级。即使带上 logger.Info 等开销也应
-// 远低于 100ms。
-//
-// 注意：本测试构造 N 个 fake Session（不走真实 httptest gateway），用 manager
-// 的 Register 直接挂载 → 避免 100 个 httptest server 的端口耗尽问题。
-func TestBroadcastToRoom_R1_LargeN_SyncFanoutFastEnough(t *testing.T) {
-	mgr := wsapp.NewSessionManager()
-	defer mgr.Close()
-	repo := &stubRoomMemberRepo{}
-
-	const N = 100
-	conns := make([]*websocket.Conn, 0, N)
-	tss := make([]*httptest.Server, 0, N)
-	defer func() {
-		for _, c := range conns {
-			c.Close()
-		}
-		for _, ts := range tss {
-			ts.Close()
-		}
-	}()
-	for i := 0; i < N; i++ {
-		conn, _, ts := useGatewayDial(t, mgr, repo, uint64(22000+i), 9201)
-		conns = append(conns, conn)
-		tss = append(tss, ts)
-	}
-
-	msg := []byte(`{"type":"big.sync.fanout","requestId":"","payload":{},"ts":0}`)
-	start := time.Now()
-	sent, err := wsapp.BroadcastToRoom(context.Background(), mgr, 9201, msg)
-	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("BroadcastToRoom: %v", err)
-	}
-	if sent != N {
-		t.Errorf("sent = %d, want %d", sent, N)
-	}
-	// CI / Windows 下宽松一点：100ms 上限（实际预期 <10ms）
-	if elapsed > 100*time.Millisecond {
-		t.Errorf("BroadcastToRoom over %d sessions took %v > 100ms — sync fanout may have regression", N, elapsed)
-	}
-	t.Logf("BroadcastToRoom over %d sessions took %v (sync fanout)", N, elapsed)
-}
+// TestBroadcastToRoom_R1_LargeN_SyncFanoutFastEnough 已迁移到内部测试包
+// （broadcast_perf_internal_test.go），用裸 *Session{sendChan} fixture 取代
+// httptest.Server 路径 —— 详见 review 10-5 r2 P2 修复。本处保留注释以便
+// `git blame` 时找到迁移轨迹。
 
