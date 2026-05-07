@@ -246,35 +246,59 @@ func main() {
 	//
 	// 钩子失败仅 log warn + 包含 sessionId / userId / roomId 上下文；**不** os.Exit /
 	// panic（lifecycle 钩子失败 ≠ server 必须停机；TTL 兜底 + scanner 路径双重保险）。
+	//
+	// **review 10-6 r6 P1 修**：钩子内部 Redis I/O 走 **fire-and-forget goroutine**，
+	// 不阻塞 SessionManager.Register / Unregister 主路径。理由：
+	//   - Register 同步路径：gateway.handleWS 等 Register 返回才启 read/write loop。
+	//     原版 AddOnline 同步阻塞 → Redis 慢 / 挂时每次 connect/reconnect 卡 2s
+	//     （presenceHookTimeout 上限）→ Redis brownout 期所有用户握手 visible 延迟。
+	//   - Unregister 串行路径：SessionManager.Close 串行调 Unregister；reconnect
+	//     替换路径也串行调旧 Session.Close → notifyClosed → Unregister。原版同步
+	//     RemoveOnline → O(session 数 × 2s) 关停延迟，多会话部署 graceful shutdown
+	//     直接超 K8s termination grace。
+	//   - Fire-and-forget 后 register/unregister 主路径 < 1ms 完成；presence 写入
+	//     在 background goroutine 跑。失败兜底已经多重保险：
+	//       (a) presence key TTL 5min 自然过期（server crash / shutdown 时）
+	//       (b) HeartbeatScanner 30s tick 调 AddOnline reconcile（10-6 r2/r5 加），
+	//           漏写 / partial-fail 30s 内自愈
+	//       (c) RemoveOnline guard 走 sessionID atomic compare（10-6 r1 加），
+	//           reconnect 替换路径下旧 RemoveOnline 即便延迟跑也不会误清新 Session
+	// shutdown 期 fire-and-forget goroutine 可能没机会跑完 → 可接受（presence TTL
+	// 兜底；shutdown 时优先快速关停而非等所有 RemoveOnline 完成）。
+	// 详见 docs/lessons/2026-05-07-presence-hooks-fire-and-forget-and-ttl-floor-env-gate-10-6-r6.md。
 	sessionMgr := wsapp.NewSessionManager(
 		wsapp.WithRegisterHook(func(s *wsapp.Session) {
-			hookCtx, cancel := context.WithTimeout(context.Background(), presenceHookTimeout)
-			defer cancel()
-			if err := presenceRepo.AddOnline(hookCtx, s.RoomID(), s.UserID(), s.SessionID()); err != nil {
-				slog.Warn("presence add online failed",
-					slog.String("sessionId", s.SessionID()),
-					slog.Uint64("userId", s.UserID()),
-					slog.Uint64("roomId", s.RoomID()),
-					slog.Any("error", err),
-				)
-			}
+			go func() {
+				hookCtx, cancel := context.WithTimeout(context.Background(), presenceHookTimeout)
+				defer cancel()
+				if err := presenceRepo.AddOnline(hookCtx, s.RoomID(), s.UserID(), s.SessionID()); err != nil {
+					slog.Warn("presence add online failed",
+						slog.String("sessionId", s.SessionID()),
+						slog.Uint64("userId", s.UserID()),
+						slog.Uint64("roomId", s.RoomID()),
+						slog.Any("error", err),
+					)
+				}
+			}()
 		}),
 		wsapp.WithUnregisterHook(func(s *wsapp.Session) {
-			hookCtx, cancel := context.WithTimeout(context.Background(), presenceHookTimeout)
-			defer cancel()
-			// **关键**（Story 10.6 r1 P1 修）：必须传入 s.SessionID() 让 RemoveOnline
-			// 走 sessionID guard 的 Lua script 路径。reconnect 替换场景下旧 Session
-			// 延后 Unregister 触发本钩子时，user:{id}:ws_session 已被新 Session 覆盖
-			// 为新 sessionID → script 比较失败走 no-op，不会清掉新 Session 的 presence。
-			// 详见 lesson 2026-05-07-redis-presence-remove-needs-session-id-guard-10-6-r1.md。
-			if err := presenceRepo.RemoveOnline(hookCtx, s.RoomID(), s.UserID(), s.SessionID()); err != nil {
-				slog.Warn("presence remove online failed",
-					slog.String("sessionId", s.SessionID()),
-					slog.Uint64("userId", s.UserID()),
-					slog.Uint64("roomId", s.RoomID()),
-					slog.Any("error", err),
-				)
-			}
+			go func() {
+				hookCtx, cancel := context.WithTimeout(context.Background(), presenceHookTimeout)
+				defer cancel()
+				// **关键**（Story 10.6 r1 P1 修）：必须传入 s.SessionID() 让 RemoveOnline
+				// 走 sessionID guard 的 Lua script 路径。reconnect 替换场景下旧 Session
+				// 延后 Unregister 触发本钩子时，user:{id}:ws_session 已被新 Session 覆盖
+				// 为新 sessionID → script 比较失败走 no-op，不会清掉新 Session 的 presence。
+				// 详见 lesson 2026-05-07-redis-presence-remove-needs-session-id-guard-10-6-r1.md。
+				if err := presenceRepo.RemoveOnline(hookCtx, s.RoomID(), s.UserID(), s.SessionID()); err != nil {
+					slog.Warn("presence remove online failed",
+						slog.String("sessionId", s.SessionID()),
+						slog.Uint64("userId", s.UserID()),
+						slog.Uint64("roomId", s.RoomID()),
+						slog.Any("error", err),
+					)
+				}
+			}()
 		}),
 	)
 	slog.Info("ws session manager ready (with presence hooks)")

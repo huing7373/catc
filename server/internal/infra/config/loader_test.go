@@ -417,17 +417,79 @@ func TestLoad_RedisPresenceTTLSecExplicitYAML(t *testing.T) {
 
 // TestLoad_RedisPresenceTTLSecBelowMin_FailFast 验证 YAML 显式写
 // `redis.presence_ttl_sec` < 60（下限 = 2 × heartbeat scan interval 30s）时，
-// loader 返 error 而不是静默接受 / fall-back。review 10-6 r3 P2 加。
+// loader 在 **prod env** 下返 error 而不是静默接受 / fall-back。
+// review 10-6 r3 P2 加；review 10-6 r6 P2 改环境感知（仅 prod 强校验）。
 //
 // 下限的工程含义：HeartbeatScanner 每 30s tick 调 AddOnline 重写 presence；
 // TTL ≤ 30s 连续两次 tick 之间已过期 → user 闪烁 offline。fail-fast 让运维
 // 立即注意配置错误，不让"看起来跑得起来但 presence 异常"漏到 prod。
+//
+// 显式 t.Setenv("CAT_ENV", "") 模拟 prod env（safe-by-default：未注入 / 拼错
+// 视为 prod；其他单测可能 set CAT_ENV=test 防漂移，本测试要求严格 prod 路径）。
 func TestLoad_RedisPresenceTTLSecBelowMin_FailFast(t *testing.T) {
+	t.Setenv("CAT_ENV", "") // 强制 prod env 路径
 	_, err := Load("testdata/redis_presence_ttl_below_min.yaml")
 	if err == nil {
-		t.Fatal("Load should return error when presence_ttl_sec < 60 (below 2x scan interval), got nil")
+		t.Fatal("Load should return error when presence_ttl_sec < 60 in prod env, got nil")
 	}
-	wantSubstr := "redis.presence_ttl_sec=30 below minimum 60"
+	wantSubstr := "redis.presence_ttl_sec=30 below minimum 60 in prod"
+	if !strings.Contains(err.Error(), wantSubstr) {
+		t.Errorf("Load error = %q, want contains %q", err.Error(), wantSubstr)
+	}
+}
+
+// TestLoad_RedisPresenceTTLSecBelowMin_DevEnv_OK 验证 dev env 下 YAML 显式写
+// `redis.presence_ttl_sec` < 60 通过校验（不 fail-fast）。review 10-6 r6 P2 加。
+//
+// 与 RedisConfig.PresenceTTLSec 注释 + sample-config "dev / test 可短到 5s 走
+// miniredis FastForward" 一致：dev / test 允许 fast TTL 跑测试，prod 强校验防 flap。
+func TestLoad_RedisPresenceTTLSecBelowMin_DevEnv_OK(t *testing.T) {
+	t.Setenv("CAT_ENV", "dev")
+	cfg, err := Load("testdata/redis_presence_ttl_below_min.yaml")
+	if err != nil {
+		t.Fatalf("Load returned unexpected error in dev env: %v", err)
+	}
+	if cfg.Redis.PresenceTTLSec != 30 {
+		t.Errorf("Redis.PresenceTTLSec = %d, want 30 (explicit YAML in dev env, no min-floor)", cfg.Redis.PresenceTTLSec)
+	}
+}
+
+// TestLoad_RedisPresenceTTLSecBelowMin_TestEnv_OK 验证 test env 下 YAML < 60 通过。
+// review 10-6 r6 P2 加（CAT_ENV=test 与 dev/staging 同走 dev-friendly 路径）。
+func TestLoad_RedisPresenceTTLSecBelowMin_TestEnv_OK(t *testing.T) {
+	t.Setenv("CAT_ENV", "test")
+	cfg, err := Load("testdata/redis_presence_ttl_below_min.yaml")
+	if err != nil {
+		t.Fatalf("Load returned unexpected error in test env: %v", err)
+	}
+	if cfg.Redis.PresenceTTLSec != 30 {
+		t.Errorf("Redis.PresenceTTLSec = %d, want 30 (explicit YAML in test env, no min-floor)", cfg.Redis.PresenceTTLSec)
+	}
+}
+
+// TestLoad_RedisPresenceTTLSecBelowMin_StagingEnv_OK 验证 staging env 下 < 60 通过。
+// review 10-6 r6 P2 加（与 Story 7.3 step service envName 接受值列表一致：
+// "dev" / "staging" / "test"，其余 / 空均视为 prod）。
+func TestLoad_RedisPresenceTTLSecBelowMin_StagingEnv_OK(t *testing.T) {
+	t.Setenv("CAT_ENV", "staging")
+	cfg, err := Load("testdata/redis_presence_ttl_below_min.yaml")
+	if err != nil {
+		t.Fatalf("Load returned unexpected error in staging env: %v", err)
+	}
+	if cfg.Redis.PresenceTTLSec != 30 {
+		t.Errorf("Redis.PresenceTTLSec = %d, want 30 (explicit YAML in staging env, no min-floor)", cfg.Redis.PresenceTTLSec)
+	}
+}
+
+// TestLoad_RedisPresenceTTLSecBelowMin_UnknownEnv_FailFast 验证 CAT_ENV 拼错（如
+// "production" / "develop"）safe-by-default 走 prod 严格路径。review 10-6 r6 P2 加。
+func TestLoad_RedisPresenceTTLSecBelowMin_UnknownEnv_FailFast(t *testing.T) {
+	t.Setenv("CAT_ENV", "production") // typo of "prod" but未在白名单 → 视为 prod
+	_, err := Load("testdata/redis_presence_ttl_below_min.yaml")
+	if err == nil {
+		t.Fatal("Load should return error when CAT_ENV is unknown (safe-by-default → prod), got nil")
+	}
+	wantSubstr := "below minimum 60 in prod"
 	if !strings.Contains(err.Error(), wantSubstr) {
 		t.Errorf("Load error = %q, want contains %q", err.Error(), wantSubstr)
 	}
@@ -436,6 +498,7 @@ func TestLoad_RedisPresenceTTLSecBelowMin_FailFast(t *testing.T) {
 // TestLoad_RedisPresenceTTLSecAtMin_OK 验证下限边界值（=60）通过校验。
 // review 10-6 r3 P2 加。
 func TestLoad_RedisPresenceTTLSecAtMin_OK(t *testing.T) {
+	t.Setenv("CAT_ENV", "") // 即便 prod 路径下 60 = 边界值仍合法
 	cfg, err := Load("testdata/redis_presence_ttl_at_min.yaml")
 	if err != nil {
 		t.Fatalf("Load returned unexpected error for boundary value 60: %v", err)

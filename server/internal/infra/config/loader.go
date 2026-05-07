@@ -72,6 +72,21 @@ const (
 	defaultWSWriteTimeoutSec = 5
 )
 
+// isProdEnv 返回 true 当且仅当 `CAT_ENV` 既非 "dev" 也非 "staging" 也非 "test"
+// （safe-by-default：未注入 / 拼写错都视为 prod，避免 dev YAML 静默漂到 prod）。
+//
+// **prod gate 模式**（与 service.NewStepService / wsapp.NewGateway 同模式）：本项目
+// 不在 cfg 上挂 Env 字段，统一让需要 prod-only 强校验的位置就近读 `CAT_ENV` env var。
+// 详见 docs/lessons/2026-05-07-presence-hooks-fire-and-forget-and-ttl-floor-env-gate-10-6-r6.md。
+func isProdEnv() bool {
+	switch os.Getenv("CAT_ENV") {
+	case "dev", "staging", "test":
+		return false
+	default:
+		return true
+	}
+}
+
 func Load(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -174,13 +189,21 @@ func Load(path string) (*Config, error) {
 	if cfg.Redis.PresenceTTLSec <= 0 {
 		cfg.Redis.PresenceTTLSec = defaultRedisPresenceTTLSec
 	}
-	// 下限校验（review 10-6 r3 P2 加）：HeartbeatScanner 30s tick 调 AddOnline
-	// 重写 + 续 TTL；TTL ≤ 30s 让连续两次 tick 之间 keys 过期，long-lived session
-	// 闪烁 offline。最小 60s = 2 × tick 让 IO 抖动 / 调度延迟仍有 buffer。显式
-	// 配置低于下限视为错误，fail-fast 让运维侧立即注意（与 mysql.dsn 空串模式
-	// 一致）。零值已在上一段兜底成 300，不会进本分支。
-	if cfg.Redis.PresenceTTLSec < minRedisPresenceTTLSec {
-		return nil, fmt.Errorf("redis.presence_ttl_sec=%d below minimum %d (must be >= 2x heartbeat scan interval 30s)",
+	// 下限校验（review 10-6 r3 P2 加；review 10-6 r6 P2 改环境感知）：
+	// HeartbeatScanner 30s tick 调 AddOnline 重写 + 续 TTL；TTL ≤ 30s 让连续两次
+	// tick 之间 keys 过期，long-lived session 闪烁 offline。最小 60s = 2 × tick 让
+	// IO 抖动 / 调度延迟仍有 buffer。显式配置低于下限视为错误，fail-fast 让运维侧
+	// 立即注意（与 mysql.dsn 空串模式一致）。零值已在上一段兜底成 300，不会进本分支。
+	//
+	// **环境感知**（review 10-6 r6 P2）：r3 引入硬下限后与 RedisConfig.PresenceTTLSec
+	// 注释 + sample-config "dev / test 可短到 5s 走 miniredis FastForward" 直接冲突 ——
+	// dev 按文档配 5s 启动失败。修法：仅在 prod env 强校验下限，dev / staging / test
+	// 允许任意正值（< 60s 也允许，让 fast TTL 测试 / FastForward fixture 能跑）。
+	// 与 Story 7.3 review r6 [P2] StepsConfig prod-only cap-override gate 同模式
+	// （CAT_ENV != "dev|staging|test" 视为 prod，safe-by-default：未注入 / typo 都
+	// 走 prod 严格策略，避免 dev YAML 静默漂到 prod）。
+	if isProdEnv() && cfg.Redis.PresenceTTLSec < minRedisPresenceTTLSec {
+		return nil, fmt.Errorf("redis.presence_ttl_sec=%d below minimum %d in prod (must be >= 2x heartbeat scan interval 30s; dev/test 覆盖必须 export CAT_ENV=dev|staging|test)",
 			cfg.Redis.PresenceTTLSec, minRedisPresenceTTLSec)
 	}
 	// Redis Addr / DB 不在 loader 兜底：
