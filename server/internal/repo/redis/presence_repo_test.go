@@ -8,6 +8,7 @@ package redis_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -308,4 +309,194 @@ func TestPresenceRepo_NewPresenceRepo_DefaultTTL(t *testing.T) {
 	online, err = repo.IsOnline(ctx, 100, 42)
 	require.NoError(t, err)
 	require.False(t, online, "6 min 后超过 5 min 默认 TTL，应已过期")
+}
+
+// ---------- review 10-6 r2 P2: AddOnline partial-fail 测试 ----------
+
+// faultInjectingClient 把所有调用透传到底层 RedisClient，但允许测试代码控制
+// 某次特定命令（SAdd/Set/Expire）失败。用 invocation count 让单测可决定"第 N
+// 次调用某命令时返 error" —— 配合 review 10-6 r2 P2 修后的命令顺序
+// （SET → SADD → EXPIRE）覆盖三种 partial-fail 场景。
+//
+// 设计：跟踪每个命令的调用次数，对照 *FailAt 字段判断是否在该次调用注入 error；
+// nil *FailAt 表示该命令永不失败。
+//
+// **mock 边界**：本结构仅在本测试文件用，**不**导出 / **不**复用 ——
+// production / 其他包测试需要类似 fault-injection 时各自定义独立 wrapper，
+// 避免本结构被滥用导致 mock 行为偏离实际 RedisClient。
+type faultInjectingClient struct {
+	inner redisinfra.RedisClient
+
+	setCount    int
+	sAddCount   int
+	expireCount int
+
+	// 命令调用 N 次（1-indexed）时是否返 error；nil = 不注入错误
+	setFailAt    *int
+	sAddFailAt   *int
+	expireFailAt *int
+}
+
+func intp(i int) *int { return &i }
+
+var errFault = errors.New("injected fault")
+
+func (f *faultInjectingClient) Get(ctx context.Context, key string) (string, error) {
+	return f.inner.Get(ctx, key)
+}
+
+func (f *faultInjectingClient) Set(ctx context.Context, key, value string, expiration time.Duration, nx bool) (bool, error) {
+	f.setCount++
+	if f.setFailAt != nil && f.setCount == *f.setFailAt {
+		return false, errFault
+	}
+	return f.inner.Set(ctx, key, value, expiration, nx)
+}
+
+func (f *faultInjectingClient) Del(ctx context.Context, keys ...string) (int64, error) {
+	return f.inner.Del(ctx, keys...)
+}
+
+func (f *faultInjectingClient) Expire(ctx context.Context, key string, expiration time.Duration) (bool, error) {
+	f.expireCount++
+	if f.expireFailAt != nil && f.expireCount == *f.expireFailAt {
+		return false, errFault
+	}
+	return f.inner.Expire(ctx, key, expiration)
+}
+
+func (f *faultInjectingClient) SAdd(ctx context.Context, key string, members ...string) (int64, error) {
+	f.sAddCount++
+	if f.sAddFailAt != nil && f.sAddCount == *f.sAddFailAt {
+		return 0, errFault
+	}
+	return f.inner.SAdd(ctx, key, members...)
+}
+
+func (f *faultInjectingClient) SRem(ctx context.Context, key string, members ...string) (int64, error) {
+	return f.inner.SRem(ctx, key, members...)
+}
+
+func (f *faultInjectingClient) SMembers(ctx context.Context, key string) ([]string, error) {
+	return f.inner.SMembers(ctx, key)
+}
+
+func (f *faultInjectingClient) Eval(ctx context.Context, script string, keys []string, args ...interface{}) (interface{}, error) {
+	return f.inner.Eval(ctx, script, keys, args...)
+}
+
+func (f *faultInjectingClient) Close() error { return f.inner.Close() }
+
+// newFaultInjectingRepo 构造带 fault injection 的 PresenceRepo + 暴露
+// fault client 让测试 case 设 FailAt + 真 miniredis 让验证残留状态。
+func newFaultInjectingRepo(t *testing.T) (redisrepo.PresenceRepo, *faultInjectingClient, redisinfra.RedisClient) {
+	t.Helper()
+	mr, _ := testhelper.NewMiniRedis(t)
+	inner := redisinfra.NewRedisClientFromMiniredis(t, mr)
+	fault := &faultInjectingClient{inner: inner}
+	repo := redisrepo.NewPresenceRepo(fault, 5*time.Minute)
+	return repo, fault, inner
+}
+
+// TestPresenceRepo_AddOnline_SetFails_NoLeftover 验证 review 10-6 r2 P2：
+// SET 失败（命令顺序首位）→ AddOnline return → SADD 没执行 → 不留任何残留。
+//
+// 这是 P2 修后命令顺序（SET → SADD → EXPIRE）的第一类 partial-fail 场景；
+// 也是修法的"最干净"路径 —— 修前是 SADD 在第一位，SADD 成功后 SET 失败让 room
+// set 永远没 EXPIRE → zombie 永久存活；修后 SET 在第一位，SET 失败时其他命令
+// 完全没动，无残留。
+func TestPresenceRepo_AddOnline_SetFails_NoLeftover(t *testing.T) {
+	repo, fault, inner := newFaultInjectingRepo(t)
+	ctx := context.Background()
+
+	// 第 1 次 Set 调用失败
+	fault.setFailAt = intp(1)
+
+	err := repo.AddOnline(ctx, 100, 42, "s1")
+	require.Error(t, err, "SET 失败应让 AddOnline 返 error")
+
+	// 验证 SAdd 未被调用（命令顺序首位是 SET，失败立即 return）
+	require.Equal(t, 0, fault.sAddCount, "SET 失败 → SADD 不应被调用")
+	require.Equal(t, 0, fault.expireCount, "SET 失败 → EXPIRE 不应被调用")
+
+	// 验证 user:{id}:ws_session 没被写入（SET 失败前没数据）
+	val, err := inner.Get(ctx, "user:42:ws_session")
+	require.NoError(t, err)
+	require.Empty(t, val, "SET 失败 → user:{id}:ws_session 不应有残留")
+
+	// 验证 room set 也没被写入
+	members, err := inner.SMembers(ctx, "room:100:online_users")
+	require.NoError(t, err)
+	require.Empty(t, members, "SET 失败 → room set 不应有残留")
+}
+
+// TestPresenceRepo_AddOnline_SAddFails_UserKeyHasTTL_RoomSetEmpty 验证 review
+// 10-6 r2 P2：SET 成功 + SADD 失败 → user:{id}:ws_session 已写入但**有 TTL**
+// （SET KEY VAL EX 单命令原子）→ 5min 后自然过期 → 不 zombie。room set 还没 SADD
+// 过 → 没 member。
+//
+// 关键不变量：user:{id}:ws_session 必须**有** TTL（不能是永久 key），否则
+// reconnect / 其他 user 路径会看到 stale sessionID 且永不自愈。
+func TestPresenceRepo_AddOnline_SAddFails_UserKeyHasTTL_RoomSetEmpty(t *testing.T) {
+	repo, fault, inner := newFaultInjectingRepo(t)
+	ctx := context.Background()
+
+	fault.sAddFailAt = intp(1)
+
+	err := repo.AddOnline(ctx, 100, 42, "s1")
+	require.Error(t, err, "SADD 失败应让 AddOnline 返 error")
+
+	// 验证 EXPIRE 没被调用（SADD 失败立即 return）
+	require.Equal(t, 0, fault.expireCount, "SADD 失败 → EXPIRE 不应被调用")
+
+	// 验证 user:{id}:ws_session 已被 SET（含 TTL，因为 Set 走 KEY VAL EX 原子）
+	val, err := inner.Get(ctx, "user:42:ws_session")
+	require.NoError(t, err)
+	require.Equal(t, "s1", val, "SET 已成功 → user:{id}:ws_session 应有值")
+
+	// 验证 room set 没 member（SADD 失败前没数据）
+	members, err := inner.SMembers(ctx, "room:100:online_users")
+	require.NoError(t, err)
+	require.Empty(t, members, "SADD 失败 → room set 不应有残留")
+
+	// **关键**：下一次 AddOnline 同 user 应能恢复（覆盖 user:{id}:ws_session +
+	// 重新 SADD），让"暂时性 SADD 失败"路径有自然 retry 通道。
+	fault.sAddFailAt = nil // 解除 SADD 失败注入
+	require.NoError(t, repo.AddOnline(ctx, 100, 42, "s2"))
+
+	online, err := repo.IsOnline(ctx, 100, 42)
+	require.NoError(t, err)
+	require.True(t, online, "重试 AddOnline 应能完整恢复 presence")
+}
+
+// TestPresenceRepo_AddOnline_ExpireFails_UserKeyHasTTL 验证 review 10-6 r2 P2：
+// SET + SADD 都成功 + EXPIRE 失败 → user:{id}:ws_session 已写入**有 TTL**，room
+// set 没 TTL。Lesson 中详述：room set 没 TTL 是已知的轻度不一致 —— RemoveOnline
+// 走 Lua script 仍能正确 SREM 干净；最坏路径是某 user 5min 内未 unregister 时
+// room set 上残留 member 直到下一次 AddOnline 触发 EXPIRE 续期。
+//
+// 关键不变量：user:{id}:ws_session 仍**有 TTL**（5min），不会留永久 zombie key。
+func TestPresenceRepo_AddOnline_ExpireFails_UserKeyHasTTL(t *testing.T) {
+	mr, _ := testhelper.NewMiniRedis(t)
+	inner := redisinfra.NewRedisClientFromMiniredis(t, mr)
+	fault := &faultInjectingClient{inner: inner}
+	repo := redisrepo.NewPresenceRepo(fault, 5*time.Minute)
+	ctx := context.Background()
+
+	fault.expireFailAt = intp(1)
+
+	err := repo.AddOnline(ctx, 100, 42, "s1")
+	require.Error(t, err, "EXPIRE 失败应让 AddOnline 返 error")
+
+	// 验证 user:{id}:ws_session 有值（SET 已成功）
+	val, err := inner.Get(ctx, "user:42:ws_session")
+	require.NoError(t, err)
+	require.Equal(t, "s1", val)
+
+	// 验证 user:{id}:ws_session **有** TTL（由 Set KEY VAL EX 原子带入；不依赖
+	// 后续 EXPIRE 命令）—— 走 FastForward 6 分钟后应过期
+	mr.FastForward(6 * time.Minute)
+	val, err = inner.Get(ctx, "user:42:ws_session")
+	require.NoError(t, err)
+	require.Empty(t, val, "user:{id}:ws_session 应在 5min TTL 后自然过期（验证 SET KEY VAL EX 已带 TTL）")
 }

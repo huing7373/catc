@@ -75,12 +75,18 @@ const defaultPresenceTTL = 5 * time.Minute
 type PresenceRepo interface {
 	// AddOnline 把 (roomID, userID, sessionID) 写入 presence。
 	//
-	// 流程：
-	//  1. SADD room:{roomID}:online_users {userID-string}
-	//  2. SET user:{userID}:ws_session {sessionID} ttl（无 NX，无条件覆盖；让 reconnect
-	//     替换路径能更新 sessionID）
+	// 流程（**review 10-6 r2 P2 修后**）：
+	//  1. SET user:{userID}:ws_session {sessionID} ttl（SET KEY VAL EX 单命令原子，
+	//     包含 TTL；nx=false → reconnect 替换路径能更新 sessionID）
+	//  2. SADD room:{roomID}:online_users {userID-string}
 	//  3. EXPIRE room:{roomID}:online_users {ttl}（让 set key 也自带 TTL，避免空 room
 	//     key 无人续期僵在 Redis）
+	//
+	// **顺序决策**（r2 P2）：原版顺序 SADD → SET → EXPIRE 在 SADD 成功 + SET 失败
+	// 路径下直接 return，让 room set 永远没 EXPIRE → zombie member 永久存活。改为
+	// SET 先做（带 TTL 原子）→ 任何后续命令失败时 user:{id}:ws_session 已有 TTL
+	// 兜底，不会留永久 zombie。详见实装 godoc + lesson
+	// 2026-05-07-presence-add-online-command-order-and-ttl-guarantee-10-6-r2.md。
 	//
 	// 错误语义：底层 Redis 命令任一失败 → 返 error，不做"部分写入"兜底；调用方
 	// （hook adapter）log warn 即可（本 story 不做 retry / 重试队列；节点 13+
@@ -206,23 +212,49 @@ func userKey(userID uint64) string {
 }
 
 // AddOnline 实装 PresenceRepo.AddOnline（详见 interface godoc）。
+//
+// **review 10-6 r2 P2 修**：命令顺序改为 SET → SADD → EXPIRE（原版是
+// SADD → SET → EXPIRE）。原版的 partial-fail 后果是 "SADD 成功 + SET 失败 →
+// 直接 return → room set 永远没 EXPIRE → zombie member 永久存活"，与本 repo
+// "TTL 兜底清理 zombie" 语义直接矛盾。
+//
+// 修后顺序的 partial-fail 矩阵：
+//   - SET 失败 → return → SADD 没执行 → 不留任何残留（最干净）
+//   - SET 成功 + SADD 失败 → return → user:{id}:ws_session 已写入但有 TTL（SET KEY
+//     VAL EX 单命令原子）→ 5min 后自然过期 → 不 zombie
+//   - SET 成功 + SADD 成功 + EXPIRE 失败 → return → user:{id}:ws_session 有 TTL，
+//     room set 没 TTL；但 room set 的存活由 SREM/DEL 在 RemoveOnline 路径走 Lua
+//     script 清理（user→sessionID DEL 后 SREM 同步执行），不会真正永久 zombie ——
+//     最坏情况是某 user 在 TTL 5min 内未 reconnect / unregister，room set 上残留
+//     该 user member 直到下一次 AddOnline 同 room 触发 EXPIRE 续期；与原版
+//     "SADD 后 SET 失败 → return → room set 永久无 TTL" 相比，影响范围由"永久"
+//     缩到"最多一次 AddOnline cycle 内"，且 RemoveOnline 走 Lua 仍能 SREM 干净。
+//
+// 三连写仍非原子（Redis 单 client 命令间不保事务）；本简化版接受 "短窗口轻度
+// 不一致 + TTL 自愈" 而不是 Lua script 升级 —— Lua 改动范围更大且本 partial-fail
+// 场景下后果已可接受。详见 docs/lessons/2026-05-07-presence-add-online-command-order-and-ttl-guarantee-10-6-r2.md。
 func (r *presenceRepo) AddOnline(ctx context.Context, roomID, userID uint64, sessionID string) error {
 	rk := roomKey(roomID)
 	uk := userKey(userID)
 	uidStr := strconv.FormatUint(userID, 10)
 
-	if _, err := r.client.SAdd(ctx, rk, uidStr); err != nil {
-		return fmt.Errorf("presence add online sadd: %w", err)
-	}
-	// SET nx=false：reconnect 替换路径能更新 sessionID（同 user 二次 AddOnline 覆盖旧值）；
-	// expiration 直接传 ttl 让 SET 命令一步完成 SET + EXPIRE（go-redis 支持 SET KEY VAL EX）。
+	// 第一步：SET user:{id}:ws_session 走 SET KEY VAL EX 单命令原子（包含 TTL）。
+	// SET nx=false：reconnect 替换路径能更新 sessionID（同 user 二次 AddOnline 覆盖旧值）。
+	// 失败立即 return，**之前没动** SADD —— 不留任何残留。
 	if _, err := r.client.Set(ctx, uk, sessionID, r.ttl, false); err != nil {
 		return fmt.Errorf("presence add online set: %w", err)
 	}
-	// 显式 EXPIRE room set —— SADD 不带 TTL 选项，需要单独命令兜底防 set key 永久存活。
-	// 注意：每次 AddOnline 都覆盖 room set 的 TTL（与 SET nx=false 同模式）；这让 active
-	// room 自然续期，与"心跳路径 RenewTTL"分工：AddOnline 续 room TTL 一次，RenewTTL
-	// 主动定期续期。
+	// 第二步：SADD room:{id}:online_users 把 user 加入 set。失败 return → user
+	// 已写入 user:{id}:ws_session 但**有 TTL**（5min 后自然过期），不 zombie；下一次
+	// AddOnline 同 user 调用会重写 user:{id}:ws_session + 重新 SADD（语义恢复）。
+	if _, err := r.client.SAdd(ctx, rk, uidStr); err != nil {
+		return fmt.Errorf("presence add online sadd: %w", err)
+	}
+	// 第三步：EXPIRE room set —— SADD 不带 TTL 选项，需要单独命令兜底防 set key
+	// 永久存活。每次 AddOnline 都覆盖 room set 的 TTL（与 SET nx=false 同模式）；
+	// 这让 active room 自然续期，与"心跳路径 RenewTTL"分工：AddOnline 续 room TTL
+	// 一次，RenewTTL（review 10-6 r2 P1 钩在 HeartbeatScanner 30s tick 上）主动
+	// 定期续期。
 	if _, err := r.client.Expire(ctx, rk, r.ttl); err != nil {
 		return fmt.Errorf("presence add online expire room: %w", err)
 	}

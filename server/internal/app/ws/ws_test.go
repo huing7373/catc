@@ -2388,12 +2388,12 @@ func TestHeartbeatScanner_NewHeartbeatScanner_ZeroTimeoutSec_FallbacksTo60(t *te
 	mgr := wsapp.NewSessionManager()
 	defer mgr.Close()
 
-	scanner := wsapp.NewHeartbeatScanner(mgr, 0, idleTestLogger())
+	scanner := wsapp.NewHeartbeatScanner(mgr, 0, idleTestLogger(), nil)
 	if got := scanner.TimeoutMsForTest(); got != 60_000 {
 		t.Errorf("timeoutMs = %d, want 60_000 (zero/negative input should fallback to 60s)", got)
 	}
 
-	scanner2 := wsapp.NewHeartbeatScanner(mgr, -5, idleTestLogger())
+	scanner2 := wsapp.NewHeartbeatScanner(mgr, -5, idleTestLogger(), nil)
 	if got := scanner2.TimeoutMsForTest(); got != 60_000 {
 		t.Errorf("negative input: timeoutMs = %d, want 60_000", got)
 	}
@@ -3913,6 +3913,176 @@ func TestPresenceHook_ManagerCloseTriggersRemoveForAllSessions(t *testing.T) {
 		if _, ok := fake.removedIDs.Load(s.SessionID()); !ok {
 			t.Errorf("session %s did not trigger RemoveOnline hook", s.SessionID())
 		}
+	}
+}
+
+// ---------- review 10-6 r2 P1: HeartbeatScanner RenewTTL 集成测试 ----------
+//
+// 本节验证 review 10-6 r2 P1 修：HeartbeatScanner.scanOnce 对 active session
+// （idle <= timeoutMs）调 PresenceRenewer.RenewTTL，让 long-lived WS session
+// 不会被 Redis presence TTL 自动过期误报为 offline。
+//
+// 测试栈：fakeRenewer + atomic 计数器；不接 miniredis（与 Story 10.6 钩子集成
+// 测试同模式 —— 单测的目标是验证"scanner 在正确时机调 RenewTTL 并传对参数"，
+// Redis 真实 TTL 行为由 presence_repo_test.go 的 RenewTTL 单测覆盖）。
+
+// fakeRenewer 是 PresenceRenewer 接口（review 10-6 r2 P1）的轻量替身，让单测
+// 验证"scanner 给哪些 (roomID, userID) 调了 RenewTTL"。
+//
+// 设计：用 sync.Map 收集每次调用的参数 + atomic.Int32 计数 + 可选 returnErr 注入。
+// fail-on-error 不让 scanner 退出 —— scanner 必须 log warn 继续遍历下一 session。
+type fakeRenewer struct {
+	count        atomic.Int32
+	calls        sync.Map // (roomID|userID composite key) → call count
+	returnErr    error
+}
+
+func renewerKey(roomID, userID uint64) string {
+	return fmt.Sprintf("r=%d|u=%d", roomID, userID)
+}
+
+func (f *fakeRenewer) RenewTTL(_ context.Context, roomID, userID uint64) error {
+	f.count.Add(1)
+	key := renewerKey(roomID, userID)
+	if v, ok := f.calls.Load(key); ok {
+		f.calls.Store(key, v.(int)+1)
+	} else {
+		f.calls.Store(key, 1)
+	}
+	return f.returnErr
+}
+
+// TestHeartbeatScanner_ScanOnce_ActiveSession_RenewsTTL：active session（idle <= timeoutMs）
+// 触发 PresenceRenewer.RenewTTL；参数 (roomID, userID) 与 Session 字段匹配。
+//
+// 这是 review 10-6 r2 P1 修后的核心 case：long-lived session 在 30s tick 路径
+// 上每次都被续期，TTL 5min 永远不到。
+func TestHeartbeatScanner_ScanOnce_ActiveSession_RenewsTTL(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, _, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	renewer := &fakeRenewer{}
+
+	// timeoutMs=10s 让刚握手完的 session 视为 active（idle ≈ 几 ms < 10s）
+	scanner := wsapp.NewHeartbeatScannerForTestWithRenewer(mgr, 10*1000, 200*time.Millisecond, idleTestLogger(), renewer)
+
+	scanner.ScanOnceForTest(context.Background(), time.Now())
+
+	// 验证 RenewTTL 被调一次，参数匹配
+	if got := renewer.count.Load(); got != 1 {
+		t.Errorf("RenewTTL count = %d, want 1 (single active session should renew once)", got)
+	}
+	expectedKey := renewerKey(3001, 1001)
+	if v, ok := renewer.calls.Load(expectedKey); !ok || v.(int) != 1 {
+		t.Errorf("RenewTTL not called for room=3001 user=1001 (calls map = %v)", v)
+	}
+}
+
+// TestHeartbeatScanner_ScanOnce_IdleSession_DoesNotRenewTTL：idle session
+// （idle > timeoutMs）走 close 路径，**不**调 RenewTTL。
+//
+// 这是 P1 修后的负向 case：idle session 即将被 4005 关闭，没必要续 TTL；
+// onUnregister 钩子会在 close 完成后清干净 presence。
+func TestHeartbeatScanner_ScanOnce_IdleSession_DoesNotRenewTTL(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, _, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	renewer := &fakeRenewer{}
+
+	// timeoutMs=10ms 让握手完的 session 视为 idle
+	scanner := wsapp.NewHeartbeatScannerForTestWithRenewer(mgr, 10, 200*time.Millisecond, idleTestLogger(), renewer)
+
+	// 等握手后 sleep 50ms 让 idle 远超 10ms
+	time.Sleep(50 * time.Millisecond)
+
+	scanner.ScanOnceForTest(context.Background(), time.Now())
+
+	// 验证 RenewTTL 没被调
+	if got := renewer.count.Load(); got != 0 {
+		t.Errorf("RenewTTL count = %d, want 0 (idle session should not renew, will be closed)", got)
+	}
+}
+
+// TestHeartbeatScanner_ScanOnce_NilRenewer_DoesNotPanic：renewer == nil（未接
+// Redis 的最小路径 / 单测）→ scanner 跳过续期不 panic。
+func TestHeartbeatScanner_ScanOnce_NilRenewer_DoesNotPanic(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, _, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	// renewer = nil
+	scanner := wsapp.NewHeartbeatScannerForTestWithRenewer(mgr, 10*1000, 200*time.Millisecond, idleTestLogger(), nil)
+
+	// 不应 panic
+	scanner.ScanOnceForTest(context.Background(), time.Now())
+}
+
+// TestHeartbeatScanner_ScanOnce_RenewerError_LoggedNotAborted：RenewTTL 返 error
+// → scanner log warn 继续遍历下一 session，不让单 session 失败影响整批。
+//
+// 验证多 session 场景：第一个 session 的 RenewTTL 返 error，后续 session 仍被续期。
+func TestHeartbeatScanner_ScanOnce_RenewerError_LoggedNotAborted(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+
+	signer := newSigner(t)
+	wsURL, ts := startGatewayServer(t, signer, mgr, repo)
+	defer ts.Close()
+
+	// 起 3 个 Session
+	type connSess struct {
+		conn *websocket.Conn
+		uid  uint64
+	}
+	var all []connSess
+	for _, uid := range []uint64{1001, 1002, 1003} {
+		token, _ := signer.Sign(uid, 3600)
+		url := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, 3001, token)
+		conn, _, err := dialWS(t, url)
+		if err != nil {
+			t.Fatalf("dial uid=%d: %v", uid, err)
+		}
+		all = append(all, connSess{conn, uid})
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		if _, _, err := conn.ReadMessage(); err != nil {
+			t.Fatalf("read snapshot uid=%d: %v", uid, err)
+		}
+	}
+	defer func() {
+		for _, cs := range all {
+			cs.conn.Close()
+		}
+	}()
+
+	// 等所有注册
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(mgr.ListAllSessions(context.Background())) >= 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	renewer := &fakeRenewer{returnErr: errors.New("redis down")}
+
+	scanner := wsapp.NewHeartbeatScannerForTestWithRenewer(mgr, 10*1000, 200*time.Millisecond, idleTestLogger(), renewer)
+	scanner.ScanOnceForTest(context.Background(), time.Now())
+
+	// 即使 RenewTTL 返 error，scanner 仍应对所有 3 session 调 RenewTTL（不被中断）
+	if got := renewer.count.Load(); got != 3 {
+		t.Errorf("RenewTTL count = %d after error, want 3 (error should not abort iteration)", got)
 	}
 }
 

@@ -20,6 +20,15 @@ func NewHeartbeatScannerForTest(mgr SessionManager, timeoutMs int64, interval ti
 	return newHeartbeatScannerForTest(mgr, timeoutMs, interval, logger)
 }
 
+// NewHeartbeatScannerForTestWithRenewer 是 newHeartbeatScannerForTestWithRenewer
+// 的 exported 别名（review 10-6 r2 P1 引入），让 ws_test 包能注入 PresenceRenewer
+// stub 验证续期路径。
+//
+// 参数语义见 newHeartbeatScannerForTestWithRenewer 注释。
+func NewHeartbeatScannerForTestWithRenewer(mgr SessionManager, timeoutMs int64, interval time.Duration, logger *slog.Logger, renewer PresenceRenewer) *HeartbeatScanner {
+	return newHeartbeatScannerForTestWithRenewer(mgr, timeoutMs, interval, logger, renewer)
+}
+
 // ScanOnceForTest 暴露 unexported scanOnce 给 ws_test 单测直接调用（绕过 ticker）。
 func (s *HeartbeatScanner) ScanOnceForTest(ctx context.Context, now time.Time) {
 	s.scanOnce(ctx, now)

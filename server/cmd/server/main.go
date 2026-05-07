@@ -308,8 +308,11 @@ func main() {
 	// 修法：scannerDone chan 跟踪 Run 真正退出；把 cancelHeartbeat → wait scannerDone →
 	// sessionMgr.Close 收成**一个 deferred 函数**（顺序确定，不依赖 LIFO 间接对齐）。
 	// 详见 docs/lessons/2026-05-07-shutdown-must-wait-for-goroutine-exit-not-just-signal.md。
+	// **review 10-6 r2 P1**：注入 presenceRepo 让 scanner 每 30s tick 给 active
+	// session 续 presence TTL（默认 5min）—— 防 long-lived WS session 被 Redis
+	// 自动过期误报为 offline。详见 docs/lessons/2026-05-07-presence-ttl-renewal-via-heartbeat-scanner-10-6-r2.md。
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
-	heartbeatScanner := wsapp.NewHeartbeatScanner(sessionMgr, cfg.WS.HeartbeatTimeoutSec, slog.Default())
+	heartbeatScanner := wsapp.NewHeartbeatScanner(sessionMgr, cfg.WS.HeartbeatTimeoutSec, slog.Default(), presenceRepo)
 	scannerDone := make(chan struct{})
 	go func() {
 		defer close(scannerDone)

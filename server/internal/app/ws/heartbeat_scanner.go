@@ -33,7 +33,7 @@ const heartbeatScanIntervalSec = 30
 //
 // 生命周期：
 //  1. main.go bootstrap wire：scanner := NewHeartbeatScanner(mgr,
-//     cfg.WS.HeartbeatTimeoutSec, slog.Default())
+//     cfg.WS.HeartbeatTimeoutSec, slog.Default(), presenceRepo)
 //  2. ctx, cancel := context.WithCancel(context.Background())
 //  3. go scanner.Run(ctx)
 //  4. defer cancel()（让 scanner.Run 在 ctx.Done 时优雅退出）
@@ -60,17 +60,47 @@ const heartbeatScanIntervalSec = 30
 //     Run 退出前 wg.Wait() 阻塞到所有 goroutine 跑完。两道防线（fanout 入口
 //     ctx-check 让 ctx-cancelled 路径立即 return + Run defer wg.Wait() 让残余
 //     goroutine 全跑完）共同保证 ctx cancel 后没有 stale fanout 在跑。
+//   - **每 tick renew presence TTL**（review 10-6 r2 P1）：long-lived WS session
+//     超过 redis.presence_ttl_sec（默认 300s）后 presence keys 会过期 ——
+//     IsOnline / ListOnline 误报 user offline，但 manager 还认为 session active。
+//     scanOnce 拿到 ListAllSessions 后对每个 active（idle <= timeoutMs）session
+//     同步调 PresenceRenewer.RenewTTL 续期 —— 与 client 实际 ping 频率解耦（即使
+//     client ping 慢一点，scanner 30s tick 仍续，远小于 TTL 300s）。**仅对 active
+//     session 续期**，idle > timeoutMs 的 session 已经走 fanout close 路径，没必要
+//     续 TTL（close 完成后 onUnregister 钩子会 RemoveOnline 清干净）。详见 lesson
+//     2026-05-07-presence-ttl-renewal-via-heartbeat-scanner-10-6-r2.md。
 type HeartbeatScanner struct {
 	mgr      SessionManager
 	cfg      heartbeatScannerConfig
 	logger   *slog.Logger
 	interval time.Duration
 
+	// renewer 是 presence TTL 续期接口（review 10-6 r2 P1）。**可空** —— production
+	// 路径 main.go wire 时传 PresenceRepo；单测路径默认 nil 跳过续期不影响心跳超时
+	// 检测语义。窄化接口（仅 RenewTTL 一个方法）让 scanner 不直接 import repo/redis
+	// 包，保持 ws → repo/redis 单向依赖最小化（gateway.go 已 import repo/mysql；
+	// 加 repo/redis 只是同模式扩展，无新跨层依赖问题）。
+	renewer PresenceRenewer
+
 	// wg 跟踪 scanOnce 已 dispatch 的 in-flight fanout goroutines（review r5 P2）。
 	// Run defer wg.Wait() 让 ctx cancel 后 Run 仍阻塞到所有 fanout 跑完才返回 ——
 	// 配合 fanout 入口 ctx-check 让 ctx-cancelled 路径立即 return，shutdown 期间
 	// 不再有 stale 4005 emit。
 	wg sync.WaitGroup
+}
+
+// PresenceRenewer 是 HeartbeatScanner 续期 presence TTL 用的窄化接口（review
+// 10-6 r2 P1）。
+//
+// 接口边界：仅含 RenewTTL 一个方法 —— scanner 不需要 AddOnline / RemoveOnline /
+// IsOnline / ListOnline；让单测可注入 stub 不必拉 miniredis；production 路径
+// PresenceRepo 接口超集自动满足本接口。
+//
+// 失败语义：RenewTTL 返 error → scanner log warn 继续遍历下一 session（一次失败
+// 不影响其他 session 续期，与 close fanout 错误隔离同模式）；下一 tick 30s 后
+// 重试，TTL 5min 远 > 30s × 几次重试，足以容忍偶发 Redis 抖动。
+type PresenceRenewer interface {
+	RenewTTL(ctx context.Context, roomID, userID uint64) error
 }
 
 // heartbeatScannerConfig 是 HeartbeatScanner 接受的最小配置面（让单测可注入
@@ -86,6 +116,10 @@ type heartbeatScannerConfig struct {
 //   - timeoutSec: 心跳超时阈值（秒）；通常传 cfg.WS.HeartbeatTimeoutSec
 //   - logger: base logger（传 slog.Default() 即可；scanner 内部 With 加
 //     component=ws-heartbeat）
+//   - renewer: presence TTL 续期接口（review 10-6 r2 P1 加；可空 —— 单测 / 没接
+//     Redis 的最小路径传 nil 跳过续期，不影响心跳超时检测语义）；production 路径
+//     传 PresenceRepo 单例（PresenceRepo 接口含 RenewTTL 方法满足 PresenceRenewer
+//     接口约束）
 //
 // timeoutSec ≤ 0 → 走默认 60s（防御性兜底；正常路径 cfg.WS.HeartbeatTimeoutSec
 // 已经在 loader 内兜底过 60，但本构造函数也兜底一次让 scanner 在 testing 场景
@@ -93,7 +127,7 @@ type heartbeatScannerConfig struct {
 //
 // **不**接受 interval 参数（30s SLO 契约不开放调整）；单测路径用 unexported
 // helper newHeartbeatScannerForTest 注入小 interval（如 200ms）让单测加速。
-func NewHeartbeatScanner(mgr SessionManager, timeoutSec int, logger *slog.Logger) *HeartbeatScanner {
+func NewHeartbeatScanner(mgr SessionManager, timeoutSec int, logger *slog.Logger, renewer PresenceRenewer) *HeartbeatScanner {
 	if timeoutSec <= 0 {
 		timeoutSec = 60
 	}
@@ -105,6 +139,7 @@ func NewHeartbeatScanner(mgr SessionManager, timeoutSec int, logger *slog.Logger
 		cfg:      heartbeatScannerConfig{timeoutMs: int64(timeoutSec) * 1000},
 		logger:   logger.With(slog.String("component", "ws-heartbeat")),
 		interval: heartbeatScanIntervalSec * time.Second,
+		renewer:  renewer,
 	}
 }
 
@@ -114,9 +149,18 @@ func NewHeartbeatScanner(mgr SessionManager, timeoutSec int, logger *slog.Logger
 // 几秒内触发多次扫描；timeoutMs 也接受任意小值（如 50ms）让"超时检测"测试
 // 不必 sleep 60s。
 //
+// renewer 可空（与 NewHeartbeatScanner 同语义）—— 既有 10.4 测试不传 renewer
+// 仍正常工作；review 10-6 r2 P1 续期路径走 newHeartbeatScannerForTestWithRenewer。
+//
 // **禁止**在生产路径调用：production 路径必须用 NewHeartbeatScanner（30s SLO
 // 契约不可破防）。
 func newHeartbeatScannerForTest(mgr SessionManager, timeoutMs int64, interval time.Duration, logger *slog.Logger) *HeartbeatScanner {
+	return newHeartbeatScannerForTestWithRenewer(mgr, timeoutMs, interval, logger, nil)
+}
+
+// newHeartbeatScannerForTestWithRenewer 是 newHeartbeatScannerForTest 的扩展版
+// （review 10-6 r2 P1 加），让单测可注入 PresenceRenewer stub 验证续期路径。
+func newHeartbeatScannerForTestWithRenewer(mgr SessionManager, timeoutMs int64, interval time.Duration, logger *slog.Logger, renewer PresenceRenewer) *HeartbeatScanner {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -125,6 +169,7 @@ func newHeartbeatScannerForTest(mgr SessionManager, timeoutMs int64, interval ti
 		cfg:      heartbeatScannerConfig{timeoutMs: timeoutMs},
 		logger:   logger.With(slog.String("component", "ws-heartbeat")),
 		interval: interval,
+		renewer:  renewer,
 	}
 }
 
@@ -181,10 +226,13 @@ func (s *HeartbeatScanner) Run(ctx context.Context) {
 // 流程：
 //  1. mgr.ListAllSessions(ctx) → 拿当前所有 active Session 切片
 //  2. 对每个 Session 计算 idle = now.UnixMilli() - s.LastHeartbeatAt()
-//  3. idle > timeoutMs → 并发 go { ctx-check → 重新校验 idle > timeoutMs（review
+//  3. idle <= timeoutMs（active）→ renewer != nil 时同步调
+//     PresenceRenewer.RenewTTL（roomID, userID）续期 presence keys（review
+//     10-6 r2 P1）
+//  4. idle > timeoutMs → 并发 go { ctx-check → 重新校验 idle > timeoutMs（review
 //     r1 P1 TOCTOU 修） → ctx-check → s.CloseWithCode(4005, "heartbeat timeout") }
 //     （并发避免某一 Session 写 close frame 慢阻塞其他 Session 检测）
-//  4. log info（V1 §12.1 钦定 4005 写 log info，因为心跳超时是常态网络抖动 /
+//  5. log info（V1 §12.1 钦定 4005 写 log info，因为心跳超时是常态网络抖动 /
 //     切后台）
 //
 // **关键约束**：
@@ -231,6 +279,22 @@ func (s *HeartbeatScanner) scanOnce(ctx context.Context, now time.Time) {
 		}
 		idle := nowMs - sess.LastHeartbeatAt()
 		if idle <= timeoutMs {
+			// review 10-6 r2 P1：active session 续 presence TTL —— scanner 30s
+			// tick 远小于 TTL 5min，让 long-lived session 不被 Redis 自动过期误
+			// 报为 offline。renewer == nil（未接 Redis 的最小路径 / 单测）跳过。
+			if s.renewer != nil {
+				if err := s.renewer.RenewTTL(ctx, sess.RoomID(), sess.UserID()); err != nil {
+					// 一次失败不阻塞遍历下一 session；下一 tick 30s 后重试，TTL
+					// 5min 远 > 30s × 几次重试，足以容忍偶发 Redis 抖动。log warn
+					// 让运维侧能看到累计失败信号。
+					s.logger.Warn("ws presence renew ttl failed",
+						slog.String("sessionID", sess.SessionID()),
+						slog.Uint64("userID", sess.UserID()),
+						slog.Uint64("roomID", sess.RoomID()),
+						slog.Any("error", err),
+					)
+				}
+			}
 			continue
 		}
 		// 启动 fire-and-forget goroutine 写 close frame + 释放本地资源。
