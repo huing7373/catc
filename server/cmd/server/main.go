@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -263,12 +264,25 @@ func main() {
 	//           漏写 / partial-fail 30s 内自愈
 	//       (c) RemoveOnline guard 走 sessionID atomic compare（10-6 r1 加），
 	//           reconnect 替换路径下旧 RemoveOnline 即便延迟跑也不会误清新 Session
-	// shutdown 期 fire-and-forget goroutine 可能没机会跑完 → 可接受（presence TTL
-	// 兜底；shutdown 时优先快速关停而非等所有 RemoveOnline 完成）。
-	// 详见 docs/lessons/2026-05-07-presence-hooks-fire-and-forget-and-ttl-floor-env-gate-10-6-r6.md。
+	//
+	// **review 10-6 r7 P2 修**：fire-and-forget hook goroutines 必须用 sync.WaitGroup
+	// 跟踪，graceful shutdown 路径上**等所有 hook goroutine 跑完才关 Redis client**。
+	// 原版 r6 注释里说"shutdown 期 fire-and-forget goroutine 可能没机会跑完 → 可接受
+	// （TTL 5min 兜底）"，但实际后果是：sessionMgr.Close() 串行触发 N 个 Unregister
+	// 钩子 → 每个 dispatch 一个 RemoveOnline goroutine 后立即返；defer LIFO 让
+	// redisClient.Close() 紧接着关闭共享 client → in-flight RemoveOnline goroutines
+	// 撞 "redis: client is closed" → 大量 / 全部 presence removal 被跳过 → 每次
+	// clean restart 后 room:*:online_users 留 stale member 直到 TTL 5min 过期。
+	// 即便有 TTL 兜底，IsOnline / ListOnline 在 5min 内会 over-report，违反"graceful
+	// shutdown 必须清空 presence"的设计意图。修法：sync.WaitGroup + 在 sessionMgr.Close()
+	// 之后调 wg.Wait() 让 Redis 关闭推迟到所有 hook goroutine 真正退出。
+	// 详见 lesson 2026-05-07-presence-same-room-reconnect-needs-room-aware-guard-10-6-r7.md。
+	var presenceHooksWG sync.WaitGroup
 	sessionMgr := wsapp.NewSessionManager(
 		wsapp.WithRegisterHook(func(s *wsapp.Session) {
+			presenceHooksWG.Add(1)
 			go func() {
+				defer presenceHooksWG.Done()
 				hookCtx, cancel := context.WithTimeout(context.Background(), presenceHookTimeout)
 				defer cancel()
 				if err := presenceRepo.AddOnline(hookCtx, s.RoomID(), s.UserID(), s.SessionID()); err != nil {
@@ -282,7 +296,9 @@ func main() {
 			}()
 		}),
 		wsapp.WithUnregisterHook(func(s *wsapp.Session) {
+			presenceHooksWG.Add(1)
 			go func() {
+				defer presenceHooksWG.Done()
 				hookCtx, cancel := context.WithTimeout(context.Background(), presenceHookTimeout)
 				defer cancel()
 				// **关键**（Story 10.6 r1 P1 修）：必须传入 s.SessionID() 让 RemoveOnline
@@ -351,10 +367,22 @@ func main() {
 		//    close 路径。
 		<-scannerDone
 		slog.Info("ws heartbeat scanner stopped")
-		// 3. 现在批量清 Session，没有 4005 race。
+		// 3. 现在批量清 Session，没有 4005 race。每个 Session.Close 触发 onUnregister
+		//    钩子 → dispatch 一个 fire-and-forget RemoveOnline goroutine（presenceHooksWG.Add(1)）。
 		if cerr := sessionMgr.Close(); cerr != nil {
 			slog.Error("session manager close failed", slog.Any("error", cerr))
 		}
+		// 4. **review 10-6 r7 P2 修**：等所有 hook goroutine 跑完才让本 defer 返回 ——
+		//    本 defer 是 main 退出栈上**最早**注册的（在 redisClient defer 之后），
+		//    LIFO 让 redisClient.Close() 在本 defer 返回**之后**才跑。如果不等
+		//    presenceHooksWG，Close() 会立刻关 client → in-flight RemoveOnline 撞
+		//    "redis: client is closed" → presence 留 stale 到 TTL 5min 过期。
+		//    每个 hook goroutine 上限 = presenceHookTimeout（2s），N 个 session 并发
+		//    跑总等待时间 ≈ 单个 timeout 上限（不是 O(N×2s) 串行），完全在 K8s
+		//    termination grace 内。详见 lesson
+		//    2026-05-07-presence-same-room-reconnect-needs-room-aware-guard-10-6-r7.md。
+		presenceHooksWG.Wait()
+		slog.Info("ws presence hooks drained")
 	}()
 	slog.Info("ws heartbeat scanner ready",
 		slog.Int("heartbeatTimeoutSec", cfg.WS.HeartbeatTimeoutSec),

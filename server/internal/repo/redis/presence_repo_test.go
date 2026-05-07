@@ -103,9 +103,10 @@ func TestPresenceRepo_AddOnline_Duplicates_DedupedBySADD(t *testing.T) {
 	require.Equal(t, []uint64{42}, online)
 
 	// sessionID 应被覆盖到 v2（reconnect 替换语义；SET 走 nx=false → 第二次覆盖第一次）
+	// **review 10-6 r7 P1**：value 编码 "sessionID|roomID"，断言完整 value 而非裸 sessionID
 	val, err := client.Get(ctx, "user:42:ws_session")
 	require.NoError(t, err)
-	require.Equal(t, "session-v2", val)
+	require.Equal(t, "session-v2|100", val)
 }
 
 // TestPresenceRepo_TTLExpire_ListOnline_RemovesUser 验证 edge：
@@ -205,39 +206,40 @@ func TestPresenceRepo_RemoveOnline_ReconnectRace_GuardsUserKey(t *testing.T) {
 	require.NoError(t, repo.AddOnline(ctx, roomID, userID, newSessionID))
 
 	// 确认 user:{id}:ws_session 已切到 newSessionID
+	// **review 10-6 r7 P1**：value 编码 "sessionID|roomID"，断言完整 value
 	val, err := client.Get(ctx, "user:42:ws_session")
 	require.NoError(t, err)
-	require.Equal(t, newSessionID, val)
+	require.Equal(t, newSessionID+"|100", val)
 
 	// Step 3: old session 延后 Unregister 钩子触发: RemoveOnline(oldSessionID)
-	// → 期望 user key 不动（sessionID guard 阻止 DEL）；但 SREM 旧 room 仍执行
-	// （r4 P1 修：cross-room 不变量也覆盖 same-room 路径，user key 保护与 SREM 解耦）
+	// → 期望 user key 不动（sessionID guard 阻止 DEL）；same-room reconnect 路径下
+	// **跳过 SREM**（r7 P1 修：currentRoom == 传入 roomID → Lua case 4 跳 SREM 防 race）
 	require.NoError(t, repo.RemoveOnline(ctx, roomID, userID, oldSessionID))
 
-	// Step 4: user:{id}:ws_session 仍 == newSessionID（**关键不变量** —— DEL 受
+	// Step 4: user:{id}:ws_session 仍 == newSessionID|roomID（**关键不变量** —— DEL 受
 	// sessionID guard 保护，不会被旧 session 的延后 RemoveOnline 误删，让上层
 	// 后续 RemoveOnline(newSessionID) 路径仍能正确比对）
 	val, err = client.Get(ctx, "user:42:ws_session")
 	require.NoError(t, err)
-	require.Equal(t, newSessionID, val, "user:{id}:ws_session 应保留 newSessionID（DEL 受 sessionID guard 保护）")
+	require.Equal(t, newSessionID+"|100", val, "user:{id}:ws_session 应保留 newSessionID|roomID（DEL 受 sessionID guard 保护）")
 }
 
-// TestPresenceRepo_RemoveOnline_SameRoomReconnect_SelfHealsAfterReAdd 验证
-// review 10-6 r4 P1 修后的 same-room 自愈语义：旧 RemoveOnline（sessionID 不匹配）
-// SREM 旧 room → user 暂离 room set；NEW session 的 AddOnline / scanner reconcile
-// SADD 把 user 加回 → IsOnline 自愈。
+// TestPresenceRepo_RemoveOnline_SameRoomReconnect_SkipsSREM_NoVisibilityGap
+// 验证 review 10-6 r7 P1 修后的 same-room 不变量：旧 RemoveOnline（sessionID 不
+// 匹配 + currentRoom == 旧 roomID）**跳过 SREM**，user 在 room set 内连续在线，
+// 没有"暂离窗口"。
 //
-// 时序：
+// 时序（fire-and-forget hook race 的真实复现）：
 //  1. AddOnline(roomA, userID, oldID)
-//  2. AddOnline(roomA, userID, newID) —— 模拟 NEW session AddOnline 抢先（scanner
-//     reconcile race / hook adapter 顺序）
-//  3. RemoveOnline(roomA, userID, oldID) —— 旧 unregister 钩子；r4 P1 新 Lua case 3
-//     SREM 旧 room（user 暂离）
-//  4. AddOnline(roomA, userID, newID) —— 后续 scanner reconcile / NEW Register
-//     onRegister 钩子；SADD 自愈
+//  2. AddOnline(roomA, userID, newID) —— 新 hook goroutine 先跑（覆盖 user key=newID|roomA + SADD）
+//  3. RemoveOnline(roomA, userID, oldID) —— 旧 hook goroutine 后跑；r7 P1 修：
+//     Lua case 4（currentRoom == ARGV[3]）跳 SREM 防 race
 //
-// 期望：最终 IsOnline 返 true、user key 仍 == newID。
-func TestPresenceRepo_RemoveOnline_SameRoomReconnect_SelfHealsAfterReAdd(t *testing.T) {
+// 期望：IsOnline 全程返 true（无瞬时 false 窗口），user key 仍 == newID|roomA。
+//
+// 旧版本（r4 P1 修后 r7 修前）：步骤 3 走 case 3 SREM → user 离开 roomA →
+// IsOnline 返 false 直到 scanner 30s tick 才自愈。本 test 锁定该窗口已消除。
+func TestPresenceRepo_RemoveOnline_SameRoomReconnect_SkipsSREM_NoVisibilityGap(t *testing.T) {
 	repo, _, client := newPresenceRepo(t)
 	ctx := context.Background()
 
@@ -249,26 +251,17 @@ func TestPresenceRepo_RemoveOnline_SameRoomReconnect_SelfHealsAfterReAdd(t *test
 	require.NoError(t, repo.AddOnline(ctx, roomID, userID, oldSessionID))
 	require.NoError(t, repo.AddOnline(ctx, roomID, userID, newSessionID))
 
-	// 旧 RemoveOnline 走 Lua case 3 —— SREM 旧 room（user 暂离 set），保留 user key
+	// 旧 RemoveOnline 走 Lua case 4 —— same-room reconnect，**跳过 SREM**，user 仍在 room set
 	require.NoError(t, repo.RemoveOnline(ctx, roomID, userID, oldSessionID))
 
-	// 中间瞬时态：user 不在 room set，但 user key 仍指 newID
+	// **关键不变量**：IsOnline 应仍返 true（无瞬时 false 窗口），user key 仍指 newID|roomA
 	online, err := repo.IsOnline(ctx, roomID, userID)
 	require.NoError(t, err)
-	require.False(t, online, "SREM 后 user 暂离 room set（瞬时态，预期）")
+	require.True(t, online, "r7 P1 修：same-room reconnect 路径 SREM 被跳过，user 应连续在 room set 内")
+
 	val, err := client.Get(ctx, "user:42:ws_session")
 	require.NoError(t, err)
-	require.Equal(t, newSessionID, val, "user key 受 sessionID guard 保护，不被旧 RemoveOnline DEL")
-
-	// 后续 scanner reconcile / NEW Register 钩子的 AddOnline 把 user 加回
-	require.NoError(t, repo.AddOnline(ctx, roomID, userID, newSessionID))
-
-	online, err = repo.IsOnline(ctx, roomID, userID)
-	require.NoError(t, err)
-	require.True(t, online, "AddOnline 后 user 自愈回 room set")
-	val, err = client.Get(ctx, "user:42:ws_session")
-	require.NoError(t, err)
-	require.Equal(t, newSessionID, val)
+	require.Equal(t, newSessionID+"|100", val, "user key 受 sessionID guard 保护，仍指 newSessionID|roomID")
 }
 
 // TestPresenceRepo_RemoveOnline_CrossRoomReconnect_SREMsOldRoom 验证 review
@@ -330,7 +323,8 @@ func TestPresenceRepo_RemoveOnline_CrossRoomReconnect_SREMsOldRoom(t *testing.T)
 
 	val, err := client.Get(ctx, "user:42:ws_session")
 	require.NoError(t, err)
-	require.Equal(t, newSessionID, val, "user key 仍 == newSessionID（DEL 受 sessionID guard 保护）")
+	// **review 10-6 r7 P1**：value 编码 "sessionID|roomID"；新 session 在 roomB
+	require.Equal(t, newSessionID+"|200", val, "user key 仍 == newSessionID|roomB（DEL 受 sessionID guard 保护）")
 }
 
 // TestPresenceRepo_RemoveOnline_MatchingSessionID_ClearsPresence 验证
@@ -554,9 +548,10 @@ func TestPresenceRepo_AddOnline_SAddFails_UserKeyHasTTL_RoomSetEmpty(t *testing.
 	require.Equal(t, 0, fault.expireCount, "SADD 失败 → EXPIRE 不应被调用")
 
 	// 验证 user:{id}:ws_session 已被 SET（含 TTL，因为 Set 走 KEY VAL EX 原子）
+	// **review 10-6 r7 P1**：value 编码 "sessionID|roomID"
 	val, err := inner.Get(ctx, "user:42:ws_session")
 	require.NoError(t, err)
-	require.Equal(t, "s1", val, "SET 已成功 → user:{id}:ws_session 应有值")
+	require.Equal(t, "s1|100", val, "SET 已成功 → user:{id}:ws_session 应有 sessionID|roomID 值")
 
 	// 验证 room set 没 member（SADD 失败前没数据）
 	members, err := inner.SMembers(ctx, "room:100:online_users")
@@ -593,9 +588,10 @@ func TestPresenceRepo_AddOnline_ExpireFails_UserKeyHasTTL(t *testing.T) {
 	require.Error(t, err, "EXPIRE 失败应让 AddOnline 返 error")
 
 	// 验证 user:{id}:ws_session 有值（SET 已成功）
+	// **review 10-6 r7 P1**：value 编码 "sessionID|roomID"
 	val, err := inner.Get(ctx, "user:42:ws_session")
 	require.NoError(t, err)
-	require.Equal(t, "s1", val)
+	require.Equal(t, "s1|100", val)
 
 	// 验证 user:{id}:ws_session **有** TTL（由 Set KEY VAL EX 原子带入；不依赖
 	// 后续 EXPIRE 命令）—— 走 FastForward 6 分钟后应过期
