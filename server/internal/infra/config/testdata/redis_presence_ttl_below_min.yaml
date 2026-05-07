@@ -1,0 +1,9 @@
+server:
+  http_port: 8080
+
+# review 10-6 r3 P2 测试 fixture：YAML 显式写 redis.presence_ttl_sec=30s
+# 低于下限 60s（= 2 × HeartbeatScanner tick 30s）→ loader fail-fast。
+# 30s 在 r2 之前是合法值；r3 P2 加下限后 loader 必须 return error 让运维注意。
+redis:
+  addr: "127.0.0.1:6379"
+  presence_ttl_sec: 30

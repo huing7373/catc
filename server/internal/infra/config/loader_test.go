@@ -402,13 +402,46 @@ func TestLoad_RedisPresenceTTLSecDefault(t *testing.T) {
 
 // TestLoad_RedisPresenceTTLSecExplicitYAML 验证 YAML 显式写 redis.presence_ttl_sec
 // 正值时正确解析（不被 loader 默认值覆盖）。Story 10.6 引入。
+//
+// fixture 显式值 90s（review 10-6 r3 P2 把下限设为 60s 后不能再用 30s；90s 仍
+// > 默认 300 但合法 ≥ 60 下限）。
 func TestLoad_RedisPresenceTTLSecExplicitYAML(t *testing.T) {
 	cfg, err := Load("testdata/redis_presence_ttl.yaml")
 	if err != nil {
 		t.Fatalf("Load returned unexpected error: %v", err)
 	}
-	if cfg.Redis.PresenceTTLSec != 30 {
-		t.Errorf("Redis.PresenceTTLSec = %d, want 30 (explicit YAML)", cfg.Redis.PresenceTTLSec)
+	if cfg.Redis.PresenceTTLSec != 90 {
+		t.Errorf("Redis.PresenceTTLSec = %d, want 90 (explicit YAML)", cfg.Redis.PresenceTTLSec)
+	}
+}
+
+// TestLoad_RedisPresenceTTLSecBelowMin_FailFast 验证 YAML 显式写
+// `redis.presence_ttl_sec` < 60（下限 = 2 × heartbeat scan interval 30s）时，
+// loader 返 error 而不是静默接受 / fall-back。review 10-6 r3 P2 加。
+//
+// 下限的工程含义：HeartbeatScanner 每 30s tick 调 AddOnline 重写 presence；
+// TTL ≤ 30s 连续两次 tick 之间已过期 → user 闪烁 offline。fail-fast 让运维
+// 立即注意配置错误，不让"看起来跑得起来但 presence 异常"漏到 prod。
+func TestLoad_RedisPresenceTTLSecBelowMin_FailFast(t *testing.T) {
+	_, err := Load("testdata/redis_presence_ttl_below_min.yaml")
+	if err == nil {
+		t.Fatal("Load should return error when presence_ttl_sec < 60 (below 2x scan interval), got nil")
+	}
+	wantSubstr := "redis.presence_ttl_sec=30 below minimum 60"
+	if !strings.Contains(err.Error(), wantSubstr) {
+		t.Errorf("Load error = %q, want contains %q", err.Error(), wantSubstr)
+	}
+}
+
+// TestLoad_RedisPresenceTTLSecAtMin_OK 验证下限边界值（=60）通过校验。
+// review 10-6 r3 P2 加。
+func TestLoad_RedisPresenceTTLSecAtMin_OK(t *testing.T) {
+	cfg, err := Load("testdata/redis_presence_ttl_at_min.yaml")
+	if err != nil {
+		t.Fatalf("Load returned unexpected error for boundary value 60: %v", err)
+	}
+	if cfg.Redis.PresenceTTLSec != 60 {
+		t.Errorf("Redis.PresenceTTLSec = %d, want 60 (boundary value)", cfg.Redis.PresenceTTLSec)
 	}
 }
 

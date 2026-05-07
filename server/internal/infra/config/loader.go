@@ -52,6 +52,15 @@ const (
 	// scan=30s）钦定 —— 远大于心跳路径让 TTL 永不到，远小于运维容忍窗口让僵尸 user
 	// 5 分钟内自然清。
 	defaultRedisPresenceTTLSec = 300
+	// minRedisPresenceTTLSec 是 PresenceTTLSec 显式 YAML 写入时的下限（review
+	// 10-6 r3 P2 加）。HeartbeatScanner 内部 tick 频率写死 30s（heartbeatScanIntervalSec），
+	// scanner 每次 tick 调 PresenceRepo.AddOnline 重写并续 TTL；如果 TTL ≤ 30s，
+	// 连续两次 tick 之间 TTL 已过期 → user 闪烁 offline 即使 session 活跃。最小
+	// 60s = 2 × tick 让 scanner 有足够 buffer 应对 IO 抖动；显式写更小值视为
+	// 配置错误，loader fail-fast 让运维侧能立即注意到（与 mysql.dsn 空串 fail-fast
+	// 同模式）。零值 / 负值仍走默认 300 兜底（YAML 缺字段路径不应被卡住）。
+	// 详见 docs/lessons/2026-05-07-presence-ttl-min-vs-scan-interval-10-6-r3.md。
+	minRedisPresenceTTLSec = 60
 	// defaultWSHeartbeatTimeoutSec 是 WS Session 心跳超时阈值（秒）。
 	// V1 §12.2 钦定 60s；prod 必须使用默认值（契约一部分）；Story 10.3 引入。
 	defaultWSHeartbeatTimeoutSec = 60
@@ -164,6 +173,15 @@ func Load(path string) (*Config, error) {
 	// 的合法业务语义；presence repo 必须有 TTL 才能在 server crash 后自然清僵尸记录）。
 	if cfg.Redis.PresenceTTLSec <= 0 {
 		cfg.Redis.PresenceTTLSec = defaultRedisPresenceTTLSec
+	}
+	// 下限校验（review 10-6 r3 P2 加）：HeartbeatScanner 30s tick 调 AddOnline
+	// 重写 + 续 TTL；TTL ≤ 30s 让连续两次 tick 之间 keys 过期，long-lived session
+	// 闪烁 offline。最小 60s = 2 × tick 让 IO 抖动 / 调度延迟仍有 buffer。显式
+	// 配置低于下限视为错误，fail-fast 让运维侧立即注意（与 mysql.dsn 空串模式
+	// 一致）。零值已在上一段兜底成 300，不会进本分支。
+	if cfg.Redis.PresenceTTLSec < minRedisPresenceTTLSec {
+		return nil, fmt.Errorf("redis.presence_ttl_sec=%d below minimum %d (must be >= 2x heartbeat scan interval 30s)",
+			cfg.Redis.PresenceTTLSec, minRedisPresenceTTLSec)
 	}
 	// Redis Addr / DB 不在 loader 兜底：
 	//   - Addr == "" 让 fail-fast 在 redis.Open 层暴露（与 mysql.dsn 同模式）

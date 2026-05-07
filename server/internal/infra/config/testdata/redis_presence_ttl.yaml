@@ -3,6 +3,9 @@ server:
 
 # Story 10.6 测试 fixture：YAML 显式写 redis.presence_ttl_sec 正值，
 # 验证 loader 不被默认值覆盖（与 testdata/redis.yaml 同风格）。
+#
+# review 10-6 r3 P2 把 90 设为 ≥ 60 下限的合法显式值；之前用 30
+# 在 r3 P2 加下限校验后会被 loader fail-fast 拒绝。
 redis:
   addr: "127.0.0.1:6379"
-  presence_ttl_sec: 30
+  presence_ttl_sec: 90

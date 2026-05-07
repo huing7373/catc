@@ -158,10 +158,11 @@ type PresenceRepo interface {
 	//     work，因为 set key 由其他 active user 维持存活）
 	//  2. EXPIRE user:{userID}:ws_session {ttl}
 	//
-	// **何时调用**：心跳路径（client 发 ping → server 收 ping 后 / scanner 扫到
-	// active session 后）—— 但**本 story 不挂载 RenewTTL 到 ping 路径**；本 story
-	// 仅交付 RenewTTL 方法实装 + 单测；钩子挂载由 future 优化 story 推进
-	// （Story 10.6 §"实装关键决策" §3 RenewTTL 挂载策略钦定）。
+	// **何时调用**：当前**生产路径不调用 RenewTTL**（Story 10.6 r3 P2 把 scanner
+	// reconcile 路径从 RenewTTL 改成 AddOnline，理由见 docs/lessons/2026-05-07-
+	// presence-add-online-self-heal-via-scanner-10-6-r3.md）—— RenewTTL 保留作
+	// PresenceRepo 接口契约方法 + 单测覆盖，让未来"纯续期不重写"场景（如 Lua
+	// reconcile script）能直接复用，不需要重新加方法。
 	//
 	// 错误语义：底层 EXPIRE 命令失败 → 返 error；key 不存在导致 EXPIRE 返 false ≠
 	// error，正常返 nil（让 caller 不必区分）。

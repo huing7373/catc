@@ -1,0 +1,8 @@
+server:
+  http_port: 8080
+
+# review 10-6 r3 P2 测试 fixture：边界值 60s（下限本身）。
+# loader 必须接受（"<" 严格小于而非 "<="），让 dev / 测试可压低 TTL 加速验证。
+redis:
+  addr: "127.0.0.1:6379"
+  presence_ttl_sec: 60

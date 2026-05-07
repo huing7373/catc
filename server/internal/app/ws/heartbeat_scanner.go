@@ -60,26 +60,34 @@ const heartbeatScanIntervalSec = 30
 //     Run 退出前 wg.Wait() 阻塞到所有 goroutine 跑完。两道防线（fanout 入口
 //     ctx-check 让 ctx-cancelled 路径立即 return + Run defer wg.Wait() 让残余
 //     goroutine 全跑完）共同保证 ctx cancel 后没有 stale fanout 在跑。
-//   - **每 tick renew presence TTL**（review 10-6 r2 P1）：long-lived WS session
+//   - **每 tick reconcile presence**（review 10-6 r2 P1 / r3 P2）：long-lived WS session
 //     超过 redis.presence_ttl_sec（默认 300s）后 presence keys 会过期 ——
 //     IsOnline / ListOnline 误报 user offline，但 manager 还认为 session active。
 //     scanOnce 拿到 ListAllSessions 后对每个 active（idle <= timeoutMs）session
-//     同步调 PresenceRenewer.RenewTTL 续期 —— 与 client 实际 ping 频率解耦（即使
-//     client ping 慢一点，scanner 30s tick 仍续，远小于 TTL 300s）。**仅对 active
-//     session 续期**，idle > timeoutMs 的 session 已经走 fanout close 路径，没必要
-//     续 TTL（close 完成后 onUnregister 钩子会 RemoveOnline 清干净）。详见 lesson
+//     同步调 PresenceRenewer.AddOnline 重写 + 续期 —— 与 client 实际 ping 频率解耦（即使
+//     client ping 慢一点，scanner 30s tick 仍写，远小于 TTL 300s）。**仅对 active
+//     session reconcile**，idle > timeoutMs 的 session 已经走 fanout close 路径，没必要
+//     续（close 完成后 onUnregister 钩子会 RemoveOnline 清干净）。详见 lesson
 //     2026-05-07-presence-ttl-renewal-via-heartbeat-scanner-10-6-r2.md。
+//   - **走 AddOnline 而非纯 RenewTTL**（review 10-6 r3 P2）：Register hook 调
+//     AddOnline 失败仅 log warn 仍接受 session；如果只调 RenewTTL（EXPIRE）扫描
+//     路径无法重建缺失的 room set 成员 → IsOnline/ListOnline 整个 session 生命周期
+//     内误报 offline。AddOnline 是 idempotent（SET 覆盖、SADD 已存在 no-op、EXPIRE
+//     总是续）—— 每 30s 全量重写 presence 让 partial-fail 路径自然 self-heal。
+//     IO 比 RenewTTL 略多（每 session 3 次 Redis command vs 2 次）但 SLO 内可接受。
+//     详见 lesson 2026-05-07-presence-add-online-self-heal-via-scanner-10-6-r3.md。
 type HeartbeatScanner struct {
 	mgr      SessionManager
 	cfg      heartbeatScannerConfig
 	logger   *slog.Logger
 	interval time.Duration
 
-	// renewer 是 presence TTL 续期接口（review 10-6 r2 P1）。**可空** —— production
-	// 路径 main.go wire 时传 PresenceRepo；单测路径默认 nil 跳过续期不影响心跳超时
-	// 检测语义。窄化接口（仅 RenewTTL 一个方法）让 scanner 不直接 import repo/redis
-	// 包，保持 ws → repo/redis 单向依赖最小化（gateway.go 已 import repo/mysql；
-	// 加 repo/redis 只是同模式扩展，无新跨层依赖问题）。
+	// renewer 是 presence reconcile 接口（review 10-6 r2 P1 / r3 P2）。**可空** ——
+	// production 路径 main.go wire 时传 PresenceRepo；单测路径默认 nil 跳过 reconcile
+	// 不影响心跳超时检测语义。窄化接口（仅 AddOnline 一个方法；r3 P2 从 RenewTTL
+	// 改成 AddOnline 让 scanner 路径 self-heal Register hook partial-fail）让 scanner
+	// 不直接 import repo/redis 包，保持 ws → repo/redis 单向依赖最小化（gateway.go
+	// 已 import repo/mysql；加 repo/redis 只是同模式扩展，无新跨层依赖问题）。
 	renewer PresenceRenewer
 
 	// wg 跟踪 scanOnce 已 dispatch 的 in-flight fanout goroutines（review r5 P2）。
@@ -89,18 +97,24 @@ type HeartbeatScanner struct {
 	wg sync.WaitGroup
 }
 
-// PresenceRenewer 是 HeartbeatScanner 续期 presence TTL 用的窄化接口（review
-// 10-6 r2 P1）。
+// PresenceRenewer 是 HeartbeatScanner reconcile presence 用的窄化接口（review
+// 10-6 r2 P1 / r3 P2）。
 //
-// 接口边界：仅含 RenewTTL 一个方法 —— scanner 不需要 AddOnline / RemoveOnline /
-// IsOnline / ListOnline；让单测可注入 stub 不必拉 miniredis；production 路径
+// 接口边界：仅含 AddOnline 一个方法 —— scanner 不需要 RemoveOnline / IsOnline /
+// ListOnline / RenewTTL；让单测可注入 stub 不必拉 miniredis；production 路径
 // PresenceRepo 接口超集自动满足本接口。
 //
-// 失败语义：RenewTTL 返 error → scanner log warn 继续遍历下一 session（一次失败
-// 不影响其他 session 续期，与 close fanout 错误隔离同模式）；下一 tick 30s 后
+// **r3 P2 决策**：从 RenewTTL 改成 AddOnline。原因：Register hook 调 AddOnline
+// 失败仅 log warn 仍接受 session；后续 scanner 路径若只跑 RenewTTL（EXPIRE 双
+// key）不会重建缺失的 room set 成员（room:{id}:online_users 没 SADD 过就不会有
+// user-string member 让 EXPIRE 续命）。改调 AddOnline 走 SET → SADD → EXPIRE
+// 三命令 idempotent 重写 → partial-fail 场景下 30s 内自愈。
+//
+// 失败语义：AddOnline 返 error → scanner log warn 继续遍历下一 session（一次失败
+// 不影响其他 session reconcile，与 close fanout 错误隔离同模式）；下一 tick 30s 后
 // 重试，TTL 5min 远 > 30s × 几次重试，足以容忍偶发 Redis 抖动。
 type PresenceRenewer interface {
-	RenewTTL(ctx context.Context, roomID, userID uint64) error
+	AddOnline(ctx context.Context, roomID, userID uint64, sessionID string) error
 }
 
 // heartbeatScannerConfig 是 HeartbeatScanner 接受的最小配置面（让单测可注入
@@ -116,10 +130,11 @@ type heartbeatScannerConfig struct {
 //   - timeoutSec: 心跳超时阈值（秒）；通常传 cfg.WS.HeartbeatTimeoutSec
 //   - logger: base logger（传 slog.Default() 即可；scanner 内部 With 加
 //     component=ws-heartbeat）
-//   - renewer: presence TTL 续期接口（review 10-6 r2 P1 加；可空 —— 单测 / 没接
-//     Redis 的最小路径传 nil 跳过续期，不影响心跳超时检测语义）；production 路径
-//     传 PresenceRepo 单例（PresenceRepo 接口含 RenewTTL 方法满足 PresenceRenewer
-//     接口约束）
+//   - renewer: presence reconcile 接口（review 10-6 r2 P1 加 / r3 P2 改：方法
+//     从 RenewTTL 换成 AddOnline 让 scanner 路径自愈 Register hook partial-fail；
+//     可空 —— 单测 / 没接 Redis 的最小路径传 nil 跳过 reconcile，不影响心跳超时
+//     检测语义）；production 路径传 PresenceRepo 单例（PresenceRepo 接口含
+//     AddOnline 方法满足 PresenceRenewer 接口约束）
 //
 // timeoutSec ≤ 0 → 走默认 60s（防御性兜底；正常路径 cfg.WS.HeartbeatTimeoutSec
 // 已经在 loader 内兜底过 60，但本构造函数也兜底一次让 scanner 在 testing 场景
@@ -227,8 +242,9 @@ func (s *HeartbeatScanner) Run(ctx context.Context) {
 //  1. mgr.ListAllSessions(ctx) → 拿当前所有 active Session 切片
 //  2. 对每个 Session 计算 idle = now.UnixMilli() - s.LastHeartbeatAt()
 //  3. idle <= timeoutMs（active）→ renewer != nil 时同步调
-//     PresenceRenewer.RenewTTL（roomID, userID）续期 presence keys（review
-//     10-6 r2 P1）
+//     PresenceRenewer.AddOnline（roomID, userID, sessionID）重写 + 续期 presence
+//     keys（review 10-6 r2 P1 加；r3 P2 把方法从 RenewTTL 改成 AddOnline 让
+//     Register hook partial-fail 路径在 30s 内自愈）
 //  4. idle > timeoutMs → 并发 go { ctx-check → 重新校验 idle > timeoutMs（review
 //     r1 P1 TOCTOU 修） → ctx-check → s.CloseWithCode(4005, "heartbeat timeout") }
 //     （并发避免某一 Session 写 close frame 慢阻塞其他 Session 检测）
@@ -279,15 +295,20 @@ func (s *HeartbeatScanner) scanOnce(ctx context.Context, now time.Time) {
 		}
 		idle := nowMs - sess.LastHeartbeatAt()
 		if idle <= timeoutMs {
-			// review 10-6 r2 P1：active session 续 presence TTL —— scanner 30s
-			// tick 远小于 TTL 5min，让 long-lived session 不被 Redis 自动过期误
-			// 报为 offline。renewer == nil（未接 Redis 的最小路径 / 单测）跳过。
+			// review 10-6 r2 P1 / r3 P2：active session 调 AddOnline reconcile
+			// presence —— scanner 30s tick 远小于 TTL 5min，让 long-lived session
+			// 不被 Redis 自动过期误报为 offline；同时让 Register hook AddOnline
+			// 失败（partial fail）的 session 在 30s 内通过 scanner 路径自愈
+			// 重建缺失的 room set 成员（纯 RenewTTL 路径只 EXPIRE 双 key，不会
+			// 重建 SADD member）。AddOnline 是 idempotent（SET nx=false 覆盖、
+			// SADD 已存在 no-op、EXPIRE 总是续）—— 重复调安全。renewer == nil
+			// （未接 Redis 的最小路径 / 单测）跳过。
 			if s.renewer != nil {
-				if err := s.renewer.RenewTTL(ctx, sess.RoomID(), sess.UserID()); err != nil {
+				if err := s.renewer.AddOnline(ctx, sess.RoomID(), sess.UserID(), sess.SessionID()); err != nil {
 					// 一次失败不阻塞遍历下一 session；下一 tick 30s 后重试，TTL
 					// 5min 远 > 30s × 几次重试，足以容忍偶发 Redis 抖动。log warn
 					// 让运维侧能看到累计失败信号。
-					s.logger.Warn("ws presence renew ttl failed",
+					s.logger.Warn("ws presence reconcile failed",
 						slog.String("sessionID", sess.SessionID()),
 						slog.Uint64("userID", sess.UserID()),
 						slog.Uint64("roomID", sess.RoomID()),

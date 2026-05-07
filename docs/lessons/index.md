@@ -193,3 +193,4 @@
 | 2026-05-07 | [WS BroadcastToRoom 同 room hot path 必须 Load fast path 而非每次 LoadOrStore alloc 新 mutex（10-5 r3）](2026-05-07-ws-broadcast-load-fast-path-zero-alloc-hot-path-10-5-r3.md) | 1 | perf | `40b017e` |
 | 2026-05-07 | [Redis presence RemoveOnline 必须带 sessionID guard 走 Lua atomic compare-and-delete（10-6 r1）](2026-05-07-redis-presence-remove-needs-session-id-guard-10-6-r1.md) | 1 | architecture | `<pending>` |
 | 2026-05-07 | [Redis presence TTL 必须周期续期 & AddOnline 命令顺序必须让 partial-fail 不留永久 zombie（10-6 r2）](2026-05-07-presence-ttl-renewal-and-add-online-command-order-10-6-r2.md) | 2 | architecture, error-handling | `<pending>` |
+| 2026-05-07 | [Presence reconcile 必须走 idempotent 全量重写而非纯 EXPIRE 续期 & TTL 显式配置必须 ≥ 2× scan interval（10-6 r3）](2026-05-07-presence-self-heal-and-ttl-min-bound-10-6-r3.md) | 2 | architecture, config | `<pending>` |
