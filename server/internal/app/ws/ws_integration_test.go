@@ -441,3 +441,146 @@ func TestWSIntegration_HeartbeatTimeout_Closes4005(t *testing.T) {
 		t.Errorf("ListAllSessions len = %d after timeout close, want 0 (Unregister hook 未触发？)", got)
 	}
 }
+
+// TestWSIntegration_BroadcastToRoom_3Clients_AllReceive（Story 10.5 集成测试）：
+//   - 复用 startMySQLWithRoomMemberFixture（默认含 room=3001 + user 1001/1002）
+//   - 在测试体内额外插入 user 1003 到 room=3001，让 fixture 含 3 个 user
+//   - 启动 httptest gateway → 用 3 个不同 token 拨连 3 个 WS Dialer
+//   - 各自收到 placeholder snapshot 后 → 调 BroadcastToRoom(ctx, sessionMgr, 3001, msg)
+//   - 验证：
+//     1. 返 (3, nil)
+//     2. 3 个 conn 都 ReadMessage 收到同 msg
+//     3. 一个 client 主动 Close → 等 manager Unregister → 再调 BroadcastToRoom →
+//        剩 2 个 client 收到；返 (2, nil)；无 error
+//
+// **关键**：本测试用**生产路径** BroadcastToRoom（不是 ForTest 变体）— 通过
+// 显式 ReadMessage 等所有 fanout goroutine 把 msg 写到 conn 上 → 验证生产
+// fire-and-forget 行为。
+func TestWSIntegration_BroadcastToRoom_3Clients_AllReceive(t *testing.T) {
+	gormDB, cleanup := startMySQLWithRoomMemberFixture(t)
+	defer cleanup()
+
+	// 扩展 fixture：插入 user 1003 到 room=3001，让 room 含 3 个 user
+	rawDB, err := gormDB.DB()
+	if err != nil {
+		t.Fatalf("gormDB.DB: %v", err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO room_members (room_id, user_id) VALUES (3001, 1003)`); err != nil {
+		t.Fatalf("insert user 1003: %v", err)
+	}
+	// 同步更新 rooms.member_count = 3
+	if _, err := rawDB.Exec(`UPDATE rooms SET member_count = 3 WHERE id = 3001`); err != nil {
+		t.Fatalf("update member_count: %v", err)
+	}
+
+	wsURL, signer, mgr, ts := startGatewayWithRealMySQL(t, gormDB)
+	defer mgr.Close()
+	defer ts.Close()
+
+	// 拨 3 个 conn
+	conns := make([]*websocket.Conn, 0, 3)
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+	for _, uid := range []uint64{1001, 1002, 1003} {
+		token, err := signer.Sign(uid, 3600)
+		if err != nil {
+			t.Fatalf("Sign uid=%d: %v", uid, err)
+		}
+		url := fmt.Sprintf("%s/ws/rooms/3001?token=%s", wsURL, token)
+		conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+		if err != nil {
+			t.Fatalf("Dial uid=%d: %v", uid, err)
+		}
+		conns = append(conns, conn)
+
+		// 读 snapshot
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, _, err := conn.ReadMessage(); err != nil {
+			t.Fatalf("read snapshot uid=%d: %v", uid, err)
+		}
+	}
+
+	// 等 3 个 Session 全部注册到 manager
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(mgr.ListSessionsByRoomID(context.Background(), 3001)) >= 3 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := len(mgr.ListSessionsByRoomID(context.Background(), 3001)); got != 3 {
+		t.Fatalf("ListSessionsByRoomID(3001) = %d, want 3", got)
+	}
+
+	// 调 BroadcastToRoom 推送 member.joined-shape 消息（生产路径 fire-and-forget）
+	msg1 := []byte(`{"type":"member.joined","requestId":"","payload":{"userId":"4001","nickname":""},"ts":1234567890}`)
+	sent, err := wsapp.BroadcastToRoom(context.Background(), mgr, 3001, msg1)
+	if err != nil {
+		t.Fatalf("BroadcastToRoom err: %v", err)
+	}
+	if sent != 3 {
+		t.Errorf("sent = %d, want 3", sent)
+	}
+
+	// 3 个 conn 都应收到 msg1
+	for i, conn := range conns {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("conn[%d] ReadMessage msg1: %v", i, err)
+		}
+		var env map[string]any
+		if err := json.Unmarshal(msg, &env); err != nil {
+			t.Errorf("conn[%d] unmarshal msg1: %v", i, err)
+			continue
+		}
+		if env["type"] != "member.joined" {
+			t.Errorf("conn[%d] type = %v, want member.joined", i, env["type"])
+		}
+	}
+
+	// 主动关 conn[1]（user 1002）
+	conns[1].Close()
+
+	// 等 manager Unregister user 1002 完成（list 长度从 3 变成 2）
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(mgr.ListSessionsByRoomID(context.Background(), 3001)) <= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := len(mgr.ListSessionsByRoomID(context.Background(), 3001)); got != 2 {
+		t.Fatalf("after close conn[1], ListSessionsByRoomID(3001) = %d, want 2", got)
+	}
+
+	// 再调 BroadcastToRoom：仅剩 2 个 Session，sent=2
+	msg2 := []byte(`{"type":"member.left","requestId":"","payload":{"userId":"1002","nickname":""},"ts":1234567891}`)
+	sent2, err := wsapp.BroadcastToRoom(context.Background(), mgr, 3001, msg2)
+	if err != nil {
+		t.Fatalf("second BroadcastToRoom err: %v", err)
+	}
+	if sent2 != 2 {
+		t.Errorf("second sent = %d, want 2", sent2)
+	}
+
+	// conn[0] / conn[2] 都收到 msg2
+	for _, idx := range []int{0, 2} {
+		_ = conns[idx].SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, msg, err := conns[idx].ReadMessage()
+		if err != nil {
+			t.Fatalf("conn[%d] ReadMessage msg2: %v", idx, err)
+		}
+		var env map[string]any
+		if err := json.Unmarshal(msg, &env); err != nil {
+			t.Errorf("conn[%d] unmarshal msg2: %v", idx, err)
+			continue
+		}
+		if env["type"] != "member.left" {
+			t.Errorf("conn[%d] type = %v, want member.left", idx, env["type"])
+		}
+	}
+}

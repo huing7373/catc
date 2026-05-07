@@ -50,3 +50,21 @@ func (s *Session) CloseWaitTimeoutForTest() time.Duration {
 func (s *Session) WriteTimeoutForTest() time.Duration {
 	return s.writeTimeout
 }
+
+// BroadcastToRoomForTest 是 BroadcastToRoom 的测试别名（review 10-5 r1 后保留
+// 作语义标注 + 既有测试调用站不破坏）。
+//
+// **历史**：r1 之前生产路径走 fire-and-forget goroutine fanout，ForTest 变体内
+// wg.Wait() 等所有 goroutine drain 让单测可同步 assert。r1 review 指出 fanout
+// goroutine 不保证 per-session 顺序 + msg buffer ownership 泄漏 → 生产路径改成
+// 同步 for-range 调 Session.Send，wg / goroutine 完全去掉。同步后 ForTest 与
+// 生产路径行为一致 —— 保留本别名仅为：
+//   - 既有测试调用站（TestBroadcastToRoom_* in ws_test.go）不破坏
+//   - 测试代码语义清晰（ForTest 后缀提示"测试场景，不依赖任何 fire-and-forget
+//     语义"）
+//
+// **禁止**在生产路径调用 —— 命名 *ForTest 后缀 + export_test.go 文件让 go build
+// 自动忽略本入口；生产路径必须用 BroadcastToRoom。
+func BroadcastToRoomForTest(ctx context.Context, mgr SessionManager, roomID uint64, msg []byte) (sent int, err error) {
+	return BroadcastToRoom(ctx, mgr, roomID, msg)
+}
