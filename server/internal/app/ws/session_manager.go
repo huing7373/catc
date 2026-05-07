@@ -183,8 +183,11 @@ func NewSessionManager(opts ...SessionManagerOption) SessionManager {
 //     + 重建 contextual logger（带 sessionID）
 //  4. 注入新 Session 的双索引 + userToSessionID（覆盖）
 //  5. 把 manager 自身设为 session.notifier，让 session 自闭时反向通知 manager
-//  6. 锁外调 onRegister 钩子（如有）+ 旧 Session 强制 Close（触发 onUnregister
-//     钩子）
+//  6. 锁外**先**调 onRegister 钩子（10.6 presence AddOnline）—— 让新 session 的
+//     AddOnline 在旧 session 的 RemoveOnline **之前**跑，消除 reconnect "false
+//     offline window"
+//  7. 锁外**后**触发旧 Session 强制 Close（→ notifyClosed → Unregister(oldID) →
+//     onUnregister 钩子 → RemoveOnline(OLD)）
 //
 // **关键不变量 1**（review r2 P1 修）：reconnect 替换路径**必须**触发旧 Session
 // 的 onUnregister 钩子。修复前实装是"锁内 removeFromIndicesLocked(oldS) → 锁外
@@ -199,6 +202,19 @@ func NewSessionManager(opts ...SessionManagerOption) SessionManager {
 // 保留 OLD 在 sessionsByID 让后续 Close → Unregister 仍能找到 + 触发钩子；OLD 在
 // sessionsByID 的清理由 Unregister(oldID) 路径接管，**不**再二次动 sessionsByRoom
 // （已被 Register 段移除）。
+//
+// **关键不变量 3**（review r10 P2 修）：reconnect 替换路径下 onRegister(NEW) 必须
+// **先于** replaced.Close() 触发的 onUnregister(OLD) 跑。修前顺序是 "replaced.Close()
+// → onUnregister(OLD) → RemoveOnline(OLD) → onRegister(NEW) → AddOnline(NEW)" ——
+// 中间窗口里 user_key 已被 RemoveOnline DEL（sessionID 匹配走 Lua case 2），
+// IsOnline / ListOnline 看到 user **暂时离线**直到 AddOnline(NEW) 跑完。这是
+// presence 数据准确度的回归（同一 user reconnect 不应有 false offline 窗口）。
+// 修后顺序：onRegister(NEW) **先**跑 → AddOnline(NEW) 在 r9 P1 共享 user mutex
+// 内同步完成（user_key 改成 newSession|newRoom，newRoom set 含 user，且 r10 P1
+// 内置的 cross-room SREM 自愈也跑掉了 oldRoom stale）；之后 replaced.Close() 触发
+// RemoveOnline(OLD) → Lua script GET → currentSession==newSession≠oldSession →
+// 走 case 3/4（**不**动 user_key），SREM 仅在 cross-room 路径执行（旧 oldRoom
+// 已被 r10 P1 SREM 干净，二次 SREM 是 idempotent no-op）。**全程 user 看似 online**。
 //
 // 配合修改：removeFromIndicesLocked 必须 graceful 处理"sessionsByRoom 已不在
 // 但 sessionsByID 在"的状态（只 delete 存在的索引）—— 已就绪（map delete 对
@@ -258,17 +274,23 @@ func (m *sessionManager) Register(ctx context.Context, s *Session) (string, erro
 	onRegister := m.onRegister
 	m.mu.Unlock()
 
-	// 锁外做：
-	//   1. 旧 Session 强制 Close（避免 Close → notifyClosed → manager.Unregister
-	//      在锁内重入死锁）；Close → notifyClosed → Unregister(oldID) 走标准
-	//      removeFromIndicesLocked + onUnregister 钩子触发路径
-	//   2. 注册钩子（10.6 Redis presence；外部 IO 可能慢，不能持锁）
+	// 锁外做（**review r10 P2 修后顺序**）：
+	//   1. 注册钩子（10.6 Redis presence AddOnline；外部 IO 可能慢，不能持锁）——
+	//      **必须**先于 replaced.Close 跑，让 user_key + newRoom set 在旧 session
+	//      的 RemoveOnline 之前已就位，消除 reconnect "false offline window"。r10
+	//      P1 配套修法：AddOnline 内置 cross-room SREM 自愈把旧 room stale 也清掉
+	//   2. 旧 Session 强制 Close（避免 Close → notifyClosed → manager.Unregister
+	//      在锁内重入死锁）；Close → notifyClosed → Unregister(oldID) → onUnregister
+	//      钩子 → RemoveOnline(oldID) 走标准路径。AddOnline(NEW) 已先跑 →
+	//      user_key=newSession|newRoom；RemoveOnline(OLD) 的 Lua script 看到
+	//      currentSession=newSession≠oldSession 走 case 3/4 不动 user_key，仅
+	//      cross-room 时 SREM oldRoom（已被 AddOnline 自愈过，幂等 no-op）
+	if onRegister != nil {
+		onRegister(s)
+	}
 	if replaced != nil {
 		// 旧 Session 主动关；调用方可通过 ErrSessionReplaced 标识本次关闭语义
 		_ = replaced.Close()
-	}
-	if onRegister != nil {
-		onRegister(s)
 	}
 
 	if replaced != nil {

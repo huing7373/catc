@@ -75,7 +75,13 @@ const defaultPresenceTTL = 5 * time.Minute
 type PresenceRepo interface {
 	// AddOnline 把 (roomID, userID, sessionID) 写入 presence。
 	//
-	// 流程（**review 10-6 r2 P2 修后 + r7 P1 修后**）：
+	// 流程（**review 10-6 r2 P2 修后 + r7 P1 修后 + r10 P1 修后**）：
+	//  0. GET user:{userID}:ws_session（review 10-6 r10 P1）—— 解析旧 value 拿到
+	//     oldRoomID；若 oldRoomID != newRoomID → SREM 旧 room set 上的 user member
+	//     （cross-room reconnect 自愈：RemoveOnline 漏跑场景下旧 room 残留的 stale
+	//     member 在下次 AddOnline 时被清，避免依赖 oldRoom set 整体 TTL 过期）。
+	//     same-room reconnect / first-time AddOnline / 旧 key TTL 已过期 → 跳过
+	//     SREM 一次 round trip。
 	//  1. SET user:{userID}:ws_session "{sessionID}|{roomID}" ttl（SET KEY VAL EX 单命令
 	//     原子，包含 TTL；nx=false → reconnect 替换路径能更新；value 编码 sessionID +
 	//     roomID 让 RemoveOnline Lua script 能区分 same-room vs cross-room reconnect）
@@ -242,6 +248,37 @@ func formatUserValue(sessionID string, roomID uint64) string {
 	return sessionID + userValueSeparator + strconv.FormatUint(roomID, 10)
 }
 
+// parseUserValue 把 user:{id}:ws_session 的 value 解析回 (sessionID, roomID)。
+//
+// value 形态：`"<sessionID>|<roomID-decimal>"`（与 formatUserValue 严格对偶；
+// review 10-6 r7 P1 引入；与 removeOnlineLuaScript 内 string.find/sub 解析逻辑等价）。
+//
+// **review 10-6 r10 P1 加**：AddOnline cross-room reconnect 自愈路径需要解析 user
+// key 旧 value 拿到 oldRoomID，在 SET 覆盖之前 SREM 旧 room set 的 stale member
+// （否则 RemoveOnline 跑失败 / 漏跑时旧 room 永远残留 user）。
+//
+// 错误语义：
+//   - value 不含 `"|"` 分隔符（数据被外部污染或旧版本残留）→ 返 (raw, 0, error)
+//   - roomID 不是合法 uint64 string → 返 (sessionID, 0, error)
+//   - happy path → 返 (sessionID, roomID, nil)
+//
+// 与 ListOnline parse member 同 fail-fast 风格：解析失败一定是数据被外部污染
+// （AddOnline 是唯一写入路径），让 caller 看见 error 而非 silently 漏 SREM。
+func parseUserValue(raw string) (sessionID string, roomID uint64, err error) {
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == userValueSeparator[0] {
+			sessionID = raw[:i]
+			roomStr := raw[i+1:]
+			rid, perr := strconv.ParseUint(roomStr, 10, 64)
+			if perr != nil {
+				return sessionID, 0, fmt.Errorf("parse user value roomID %q: %w", roomStr, perr)
+			}
+			return sessionID, rid, nil
+		}
+	}
+	return raw, 0, fmt.Errorf("parse user value: missing %q separator in %q", userValueSeparator, raw)
+}
+
 // addRoomMemberLuaScript 把 SADD + EXPIRE 包成一个 Lua 段，让 room set member
 // 加入与 TTL 设置在 Redis 端**原子**完成 —— 走 EVAL 路径不可被 server crash /
 // 命令间断点 split。
@@ -290,24 +327,79 @@ return 1`
 // TTL 5min 过期，但 room set 上 member 没人触发 SREM 永久残留。修法：SADD + EXPIRE
 // Lua 原子化，要么两条都跑要么都没跑。
 //
+// **review 10-6 r10 P1 修**：cross-room reconnect 自愈路径加 GET-旧 value-SREM-旧 room。
+// 修前的语义漏：如果 RemoveOnline(oldRoom, oldSession) 失败 / 漏跑（hook ctx timeout、
+// Redis transient unavailable 等）→ user_key 旧 value 含 oldRoomID 但 oldRoom set
+// 仍含 user member。下一 scanner reconcile tick 调 AddOnline(newRoom, userID,
+// newSession) **覆盖** user_key 到 newSession|newRoom + SADD newRoom，但**永远不
+// SREM oldRoom** —— oldRoom set 里的 user member 永久残留，直到 oldRoom 整个 set
+// 因 TTL 自然过期（仅当 oldRoom 全部 user 都离开 + 无人续 TTL；任何一个活跃 user
+// 周期性续 TTL 就让 stale entry 永远在）。
+//
+// 修法：在 SET 覆盖之前，**先 GET 旧 user_key value**，解析出 oldRoomID；如果
+// oldRoomID != newRoomID（cross-room reconnect 或 stale），先 SREM oldRoom set 上
+// 的 user member。这是 Go-side 多步操作（**非**原子 Lua），但与 r9 P1 加的 per-user
+// mutex 串行化配合 —— hook 与 scanner reconcile 都对同一 userID 走同一把 mutex 的
+// LockFor → AddOnline 顺序天然 FIFO，TOCTOU race 不可能发生（不会有两个并发
+// AddOnline 路径同时跑到 GET → SREM 之间）。
+//
 // 修后 partial-fail 矩阵：
-//   - SET 失败 → return → Lua 段没执行 → 不留任何残留（最干净）
-//   - SET 成功 + Lua 段失败 → return → user:{id}:ws_session 已写入有 TTL，room
-//     set 不变（要么 SADD+EXPIRE 都成功要么都没执行）。下次 AddOnline 同 user
-//     重试自愈（SET 覆盖 + Lua 重跑 → 完整恢复）。process crash 时 user_key TTL
-//     过期，room set 也不变（无残留）。
+//   - GET 失败 → return → SET / Lua 都没动 → 不留任何残留（最干净）
+//   - GET 成功 + SREM 失败（旧 room SREM）→ return → user_key + room set 都没改 →
+//     下次 AddOnline 重试自愈（GET 拿同样旧 value，再次尝试 SREM）；但**不**让
+//     SREM 失败永久 block 后续 → SREM 错误 wrap 成 error 返出（caller 走 hook
+//     log warn，下一 scanner tick 自愈）
+//   - GET 成功 + SREM 成功 + SET 失败 → return → oldRoom 已清，user_key 旧 value
+//     仍在（未覆盖到 newSession|newRoom），下次 AddOnline 重试 GET 仍拿旧 value，
+//     SREM 是 idempotent no-op（member 已不存在），SET 重试覆盖。也无残留
+//   - SET 成功 + Lua 段失败 → return → user_key 已写入新 value 含 TTL，room set
+//     不变。下次 AddOnline 重试 GET 拿到 newSession|newRoom（current = new = same
+//     room）→ SREM 跳过；SET 覆盖（同值幂等）；Lua 重跑 → 完整恢复。
 //   - SET 成功 + Lua 段成功 → 完整一致状态。
 //
-// 详见 docs/lessons/2026-05-07-fire-and-forget-hooks-need-per-user-mutex-10-6-r8.md。
+// 详见 docs/lessons/2026-05-07-fire-and-forget-hooks-need-per-user-mutex-10-6-r8.md
+// + lesson 2026-05-07-presence-add-online-cross-room-stale-srem-10-6-r10.md。
 func (r *presenceRepo) AddOnline(ctx context.Context, roomID, userID uint64, sessionID string) error {
 	rk := roomKey(roomID)
 	uk := userKey(userID)
 	uidStr := strconv.FormatUint(userID, 10)
 	userValue := formatUserValue(sessionID, roomID)
 
+	// **review 10-6 r10 P1**：先 GET 旧 user_key value，解析出 oldRoomID；如果
+	// oldRoomID != newRoomID（cross-room reconnect 或 RemoveOnline 漏跑残留）→
+	// SREM 旧 room set 上的 stale user member。**仅当**旧 room 与新 room 不同
+	// 才 SREM —— same-room reconnect / first-time AddOnline / TTL 过期路径都跳过
+	// （省一次 round trip）。
+	//
+	// **why Go-side 多步而非 Lua 原子**：Lua script 的 KEYS 必须在调用前列举
+	// （Redis Cluster 限制 EVAL keys 在同一 hash slot），但 oldRoom 是从 user_key
+	// value 动态解析出来的，无法预知。Go-side 多步配合 r9 P1 per-user mutex 串行
+	// 化（hook 与 scanner reconcile 共享 LockFor）足以保证 TOCTOU 不发生：同 userID
+	// 的所有 AddOnline / RemoveOnline 路径在锁内排队，GET → SREM → SET → Lua 这
+	// 一段不可被并发抢占。Cluster 部署时如启用 cross-slot key，本路径在不同 slot
+	// 间走多 RTT 是可接受的（presence 是 ephemeral 状态，毫秒级延迟无 SLO 风险）。
+	if oldRaw, err := r.client.Get(ctx, uk); err != nil {
+		return fmt.Errorf("presence add online get old: %w", err)
+	} else if oldRaw != "" {
+		// oldRaw 解析失败（externally polluted）→ fail-fast 让运维注意，与 ListOnline
+		// 的 strconv.ParseUint 失败兜底语义一致；不 silently 跳 SREM 留 zombie。
+		_, oldRoomID, perr := parseUserValue(oldRaw)
+		if perr != nil {
+			return fmt.Errorf("presence add online parse old user value: %w", perr)
+		}
+		if oldRoomID != roomID {
+			oldRk := roomKey(oldRoomID)
+			if _, srErr := r.client.SRem(ctx, oldRk, uidStr); srErr != nil {
+				return fmt.Errorf("presence add online srem old room: %w", srErr)
+			}
+		}
+	}
+
 	// 第一步：SET user:{id}:ws_session 走 SET KEY VAL EX 单命令原子（包含 TTL）。
 	// SET nx=false：reconnect 替换路径能更新 sessionID（同 user 二次 AddOnline 覆盖旧值）。
-	// 失败立即 return，**之前没动** Lua 段 —— 不留任何残留。
+	// 失败立即 return，**之前的 SREM** 已经跑了 —— 但旧 room SREM 是 idempotent，
+	// 失败重试路径下 GET 拿到的旧 value 仍指 old，SREM 二次调用是 no-op（member 已
+	// 不存在）；不会留残留。
 	// value = "sessionID|roomID"（review 10-6 r7 P1 修）让 RemoveOnline Lua script
 	// 能比较 currentRoom vs oldRoom 区分 same-room / cross-room reconnect。
 	if _, err := r.client.Set(ctx, uk, userValue, r.ttl, false); err != nil {

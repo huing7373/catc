@@ -3829,6 +3829,155 @@ func TestPresenceHook_ReconnectTriggersRemoveForOldSession(t *testing.T) {
 	}
 }
 
+// TestPresenceHook_Reconnect_AddBeforeRemove_NoOfflineWindow: review 10-6 r10 P2
+// 防回归 —— 同 user reconnect 替换路径下 onRegister(NEW) 必须**先于**
+// onUnregister(OLD) 触发。
+//
+// 修前 Register 顺序：
+//   - 锁外: replaced.Close() → notifyClosed → Unregister(oldID) → onUnregister(OLD)
+//     → RemoveOnline(OLD) 跑掉 user_key 和 oldRoom set 上的 user
+//   - 锁外: onRegister(NEW) → AddOnline(NEW) 重新写回
+//
+// 中间窗口（RemoveOnline 跑完到 AddOnline 跑完之间）IsOnline / ListOnline 看到
+// user 暂时离线（生产路径上 Redis brownout 期可能拉到几百毫秒），违反 V1 §12 "presence
+// 是查询时态" 的连续性语义。
+//
+// 修后顺序：onRegister(NEW) **先**跑 → AddOnline(NEW) 完整就位（含 r10 P1 自动
+// SREM stale oldRoom）→ replaced.Close() → onUnregister(OLD) → RemoveOnline(OLD)
+// 后跑（Lua script 看 currentSession=NEW≠OLD 走 case 3/4 不动 user_key）。全程
+// user 看似 online。
+//
+// 本测试用 fake adapter 收集 hook 触发**顺序**，断言 NEW 的 AddOnline call 在 OLD
+// 的 RemoveOnline call **之前**。
+func TestPresenceHook_Reconnect_AddBeforeRemove_NoOfflineWindow(t *testing.T) {
+	var (
+		mu          sync.Mutex
+		callOrder   []string // append "add:<sid>" / "remove:<sid>" 按真实触发顺序
+		oldSessionID string
+	)
+	mgr := wsapp.NewSessionManager(
+		wsapp.WithRegisterHook(func(s *wsapp.Session) {
+			mu.Lock()
+			callOrder = append(callOrder, "add:"+s.SessionID())
+			mu.Unlock()
+		}),
+		wsapp.WithUnregisterHook(func(s *wsapp.Session) {
+			mu.Lock()
+			callOrder = append(callOrder, "remove:"+s.SessionID())
+			mu.Unlock()
+		}),
+	)
+	defer mgr.Close()
+
+	repo := &stubRoomMemberRepo{}
+	signer := newSigner(t)
+	wsURL, ts := startGatewayServer(t, signer, mgr, repo)
+	defer ts.Close()
+
+	const userID = uint64(1001)
+	const roomA = uint64(3001)
+	const roomB = uint64(3002)
+
+	// 第一次连接到 roomA
+	tokenA, _ := signer.Sign(userID, 3600)
+	urlA := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomA, tokenA)
+	connA, _, err := dialWS(t, urlA)
+	if err != nil {
+		t.Fatalf("dial roomA: %v", err)
+	}
+	defer connA.Close()
+	_ = connA.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := connA.ReadMessage(); err != nil {
+		t.Fatalf("read snapshot roomA: %v", err)
+	}
+
+	// 抓旧 sessionID
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sessions := mgr.ListSessionsByRoomID(context.Background(), roomA)
+		for _, s := range sessions {
+			if s.UserID() == userID {
+				oldSessionID = s.SessionID()
+				break
+			}
+		}
+		if oldSessionID != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if oldSessionID == "" {
+		t.Fatalf("old session not found in roomA")
+	}
+
+	// 第二次连接到 roomB（同 user → 触发 reconnect 替换）
+	tokenB, _ := signer.Sign(userID, 3600)
+	urlB := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomB, tokenB)
+	connB, _, err := dialWS(t, urlB)
+	if err != nil {
+		t.Fatalf("dial roomB: %v", err)
+	}
+	defer connB.Close()
+	_ = connB.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := connB.ReadMessage(); err != nil {
+		t.Fatalf("read snapshot roomB: %v", err)
+	}
+
+	// 等异步 OLD 的 RemoveOnline 钩子触发完毕（oldS.Close() → notifyClosed →
+	// Unregister(oldID) → onUnregister）
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		hasRemove := false
+		for _, e := range callOrder {
+			if strings.HasPrefix(e, "remove:") {
+				hasRemove = true
+				break
+			}
+		}
+		mu.Unlock()
+		if hasRemove {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// 期望 callOrder 至少 3 条：[add:OLD, add:NEW, remove:OLD]
+	// **关键不变量**（r10 P2）：第二次 register 的 add 必须出现在 OLD 的 remove **之前**
+	if len(callOrder) < 3 {
+		t.Fatalf("expect at least 3 hook calls, got %v", callOrder)
+	}
+
+	// 找 add:NEW 与 remove:OLD 的 index；NEW = 第二个 add（不是 OLD 的 add）
+	addNewIdx := -1
+	removeOldIdx := -1
+	addCount := 0
+	for i, e := range callOrder {
+		if strings.HasPrefix(e, "add:") {
+			addCount++
+			if addCount == 2 {
+				addNewIdx = i
+			}
+		}
+		if e == "remove:"+oldSessionID && removeOldIdx < 0 {
+			removeOldIdx = i
+		}
+	}
+	if addNewIdx == -1 {
+		t.Fatalf("second add (NEW) not found in callOrder=%v", callOrder)
+	}
+	if removeOldIdx == -1 {
+		t.Fatalf("remove:%s (OLD) not found in callOrder=%v", oldSessionID, callOrder)
+	}
+	if addNewIdx >= removeOldIdx {
+		t.Errorf("r10 P2 不变量：onRegister(NEW) 必须先于 onUnregister(OLD)；callOrder=%v (addNew@%d, removeOld@%d)",
+			callOrder, addNewIdx, removeOldIdx)
+	}
+}
+
 // TestPresenceHook_ManagerCloseTriggersRemoveForAllSessions: Story 10.6 钩子集成 case 4。
 // SessionManager.Close 必须为**每个**注册的 Session 都触发 RemoveOnline 钩子。
 //
