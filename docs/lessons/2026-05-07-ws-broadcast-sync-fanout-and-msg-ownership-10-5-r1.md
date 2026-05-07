@@ -2,7 +2,7 @@
 date: 2026-05-07
 source_review: codex review (file: /tmp/epic-loop-review-10-5-r1.md) for Story 10-5 broadcasttoroom-primitive
 story: 10-5-broadcasttoroom-primitive
-commit: <pending>
+commit: c53abb2
 lesson_count: 2
 ---
 
