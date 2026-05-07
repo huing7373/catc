@@ -71,6 +71,10 @@ func newSigner(t *testing.T) *auth.Signer {
 
 // startGatewayServer 启动 httptest.NewServer 挂 GET /ws/rooms/:roomId，返
 // (wsURL, httptest server, cleanup)。
+//
+// Story 10.7 修：NewGateway 新增 builder 参数；本 helper 用 stub repo 构造默认
+// placeholder builder（与 Story 10.3 ~ 10.6 既有测试覆盖语义一致 —— stub repo
+// 控制 ListMembers 行为，builder 走真实 placeholder 路径）。
 func startGatewayServer(t *testing.T, signer *auth.Signer, mgr wsapp.SessionManager, repo *stubRoomMemberRepo) (string, *httptest.Server) {
 	t.Helper()
 	cfg := config.WSConfig{
@@ -78,7 +82,8 @@ func startGatewayServer(t *testing.T, signer *auth.Signer, mgr wsapp.SessionMana
 		MaxMessageSizeBytes: 16384,
 		WriteTimeoutSec:     2,
 	}
-	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "test")
+	builder := wsapp.NewPlaceholderSnapshotBuilder(repo)
+	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "test", builder)
 	r := gin.New()
 	r.GET("/ws/rooms/:roomId", gateway.Handle)
 	ts := httptest.NewServer(r)
@@ -1306,7 +1311,8 @@ func TestSession_Send_BufferFull_ReturnsErr(t *testing.T) {
 		MaxMessageSizeBytes: 16384,
 		WriteTimeoutSec:     30, // 长 timeout 让写 goroutine 卡住更稳定
 	}
-	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "test")
+	builder := wsapp.NewPlaceholderSnapshotBuilder(repo)
+	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "test", builder)
 	r := gin.New()
 	r.GET("/ws/rooms/:roomId", gateway.Handle)
 	ts := httptest.NewServer(r)
@@ -1752,7 +1758,7 @@ func TestNewGateway_ProdEnv_RejectsNonContractHeartbeat(t *testing.T) {
 		MaxMessageSizeBytes: 16384,
 		WriteTimeoutSec:     5,
 	}
-	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "prod")
+	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "prod", wsapp.NewPlaceholderSnapshotBuilder(repo))
 }
 
 // TestNewGateway_ProdEnv_RejectsNonContractMaxMessageSize: env=prod 配
@@ -1778,7 +1784,7 @@ func TestNewGateway_ProdEnv_RejectsNonContractMaxMessageSize(t *testing.T) {
 		MaxMessageSizeBytes: 8192, // 非契约值
 		WriteTimeoutSec:     5,
 	}
-	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "prod")
+	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "prod", wsapp.NewPlaceholderSnapshotBuilder(repo))
 }
 
 // TestNewGateway_EmptyEnv_BehavesAsProd: env="" 应按 prod 严格策略
@@ -1799,7 +1805,7 @@ func TestNewGateway_EmptyEnv_BehavesAsProd(t *testing.T) {
 		MaxMessageSizeBytes: 16384,
 		WriteTimeoutSec:     5,
 	}
-	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "")
+	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "", wsapp.NewPlaceholderSnapshotBuilder(repo))
 }
 
 // TestNewGateway_DevEnv_AcceptsOverride: env=dev 应允许 YAML 覆盖契约字段。
@@ -1819,7 +1825,7 @@ func TestNewGateway_DevEnv_AcceptsOverride(t *testing.T) {
 		MaxMessageSizeBytes: 8192,
 		WriteTimeoutSec:     5,
 	}
-	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "dev")
+	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "dev", wsapp.NewPlaceholderSnapshotBuilder(repo))
 	if gateway == nil {
 		t.Error("NewGateway returned nil in dev env")
 	}
@@ -1842,10 +1848,36 @@ func TestNewGateway_ProdEnv_AcceptsContractValues(t *testing.T) {
 		MaxMessageSizeBytes: 16384,
 		WriteTimeoutSec:     5,
 	}
-	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "prod")
+	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "prod", wsapp.NewPlaceholderSnapshotBuilder(repo))
 	if gateway == nil {
 		t.Error("NewGateway returned nil in prod env with contract values")
 	}
+}
+
+// TestNewGateway_NilBuilder_Panics: builder == nil 应触发 fail-fast panic
+// （Story 10.7 引入；与 signer / mgr / roomMember 同模式）。
+func TestNewGateway_NilBuilder_Panics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("NewGateway should panic when SnapshotBuilder is nil")
+		} else {
+			msg := fmt.Sprintf("%v", r)
+			if !strings.Contains(msg, "SnapshotBuilder") {
+				t.Errorf("panic message %q should mention SnapshotBuilder", msg)
+			}
+		}
+	}()
+
+	signer := newSigner(t)
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	cfg := config.WSConfig{
+		HeartbeatTimeoutSec: 60,
+		MaxMessageSizeBytes: 16384,
+		WriteTimeoutSec:     5,
+	}
+	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "prod", nil)
 }
 
 // ---------- Story 10.4：Session.CloseWithCode 测试 ----------

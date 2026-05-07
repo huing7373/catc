@@ -2,7 +2,6 @@ package ws
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -45,6 +44,14 @@ type Gateway struct {
 	logger       *slog.Logger
 	cfg          config.WSConfig
 	writeTimeout time.Duration
+	// builder（Story 10.7 引入）：room.snapshot 构造路径。
+	//
+	// 节点 4 placeholder 实装：placeholderSnapshotBuilder（NewPlaceholderSnapshotBuilder
+	// 构造），走 RoomMemberRepo.ListMembers 单表查询。Story 11.7 真实实装时替换为
+	// realSnapshotBuilder，gateway 层不感知。
+	//
+	// **不可 nil**：NewGateway 内 fail-fast 校验。
+	builder SnapshotBuilder
 }
 
 // NewGateway 构造 Gateway（main.go bootstrap wire 用）。
@@ -71,6 +78,7 @@ func NewGateway(
 	roomMember mysql.RoomMemberRepo,
 	cfg config.WSConfig,
 	envName string,
+	builder SnapshotBuilder,
 ) *Gateway {
 	// **prod 配置覆盖强制**（review r2 P2；与 Story 7.3 NewStepService 同模式）：
 	// envName 归一化为小写；只有显式 "dev" / "staging" / "test" 才允许 contract 字段
@@ -91,6 +99,13 @@ func NewGateway(
 				envName, wsProdMaxMessageSizeBytes, cfg.MaxMessageSizeBytes,
 			))
 		}
+	}
+
+	// **builder fail-fast**（Story 10.7 引入；与 signer / mgr / roomMember 同模式）：
+	// Gateway struct 字段无 nil-safe 保护，缺失依赖在启动期 fail-fast 比 request 期
+	// nil-deref panic 更安全，运维 CrashLoopBackOff 立即可见。
+	if builder == nil {
+		panic("ws gateway: SnapshotBuilder is required (Story 10.7; bootstrap 期必须 wire NewPlaceholderSnapshotBuilder)")
 	}
 
 	upgrader := &websocket.Upgrader{
@@ -114,6 +129,7 @@ func NewGateway(
 		logger:       slog.Default(),
 		cfg:          cfg,
 		writeTimeout: writeTimeout,
+		builder:      builder,
 	}
 }
 
@@ -143,12 +159,12 @@ func NewGateway(
 //     Upgrade，再走校验链路）
 //  2. 创建 Session 对象（newSession，sessionID 留空；**不** Register）
 //  3. **同步段**写 placeholder room.snapshot：
-//     - 调 roomMemberRepo.ListMembers(ctx, roomID) 拿全成员行
-//     - 构造 placeholder snapshot（payload.room.{id, maxMembers=4, memberCount=len(members)}
-//     + payload.members[]：每行 {userId, nickname:"", pet:{petId:"", currentState:1}}）
-//     - 调 conn.WriteMessage(TextMessage, snapshotBytes)；失败 → close 1011
-//     reason "snapshot build failed"，**不**启动读/写 goroutine、**不** Register
-//     —— 旧 session（如有）保持活跃，user 可继续用旧连接
+//     - 调 SendRoomSnapshot(ctx, conn, roomID, g.builder, g.writeTimeout)
+//       —— Story 10.7 引入；内部走 SnapshotBuilder.BuildSnapshot 构造 +
+//       conn.WriteMessage 同步写入；失败统一返 error
+//     - SendRoomSnapshot 返 error → close 1011 reason "snapshot build failed"，
+//       **不**启动读/写 goroutine、**不** Register —— 旧 session（如有）保持
+//       活跃，user 可继续用旧连接
 //  4. mgr.Register(ctx, session)（触发 OnSessionRegister 钩子；reconnect 路径
 //     在此点 evict 旧 session）—— **必须**在 snapshot 写成功之后才执行；
 //     Register 失败 → close 1011 reason "session register failed"
@@ -258,38 +274,19 @@ func (g *Gateway) Handle(c *gin.Context) {
 	session := newSession("", userID, roomID, conn, g.logger, g.cfg.MaxMessageSizeBytes, g.writeTimeout)
 
 	// 6.2 同步段构造 + 写 placeholder room.snapshot（**先于** Register；
-	// transient 失败时旧 session 不被 evict）
-	members, err := g.roomMember.ListMembers(ctx, roomID)
-	if err != nil {
+	// transient 失败时旧 session 不被 evict）—— Story 10.7 把原 inline 三段
+	// （ListMembers + buildPlaceholderSnapshot + conn.WriteMessage）抽离到
+	// SendRoomSnapshot 包级函数；失败处理路径（close 1011 + Session.Close）保留
+	// 在调用点（Handle 仍是错误处理 single source of truth）。
+	//
+	// **未** Register —— 不需要 manager 侧 cleanup；Session 结构无副作用占用，
+	// 但需要显式 Close 释放 Session 持有的 ctx / chan（newSession 内已分配）+
+	// gorilla conn（closeWithCode 已 conn.Close，session.conn 是同一指针 ——
+	// session.Close 内 _ = s.conn.Close 是 idempotent no-op，不会 double close
+	// panic）。
+	if err := SendRoomSnapshot(ctx, conn, roomID, g.builder, g.writeTimeout); err != nil {
 		g.closeWithCode(conn, 1011, "snapshot build failed")
-		g.logger.Error("ws handshake: ListMembers failed",
-			slog.Uint64("roomID", roomID), slog.Any("error", err))
-		// **未** Register —— 不需要 manager 侧 cleanup；Session 结构无副作用占用，
-		// 但需要显式 Close 释放 Session 持有的 ctx / chan（newSession 内已分配）+
-		// gorilla conn（closeWithCode 已 conn.Close，session.conn 是同一指针 ——
-		// session.Close 内 _ = s.conn.Close 是 idempotent no-op，不会 double close
-		// panic）。
-		_ = session.Close()
-		return
-	}
-	snapshotBytes, err := buildPlaceholderSnapshot(roomID, members)
-	if err != nil {
-		g.closeWithCode(conn, 1011, "snapshot build failed")
-		g.logger.Error("ws handshake: build snapshot failed",
-			slog.Uint64("roomID", roomID), slog.Any("error", err))
-		_ = session.Close()
-		return
-	}
-	// V1 §12.1.3 钦定 snapshot 是握手成功后**必发**的第一条 authoritative 消息；
-	// 必须**同步**写入 conn（不走异步 sendChan）—— writeLoop 此时还没启动。
-	if g.writeTimeout > 0 {
-		_ = conn.SetWriteDeadline(time.Now().Add(g.writeTimeout))
-	}
-	if err := conn.WriteMessage(websocket.TextMessage, snapshotBytes); err != nil {
-		// 写 snapshot 失败 → 不再启动 goroutine、**未** Register；按 V1 §12.1
-		// close 1011 reason "snapshot build failed"
-		g.closeWithCode(conn, 1011, "snapshot build failed")
-		g.logger.Error("ws handshake: snapshot write failed",
+		g.logger.Error("ws handshake: snapshot send failed",
 			slog.Uint64("roomID", roomID), slog.Any("error", err))
 		_ = session.Close()
 		return
@@ -325,7 +322,6 @@ func (g *Gateway) Handle(c *gin.Context) {
 		slog.String("sessionID", sessionID),
 		slog.Uint64("userID", userID),
 		slog.Uint64("roomID", roomID),
-		slog.Int("memberCount", len(members)),
 	)
 }
 
@@ -349,83 +345,15 @@ func (g *Gateway) closeWithCode(conn *websocket.Conn, code int, reason string) {
 	_ = conn.Close()
 }
 
-// snapshotPayload 是 V1 §12.3 room.snapshot payload 的 Go 结构。
-type snapshotPayload struct {
-	Room    snapshotRoom     `json:"room"`
-	Members []snapshotMember `json:"members"`
-}
-
-type snapshotRoom struct {
-	ID          string `json:"id"`
-	MaxMembers  int    `json:"maxMembers"`
-	MemberCount int    `json:"memberCount"`
-}
-
-type snapshotMember struct {
-	UserID   string      `json:"userId"`
-	Nickname string      `json:"nickname"`
-	Pet      snapshotPet `json:"pet"`
-}
-
-type snapshotPet struct {
-	PetID        string `json:"petId"`
-	CurrentState int    `json:"currentState"`
-}
-
-// buildPlaceholderSnapshot 构造 V1 §12.3 节点 4 placeholder snapshot
-// （Story 10.7 真实 SnapshotBuilder 接管前的 inline 实装）。
+// **历史**：Story 10.3 ~ 10.6 在本文件 inline 实装了 placeholder snapshot 的
+// helper（snapshotPayload / snapshotRoom / snapshotMember / snapshotPet 4 个
+// struct + buildPlaceholderSnapshot 包级函数）。Story 10.7 把这些抽离到
+// snapshot.go 中作为 SnapshotBuilder 接口的 placeholderSnapshotBuilder 实装 +
+// SendRoomSnapshot 包级函数 —— gateway.Handle 单点调用 SendRoomSnapshot 替换
+// 原本的三段直连代码（ListMembers + buildPlaceholderSnapshot + conn.WriteMessage）。
 //
-// 字段语义（V1 §12.3 钦定）：
-//   - room.id: roomID 字符串化（V1 §2.5 全局约定 BIGINT 字符串化）
-//   - room.maxMembers: 节点 4 阶段固定 4
-//   - room.memberCount: len(members)（与 members[] 数组长度严格相等，V1 §12.3
-//     "不变量" 钦定）
-//   - members[].userId: 字符串化
-//   - members[].nickname: ""（placeholder 阶段，V1 §12.3 钦定空字符串语义 = "
-//     server 不知道"，client 按 merge contract 保留已有值；Story 11.7 真实
-//     SnapshotBuilder 接管时由 users.nickname 真实回填）
-//   - members[].pet.petId: ""（placeholder；同上）
-//   - members[].pet.currentState: 1（节点 4 阶段固定，V1 §12.3 钦定；Epic 14
-//     真实驱动）
-//
-// **不变量**：memberCount == len(members) —— 节点 4 阶段 placeholder 必须严格
-// 反映 room_members 全表行数（V1 §12.3 不变量小节钦定，禁止"全零 placeholder"
-// 或"单成员快照"）。
-func buildPlaceholderSnapshot(roomID uint64, members []uint64) ([]byte, error) {
-	memberList := make([]snapshotMember, 0, len(members))
-	for _, uid := range members {
-		memberList = append(memberList, snapshotMember{
-			UserID:   strconv.FormatUint(uid, 10),
-			Nickname: "",
-			Pet: snapshotPet{
-				PetID:        "",
-				CurrentState: 1,
-			},
-		})
-	}
-	env := serverEnvelope{
-		Type:      "room.snapshot",
-		RequestID: "", // V1 §12.3 钦定主动推送类固定 ""
-		Payload: snapshotPayload{
-			Room: snapshotRoom{
-				ID:          strconv.FormatUint(roomID, 10),
-				MaxMembers:  4,
-				MemberCount: len(memberList),
-			},
-			Members: memberList,
-		},
-		Ts: time.Now().UnixMilli(),
-	}
-	bytes, err := json.Marshal(env)
-	if err != nil {
-		// json.Marshal 在 marshalable struct 下不可能失败；防御性 wrap
-		return nil, fmt.Errorf("ws: marshal snapshot: %w", err)
-	}
-	return bytes, nil
-}
-
-// 编译时接口断言：确保 RoomMemberRepo 是 mysql.RoomMemberRepo
-// （让 Gateway struct 字段定义在编译期被 type system 校验）
+// 编译时接口断言：确保 mysql.RoomMemberRepo 是 nilRoomMemberRepo 的接口形态
+// （让 Gateway struct 字段定义在编译期被 type system 校验）。
 var _ mysql.RoomMemberRepo = (*nilRoomMemberRepo)(nil)
 
 type nilRoomMemberRepo struct{}

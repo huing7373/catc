@@ -380,12 +380,17 @@ func NewRouter(deps Deps) *gin.Engine {
 				panic("ws backing tables missing: rooms / room_members must exist (run migrations 0007 / 0008)")
 			}
 			roomMemberRepo := repomysql.NewRoomMemberRepo(deps.GormDB)
+			// Story 10.7 加：构造 SnapshotBuilder（节点 4 阶段 placeholder 实装；
+			// Story 11.7 真实实装时把本行替换为 NewRealSnapshotBuilder，gateway
+			// 层不感知）。共享同一个 roomMemberRepo 实例避免重复构造。
+			snapshotBuilder := wsapp.NewPlaceholderSnapshotBuilder(roomMemberRepo)
 			gateway := wsapp.NewGateway(
 				deps.Signer,
 				deps.SessionMgr,
 				roomMemberRepo,
 				deps.WSCfg,
-				deps.EnvName, // review r2 P2 加：prod contract override 强制
+				deps.EnvName,    // review r2 P2 加：prod contract override 强制
+				snapshotBuilder, // Story 10.7 加：snapshot 构造路径
 			)
 			r.GET("/ws/rooms/:roomId", gateway.Handle)
 		}
