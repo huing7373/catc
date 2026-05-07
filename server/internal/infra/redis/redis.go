@@ -162,6 +162,17 @@ func (c *redisClient) SMembers(ctx context.Context, key string) ([]string, error
 	return c.client.SMembers(ctx, key).Result()
 }
 
+// Eval 实装 RedisClient.Eval。
+//
+// 透明 forward 到 go-redis Client.Eval；返回值 / error 不做内化（与接口注释钦定一致 ——
+// 不同 script 语义不同，调用方按需 handle redis.Nil）。
+//
+// 路径：直接调 c.client.Eval(ctx, script, keys, args...).Result()；
+// go-redis 自身负责 EVAL 命令编码、ARGV marshal、ctx 传播。
+func (c *redisClient) Eval(ctx context.Context, script string, keys []string, args ...interface{}) (interface{}, error) {
+	return c.client.Eval(ctx, script, keys, args...).Result()
+}
+
 // Close 实装 RedisClient.Close。
 //
 // **真·幂等**（review r2 修法）：go-redis Client.Close 实际**不**幂等 —— 第二次

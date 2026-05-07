@@ -3578,3 +3578,341 @@ func TestBroadcastToRoom_R1_CallerMayMutateMsgAfterReturn(t *testing.T) {
 // httptest.Server 路径 —— 详见 review 10-5 r2 P2 修复。本处保留注释以便
 // `git blame` 时找到迁移轨迹。
 
+// ---------- Story 10.6 PresenceRepo 钩子集成测试（端到端 lifecycle）----------
+//
+// 本节 4 case 验证"hook 挂上 SessionManager 后，lifecycle 触发 → presenceRepo
+// 方法调用次数正确"端到端语义。**不**真正 import redis 包跑 miniredis（避免 ws
+// 测试包反向 import redis 包形成循环依赖）；用 fakePresenceRepo + atomic.Int32
+// 计数器即可验证"钩子触发次数"语义。
+//
+// 4 case 严格按 epics.md §Story 10.6 + lesson 钦定的 4 个不变量铺：
+//   - Register → AddOnline 钩子触发 1 次
+//   - Unregister → RemoveOnline 钩子触发 1 次
+//   - Reconnect 替换路径 → 旧 Session 的 RemoveOnline 触发恰好 1 次
+//     （不变量见 lesson 2026-05-06-ws-reconnect-unregister-hook-and-prod-contract-gate.md）
+//   - SessionManager.Close → 每个 Session 的 RemoveOnline 都触发
+//     （不变量见 lesson 2026-05-06-ws-session-send-close-race-and-shutdown-hooks.md）
+
+// fakePresenceRepo 是 PresenceRepo 接口的轻量替身（仅 ws_test.go 内部用，验证
+// 钩子触发次数）。**不**真正访问 Redis；用 atomic.Int32 计数 + sync.Map 收集
+// sessionID 让 case 能精确断言"哪些 Session 触发了 hook"。
+//
+// 与生产 redisrepo.PresenceRepo 接口的语义一致（5 方法）—— 但本结构体**不**实装
+// PresenceRepo interface（避免反向 import redis 包），只是 ws hook adapter 适配
+// 函数签名（func(s *wsapp.Session)）。
+type fakePresenceRepo struct {
+	addCount      atomic.Int32
+	removeCount   atomic.Int32
+	addedIDs      sync.Map // sessionID → struct{}
+	removedIDs    sync.Map // sessionID → struct{}
+	addedRooms    sync.Map // sessionID → roomID
+	removedRooms  sync.Map // sessionID → roomID
+	addedUsers    sync.Map // sessionID → userID
+	removedUsers  sync.Map // sessionID → userID
+	addReturnErr  error    // 让 case 能注入错误验证 log warn 路径（本节未用，预留）
+	removeReturnErr error
+}
+
+func (f *fakePresenceRepo) AddOnline(_ context.Context, roomID, userID uint64, sessionID string) error {
+	f.addCount.Add(1)
+	f.addedIDs.Store(sessionID, struct{}{})
+	f.addedRooms.Store(sessionID, roomID)
+	f.addedUsers.Store(sessionID, userID)
+	return f.addReturnErr
+}
+
+func (f *fakePresenceRepo) RemoveOnline(_ context.Context, roomID, userID uint64, sessionID string) error {
+	f.removeCount.Add(1)
+	// 用 userID 当 key 也行，但 Reconnect / Close 场景需要按 sessionID 关联，
+	// 为简化，hook adapter 的 closure 走 sessionID 是更稳妥的索引——
+	// 本 fake 在 Remove 路径拿到 (roomID, userID, sessionID)，没有真 Redis state；
+	// 为支持 case 4（Close 触发每个 sessionID）的断言，hook adapter 在
+	// Remove 路径直接调 fake 的 hookSessionRemove(s) 而非 RemoveOnline。
+	// 但为接口对齐，本方法仍保留以便未来真消费。
+	// Story 10.6 r1 修：sessionID 参数加入接口签名（real impl 走 Lua script
+	// compare-and-delete），但本 fake 不做 sessionID guard 模拟 —— hook adapter
+	// 集成测试的目标是验证"钩子被触发的次数与时机"，不是验证 Lua script 行为
+	// （后者由 presence_repo_test.go 的 ReconnectRace case 单测覆盖）。
+	_ = userID
+	_ = roomID
+	_ = sessionID
+	return f.removeReturnErr
+}
+
+// hookRegister / hookUnregister 是给 SessionManager hook adapter 的快捷入口；
+// closure 内拿到 *Session 后调本方法（既计数 + 又记录 sessionID 索引）。
+// 与 main.go 钩子 adapter 模式一致（adapter 内拿 Session.UserID/RoomID/SessionID
+// 走 PresenceRepo 接口）。
+func (f *fakePresenceRepo) hookRegister(s *wsapp.Session) {
+	f.addCount.Add(1)
+	f.addedIDs.Store(s.SessionID(), struct{}{})
+	f.addedRooms.Store(s.SessionID(), s.RoomID())
+	f.addedUsers.Store(s.SessionID(), s.UserID())
+}
+
+func (f *fakePresenceRepo) hookUnregister(s *wsapp.Session) {
+	f.removeCount.Add(1)
+	f.removedIDs.Store(s.SessionID(), struct{}{})
+	f.removedRooms.Store(s.SessionID(), s.RoomID())
+	f.removedUsers.Store(s.SessionID(), s.UserID())
+}
+
+// TestPresenceHook_RegisterTriggersAddOnline: Story 10.6 钩子集成 case 1。
+// Register → onRegister 钩子 adapter → fakePresenceRepo.hookRegister 触发 1 次。
+// 钩子收到的 Session 应携带正确的 userID / roomID / sessionID（不是空 / 不是别的 user）。
+func TestPresenceHook_RegisterTriggersAddOnline(t *testing.T) {
+	fake := &fakePresenceRepo{}
+	mgr := wsapp.NewSessionManager(
+		wsapp.WithRegisterHook(func(s *wsapp.Session) {
+			fake.hookRegister(s)
+		}),
+		wsapp.WithUnregisterHook(func(s *wsapp.Session) {
+			fake.hookUnregister(s)
+		}),
+	)
+	defer mgr.Close()
+
+	repo := &stubRoomMemberRepo{}
+	conn, session, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	if got := fake.addCount.Load(); got != 1 {
+		t.Errorf("AddOnline hook called %d times, want 1", got)
+	}
+	if got := fake.removeCount.Load(); got != 0 {
+		t.Errorf("RemoveOnline hook called %d times, want 0 (not yet unregistered)", got)
+	}
+	// 钩子收到的 Session 上下文正确
+	if _, ok := fake.addedIDs.Load(session.SessionID()); !ok {
+		t.Errorf("AddOnline hook did not receive sessionID %q", session.SessionID())
+	}
+	if v, ok := fake.addedRooms.Load(session.SessionID()); !ok || v.(uint64) != uint64(3001) {
+		t.Errorf("AddOnline hook roomID = %v, want 3001", v)
+	}
+	if v, ok := fake.addedUsers.Load(session.SessionID()); !ok || v.(uint64) != uint64(1001) {
+		t.Errorf("AddOnline hook userID = %v, want 1001", v)
+	}
+}
+
+// TestPresenceHook_UnregisterTriggersRemoveOnline: Story 10.6 钩子集成 case 2。
+// Session.Close → notifyClosed → Unregister → onUnregister 钩子 adapter →
+// fakePresenceRepo.hookUnregister 触发 1 次。
+func TestPresenceHook_UnregisterTriggersRemoveOnline(t *testing.T) {
+	fake := &fakePresenceRepo{}
+	mgr := wsapp.NewSessionManager(
+		wsapp.WithRegisterHook(func(s *wsapp.Session) {
+			fake.hookRegister(s)
+		}),
+		wsapp.WithUnregisterHook(func(s *wsapp.Session) {
+			fake.hookUnregister(s)
+		}),
+	)
+	defer mgr.Close()
+
+	repo := &stubRoomMemberRepo{}
+	conn, session, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	_ = session.Close()
+
+	// 等钩子异步触发
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if fake.removeCount.Load() >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := fake.removeCount.Load(); got != 1 {
+		t.Errorf("RemoveOnline hook called %d times, want 1", got)
+	}
+	if _, ok := fake.removedIDs.Load(session.SessionID()); !ok {
+		t.Errorf("RemoveOnline hook did not receive sessionID %q", session.SessionID())
+	}
+}
+
+// TestPresenceHook_ReconnectTriggersRemoveForOldSession: Story 10.6 钩子集成 case 3。
+// 同 user 重连替换路径必须为旧 Session 触发 RemoveOnline 钩子**恰好一次**。
+//
+// 这是 lesson 2026-05-06-ws-reconnect-unregister-hook-and-prod-contract-gate.md
+// 钉死的 P1 不变量；SessionManager 已在 10.3 r2 修复，本 case 是 contract verification
+// 让 future 反向破坏行为时立即失败。
+func TestPresenceHook_ReconnectTriggersRemoveForOldSession(t *testing.T) {
+	fake := &fakePresenceRepo{}
+	mgr := wsapp.NewSessionManager(
+		wsapp.WithRegisterHook(func(s *wsapp.Session) {
+			fake.hookRegister(s)
+		}),
+		wsapp.WithUnregisterHook(func(s *wsapp.Session) {
+			fake.hookUnregister(s)
+		}),
+	)
+	defer mgr.Close()
+
+	repo := &stubRoomMemberRepo{}
+	signer := newSigner(t)
+	wsURL, ts := startGatewayServer(t, signer, mgr, repo)
+	defer ts.Close()
+
+	const userID = uint64(1001)
+	const roomA = uint64(3001)
+	const roomB = uint64(3002)
+
+	// 第一次连接到 roomA
+	tokenA, _ := signer.Sign(userID, 3600)
+	urlA := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomA, tokenA)
+	connA, _, err := dialWS(t, urlA)
+	if err != nil {
+		t.Fatalf("dial roomA: %v", err)
+	}
+	defer connA.Close()
+	_ = connA.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := connA.ReadMessage(); err != nil {
+		t.Fatalf("read snapshot roomA: %v", err)
+	}
+
+	// 拿到旧 sessionID
+	deadline := time.Now().Add(2 * time.Second)
+	var oldSessionID string
+	for time.Now().Before(deadline) {
+		sessions := mgr.ListSessionsByRoomID(context.Background(), roomA)
+		for _, s := range sessions {
+			if s.UserID() == userID {
+				oldSessionID = s.SessionID()
+				break
+			}
+		}
+		if oldSessionID != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if oldSessionID == "" {
+		t.Fatalf("old session not found in roomA")
+	}
+
+	// 第二次连接到 roomB（同 user，不同 room → 触发 reconnect 替换）
+	tokenB, _ := signer.Sign(userID, 3600)
+	urlB := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomB, tokenB)
+	connB, _, err := dialWS(t, urlB)
+	if err != nil {
+		t.Fatalf("dial roomB: %v", err)
+	}
+	defer connB.Close()
+	_ = connB.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := connB.ReadMessage(); err != nil {
+		t.Fatalf("read snapshot roomB: %v", err)
+	}
+
+	// 等 onUnregister 钩子异步触发完毕（oldS.Close() → notifyClosed → Unregister(oldID) →
+	// onUnregister）
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if fake.removeCount.Load() >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 断言：Add 钩子触发 2 次（roomA + roomB），Remove 钩子触发恰好 1 次（旧 Session）
+	if got := fake.addCount.Load(); got != 2 {
+		t.Errorf("AddOnline hook called %d times, want 2 (one per Register)", got)
+	}
+	if got := fake.removeCount.Load(); got != 1 {
+		t.Errorf("RemoveOnline hook called %d times, want exactly 1 (reconnect replace path)", got)
+	}
+	if _, ok := fake.removedIDs.Load(oldSessionID); !ok {
+		t.Errorf("RemoveOnline hook did not fire for old session %q", oldSessionID)
+	}
+}
+
+// TestPresenceHook_ManagerCloseTriggersRemoveForAllSessions: Story 10.6 钩子集成 case 4。
+// SessionManager.Close 必须为**每个**注册的 Session 都触发 RemoveOnline 钩子。
+//
+// 这是 lesson 2026-05-06-ws-session-send-close-race-and-shutdown-hooks.md 钉死的
+// P1 不变量；SessionManager 已在 10.3 r1 修复（保留索引到所有 Close 跑完）；本 case
+// 是 contract verification 防回归。
+func TestPresenceHook_ManagerCloseTriggersRemoveForAllSessions(t *testing.T) {
+	fake := &fakePresenceRepo{}
+	mgr := wsapp.NewSessionManager(
+		wsapp.WithRegisterHook(func(s *wsapp.Session) {
+			fake.hookRegister(s)
+		}),
+		wsapp.WithUnregisterHook(func(s *wsapp.Session) {
+			fake.hookUnregister(s)
+		}),
+	)
+
+	repo := &stubRoomMemberRepo{}
+	signer := newSigner(t)
+	wsURL, ts := startGatewayServer(t, signer, mgr, repo)
+	defer ts.Close()
+
+	const roomID = 3001
+	uids := []uint64{1001, 1002, 1003}
+	var conns []*websocket.Conn
+	for _, uid := range uids {
+		token, _ := signer.Sign(uid, 3600)
+		url := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomID, token)
+		c, _, err := dialWS(t, url)
+		if err != nil {
+			t.Fatalf("dial uid=%d: %v", uid, err)
+		}
+		conns = append(conns, c)
+		_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		if _, _, err := c.ReadMessage(); err != nil {
+			t.Fatalf("read snapshot uid=%d: %v", uid, err)
+		}
+	}
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+
+	// 等所有 Session 注册到 manager
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if int(fake.addCount.Load()) >= len(uids) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := fake.addCount.Load(); int(got) != len(uids) {
+		t.Fatalf("AddOnline hook called %d times after dial, want %d", got, len(uids))
+	}
+
+	registered := mgr.ListSessionsByRoomID(context.Background(), roomID)
+	if got, want := len(registered), len(uids); got != want {
+		t.Fatalf("registered sessions = %d, want %d", got, want)
+	}
+
+	// 关 manager —— 必须触发**每个** Session 的 RemoveOnline 钩子
+	if err := mgr.Close(); err != nil {
+		t.Fatalf("mgr.Close: %v", err)
+	}
+
+	// 等 Remove 钩子异步触发完毕
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if int(fake.removeCount.Load()) >= len(uids) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := fake.removeCount.Load(); int(got) != len(uids) {
+		t.Errorf("RemoveOnline hook fired %d times, want %d (one per Session)", got, len(uids))
+	}
+
+	// 校验每个 Session 的 sessionID 都进了 removedIDs
+	for _, s := range registered {
+		if _, ok := fake.removedIDs.Load(s.SessionID()); !ok {
+			t.Errorf("session %s did not trigger RemoveOnline hook", s.SessionID())
+		}
+	}
+}
+

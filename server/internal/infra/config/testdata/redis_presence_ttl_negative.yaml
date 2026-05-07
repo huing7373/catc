@@ -1,0 +1,8 @@
+server:
+  http_port: 8080
+
+# Story 10.6 测试 fixture：YAML 显式写 redis.presence_ttl_sec 负值，
+# 验证 loader 兜底成默认值 300（与 testdata/redis_negative_pool.yaml 同模式）。
+redis:
+  addr: "127.0.0.1:6379"
+  presence_ttl_sec: -10

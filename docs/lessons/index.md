@@ -191,3 +191,4 @@
 | 2026-05-07 | [WS BroadcastToRoom 同步 fanout + msg buffer ownership 隔离（10-5 r1）](2026-05-07-ws-broadcast-sync-fanout-and-msg-ownership-10-5-r1.md) | 2 | architecture | `c53abb2` |
 | 2026-05-07 | [WS BroadcastToRoom 跨 goroutine 序一致性 & 大 N 性能测试 fixture 必须脱离 httptest（10-5 r2）](2026-05-07-ws-broadcast-cross-goroutine-ordering-and-stub-session-test-fixture-10-5-r2.md) | 2 | architecture, testing | `a06d9e2` |
 | 2026-05-07 | [WS BroadcastToRoom 同 room hot path 必须 Load fast path 而非每次 LoadOrStore alloc 新 mutex（10-5 r3）](2026-05-07-ws-broadcast-load-fast-path-zero-alloc-hot-path-10-5-r3.md) | 1 | perf | `40b017e` |
+| 2026-05-07 | [Redis presence RemoveOnline 必须带 sessionID guard 走 Lua atomic compare-and-delete（10-6 r1）](2026-05-07-redis-presence-remove-needs-session-id-guard-10-6-r1.md) | 1 | architecture | `<pending>` |

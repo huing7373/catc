@@ -386,6 +386,47 @@ func TestLoad_RedisPoolSizeNegative_FallbackToDefault(t *testing.T) {
 	}
 }
 
+// TestLoad_RedisPresenceTTLSecDefault 验证 fixture 没显式写 redis.presence_ttl_sec
+// 时，loader 兜底为 300（5 分钟；docs/数据库设计.md §9.1 钦定）。Story 10.6 引入。
+//
+// fixturePath 没 redis 段 → cfg.Redis.PresenceTTLSec 是 zero-value 0 → loader 兜底成 300。
+func TestLoad_RedisPresenceTTLSecDefault(t *testing.T) {
+	cfg, err := Load(fixturePath)
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.Redis.PresenceTTLSec != 300 {
+		t.Errorf("Redis.PresenceTTLSec = %d, want 300 (fixture has no redis section → loader default)", cfg.Redis.PresenceTTLSec)
+	}
+}
+
+// TestLoad_RedisPresenceTTLSecExplicitYAML 验证 YAML 显式写 redis.presence_ttl_sec
+// 正值时正确解析（不被 loader 默认值覆盖）。Story 10.6 引入。
+func TestLoad_RedisPresenceTTLSecExplicitYAML(t *testing.T) {
+	cfg, err := Load("testdata/redis_presence_ttl.yaml")
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.Redis.PresenceTTLSec != 30 {
+		t.Errorf("Redis.PresenceTTLSec = %d, want 30 (explicit YAML)", cfg.Redis.PresenceTTLSec)
+	}
+}
+
+// TestLoad_RedisPresenceTTLSecNegative_FallbackToDefault 验证 YAML 显式写
+// `redis.presence_ttl_sec: -10`（或任何非正值）时，loader 必须兜底成默认值 300。
+//
+// 与 RedisPoolSizeNegative 同模式：防 K8s ConfigMap 注入异常 / YAML 拼错让 server
+// 起来后 presence TTL 异常（如 EXPIRE -10 在 Redis 上表现不定）。Story 10.6 引入。
+func TestLoad_RedisPresenceTTLSecNegative_FallbackToDefault(t *testing.T) {
+	cfg, err := Load("testdata/redis_presence_ttl_negative.yaml")
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if cfg.Redis.PresenceTTLSec != 300 {
+		t.Errorf("Redis.PresenceTTLSec = %d, want 300 (negative YAML must fallback to default)", cfg.Redis.PresenceTTLSec)
+	}
+}
+
 // TestLoad_RedisYAMLParsing 验证 YAML 含 redis: 段时正确解析（用专属 fixture）。
 // Story 10.2 引入。
 func TestLoad_RedisYAMLParsing(t *testing.T) {

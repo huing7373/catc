@@ -106,6 +106,20 @@ type RedisConfig struct {
 	// 0 / 负值视为"用 go-redis 默认"（10 * NumCPU），但 loader.go 兜底默认 10
 	// 让"YAML 缺字段" → 行为可预测。
 	PoolSize int `yaml:"pool_size"`
+
+	// PresenceTTLSec 是 Story 10.6 引入的 presence key TTL（秒）。
+	//
+	// 默认 300（5 分钟；与 docs/数据库设计.md §9.1 钦定一致 + 远大于 ws heartbeat
+	// 60s + scanner 扫描周期 30s，让心跳路径下 TTL 永远不到，仅 server crash /
+	// network split 异常路径触发 TTL 兜底自然清）。
+	//
+	// **可配**：dev / test 可短到 5s 走 miniredis FastForward 测试 TTL 行为；
+	// prod 必须 >= 300s（避免心跳间隔触不到续期窗口）。
+	//
+	// YAML 缺字段 / 显式 0 / 显式负数都视为"用默认值"（loader.go 兜底
+	// <= 0 → defaultRedisPresenceTTLSec）。与 PoolSize / WS 三字段同模式 ——
+	// 没有"显式 0 = 禁用功能"的合法语义。
+	PresenceTTLSec int `yaml:"presence_ttl_sec"`
 }
 
 // WSConfig 是 WebSocket 配置参数。Story 10.3 引入；选型 / 默认值 / 契约语义

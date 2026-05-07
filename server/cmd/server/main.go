@@ -18,8 +18,24 @@ import (
 	"github.com/huing/cat/server/internal/infra/logger"
 	redisinfra "github.com/huing/cat/server/internal/infra/redis"
 	"github.com/huing/cat/server/internal/pkg/auth"
+	redisrepo "github.com/huing/cat/server/internal/repo/redis"
 	"github.com/huing/cat/server/internal/repo/tx"
 )
+
+// presenceHookTimeout 是 Story 10.6 钩子 adapter 内 RedisClient 调用的 short-timeout
+// 上限。
+//
+// 选 2s 的理由：
+//   - 单条 Redis 命令在 local Redis < 1ms / remote Redis < 100ms（含 RTT）；2s 是
+//     "Redis 卡住"病态场景的兜底，让钩子 adapter 不会无限阻塞 SessionManager.Close
+//     的 graceful shutdown 主流程
+//   - 钩子 adapter 走 context.Background() 派生的 short-timeout ctx，**不**走 main
+//     ctx；理由见 main.go wire 处的注释（main ctx 在 SIGTERM 时被 cancel，graceful
+//     shutdown 期所有 RemoveOnline 都会因 ctx.Canceled 返 error → presence 留僵尸
+//     5 分钟 → 违反"graceful shutdown 必须清空 presence"语义）
+//
+// 详见 docs/lessons/2026-05-07-ws-shutdown-must-wait-for-goroutine-exit-not-just-signal-10-4-r6.md
+const presenceHookTimeout = 2 * time.Second
 
 // dbOpenTimeout 是启动阶段调 db.Open 的最大等待。
 //
@@ -196,11 +212,72 @@ func main() {
 		slog.Int("db", cfg.Redis.DB),
 	)
 
-	// Story 10.3：WS SessionManager 构造。
-	// 本 story 阶段不挂任何 lifecycle 钩子（10.6 才挂 Redis presence 钩子）。
+	// Story 10.6：构造 PresenceRepo + 注入 SessionManager lifecycle 钩子。
+	//
+	// 流程：
+	//  1. 用 cfg.Redis.PresenceTTLSec（YAML 字段 redis.presence_ttl_sec；默认 300 = 5min）
+	//     构造 PresenceRepo 实例（loader 兜底 <= 0 → 默认；本调用点直接消费即可）
+	//  2. 通过 functional option 把 AddOnline / RemoveOnline 钩子挂到 SessionManager:
+	//     - WithRegisterHook(adapter func(*Session)) → presenceRepo.AddOnline
+	//     - WithUnregisterHook(adapter func(*Session)) → presenceRepo.RemoveOnline
+	//  3. adapter closure 内：拿 Session.UserID() / RoomID() / SessionID() 走 presence
+	//     方法；走 short-timeout ctx (presenceHookTimeout)，**不**走 main ctx
+	//
+	// **关键决策**：钩子 adapter 内的 ctx 走 context.WithTimeout(context.Background(),
+	// presenceHookTimeout)，**不**走 main ctx。理由：lifecycle 钩子在 ws connection
+	// register / unregister 时刻触发，与 main ctx 的 SIGTERM cancel 时机正交；如果
+	// 走 main ctx，graceful shutdown 期 ctx 已 cancel 后所有 RemoveOnline 都会返
+	// ctx.Canceled error 让 presence 留僵尸记录到 TTL 自然清除（5 分钟）—— 违反
+	// graceful shutdown 必须清空 presence 的语义。详见 lesson
+	// 2026-05-07-ws-shutdown-must-wait-for-goroutine-exit-not-just-signal-10-4-r6.md。
+	presenceRepo := redisrepo.NewPresenceRepo(redisClient, time.Duration(cfg.Redis.PresenceTTLSec)*time.Second)
+	slog.Info("presence repo ready",
+		slog.Int("ttl_sec", cfg.Redis.PresenceTTLSec),
+	)
+
+	// Story 10.3 + 10.6：WS SessionManager 构造（10.3 加，10.6 加 lifecycle 钩子）。
 	// SessionManager 是纯内存对象（map + sync.RWMutex），构造无 IO；不需要 timeout ctx。
-	sessionMgr := wsapp.NewSessionManager()
-	slog.Info("ws session manager ready")
+	//
+	// **lifecycle 钩子**（Story 10.6 加）：
+	//   - Register → AddOnline（Session 注册时把 user 加入 Redis presence）
+	//   - Unregister → RemoveOnline（Session 注销时从 Redis presence 移除）
+	//   - Reconnect 替换路径：oldSession.onUnregister 触发恰好一次（10.3 r2 P1 不变量
+	//     已锁定；本钩子直接信任 SessionManager 实装层兜底）
+	//
+	// 钩子失败仅 log warn + 包含 sessionId / userId / roomId 上下文；**不** os.Exit /
+	// panic（lifecycle 钩子失败 ≠ server 必须停机；TTL 兜底 + scanner 路径双重保险）。
+	sessionMgr := wsapp.NewSessionManager(
+		wsapp.WithRegisterHook(func(s *wsapp.Session) {
+			hookCtx, cancel := context.WithTimeout(context.Background(), presenceHookTimeout)
+			defer cancel()
+			if err := presenceRepo.AddOnline(hookCtx, s.RoomID(), s.UserID(), s.SessionID()); err != nil {
+				slog.Warn("presence add online failed",
+					slog.String("sessionId", s.SessionID()),
+					slog.Uint64("userId", s.UserID()),
+					slog.Uint64("roomId", s.RoomID()),
+					slog.Any("error", err),
+				)
+			}
+		}),
+		wsapp.WithUnregisterHook(func(s *wsapp.Session) {
+			hookCtx, cancel := context.WithTimeout(context.Background(), presenceHookTimeout)
+			defer cancel()
+			// **关键**（Story 10.6 r1 P1 修）：必须传入 s.SessionID() 让 RemoveOnline
+			// 走 sessionID guard 的 Lua script 路径。reconnect 替换场景下旧 Session
+			// 延后 Unregister 触发本钩子时，user:{id}:ws_session 已被新 Session 覆盖
+			// 为新 sessionID → script 比较失败走 no-op，不会清掉新 Session 的 presence。
+			// 详见 lesson 2026-05-07-redis-presence-remove-needs-session-id-guard-10-6-r1.md。
+			if err := presenceRepo.RemoveOnline(hookCtx, s.RoomID(), s.UserID(), s.SessionID()); err != nil {
+				slog.Warn("presence remove online failed",
+					slog.String("sessionId", s.SessionID()),
+					slog.Uint64("userId", s.UserID()),
+					slog.Uint64("roomId", s.RoomID()),
+					slog.Any("error", err),
+				)
+			}
+		}),
+	)
+	slog.Info("ws session manager ready (with presence hooks)")
 
 	// Story 10.4：HeartbeatScanner 构造 + 启动后台 goroutine。
 	// scanner 周期性扫描 SessionManager 内所有 Session，超时（cfg.WS.HeartbeatTimeoutSec）

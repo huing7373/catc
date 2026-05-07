@@ -26,6 +26,10 @@ redis:
   password: ""
   db: 0
   pool_size: 10
+  # Story 10.6 加：presence key TTL（秒）。docs/数据库设计.md §9.1 钦定默认 300（5 分钟）。
+  # prod 必须 >= 300（远大于 ws heartbeat 60s + scanner 30s，让心跳路径 TTL 永不到）；
+  # dev / test 可短到 5 走 miniredis FastForward 测试 TTL 行为。
+  presence_ttl_sec: 300
 
 ws:
   # Story 10.3 接入。本地 dev 用默认值；prod 不可覆盖（V1 §1 节点 4 冻结声明 +

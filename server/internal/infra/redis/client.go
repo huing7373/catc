@@ -74,6 +74,35 @@ type RedisClient interface {
 	// 与 Get 不存在 key 返 nil 行为一致）。
 	SMembers(ctx context.Context, key string) ([]string, error)
 
+	// Eval 执行 Lua script（go-redis EVAL 命令的透明 forward）。
+	//
+	// 用法：
+	//
+	//	res, err := client.Eval(ctx, `return redis.call("GET", KEYS[1])`, []string{"foo"})
+	//
+	// 接口契约（**关键**）：
+	//   - script 是 Lua 源码字符串（**不**做 EVALSHA 缓存优化；MVP 阶段 script 调用频次
+	//     远低于 SET / GET，cache hit ratio 收益不显著；future 高频路径需要时再加 EvalSha
+	//     方法保持单一抽象边界）
+	//   - keys 切片对应 Lua KEYS[i]（1-indexed in Lua but 0-indexed in Go slice）；空切片
+	//     合法（script 不引用 KEYS 时）
+	//   - args 切片对应 Lua ARGV[i]；按值传 interface{}（go-redis 自身 marshal 路径）
+	//   - 返回 (interface{}, error)：调用方需要按 script 实际返回类型走类型断言（如
+	//     int64 / string / []interface{}）；script 返 nil 时 returns (nil, redis.Nil)
+	//     —— 本接口**不**做 nil error 内化（与 Get/SMembers 不同），因为不同 script
+	//     语义不同，让调用方按需 handle redis.Nil
+	//
+	// 为什么本接口暴露 Eval：
+	//   - Story 10.6 r1 修：RemoveOnline 需要 atomic compare-and-delete（先 GET
+	//     user:{id}:ws_session 比 sessionID，仅当匹配时再 SREM/DEL），go-redis 单命令
+	//     拼不出，必须用 Lua script 跑在 Redis 端的原子语义
+	//   - 与 Story 10.2 §"if future Story 需要 ... Lua 等，新增方法而非让调用方走
+	//     raw client 绕过接口" 的渐进式扩展策略一致
+	//
+	// **mock 兼容**：miniredis 支持 EVAL（in-process Lua 解释器），单测路径通过
+	// NewRedisClientFromMiniredis 桥接即可正常跑 script，不需要额外 stub。
+	Eval(ctx context.Context, script string, keys []string, args ...interface{}) (interface{}, error)
+
 	// Close 关闭底层连接池；进程退出前由 main.go defer 调用一次。
 	//
 	// 必须**真·幂等**：多次调用全部返 nil（或第一次的 error），**不**返 spurious

@@ -1,0 +1,8 @@
+server:
+  http_port: 8080
+
+# Story 10.6 测试 fixture：YAML 显式写 redis.presence_ttl_sec 正值，
+# 验证 loader 不被默认值覆盖（与 testdata/redis.yaml 同风格）。
+redis:
+  addr: "127.0.0.1:6379"
+  presence_ttl_sec: 30

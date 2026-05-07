@@ -47,6 +47,11 @@ const (
 	// epics.md §Story 10.2 行 1671 钦定 `pool_size` 字段；节点 4 阶段 Redis QPS 不高，
 	// 10 足够；节点 9+ 上 prod 按观测调整。Story 10.2 引入。
 	defaultRedisPoolSize = 10
+	// defaultRedisPresenceTTLSec 是 Story 10.6 引入的 PresenceRepo TTL 默认值
+	// （5 分钟 = 300s）。选型由 docs/数据库设计.md §9.1 + 心跳节奏（heartbeat=60s /
+	// scan=30s）钦定 —— 远大于心跳路径让 TTL 永不到，远小于运维容忍窗口让僵尸 user
+	// 5 分钟内自然清。
+	defaultRedisPresenceTTLSec = 300
 	// defaultWSHeartbeatTimeoutSec 是 WS Session 心跳超时阈值（秒）。
 	// V1 §12.2 钦定 60s；prod 必须使用默认值（契约一部分）；Story 10.3 引入。
 	defaultWSHeartbeatTimeoutSec = 60
@@ -153,6 +158,12 @@ func Load(path string) (*Config, error) {
 	// 本字段无"显式 0 = 禁用功能"的合法用法，不需要区分 nil / *0。
 	if cfg.Redis.PoolSize <= 0 {
 		cfg.Redis.PoolSize = defaultRedisPoolSize
+	}
+	// Redis PresenceTTLSec 默认值兜底（Story 10.6 引入；与 PoolSize <= 0 → 默认 同模式）：
+	// YAML 缺字段 / 显式 0 / 显式负数都视为"用默认值"（PresenceTTLSec 没有"显式 0 = 禁用"
+	// 的合法业务语义；presence repo 必须有 TTL 才能在 server crash 后自然清僵尸记录）。
+	if cfg.Redis.PresenceTTLSec <= 0 {
+		cfg.Redis.PresenceTTLSec = defaultRedisPresenceTTLSec
 	}
 	// Redis Addr / DB 不在 loader 兜底：
 	//   - Addr == "" 让 fail-fast 在 redis.Open 层暴露（与 mysql.dsn 同模式）
