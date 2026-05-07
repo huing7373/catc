@@ -300,47 +300,62 @@ func (m *sessionManager) removeFromIndicesLocked(s *Session) {
 
 // ListSessionsByRoomID 实装 SessionManager.ListSessionsByRoomID。
 //
-// 锁内 read-lock copy 切片返回（避免遍历过程中 manager 改 map 的并发问题）；
-// 按 sessionID 字典序排序（让 BroadcastToRoom 调用时遍历顺序确定，便于排障）。
+// 流程：
+//  1. 锁内 read-lock 拿引用切片（避免遍历过程中 manager 改 map 的并发问题）
+//  2. **锁外**按 sessionID 字典序排序（review r5 P2 修：避免 O(N log N) sort
+//     持 RLock 阻塞 Register/Unregister 的 write lock）
+//
+// 排序在锁外的安全性：每个 *Session 是独立堆对象，Register/Unregister 改的是
+// manager 内部 map，**不**改 *Session 自身字段；快照切片的 Session 引用即便
+// 在排序期间被 manager Unregister 也不影响 sessionID 字段（unexported，唯一
+// 写入点是 Register，且生命周期内不变 —— Register 在 m.mu.Lock 持锁期赋值后
+// 不再修改）。
 func (m *sessionManager) ListSessionsByRoomID(ctx context.Context, roomID uint64) []*Session {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	room, ok := m.sessionsByRoom[roomID]
 	if !ok || len(room) == 0 {
+		m.mu.RUnlock()
 		return []*Session{}
 	}
+	// 锁内仅 copy 引用切片（O(N) 但无排序开销）
 	out := make([]*Session, 0, len(room))
-	ids := make([]string, 0, len(room))
-	for id := range room {
-		ids = append(ids, id)
+	for _, s := range room {
+		out = append(out, s)
 	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		out = append(out, room[id])
-	}
+	m.mu.RUnlock()
+	// 锁外排序（O(N log N) 不再阻塞 Register/Unregister）
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].sessionID < out[j].sessionID
+	})
 	return out
 }
 
 // ListAllSessions 实装 SessionManager.ListAllSessions（Story 10.4 加）。
 //
-// 与 ListSessionsByRoomID 同模式：锁内 read-lock copy 切片返回 + sessionID
-// 字典序排序。HeartbeatScanner 拿到切片后并发 CloseWithCode 安全（manager 内部
-// map 改动不影响切片）。
+// 与 ListSessionsByRoomID 同模式：
+//  1. 锁内 read-lock 拿引用切片
+//  2. **锁外**按 sessionID 字典序排序（review r5 P2 修）
+//
+// HeartbeatScanner 每 30s 调本方法；如果 sort 持 RLock，N 大时 Register/Unregister
+// 的 write lock（同一 mu）周期性被阻塞，连接 / 断连延迟。把 sort 挪到锁外
+// 让 RLock 持锁时间退化到 O(N) copy（约几 us 至几 ms 量级），不再随 sort 复杂度
+// 上升。
 func (m *sessionManager) ListAllSessions(ctx context.Context) []*Session {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	if len(m.sessionsByID) == 0 {
+		m.mu.RUnlock()
 		return []*Session{}
 	}
-	ids := make([]string, 0, len(m.sessionsByID))
-	for id := range m.sessionsByID {
-		ids = append(ids, id)
+	// 锁内仅 copy 引用切片
+	out := make([]*Session, 0, len(m.sessionsByID))
+	for _, s := range m.sessionsByID {
+		out = append(out, s)
 	}
-	sort.Strings(ids)
-	out := make([]*Session, 0, len(ids))
-	for _, id := range ids {
-		out = append(out, m.sessionsByID[id])
-	}
+	m.mu.RUnlock()
+	// 锁外排序
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].sessionID < out[j].sessionID
+	})
 	return out
 }
 

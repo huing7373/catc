@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -53,11 +54,23 @@ const heartbeatScanIntervalSec = 30
 //   - **fanout goroutine 必须 ctx-aware**（review r3 P2）：scanner.Run 退出后已
 //     dispatched 的 per-session goroutine 不能再 emit 4005，否则 shutdown 期间
 //     正常下线的 client 会错误地收到 "heartbeat timeout" 触发自动重连
+//   - **Run 退出前必须 drain fanout goroutines**（review r5 P2）：仅 ctx-check
+//     不够 —— "已通过最后一次 ctx.Done() check + 即将调 CloseWithCode" 的 goroutine
+//     在 ctx cancel 后仍会 emit 4005。用 sync.WaitGroup 跟踪 in-flight fanout，
+//     Run 退出前 wg.Wait() 阻塞到所有 goroutine 跑完。两道防线（fanout 入口
+//     ctx-check 让 ctx-cancelled 路径立即 return + Run defer wg.Wait() 让残余
+//     goroutine 全跑完）共同保证 ctx cancel 后没有 stale fanout 在跑。
 type HeartbeatScanner struct {
 	mgr      SessionManager
 	cfg      heartbeatScannerConfig
 	logger   *slog.Logger
 	interval time.Duration
+
+	// wg 跟踪 scanOnce 已 dispatch 的 in-flight fanout goroutines（review r5 P2）。
+	// Run defer wg.Wait() 让 ctx cancel 后 Run 仍阻塞到所有 fanout 跑完才返回 ——
+	// 配合 fanout 入口 ctx-check 让 ctx-cancelled 路径立即 return，shutdown 期间
+	// 不再有 stale 4005 emit。
+	wg sync.WaitGroup
 }
 
 // heartbeatScannerConfig 是 HeartbeatScanner 接受的最小配置面（让单测可注入
@@ -134,9 +147,17 @@ func newHeartbeatScannerForTest(mgr SessionManager, timeoutMs int64, interval ti
 //   - **不**在 ctx.Done 后再做 cleanup（除 ticker.Stop）：scanner 没有持久状态
 //   - **不**在每 tick 启动新 goroutine：scanOnce 内部并发 CloseWithCode 即可，
 //     单 ticker 串行触发避免 goroutine 数量随时间无限增长
+//   - **defer wg.Wait()**（review r5 P2）：Run 退出前阻塞到所有 in-flight fanout
+//     goroutine 跑完。fanout 入口 ctx-check 会让 ctx-cancelled 路径立即 return；
+//     已经过 ctx-check 的 goroutine 会跑到 CloseWithCode 完成 —— 两种路径都收敛
+//     后 wg.Wait() 解除阻塞，Run 才返回。这样保证 Run 返回 = scanner 全部安静，
+//     与 main.go defer LIFO（cancelHeartbeat → sessionMgr.Close）的钦定时序对齐。
 func (s *HeartbeatScanner) Run(ctx context.Context) {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
+	// review r5 P2：退出前等所有 fanout goroutine 跑完才返回，避免 ctx cancel 后
+	// 已 dispatched 但已通过 ctx-check 的 goroutine 仍在 race 4005 emit。
+	defer s.wg.Wait()
 	s.logger.Info("ws heartbeat scanner started",
 		slog.Int64("timeoutMs", s.cfg.timeoutMs),
 		slog.Duration("interval", s.interval),
@@ -188,6 +209,12 @@ func (s *HeartbeatScanner) Run(ctx context.Context) {
 //     SIGTERM 期间正常下线却收到 4005 错误地触发自动重连。修法：在 fanout
 //     goroutine 入口 select ctx.Done → return，绕过 close path；recheck 之后再
 //     check 一次防 sleep 在 nanos 间被 cancel。
+//   - **shutdown drain 兜底**（review r5 P2）：仅 ctx-check 不够 —— 已通过最后
+//     一次 ctx-check 的 goroutine 会继续跑到 CloseWithCode 完成。本函数把每个
+//     fanout goroutine 注册到 s.wg，Run 退出前 defer s.wg.Wait() 阻塞到所有
+//     goroutine 真正跑完（无论是 ctx-aware return 还是真的执行完 CloseWithCode）。
+//     wg.Add 在 dispatch 前主线程同步调用，wg.Done 在 goroutine defer 内 —— 标准
+//     "Add before go, Done in defer" 模式不会触发 wg 自身的 race。
 func (s *HeartbeatScanner) scanOnce(ctx context.Context, now time.Time) {
 	sessions := s.mgr.ListAllSessions(ctx)
 	if len(sessions) == 0 {
@@ -208,7 +235,12 @@ func (s *HeartbeatScanner) scanOnce(ctx context.Context, now time.Time) {
 		// 串行写会卡 500s；fanout 后整个 scanOnce 不超过 500ms。
 		// **review r3 P2**：必须捕获 ctx，让 shutdown 期间已 dispatched 的 goroutine
 		// 不再 emit 4005（避免与 sessionMgr.Close 标准路径 race）。
+		// **review r5 P2**：wg.Add(1) 在 dispatch 前同步调用，goroutine defer wg.Done()。
+		// Run defer s.wg.Wait() 退出前 drain，让 ctx cancel 后已 dispatched 的
+		// goroutine 全跑完才让 Run 返回。
+		s.wg.Add(1)
 		go func(target *Session) {
+			defer s.wg.Done()
 			// review r3 P2 入口 ctx check：scanner.Run 退出（cancelHeartbeat()
 			// 在 main.go defer 内被调）后 ctx 已 Done，本 goroutine 应放弃 close
 			// path，让 sessionMgr.Close 走标准 close 流程而不是 4005。

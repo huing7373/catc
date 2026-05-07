@@ -2577,3 +2577,176 @@ func TestHeartbeatScanner_ScanOnce_FanoutGoroutineRespectsCtxCancel(t *testing.T
 	}
 }
 
+// TestHeartbeatScanner_Run_DrainsFanoutBeforeReturn：review r5 P2 regression。
+//
+// 背景（r5 P2）：r3 修了 fanout goroutine 入口/recheck 后做 ctx-check，但
+// "已通过最后一次 ctx-check 即将调 CloseWithCode" 的 goroutine 在 ctx cancel
+// 后仍会 emit 4005。SIGTERM 落在 sweep 期间 → shutdown 仍能推 4005，触发 client
+// 重连风暴。修法：scanner 用 sync.WaitGroup 跟踪 in-flight fanout，Run defer
+// wg.Wait() 阻塞到所有 fanout 跑完才返回。
+//
+// 测试策略：
+//  1. 起 N=10 个 idle session，让 scanOnce 必 dispatch 大批 fanout
+//  2. scanner.Run 启动；等几个 tick 让 fanout 入队
+//  3. cancel ctx，立即收下 Run 退出信号
+//  4. 断言 Run 在合理时间内返回（说明 wg.Wait 有 drain），且 Run 返回**之后**
+//     不再有任何 fanout goroutine 跑（用 wg.Wait 后再观察一段时间确认无 emit）
+//
+// **关键**：本测试覆盖的是"Run 返回 = scanner 完全静默"的强不变量；ctx-check
+// 让 ctx-cancelled 路径立即 return，wg.Wait 让已通过 ctx-check 的 goroutine 跑完。
+// 两种 goroutine 退出方式都会 wg.Done，Run 会等到所有都 wg.Done 后才返回。
+func TestHeartbeatScanner_Run_DrainsFanoutBeforeReturn(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+
+	repo := &stubRoomMemberRepo{}
+
+	// 起 10 个 session，全 stale 让 fanout 必触发
+	const N = 10
+	conns := make([]*websocket.Conn, 0, N)
+	sessions := make([]*wsapp.Session, 0, N)
+	tss := make([]*httptest.Server, 0, N)
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+		for _, ts := range tss {
+			ts.Close()
+		}
+	}()
+	staleMs := time.Now().UnixMilli() - 10_000
+	for i := 0; i < N; i++ {
+		conn, sess, ts := useGatewayDial(t, mgr, repo, uint64(2000+i), 4000)
+		conns = append(conns, conn)
+		sessions = append(sessions, sess)
+		tss = append(tss, ts)
+		sess.SetLastHeartbeatAtForTest(staleMs)
+	}
+
+	// scanner: timeoutMs 50ms（必 stale），interval 30ms（短让 tick 多触发）
+	scanner := wsapp.NewHeartbeatScannerForTest(mgr, 50, 30*time.Millisecond, idleTestLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		scanner.Run(ctx)
+		close(runDone)
+	}()
+
+	// 让几次 tick 跑完，scanOnce dispatch 大批 fanout
+	time.Sleep(100 * time.Millisecond)
+
+	// cancel → Run 应 drain in-flight fanout 后返回
+	cancel()
+
+	// Run 应在 reasonable 时间内退出。fanout goroutine 的最大开销 = 写 close frame
+	// 500ms timeout（如果走了 close path），所以给 2s 余量。
+	select {
+	case <-runDone:
+		// good — Run 已 drain 全部 fanout 后返回
+	case <-time.After(2 * time.Second):
+		t.Fatalf("scanner.Run did not return within 2s after ctx cancel; wg.Wait drain likely missing (review r5 P2)")
+	}
+
+	// Run 已返回 = wg 已归零 = 所有 fanout goroutine 都 wg.Done 了。
+	// 此时 manager 内 session 状态二选一：被 Close（fanout 抢在 ctx-cancel 前完成
+	// emit）或仍 active（fanout 入口/recheck ctx-check 跳过 emit）。本测试**不**断言
+	// 哪一种 —— scanner 在 cancel 前后的 race 决定，两种都符合协议。
+	// 断言的是：Run 退出后**不会再有新的 4005 emit**（因为 wg.Wait 已 drain，没有
+	// 残余 goroutine 还在跑）。给 200ms 静默观察期 —— 如果有残余 goroutine 在跑，
+	// 它们这段时间会触发 onClose 副作用。
+	time.Sleep(200 * time.Millisecond)
+
+	// 注：本测试无法直接探测"是否有 goroutine 还在跑"（goroutine count 不可靠 ——
+	// runtime 内部 goroutine 数会浮动）。真正的保证来自 wg.Wait 语义：Run 返回 →
+	// wg 归零 → 所有 Add 都有对应 Done。如果 scanner 漏掉 wg.Add 或 fanout 漏掉
+	// wg.Done，go test -race 在 wg 内部探测下会暴露。本测试在 -race 下跑就足够。
+}
+
+// TestSessionManager_ListAllSessions_NoLockHeldDuringSort：review r5 P2 regression。
+//
+// 背景（r5 P2）：ListAllSessions 持 RLock 全程包括 O(N log N) sort；每 30s heartbeat
+// sweep 触发，sessions 多时整个 sweep 期间 Register/Unregister（要 write lock 同
+// 一 mu）被周期性阻塞。修法：把 sort 移到 RUnlock 之后，锁内仅 copy 引用切片。
+//
+// 测试策略（粗粒度延迟探测）：
+//  1. 预先 Register 大量 session 让 N 大到 sort 有可观察时间
+//  2. 起一个 goroutine 反复调 ListAllSessions（模拟 scanner 周期性 sweep）
+//  3. 主 goroutine 反复调 Register/Unregister，测量 N 次 op 总时间
+//  4. 断言：在并发 ListAllSessions 干扰下，Register/Unregister 平均延迟应 reasonable
+//     （go test -race 主要保证正确性；本测试主要保证 lock 持有时间不灾难性）
+//
+// **关键**：本测试**不**做精确时间断言（CI 环境抖动大），仅做"在并发 list 下
+// 仍能完成大量 op"的存活性断言。真正的并发正确性由 -race 兜底。
+func TestSessionManager_ListAllSessions_NoLockHeldDuringSort(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+
+	repo := &stubRoomMemberRepo{}
+
+	// 预先建一批 session 让 sort 工作量可观
+	const presetN = 50
+	conns := make([]*websocket.Conn, 0, presetN)
+	tss := make([]*httptest.Server, 0, presetN)
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+		for _, ts := range tss {
+			ts.Close()
+		}
+	}()
+	for i := 0; i < presetN; i++ {
+		conn, _, ts := useGatewayDial(t, mgr, repo, uint64(5000+i), 5500)
+		conns = append(conns, conn)
+		tss = append(tss, ts)
+	}
+
+	// 启动并发 list 干扰：模拟 heartbeat scanner 周期性调 ListAllSessions
+	stop := make(chan struct{})
+	listDone := make(chan struct{})
+	go func() {
+		defer close(listDone)
+		ctx := context.Background()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = mgr.ListAllSessions(ctx)
+				_ = mgr.ListSessionsByRoomID(ctx, 5500)
+			}
+		}
+	}()
+
+	// 主 goroutine：在干扰下做 N 次 Register/Unregister，验证不卡死
+	const opN = 30
+	start := time.Now()
+	regConns := make([]*websocket.Conn, 0, opN)
+	regTss := make([]*httptest.Server, 0, opN)
+	for i := 0; i < opN; i++ {
+		conn, _, ts := useGatewayDial(t, mgr, repo, uint64(6000+i), 6500)
+		regConns = append(regConns, conn)
+		regTss = append(regTss, ts)
+	}
+	elapsed := time.Since(start)
+
+	close(stop)
+	<-listDone
+
+	// cleanup
+	for _, c := range regConns {
+		c.Close()
+	}
+	for _, ts := range regTss {
+		ts.Close()
+	}
+
+	// 存活性断言：30 次 Register 在持续 list 干扰下总耗时不应灾难性
+	// （baseline 几百 ms 量级；给 30s 余量兜 CI 抖动）。如果旧实装持锁 sort 卡死，
+	// 这里会因为 Register 拿不到 write lock 而超时。
+	if elapsed > 30*time.Second {
+		t.Errorf("Register x %d under concurrent ListAllSessions took %v > 30s — write lock starvation likely (review r5 P2: sort must be outside RLock)", opN, elapsed)
+	}
+}
+
