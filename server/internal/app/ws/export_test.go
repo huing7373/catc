@@ -30,8 +30,39 @@ func NewHeartbeatScannerForTestWithRenewer(mgr SessionManager, timeoutMs int64, 
 }
 
 // ScanOnceForTest 暴露 unexported scanOnce 给 ws_test 单测直接调用（绕过 ticker）。
+//
+// **不**包 wg.Wait —— 与 production Run 路径行为一致（fire-and-forget dispatch）。
+// 既有 close-fanout 测试（如 TestHeartbeatScanner_ScanOnce_RaceRefreshAfterListing_
+// NotClosed）依赖此 fire-and-forget 语义在 ScanOnceForTest 返回后到 fanout
+// goroutine 实际跑 recheck 之间塞 SetLastHeartbeatAt 模拟 race —— 不能在此 helper
+// 内 wg.Wait 把窗口关掉。
+//
+// reconcile 路径（review 10-6 r5 P1：fanout 化）的单测需要 sync 断言 renewer
+// state 时，**显式**调 DrainFanoutForTest（或 ScanOnceAndDrainForTest）等 wg。
 func (s *HeartbeatScanner) ScanOnceForTest(ctx context.Context, now time.Time) {
 	s.scanOnce(ctx, now)
+}
+
+// ScanOnceAndDrainForTest 是 scanOnce + wg.Wait 的组合（review 10-6 r5 P1）。
+//
+// 用途：reconcile 路径单测需要在 ScanOnceForTest 返回后立刻断言 fakeRenewer 状态
+// （count / lastSession），**必须**先等 fanout 跑完才能可靠读。
+//
+// 与 ScanOnceForTest 的区别：本 helper 多了 wg.Wait —— 让 fanout drain 后才返回。
+// 不要把 wg.Wait 直接塞进 ScanOnceForTest（会破坏 close-fanout race 测试的语义，
+// 那类测试依赖 ScanOnceForTest 返回后 fanout 仍未跑的窗口期）。
+func (s *HeartbeatScanner) ScanOnceAndDrainForTest(ctx context.Context, now time.Time) {
+	s.scanOnce(ctx, now)
+	s.wg.Wait()
+}
+
+// DrainFanoutForTest 显式 wg.Wait 让单测可在调过 ScanOnceForTest 后
+// 主动 drain（review 10-6 r5 P1）。
+//
+// 与 ScanOnceAndDrainForTest 内含 wg.Wait 等价，但允许测试**先**测主 loop 耗时，
+// **后** drain fanout 验证 count，让两段时序断言分开测量。
+func (s *HeartbeatScanner) DrainFanoutForTest() {
+	s.wg.Wait()
 }
 
 // TimeoutMsForTest 暴露 internal cfg.timeoutMs 给单测断言（如 zero-input 兜底）。

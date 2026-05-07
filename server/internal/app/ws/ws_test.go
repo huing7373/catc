@@ -3975,7 +3975,8 @@ func TestHeartbeatScanner_ScanOnce_ActiveSession_ReconcilesPresence(t *testing.T
 	// timeoutMs=10s 让刚握手完的 session 视为 active（idle ≈ 几 ms < 10s）
 	scanner := wsapp.NewHeartbeatScannerForTestWithRenewer(mgr, 10*1000, 200*time.Millisecond, idleTestLogger(), renewer)
 
-	scanner.ScanOnceForTest(context.Background(), time.Now())
+	// review 10-6 r5 P1：reconcile fanout 化后必须 drain 才能可靠断言 renewer state
+	scanner.ScanOnceAndDrainForTest(context.Background(), time.Now())
 
 	// 验证 AddOnline 被调一次，参数匹配
 	if got := renewer.count.Load(); got != 1 {
@@ -4014,7 +4015,9 @@ func TestHeartbeatScanner_ScanOnce_IdleSession_DoesNotReconcile(t *testing.T) {
 	// 等握手后 sleep 50ms 让 idle 远超 10ms
 	time.Sleep(50 * time.Millisecond)
 
-	scanner.ScanOnceForTest(context.Background(), time.Now())
+	// review 10-6 r5 P1：drain 让 close fanout 跑完（虽然这个测试断言 renewer 不被
+	// 调，但 drain 让本测试退出前没有 leaked goroutine，`go test -race` 干净）
+	scanner.ScanOnceAndDrainForTest(context.Background(), time.Now())
 
 	// 验证 AddOnline 没被调
 	if got := renewer.count.Load(); got != 0 {
@@ -4035,8 +4038,8 @@ func TestHeartbeatScanner_ScanOnce_NilRenewer_DoesNotPanic(t *testing.T) {
 	// renewer = nil
 	scanner := wsapp.NewHeartbeatScannerForTestWithRenewer(mgr, 10*1000, 200*time.Millisecond, idleTestLogger(), nil)
 
-	// 不应 panic
-	scanner.ScanOnceForTest(context.Background(), time.Now())
+	// 不应 panic（renewer == nil 时主 loop 不 dispatch fanout，wg.Wait no-op）
+	scanner.ScanOnceAndDrainForTest(context.Background(), time.Now())
 }
 
 // TestHeartbeatScanner_ScanOnce_RenewerError_LoggedNotAborted：AddOnline 返 error
@@ -4090,7 +4093,8 @@ func TestHeartbeatScanner_ScanOnce_RenewerError_LoggedNotAborted(t *testing.T) {
 	renewer := &fakeRenewer{returnErr: errors.New("redis down")}
 
 	scanner := wsapp.NewHeartbeatScannerForTestWithRenewer(mgr, 10*1000, 200*time.Millisecond, idleTestLogger(), renewer)
-	scanner.ScanOnceForTest(context.Background(), time.Now())
+	// review 10-6 r5 P1：reconcile fanout 化后必须 drain 才能可靠断言 count
+	scanner.ScanOnceAndDrainForTest(context.Background(), time.Now())
 
 	// 即使 AddOnline 返 error，scanner 仍应对所有 3 session 调 AddOnline（不被中断）
 	if got := renewer.count.Load(); got != 3 {
@@ -4160,7 +4164,8 @@ func TestHeartbeatScanner_ScanOnce_UnregisteredSession_SkipsReconcile(t *testing
 	// timeoutMs=10s 让 session 视为 active（idle 远 < 10s）
 	scanner := wsapp.NewHeartbeatScannerForTestWithRenewer(staleMgr, 10*1000, 200*time.Millisecond, idleTestLogger(), renewer)
 
-	scanner.ScanOnceForTest(context.Background(), time.Now())
+	// review 10-6 r5 P1：reconcile fanout 化后必须 drain 才能可靠断言 count
+	scanner.ScanOnceAndDrainForTest(context.Background(), time.Now())
 
 	// **关键断言**：r4 P2 修后 IsRegistered guard 让 AddOnline 不被调
 	// （否则会复活已 unregister session 的 presence → zombie 直到 TTL）
@@ -4186,11 +4191,251 @@ func TestHeartbeatScanner_ScanOnce_RegisteredSession_StillReconciles(t *testing.
 
 	renewer := &fakeRenewer{}
 	scanner := wsapp.NewHeartbeatScannerForTestWithRenewer(mgr, 10*1000, 200*time.Millisecond, idleTestLogger(), renewer)
-	scanner.ScanOnceForTest(context.Background(), time.Now())
+	// review 10-6 r5 P1：reconcile fanout 化后必须 drain 才能可靠断言 count
+	scanner.ScanOnceAndDrainForTest(context.Background(), time.Now())
 
 	// IsRegistered=true → AddOnline 正常调
 	if got := renewer.count.Load(); got != 1 {
 		t.Errorf("AddOnline count = %d, want 1 (live session should reconcile)", got)
+	}
+}
+
+// ---------- review 10-6 r5 P1: reconcile fanout 不阻塞主 sweep ----------
+
+// slowRenewer 是 PresenceRenewer 替身（review 10-6 r5 P1），让每次 AddOnline
+// 内部 sleep 固定时间模拟 Redis 高延迟，验证：
+//  1. 新 fanout 实装下，scanOnce 主 loop 不会被 N × delay 拖慢（O(1) per session
+//     dispatch + 立即返回）
+//  2. ScanOnceForTest（内含 wg.Wait）等所有 fanout 跑完才返回，count=N 严格成立
+type slowRenewer struct {
+	delay time.Duration
+	count atomic.Int32
+}
+
+func (r *slowRenewer) AddOnline(_ context.Context, _, _ uint64, _ string) error {
+	time.Sleep(r.delay)
+	r.count.Add(1)
+	return nil
+}
+
+// TestHeartbeatScanner_ScanOnce_ReconcileFanout_DoesNotBlockSweep：review 10-6 r5 P1。
+//
+// 背景：r2/r3/r4 把 reconcile 走成主 loop 内**同步**调 AddOnline，让一次 sweep =
+// O(N session) × Redis latency。N 大或 Redis 慢时单 sweep > 30s tick，tail session
+// 的 idle 超时检测被延迟、它们的 presence TTL 也错过 renew → flap offline。
+//
+// r5 P1 修：reconcile 改成 fanout goroutine + per-call ctx timeout，与 close
+// fanout 同模式（共用 s.wg，Run defer wg.Wait drain）。
+//
+// 测试策略：
+//  1. 起 N=20 active session（idle < timeoutMs，必走 reconcile 分支）
+//  2. slowRenewer 每次 AddOnline sleep 100ms → 同步路径下 N=20 × 100ms = 2s
+//  3. 直接调 unexported scanOnce **不** wg.Wait（用包内同包测试访问）—— 主 loop
+//     应在 < 200ms 内完成 dispatch 返回（fanout 各自异步跑 100ms）
+//
+// **关键不变量**：主 loop 时长 ≪ N × delay 才算 fanout 真起作用。
+func TestHeartbeatScanner_ScanOnce_ReconcileFanout_DoesNotBlockSweep(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+
+	repo := &stubRoomMemberRepo{}
+
+	const N = 20
+	conns := make([]*websocket.Conn, 0, N)
+	tss := make([]*httptest.Server, 0, N)
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+		for _, ts := range tss {
+			ts.Close()
+		}
+	}()
+	for i := 0; i < N; i++ {
+		conn, _, ts := useGatewayDial(t, mgr, repo, uint64(5000+i), 4500)
+		conns = append(conns, conn)
+		tss = append(tss, ts)
+	}
+
+	// 等所有 session 注册到 mgr
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(mgr.ListAllSessions(context.Background())) >= N {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// slowRenewer：每次 AddOnline sleep 100ms。同步路径下 N=20 → 2s 总耗时
+	const delay = 100 * time.Millisecond
+	renewer := &slowRenewer{delay: delay}
+
+	// timeoutMs=10s 让所有 session 视为 active
+	scanner := wsapp.NewHeartbeatScannerForTestWithRenewer(mgr, 10*1000, 200*time.Millisecond, idleTestLogger(), renewer)
+
+	// **关键**：ScanOnceForTest 不含 wg.Wait（保留 fire-and-forget 语义让 close-fanout
+	// race 测试能用），所以这里直接测 ScanOnceForTest 主 loop 的耗时 —— dispatch 完
+	// 立即返回，不被 N × delay 拖累。
+	start := time.Now()
+	scanner.ScanOnceForTest(context.Background(), time.Now())
+	mainLoopDur := time.Since(start)
+
+	// 主 loop 应在 < 50ms 内完成（即使 N=20 也仅启 ~20 goroutines + Add/dispatch）
+	// 给 200ms 余量留 CI 抖动空间；远小于 N × delay = 2s（同步路径下界）
+	if mainLoopDur > 200*time.Millisecond {
+		t.Errorf("scanOnce main loop took %v with N=%d slow renewer; expected < 200ms (review r5 P1: reconcile must fanout, not block main sweep)", mainLoopDur, N)
+	}
+
+	// 等 fanout drain（直接调 wg.Wait via DrainFanoutForTest）
+	scanner.DrainFanoutForTest()
+
+	if got := renewer.count.Load(); got != N {
+		t.Errorf("AddOnline count = %d after drain, want %d (all fanout should complete)", got, N)
+	}
+}
+
+// hangRenewer 是 PresenceRenewer 替身（review 10-6 r5 P1），让 AddOnline 严格
+// 阻塞到 ctx done 才返回，模拟 Redis 永久 hang 的病态场景。
+type hangRenewer struct {
+	count atomic.Int32
+}
+
+func (r *hangRenewer) AddOnline(ctx context.Context, _, _ uint64, _ string) error {
+	r.count.Add(1)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// TestHeartbeatScanner_ScanOnce_ReconcileFanout_PerCallCtxTimeout：review 10-6 r5 P1。
+//
+// 背景：fanout 改造后单个 hang 的 Redis 调用如果没有 per-call ctx timeout，会让
+// fanout goroutine 永久卡住，Run defer wg.Wait drain 时间无界增长 —— shutdown 会
+// 卡到那个 hang goroutine 解锁才返回。
+//
+// 修法：fanout 内 AddOnline 走 context.WithTimeout(parentCtx, presenceReconcileTimeout=2s)，
+// 单 hang 最多卡 2s 自动 ctx.DeadlineExceeded 退出。
+//
+// 测试策略：
+//  1. 起 1 个 active session
+//  2. hangRenewer.AddOnline 阻塞到 ctx.Done
+//  3. ScanOnceForTest（内 wg.Wait）应在 ~presenceReconcileTimeout 内返回（不
+//     永久卡死也不立刻返回）—— 验证 per-call deadline 真的生效
+//
+// 上限给 presenceReconcileTimeout + 500ms = 2.5s，下限给 1s（确保不是 immediate
+// 路径意外 short-circuit）。
+func TestHeartbeatScanner_ScanOnce_ReconcileFanout_PerCallCtxTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping per-call ctx timeout test in -short mode (waits up to 2.5s)")
+	}
+
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+
+	repo := &stubRoomMemberRepo{}
+	conn, _, ts := useGatewayDial(t, mgr, repo, 1001, 4501)
+	defer ts.Close()
+	defer conn.Close()
+
+	renewer := &hangRenewer{}
+	scanner := wsapp.NewHeartbeatScannerForTestWithRenewer(mgr, 10*1000, 200*time.Millisecond, idleTestLogger(), renewer)
+
+	// 用 ScanOnceAndDrainForTest（含 wg.Wait）—— 主 loop dispatch 后等 fanout drain，
+	// drain 时间 = per-call ctx timeout（hang renewer 在 ctx.Done 才返回）
+	start := time.Now()
+	scanner.ScanOnceAndDrainForTest(context.Background(), time.Now())
+	dur := time.Since(start)
+
+	// 应在 [1s, 2.5s] 区间返回 —— per-call ctx 在 2s 后 cancel 让 hang AddOnline
+	// 解锁，wg.Wait drain 跟着返回。
+	if dur > 2500*time.Millisecond {
+		t.Errorf("ScanOnceAndDrainForTest took %v with hang renewer; expected ≤ ~2s (review r5 P1: per-call ctx timeout must cap hang)", dur)
+	}
+	if dur < 1*time.Second {
+		t.Errorf("ScanOnceAndDrainForTest returned in %v; suspiciously fast — per-call ctx timeout may be too short or path short-circuited", dur)
+	}
+
+	// hang renewer 应只被调一次（hangRenewer.count++ 在阻塞前置位）
+	if got := renewer.count.Load(); got != 1 {
+		t.Errorf("AddOnline count = %d, want 1 (single session, single dispatch)", got)
+	}
+}
+
+// TestHeartbeatScanner_Run_DrainsReconcileFanoutOnShutdown：review 10-6 r5 P1。
+//
+// 背景：r5 P2 把 close fanout 接进 s.wg，Run defer wg.Wait drain；r5 P1 把
+// reconcile fanout **也**接进同 wg，shutdown 路径需要 drain reconcile 残余
+// goroutine（不能 ctx cancel 后 reconcile 还在跑 → 让 shutdown 期间 Redis I/O
+// 仍 emit）。
+//
+// 测试策略：复用 r5 P2 ShutdownOrdering pattern：
+//  1. 起 N 个 active session（idle < timeoutMs，必走 reconcile 分支）
+//  2. slowRenewer 每次 AddOnline sleep 100ms（让 fanout 在 Run 退出时仍在跑）
+//  3. scanner.Run 启动；等几个 tick 让 reconcile fanout dispatched
+//  4. cancel ctx → Run 应在 reasonable 时间内返回（drain 完所有 reconcile fanout）
+//
+// **关键**：Run 返回后 wg 已归零 —— 所有 reconcile goroutine 都 wg.Done 完成。
+// 给 2s 余量（slowRenewer 100ms × 几次 tick 启的 fanout 总跑完时间）。
+func TestHeartbeatScanner_Run_DrainsReconcileFanoutOnShutdown(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+
+	repo := &stubRoomMemberRepo{}
+
+	const N = 5
+	conns := make([]*websocket.Conn, 0, N)
+	tss := make([]*httptest.Server, 0, N)
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+		for _, ts := range tss {
+			ts.Close()
+		}
+	}()
+	for i := 0; i < N; i++ {
+		conn, _, ts := useGatewayDial(t, mgr, repo, uint64(6000+i), 4600)
+		conns = append(conns, conn)
+		tss = append(tss, ts)
+	}
+
+	// 等所有 session 注册
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(mgr.ListAllSessions(context.Background())) >= N {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	renewer := &slowRenewer{delay: 100 * time.Millisecond}
+
+	// timeoutMs=10s 让 session 全 active；interval 30ms 让 tick 多次触发 reconcile fanout
+	scanner := wsapp.NewHeartbeatScannerForTestWithRenewer(mgr, 10*1000, 30*time.Millisecond, idleTestLogger(), renewer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		scanner.Run(ctx)
+		close(runDone)
+	}()
+
+	// 让几次 tick 跑完，reconcile fanout dispatched 大批
+	time.Sleep(150 * time.Millisecond)
+
+	// cancel → Run 应 drain in-flight reconcile fanout 后返回
+	cancel()
+
+	// 给 2s 余量：slowRenewer 100ms × 已 dispatch 的 fanout 总跑完时间
+	select {
+	case <-runDone:
+		// good — Run drain 完所有 reconcile fanout 后返回
+	case <-time.After(2 * time.Second):
+		t.Fatalf("scanner.Run did not return within 2s after ctx cancel with reconcile fanout in-flight (review r5 P1: reconcile fanout must be drained by same wg.Wait)")
+	}
+
+	// reconcile 至少被调过几次（确认 fanout 真在 ctx cancel 前 dispatched 跑过）
+	if got := renewer.count.Load(); got == 0 {
+		t.Errorf("AddOnline count = 0 after several ticks; reconcile fanout should have dispatched at least once")
 	}
 }
 

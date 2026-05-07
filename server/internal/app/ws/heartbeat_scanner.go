@@ -24,6 +24,26 @@ import (
 // 用户调整避免 SLO 漂移）。
 const heartbeatScanIntervalSec = 30
 
+// presenceReconcileTimeout 是 scanner fanout goroutine 内单次 PresenceRenewer.AddOnline
+// 的 per-call ctx deadline 上限（review 10-6 r5 P1 加）。
+//
+// 选 2s 的理由：
+//   - 与 main.go presenceHookTimeout（Register/Unregister hook 内 RemoveOnline
+//     的 short-timeout）保持一致 —— 都是单条 Redis 命令的合理 SLO（local Redis
+//     < 1ms / remote Redis < 100ms 含 RTT，2s 是"Redis 卡住"病态场景的兜底）
+//   - 单 fanout goroutine 卡住最多 2s 后 ctx 过期返 error，scanner.Run 的
+//     defer wg.Wait() 也会被 unblock（drain 上限收敛）
+//   - 不与 scanner interval（30s）混淆：reconcile 是单 session 单次 op，不是
+//     "整批 reconcile 的 SLO"
+//
+// 走独立 ctx（context.WithTimeout(parentCtx, presenceReconcileTimeout)）：scanner
+// 主 ctx 在 SIGTERM 时被 cancel，graceful shutdown 期间 fanout 入口 ctx-check 已
+// 让 cancelled 路径立即 return；本 timeout 仅 cap **未 cancel** 路径下单次 Redis
+// 调用的最坏延迟。
+//
+// 详见 docs/lessons/2026-05-07-scanner-presence-reconcile-must-fanout-not-block-sweep-10-6-r5.md。
+const presenceReconcileTimeout = 2 * time.Second
+
 // HeartbeatScanner 是后台心跳超时扫描器（Story 10.4 引入）。
 //
 // 用途：周期性遍历 SessionManager 内所有 active Session，对超过 cfg.WS.
@@ -60,15 +80,19 @@ const heartbeatScanIntervalSec = 30
 //     Run 退出前 wg.Wait() 阻塞到所有 goroutine 跑完。两道防线（fanout 入口
 //     ctx-check 让 ctx-cancelled 路径立即 return + Run defer wg.Wait() 让残余
 //     goroutine 全跑完）共同保证 ctx cancel 后没有 stale fanout 在跑。
-//   - **每 tick reconcile presence**（review 10-6 r2 P1 / r3 P2）：long-lived WS session
-//     超过 redis.presence_ttl_sec（默认 300s）后 presence keys 会过期 ——
-//     IsOnline / ListOnline 误报 user offline，但 manager 还认为 session active。
+//   - **每 tick reconcile presence**（review 10-6 r2 P1 / r3 P2 / r5 P1）：long-lived
+//     WS session 超过 redis.presence_ttl_sec（默认 300s）后 presence keys 会过期
+//     —— IsOnline / ListOnline 误报 user offline，但 manager 还认为 session active。
 //     scanOnce 拿到 ListAllSessions 后对每个 active（idle <= timeoutMs）session
-//     同步调 PresenceRenewer.AddOnline 重写 + 续期 —— 与 client 实际 ping 频率解耦（即使
-//     client ping 慢一点，scanner 30s tick 仍写，远小于 TTL 300s）。**仅对 active
-//     session reconcile**，idle > timeoutMs 的 session 已经走 fanout close 路径，没必要
-//     续（close 完成后 onUnregister 钩子会 RemoveOnline 清干净）。详见 lesson
-//     2026-05-07-presence-ttl-renewal-via-heartbeat-scanner-10-6-r2.md。
+//     fanout goroutine（review r5 P1：**不**走主 loop 同步调 —— 否则一次 sweep =
+//     O(N) × Redis latency 让 idle 超时检测被延迟、tail session 的 presence TTL
+//     错过 renew）。fanout 入口 ctx-check + IsRegistered guard（r4 P2 不变量保留）
+//     + per-call ctx timeout（presenceReconcileTimeout=2s 防 Redis hang），
+//     PresenceRenewer.AddOnline 重写 + 续期。**仅对 active session reconcile**，
+//     idle > timeoutMs 的 session 已经走 fanout close 路径，没必要续（close 完成
+//     后 onUnregister 钩子会 RemoveOnline 清干净）。详见 lesson
+//     2026-05-07-presence-ttl-renewal-via-heartbeat-scanner-10-6-r2.md /
+//     2026-05-07-scanner-presence-reconcile-must-fanout-not-block-sweep-10-6-r5.md。
 //   - **走 AddOnline 而非纯 RenewTTL**（review 10-6 r3 P2）：Register hook 调
 //     AddOnline 失败仅 log warn 仍接受 session；如果只调 RenewTTL（EXPIRE）扫描
 //     路径无法重建缺失的 room set 成员 → IsOnline/ListOnline 整个 session 生命周期
@@ -90,10 +114,12 @@ type HeartbeatScanner struct {
 	// 已 import repo/mysql；加 repo/redis 只是同模式扩展，无新跨层依赖问题）。
 	renewer PresenceRenewer
 
-	// wg 跟踪 scanOnce 已 dispatch 的 in-flight fanout goroutines（review r5 P2）。
-	// Run defer wg.Wait() 让 ctx cancel 后 Run 仍阻塞到所有 fanout 跑完才返回 ——
-	// 配合 fanout 入口 ctx-check 让 ctx-cancelled 路径立即 return，shutdown 期间
-	// 不再有 stale 4005 emit。
+	// wg 跟踪 scanOnce 已 dispatch 的 in-flight fanout goroutines（review 10-4 r5 P2 +
+	// 10-6 r5 P1）。Run defer wg.Wait() 让 ctx cancel 后 Run 仍阻塞到所有 fanout 跑完
+	// 才返回 —— 配合 fanout 入口 ctx-check 让 ctx-cancelled 路径立即 return，shutdown
+	// 期间不再有 stale 4005 emit / stale Redis I/O。**同 wg 既包 close fanout 也包
+	// reconcile fanout**（review 10-6 r5 P1）：两条 fanout 路径共用 wg + Run defer
+	// wg.Wait() 收敛 drain 上限到 max(closeFanoutMaxLatency, presenceReconcileTimeout)。
 	wg sync.WaitGroup
 }
 
@@ -241,10 +267,12 @@ func (s *HeartbeatScanner) Run(ctx context.Context) {
 // 流程：
 //  1. mgr.ListAllSessions(ctx) → 拿当前所有 active Session 切片
 //  2. 对每个 Session 计算 idle = now.UnixMilli() - s.LastHeartbeatAt()
-//  3. idle <= timeoutMs（active）→ renewer != nil 时同步调
+//  3. idle <= timeoutMs（active）→ renewer != nil 时**fanout goroutine**调
 //     PresenceRenewer.AddOnline（roomID, userID, sessionID）重写 + 续期 presence
 //     keys（review 10-6 r2 P1 加；r3 P2 把方法从 RenewTTL 改成 AddOnline 让
-//     Register hook partial-fail 路径在 30s 内自愈）
+//     Register hook partial-fail 路径在 30s 内自愈；**r5 P1 改成 fanout** 让一次
+//     sweep 不再被 O(N) × Redis latency 拖慢。fanout 入口 ctx-check + IsRegistered
+//     guard + per-call ctx timeout，与 close fanout 共用 s.wg）
 //  4. idle > timeoutMs → 并发 go { ctx-check → 重新校验 idle > timeoutMs（review
 //     r1 P1 TOCTOU 修） → ctx-check → s.CloseWithCode(4005, "heartbeat timeout") }
 //     （并发避免某一 Session 写 close frame 慢阻塞其他 Session 检测）
@@ -311,24 +339,54 @@ func (s *HeartbeatScanner) scanOnce(ctx context.Context, now time.Time) {
 			// 看似 online 直到 TTL 过期（zombie online entry，5min 视野污染）。
 			// IsRegistered 走 RLock map lookup（O(1)，nanos 量级），开销可忽略 ——
 			// 比 zombie 风险换性能成本对 SLO 更友好。
+			//
+			// **review 10-6 r5 P1**：reconcile 必须 fanout goroutine + per-call
+			// ctx timeout，**不**能在主 loop 同步调 AddOnline。原版同步路径让
+			// 一次 sweep = O(N session) × Redis latency —— Redis 慢或 N 大时
+			// 单次 sweep 远超 30s tick，tail session 的 idle 超时检测被延迟，
+			// 它们的 presence TTL 也错过 renew → flap offline。改成 fanout：
+			//  1) wg.Add(1) 同步 → Run defer wg.Wait 一并 drain（与 close fanout
+			//     共用 wg；shutdown ordering 不变量保留）
+			//  2) goroutine 入口 IsRegistered 二次校验（snapshot 与 dispatch 之间
+			//     session 可能已 unregister，避免复活 zombie presence）—— 主 loop
+			//     不再做 IsRegistered，让 dispatch O(1) 不阻塞
+			//  3) per-call ctx = WithTimeout(parentCtx, presenceReconcileTimeout=2s)
+			//     —— 单 hang 的 Redis 调用最多卡 2s 自动 ctx.DeadlineExceeded 退出，
+			//     不影响其他 fanout，也不让 scanner.Run drain 时间无界增长
 			if s.renewer != nil {
-				if !s.mgr.IsRegistered(ctx, sess.SessionID()) {
-					// snapshot 后 session 已 unregister，跳过 reconcile 避免复活
-					// 已离线 session 的 presence。下一 tick 不会再看到它（已从
-					// sessionsByID 移除），AddOnline 不会被错误重写。
-					continue
-				}
-				if err := s.renewer.AddOnline(ctx, sess.RoomID(), sess.UserID(), sess.SessionID()); err != nil {
-					// 一次失败不阻塞遍历下一 session；下一 tick 30s 后重试，TTL
-					// 5min 远 > 30s × 几次重试，足以容忍偶发 Redis 抖动。log warn
-					// 让运维侧能看到累计失败信号。
-					s.logger.Warn("ws presence reconcile failed",
-						slog.String("sessionID", sess.SessionID()),
-						slog.Uint64("userID", sess.UserID()),
-						slog.Uint64("roomID", sess.RoomID()),
-						slog.Any("error", err),
-					)
-				}
+				s.wg.Add(1)
+				go func(target *Session) {
+					defer s.wg.Done()
+					// shutdown race 防护：parent ctx 已 Done → 跳过 reconcile
+					// （与 close fanout 入口 ctx-check 同模式，避免 graceful
+					// shutdown 期间无意义的 Redis I/O）
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+					// IsRegistered guard（r4 P2 不变量保留）：snapshot 与 dispatch
+					// 之间 session 可能已 unregister；此时 reconcile 会复活已离线
+					// session 的 presence 让 zombie 持续到 TTL 过期。RLock map
+					// lookup O(1)，开销可忽略。
+					if !s.mgr.IsRegistered(ctx, target.SessionID()) {
+						return
+					}
+					// per-call ctx timeout：单 hang 不影响主 loop（review r5 P1）
+					callCtx, cancel := context.WithTimeout(ctx, presenceReconcileTimeout)
+					defer cancel()
+					if err := s.renewer.AddOnline(callCtx, target.RoomID(), target.UserID(), target.SessionID()); err != nil {
+						// 一次失败不影响其他 session reconcile；下一 tick 30s 后
+						// 重试，TTL 5min 远 > 30s × 几次重试，足以容忍偶发 Redis
+						// 抖动。log warn 让运维侧能看到累计失败信号。
+						s.logger.Warn("ws presence reconcile failed",
+							slog.String("sessionID", target.SessionID()),
+							slog.Uint64("userID", target.UserID()),
+							slog.Uint64("roomID", target.RoomID()),
+							slog.Any("error", err),
+						)
+					}
+				}(sess)
 			}
 			continue
 		}
