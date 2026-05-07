@@ -2,7 +2,7 @@
 date: 2026-05-07
 source_review: codex review (epic-loop fix-review r9 — /tmp/epic-loop-review-10-6-r9.md)
 story: 10-6-redis-presence-repo
-commit: <pending>
+commit: adcb1d3
 lesson_count: 1
 ---
 

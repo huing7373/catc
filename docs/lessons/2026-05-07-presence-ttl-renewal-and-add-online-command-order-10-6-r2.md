@@ -2,7 +2,7 @@
 date: 2026-05-07
 source_review: codex review (file: /tmp/epic-loop-review-10-6-r2.md) for Story 10-6 redis-presence-repo
 story: 10-6-redis-presence-repo
-commit: <pending>
+commit: 32b5d5b
 lesson_count: 2
 ---
 
