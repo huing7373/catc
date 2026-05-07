@@ -121,6 +121,16 @@ type HeartbeatScanner struct {
 	// reconcile fanout**（review 10-6 r5 P1）：两条 fanout 路径共用 wg + Run defer
 	// wg.Wait() 收敛 drain 上限到 max(closeFanoutMaxLatency, presenceReconcileTimeout)。
 	wg sync.WaitGroup
+
+	// userPresenceMu 是 reconcile 路径与 main.go hook adapter **共享**的 per-userID
+	// 串行化锁（review 10-6 r9 P1 加）。reconcile fanout goroutine 在调
+	// renewer.AddOnline 之前先 LockFor(userID) → Lock → defer Unlock，确保
+	// scanner 的 AddOnline 与 hook 的 AddOnline / RemoveOnline 在 per-user
+	// 维度严格串行 —— 消除"hook RemoveOnline 跑完 + scanner AddOnline 复活
+	// presence" 的 TOCTOU race。**可空** —— 单测路径可传 nil 跳过锁（scanner
+	// 走与 r8 之前同语义无锁路径）；production 必传非 nil 实例与 main.go hook
+	// 共享同一把锁。
+	userPresenceMu UserPresenceMutex
 }
 
 // PresenceRenewer 是 HeartbeatScanner reconcile presence 用的窄化接口（review
@@ -143,6 +153,33 @@ type PresenceRenewer interface {
 	AddOnline(ctx context.Context, roomID, userID uint64, sessionID string) error
 }
 
+// UserPresenceMutex 是 HeartbeatScanner reconcile 路径与 main.go 的 hook adapter
+// **共享**的 per-userID 串行化锁接口（review 10-6 r9 P1 加）。
+//
+// 背景：r8 之前 hook 路径用 fire-and-forget goroutine + 自己的 userKeyedMutex；
+// scanner reconcile 路径走另一组 goroutine 但**不**共享同一把锁。两条 goroutine
+// 树对同一 Redis presence 状态做读改写，guard / IsCurrentForUser 都只是 TOCTOU
+// snapshot —— check 完到实际 AddOnline 之间，hook 的 RemoveOnline 仍可能跑完
+// 让 scanner 的 AddOnline "复活"已离线 session 的 presence。即每加一道 guard
+// 就暴露下一个 race 窗口。r9 决定走结构性修法：把 hook 改成同步（消除 hook 内
+// fire-and-forget 的 ordering race），同时让 scanner 与 hook **共享同一把
+// per-user mutex** 让两条路径之间的 critical section 真正串行。
+//
+// 使用方式：main.go 构造 userPresenceMu（实装 UserPresenceMutex），同时传入
+// hook adapter（用同一实例）和 NewHeartbeatScanner（注入 scanner）。LockFor 返回
+// 同一 userID 的 *sync.Mutex；hook 的 AddOnline / RemoveOnline 与 scanner 的
+// AddOnline 都先 LockFor → Lock → defer Unlock 再调 Redis，强制三条路径在
+// per-user 维度严格串行。
+//
+// 不同 userID 的 LockFor 返回独立 *sync.Mutex —— 不同 user 之间互不阻塞，
+// 不会退化到全局串行。
+//
+// 单测路径可注入 stub（noopUserPresenceMutex 等），或传 nil 跳过锁（scanner 走
+// 无锁路径，与 r8 之前行为兼容；production 必传非 nil 实例）。
+type UserPresenceMutex interface {
+	LockFor(userID uint64) *sync.Mutex
+}
+
 // heartbeatScannerConfig 是 HeartbeatScanner 接受的最小配置面（让单测可注入
 // 自定义阈值不依赖完整 config.WSConfig 全字段）。
 type heartbeatScannerConfig struct {
@@ -161,6 +198,11 @@ type heartbeatScannerConfig struct {
 //     可空 —— 单测 / 没接 Redis 的最小路径传 nil 跳过 reconcile，不影响心跳超时
 //     检测语义）；production 路径传 PresenceRepo 单例（PresenceRepo 接口含
 //     AddOnline 方法满足 PresenceRenewer 接口约束）
+//   - userPresenceMu: per-userID 串行化锁（review 10-6 r9 P1 加），与 main.go
+//     hook adapter **共享**同一实例 —— scanner reconcile 与 hook 在 per-user
+//     维度严格串行，消除"hook RemoveOnline 跑完 + scanner AddOnline 复活
+//     presence" 的 TOCTOU race。**可空** —— 单测 / 没接 Redis 的最小路径传 nil
+//     跳过锁；production 必传非 nil 实例。
 //
 // timeoutSec ≤ 0 → 走默认 60s（防御性兜底；正常路径 cfg.WS.HeartbeatTimeoutSec
 // 已经在 loader 内兜底过 60，但本构造函数也兜底一次让 scanner 在 testing 场景
@@ -168,7 +210,7 @@ type heartbeatScannerConfig struct {
 //
 // **不**接受 interval 参数（30s SLO 契约不开放调整）；单测路径用 unexported
 // helper newHeartbeatScannerForTest 注入小 interval（如 200ms）让单测加速。
-func NewHeartbeatScanner(mgr SessionManager, timeoutSec int, logger *slog.Logger, renewer PresenceRenewer) *HeartbeatScanner {
+func NewHeartbeatScanner(mgr SessionManager, timeoutSec int, logger *slog.Logger, renewer PresenceRenewer, userPresenceMu UserPresenceMutex) *HeartbeatScanner {
 	if timeoutSec <= 0 {
 		timeoutSec = 60
 	}
@@ -176,11 +218,12 @@ func NewHeartbeatScanner(mgr SessionManager, timeoutSec int, logger *slog.Logger
 		logger = slog.Default()
 	}
 	return &HeartbeatScanner{
-		mgr:      mgr,
-		cfg:      heartbeatScannerConfig{timeoutMs: int64(timeoutSec) * 1000},
-		logger:   logger.With(slog.String("component", "ws-heartbeat")),
-		interval: heartbeatScanIntervalSec * time.Second,
-		renewer:  renewer,
+		mgr:            mgr,
+		cfg:            heartbeatScannerConfig{timeoutMs: int64(timeoutSec) * 1000},
+		logger:         logger.With(slog.String("component", "ws-heartbeat")),
+		interval:       heartbeatScanIntervalSec * time.Second,
+		renewer:        renewer,
+		userPresenceMu: userPresenceMu,
 	}
 }
 
@@ -196,21 +239,26 @@ func NewHeartbeatScanner(mgr SessionManager, timeoutSec int, logger *slog.Logger
 // **禁止**在生产路径调用：production 路径必须用 NewHeartbeatScanner（30s SLO
 // 契约不可破防）。
 func newHeartbeatScannerForTest(mgr SessionManager, timeoutMs int64, interval time.Duration, logger *slog.Logger) *HeartbeatScanner {
-	return newHeartbeatScannerForTestWithRenewer(mgr, timeoutMs, interval, logger, nil)
+	return newHeartbeatScannerForTestWithRenewer(mgr, timeoutMs, interval, logger, nil, nil)
 }
 
 // newHeartbeatScannerForTestWithRenewer 是 newHeartbeatScannerForTest 的扩展版
 // （review 10-6 r2 P1 加），让单测可注入 PresenceRenewer stub 验证续期路径。
-func newHeartbeatScannerForTestWithRenewer(mgr SessionManager, timeoutMs int64, interval time.Duration, logger *slog.Logger, renewer PresenceRenewer) *HeartbeatScanner {
+//
+// **review 10-6 r9 P1 改**：加 userPresenceMu 参数让单测可注入共享 mutex 验证
+// scanner 与 hook 的 per-user 串行化不变量；传 nil 仍走旧的无锁路径（与既有
+// 单测兼容）。
+func newHeartbeatScannerForTestWithRenewer(mgr SessionManager, timeoutMs int64, interval time.Duration, logger *slog.Logger, renewer PresenceRenewer, userPresenceMu UserPresenceMutex) *HeartbeatScanner {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &HeartbeatScanner{
-		mgr:      mgr,
-		cfg:      heartbeatScannerConfig{timeoutMs: timeoutMs},
-		logger:   logger.With(slog.String("component", "ws-heartbeat")),
-		interval: interval,
-		renewer:  renewer,
+		mgr:            mgr,
+		cfg:            heartbeatScannerConfig{timeoutMs: timeoutMs},
+		logger:         logger.With(slog.String("component", "ws-heartbeat")),
+		interval:       interval,
+		renewer:        renewer,
+		userPresenceMu: userPresenceMu,
 	}
 }
 
@@ -365,9 +413,32 @@ func (s *HeartbeatScanner) scanOnce(ctx context.Context, now time.Time) {
 						return
 					default:
 					}
+					// **review 10-6 r9 P1 修**：与 hook adapter **共享**同一把
+					// per-user mutex 串行 —— scanner reconcile 与 hook 的 AddOnline /
+					// RemoveOnline 在 per-user 维度严格串行，消除"hook RemoveOnline
+					// 跑完 + scanner AddOnline 复活 presence" 的 TOCTOU race。
+					//
+					// 关键：lock 必须在 ctx-check / IsCurrentForUser 之前 acquire ——
+					// 否则 lock 等待期间 hook RemoveOnline 跑完 + 我们才进 critical
+					// section 又开始 AddOnline，仍然 race。先抢锁后判 IsCurrentForUser
+					// 让两条路径成为一段串行 critical section 的"先到先服务"。
+					//
+					// 不同 userID 的 LockFor 返回独立 *sync.Mutex —— 不同 user 互不
+					// 阻塞，scanner 不会因为一个 user 的锁竞争阻塞所有 reconcile。
+					//
+					// userPresenceMu == nil → 单测 / 最小路径走无锁（与 r8 之前
+					// 兼容；production 必传非 nil 实例）。
+					if s.userPresenceMu != nil {
+						mu := s.userPresenceMu.LockFor(target.UserID())
+						mu.Lock()
+						defer mu.Unlock()
+					}
 					// IsCurrentForUser guard（review 10-6 r8 P1 修；前身 r4 P2 IsRegistered）：
+					// 必须**在持锁后**重新校验 —— hook 的 RemoveOnline / Unregister 已经
+					// 持锁的 critical section 跑完后释放锁，session 此时可能已经
+					// unregister（IsCurrentForUser=false），跳过 AddOnline 不污染。
 					// snapshot 与 dispatch 之间 session 可能已 unregister 或被 reconnect
-					// 替换。IsRegistered 在 reconnect 替换中场返 true（OLD 仍在
+					// 替换；IsRegistered 在 reconnect 替换中场返 true（OLD 仍在
 					// sessionsByID 直到 oldS.Close() 跑完），让 scanner reconcile 把
 					// user:{id}:ws_session 改回 OLD session/room → NEW 的 presence 被
 					// 后续 RemoveOnline(oldSessionID) 误清。改用 IsCurrentForUser 严格

@@ -24,9 +24,20 @@ func NewHeartbeatScannerForTest(mgr SessionManager, timeoutMs int64, interval ti
 // 的 exported 别名（review 10-6 r2 P1 引入），让 ws_test 包能注入 PresenceRenewer
 // stub 验证续期路径。
 //
-// 参数语义见 newHeartbeatScannerForTestWithRenewer 注释。
+// 参数语义见 newHeartbeatScannerForTestWithRenewer 注释。**review 10-6 r9 P1**：
+// 不在 signature 里加 userPresenceMu —— 既有测试无须传锁（默认 nil 走无锁路径）；
+// 验证 mutex 串行不变量的新单测走 NewHeartbeatScannerForTestWithMutex。
 func NewHeartbeatScannerForTestWithRenewer(mgr SessionManager, timeoutMs int64, interval time.Duration, logger *slog.Logger, renewer PresenceRenewer) *HeartbeatScanner {
-	return newHeartbeatScannerForTestWithRenewer(mgr, timeoutMs, interval, logger, renewer)
+	return newHeartbeatScannerForTestWithRenewer(mgr, timeoutMs, interval, logger, renewer, nil)
+}
+
+// NewHeartbeatScannerForTestWithMutex 是 newHeartbeatScannerForTestWithRenewer
+// 的 exported 别名（review 10-6 r9 P1 加），让 ws_test 包注入 UserPresenceMutex
+// 验证 scanner reconcile 与 hook 共享 mutex 的串行不变量。
+//
+// 参数语义见 newHeartbeatScannerForTestWithRenewer 注释。
+func NewHeartbeatScannerForTestWithMutex(mgr SessionManager, timeoutMs int64, interval time.Duration, logger *slog.Logger, renewer PresenceRenewer, userPresenceMu UserPresenceMutex) *HeartbeatScanner {
+	return newHeartbeatScannerForTestWithRenewer(mgr, timeoutMs, interval, logger, renewer, userPresenceMu)
 }
 
 // ScanOnceForTest 暴露 unexported scanOnce 给 ws_test 单测直接调用（绕过 ticker）。

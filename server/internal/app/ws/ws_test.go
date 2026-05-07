@@ -2388,12 +2388,12 @@ func TestHeartbeatScanner_NewHeartbeatScanner_ZeroTimeoutSec_FallbacksTo60(t *te
 	mgr := wsapp.NewSessionManager()
 	defer mgr.Close()
 
-	scanner := wsapp.NewHeartbeatScanner(mgr, 0, idleTestLogger(), nil)
+	scanner := wsapp.NewHeartbeatScanner(mgr, 0, idleTestLogger(), nil, nil)
 	if got := scanner.TimeoutMsForTest(); got != 60_000 {
 		t.Errorf("timeoutMs = %d, want 60_000 (zero/negative input should fallback to 60s)", got)
 	}
 
-	scanner2 := wsapp.NewHeartbeatScanner(mgr, -5, idleTestLogger(), nil)
+	scanner2 := wsapp.NewHeartbeatScanner(mgr, -5, idleTestLogger(), nil, nil)
 	if got := scanner2.TimeoutMsForTest(); got != 60_000 {
 		t.Errorf("negative input: timeoutMs = %d, want 60_000", got)
 	}
@@ -4510,6 +4510,136 @@ func TestHeartbeatScanner_Run_DrainsReconcileFanoutOnShutdown(t *testing.T) {
 	// reconcile 至少被调过几次（确认 fanout 真在 ctx cancel 前 dispatched 跑过）
 	if got := renewer.count.Load(); got == 0 {
 		t.Errorf("AddOnline count = 0 after several ticks; reconcile fanout should have dispatched at least once")
+	}
+}
+
+// ---------- review 10-6 r9 P1：scanner 与 hook 共享 UserPresenceMutex 不变量 ----------
+
+// fakeUserPresenceMutex 是 UserPresenceMutex 的最小测试实装（与 main.go 的
+// userKeyedMutex 同语义；放本文件避免单测包跨 import）。
+type fakeUserPresenceMutex struct {
+	m sync.Map // map[uint64]*sync.Mutex
+}
+
+func (u *fakeUserPresenceMutex) LockFor(userID uint64) *sync.Mutex {
+	if mu, ok := u.m.Load(userID); ok {
+		return mu.(*sync.Mutex)
+	}
+	mu, _ := u.m.LoadOrStore(userID, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
+
+// TestHeartbeatScanner_Reconcile_AcquiresSharedUserMutex_BlocksUntilReleased：
+// review 10-6 r9 P1 P1 修后核心断言。
+//
+// 不变量：scanner reconcile fanout 必须**在调 renewer.AddOnline 之前**先 LockFor
+// 同 userID 的共享 mutex。验证方式：外部 goroutine（模拟 hook adapter）持锁不放，
+// 触发 scanOnce → drain → 检查 renewer.AddOnline 是否被调过；持锁期间应 0 调用，
+// 释放锁后再 drain → 应被调过 1 次。
+//
+// 这锁定的是"hook 与 scanner 之间通过 shared mutex 互斥"的语义 —— hook 的
+// RemoveOnline 持锁期间，scanner 的 AddOnline 必须等；hook 释放锁后 scanner 才
+// 能 AddOnline。否则 scanner 会"复活" hook 已经清掉的 presence。
+func TestHeartbeatScanner_Reconcile_AcquiresSharedUserMutex_BlocksUntilReleased(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, _, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	renewer := &fakeRenewer{}
+	mu := &fakeUserPresenceMutex{}
+
+	// timeoutMs=10s 让 session 视为 active；interval 200ms 但我们用 ScanOnceForTest 直接调。
+	scanner := wsapp.NewHeartbeatScannerForTestWithMutex(mgr, 10*1000, 200*time.Millisecond, idleTestLogger(), renewer, mu)
+
+	// 外部持锁（模拟 hook adapter 在 AddOnline / RemoveOnline 中场，持有 user 1001 的 mutex）。
+	hookMu := mu.LockFor(1001)
+	hookMu.Lock()
+
+	// 触发 scanOnce —— reconcile fanout dispatch 后会试图 LockFor(1001).Lock 阻塞。
+	// 用 ScanOnceForTest（不 drain）让主线程立即返回，fanout goroutine 仍在锁上等。
+	scanner.ScanOnceForTest(context.Background(), time.Now())
+
+	// 给 fanout 一点时间跑到 Lock 调用点；此时它应该卡在 hookMu 上（因为我们持锁）。
+	time.Sleep(80 * time.Millisecond)
+
+	// 断言：reconcile **没**被调过 —— scanner 卡在 LockFor(1001).Lock。
+	if got := renewer.count.Load(); got != 0 {
+		t.Errorf("AddOnline count = %d before mutex release; want 0 (scanner reconcile must block on shared per-user mutex; r9 P1 invariant)", got)
+	}
+
+	// 释放锁 —— scanner fanout 现在应能 Lock 成功并跑完 AddOnline。
+	hookMu.Unlock()
+
+	// drain 让 fanout 跑完
+	scanner.DrainFanoutForTest()
+
+	// 断言：reconcile 被调过 1 次（fanout 在锁释放后跑完）。
+	if got := renewer.count.Load(); got != 1 {
+		t.Errorf("AddOnline count = %d after mutex release + drain; want 1 (scanner must run AddOnline after acquiring shared mutex; r9 P1 invariant)", got)
+	}
+}
+
+// TestHeartbeatScanner_Reconcile_NilUserMutex_DoesNotPanic：userPresenceMu == nil
+// （单测 / 最小路径）→ scanner reconcile 走无锁路径，与 r8 之前兼容；不 panic。
+func TestHeartbeatScanner_Reconcile_NilUserMutex_DoesNotPanic(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, _, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	renewer := &fakeRenewer{}
+
+	// 走 ForTestWithRenewer 路径（userPresenceMu == nil）
+	scanner := wsapp.NewHeartbeatScannerForTestWithRenewer(mgr, 10*1000, 200*time.Millisecond, idleTestLogger(), renewer)
+	scanner.ScanOnceAndDrainForTest(context.Background(), time.Now())
+
+	if got := renewer.count.Load(); got != 1 {
+		t.Errorf("AddOnline count = %d, want 1 (nil userPresenceMu should fall back to lock-free path)", got)
+	}
+}
+
+// TestHeartbeatScanner_Reconcile_DifferentUsers_DoNotBlockEachOther：scanner
+// reconcile 在不同 userID 上的 fanout goroutine 必须互不阻塞 —— 否则会退化到
+// 全局串行，一个 user 的 mutex 卡住会让所有 reconcile 卡住。
+func TestHeartbeatScanner_Reconcile_DifferentUsers_DoNotBlockEachOther(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn1, _, ts1 := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts1.Close()
+	defer conn1.Close()
+	conn2, _, ts2 := useGatewayDial(t, mgr, repo, 1002, 3001)
+	defer ts2.Close()
+	defer conn2.Close()
+
+	renewer := &fakeRenewer{}
+	mu := &fakeUserPresenceMutex{}
+
+	scanner := wsapp.NewHeartbeatScannerForTestWithMutex(mgr, 10*1000, 200*time.Millisecond, idleTestLogger(), renewer, mu)
+
+	// 持有 user 1001 的锁，模拟 hook adapter 在中场。user 1002 应**不**受影响。
+	hookMu1 := mu.LockFor(1001)
+	hookMu1.Lock()
+
+	scanner.ScanOnceForTest(context.Background(), time.Now())
+	time.Sleep(80 * time.Millisecond)
+
+	// 断言：user 1002 的 reconcile 应已跑完（不被 user 1001 锁阻塞），count >= 1。
+	if got := renewer.count.Load(); got < 1 {
+		t.Errorf("AddOnline count = %d; want >= 1 (user 1002 reconcile must not block on user 1001 mutex; per-user lock isolation invariant)", got)
+	}
+
+	hookMu1.Unlock()
+	scanner.DrainFanoutForTest()
+
+	// 释放后两个 user 都跑完，count == 2
+	if got := renewer.count.Load(); got != 2 {
+		t.Errorf("AddOnline count = %d after release; want 2 (both users reconciled)", got)
 	}
 }
 

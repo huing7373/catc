@@ -56,11 +56,18 @@ const dbOpenTimeout = 5 * time.Second
 // userKeyedMutex 是同 userID 串行化的小工具：每个 userID 关联一把 *sync.Mutex，
 // 同 userID 的多次 Lock 排队，不同 userID 互不阻塞。
 //
-// review 10-6 r8 P1 加：fire-and-forget hook goroutines 同 userID 的 Add/Remove
-// 必须**串行**执行 —— quick connect-then-close 或 reconnect 替换路径下 AddOnline(new)
-// 与 RemoveOnline(old) 两个独立 goroutine 调度顺序不定，可能 RemoveOnline 先跑 →
-// AddOnline 后跑，让 presence 复活已离线 session 的 keys 直到 TTL 自然过期（IsOnline
-// / ListOnline over-report 5min）。
+// review 10-6 r8 P1 加（r9 P1 改）：hook adapter 与 HeartbeatScanner reconcile
+// 路径同 userID 的 AddOnline / RemoveOnline 必须**串行**执行 —— 否则两条独立
+// goroutine 树对同一 Redis presence 状态做读写改写，无论加多少 IsCurrentForUser
+// guard / IsRegistered guard / 顺序检查都是 TOCTOU snapshot：check 完到实际
+// AddOnline / RemoveOnline 之间，另一条路径仍可能跑完让 presence 进入 stale
+// 状态（"hook RemoveOnline 跑完 + scanner AddOnline 复活已离线 session 的
+// presence" / "Register hook AddOnline 后 scanner 又改回 OLD" 等）。
+//
+// **r9 P1 改**：从"同 userID 的 hook goroutine 串行"扩展为"同 userID 的 hook
+// adapter 与 scanner reconcile 共享同一把锁"。userKeyedMutex 实装 ws.UserPresenceMutex
+// 接口（LockFor 大写匹配接口契约），同一实例同时传给 hook adapter 和
+// NewHeartbeatScanner —— 三条路径 lock 同一把 mutex 让 critical section 真正串行。
 //
 // 用 sync.Map[userID]*sync.Mutex 而非裸 map + 全局 RWMutex：sync.Map 在 read-heavy
 // + key 集合稳定的场景（同 userID 短时间内多次 Add/Remove，不同 userID 之间几乎
@@ -72,18 +79,22 @@ const dbOpenTimeout = 5 * time.Second
 // 节点 13+ 多实例水平扩展时如果出现内存压力，再考虑加 LRU evict（需要锁保护让
 // evict 与正在持锁的 goroutine 不冲突）。
 //
-// 详见 docs/lessons/2026-05-07-fire-and-forget-hooks-need-per-user-mutex-10-6-r8.md。
+// 详见 docs/lessons/2026-05-07-fire-and-forget-hooks-need-per-user-mutex-10-6-r8.md
+// 和 docs/lessons/2026-05-07-presence-hooks-must-be-synchronous-shared-mutex-10-6-r9.md。
 type userKeyedMutex struct {
 	m sync.Map // map[uint64]*sync.Mutex
 }
 
-// lockFor 返回 userID 对应的 *sync.Mutex —— 调用方拿到后调 Lock/Unlock 自行控制
-// 临界区。多次 lockFor 同 userID 返回同一 *Mutex 实例（sync.Map LoadOrStore 保证
+// LockFor 返回 userID 对应的 *sync.Mutex —— 调用方拿到后调 Lock/Unlock 自行控制
+// 临界区。多次 LockFor 同 userID 返回同一 *Mutex 实例（sync.Map LoadOrStore 保证
 // 首次 store 后续 Load 命中同地址）。
 //
 // 走 r3 P2 lesson 的 "Load fast path"：先 m.Load 单次原子命中，miss 才走
 // LoadOrStore（避免每次 hook 都分配一个 *sync.Mutex 然后又被 GC）。
-func (u *userKeyedMutex) lockFor(userID uint64) *sync.Mutex {
+//
+// **r9 P1 改**：方法名从 lockFor 大写为 LockFor 实装 ws.UserPresenceMutex 接口 ——
+// scanner 和 hook adapter 都通过该接口拿同一把锁。
+func (u *userKeyedMutex) LockFor(userID uint64) *sync.Mutex {
 	if muVal, ok := u.m.Load(userID); ok {
 		return muVal.(*sync.Mutex)
 	}
@@ -286,97 +297,77 @@ func main() {
 	// 钩子失败仅 log warn + 包含 sessionId / userId / roomId 上下文；**不** os.Exit /
 	// panic（lifecycle 钩子失败 ≠ server 必须停机；TTL 兜底 + scanner 路径双重保险）。
 	//
-	// **review 10-6 r6 P1 修**：钩子内部 Redis I/O 走 **fire-and-forget goroutine**，
-	// 不阻塞 SessionManager.Register / Unregister 主路径。理由：
-	//   - Register 同步路径：gateway.handleWS 等 Register 返回才启 read/write loop。
-	//     原版 AddOnline 同步阻塞 → Redis 慢 / 挂时每次 connect/reconnect 卡 2s
-	//     （presenceHookTimeout 上限）→ Redis brownout 期所有用户握手 visible 延迟。
-	//   - Unregister 串行路径：SessionManager.Close 串行调 Unregister；reconnect
-	//     替换路径也串行调旧 Session.Close → notifyClosed → Unregister。原版同步
-	//     RemoveOnline → O(session 数 × 2s) 关停延迟，多会话部署 graceful shutdown
-	//     直接超 K8s termination grace。
-	//   - Fire-and-forget 后 register/unregister 主路径 < 1ms 完成；presence 写入
-	//     在 background goroutine 跑。失败兜底已经多重保险：
-	//       (a) presence key TTL 5min 自然过期（server crash / shutdown 时）
-	//       (b) HeartbeatScanner 30s tick 调 AddOnline reconcile（10-6 r2/r5 加），
-	//           漏写 / partial-fail 30s 内自愈
-	//       (c) RemoveOnline guard 走 sessionID atomic compare（10-6 r1 加），
-	//           reconnect 替换路径下旧 RemoveOnline 即便延迟跑也不会误清新 Session
+	// **review 10-6 r9 P1 修**：钩子内部 Redis I/O 走 **同步调用**（不再 fire-and-forget
+	// goroutine）。架构理由：
+	//   - r6-r8 一路演进的根因 lesson：fire-and-forget goroutine 模式下，无论加多少
+	//     mutex / IsCurrent guard / 顺序检查，每一 round 都会暴露下一个 race window ——
+	//     "hook 路径"与"scanner reconcile 路径"是两个独立 goroutine 树，对同一 Redis
+	//     状态做读写改写但缺乏统一的 critical section
+	//   - 同步调用 trade-off：normal Redis 健康下连接 +10-50ms 延迟（一次 Redis op，
+	//     local Redis < 1ms / remote < 100ms RTT）；Redis brownout 期连接最多卡
+	//     presenceHookTimeout（已有 2s 兜底）。换来的是**消除所有 ordering race** ——
+	//     Register/Unregister 调用本身已经被 SessionManager 锁串行（同 session），
+	//     AddOnline 在 Register 内同步跑 = 自然 FIFO；scanner 也走同步 + 共享一个
+	//     per-user mutex 就能与 hook 互斥
+	//   - shutdown 序列简化：不再需要 presenceHooksWG —— sessionMgr.Close 串行调
+	//     Unregister 钩子时 RemoveOnline 自然顺序完成（每个 ~10ms × N session，
+	//     normal Redis 下 N=100 也只 1s，K8s termination grace 内可接受）
 	//
-	// **review 10-6 r7 P2 修**：fire-and-forget hook goroutines 必须用 sync.WaitGroup
-	// 跟踪，graceful shutdown 路径上**等所有 hook goroutine 跑完才关 Redis client**。
-	// 原版 r6 注释里说"shutdown 期 fire-and-forget goroutine 可能没机会跑完 → 可接受
-	// （TTL 5min 兜底）"，但实际后果是：sessionMgr.Close() 串行触发 N 个 Unregister
-	// 钩子 → 每个 dispatch 一个 RemoveOnline goroutine 后立即返；defer LIFO 让
-	// redisClient.Close() 紧接着关闭共享 client → in-flight RemoveOnline goroutines
-	// 撞 "redis: client is closed" → 大量 / 全部 presence removal 被跳过 → 每次
-	// clean restart 后 room:*:online_users 留 stale member 直到 TTL 5min 过期。
-	// 即便有 TTL 兜底，IsOnline / ListOnline 在 5min 内会 over-report，违反"graceful
-	// shutdown 必须清空 presence"的设计意图。修法：sync.WaitGroup + 在 sessionMgr.Close()
-	// 之后调 wg.Wait() 让 Redis 关闭推迟到所有 hook goroutine 真正退出。
-	// 详见 lesson 2026-05-07-presence-same-room-reconnect-needs-room-aware-guard-10-6-r7.md。
+	// **review 10-6 r9 P1 修（核心）**：scanner reconcile 与 hook adapter **共享同一把
+	// userPresenceMu（实装 ws.UserPresenceMutex 接口）**。三条路径 (Register hook
+	// AddOnline / Unregister hook RemoveOnline / scanner reconcile AddOnline) lock
+	// 同一把 per-user mutex —— "scanner snapshot session → IsCurrentForUser 通过 → hook
+	// 跑完 RemoveOnline → scanner AddOnline 复活已离线 presence" 的 TOCTOU race 被
+	// 消除（hook 与 scanner 在锁上排队，谁先 Lock 谁先跑；scanner 持锁后再
+	// IsCurrentForUser 重新校验，session 已 unregister 直接跳过）。
 	//
-	// **review 10-6 r8 P1 修**：fire-and-forget hook goroutines 同 userID 的 Add/Remove
-	// 必须**串行**执行 —— 否则 quick connect-then-close 或 reconnect 替换路径下
-	// AddOnline(new) 与 RemoveOnline(old) 两个独立 goroutine 调度顺序不定，可能
-	// RemoveOnline 先跑 → AddOnline 后跑，让 presence 复活已离线 session 的 keys
-	// 直到 TTL 自然过期（IsOnline / ListOnline over-report 5min）。
+	// 同 userID 不同 session 的 Add/Remove 也走这把锁（reconnect 替换路径下
+	// AddOnline(new) 与 RemoveOnline(old) 都是同 userID）。
 	//
-	// 修法：用 sync.Map[userID]*sync.Mutex；同 userID 的 hook goroutine 在内部抢同
-	// 一把锁 → 强制 register / unregister 在 Redis 端的命令顺序与 SessionManager
-	// 端的钩子触发顺序一致。同 user 不同 session 的 Add/Remove 也走这把锁（reconnect
-	// 替换路径下 AddOnline(new) 与 RemoveOnline(old) 都是同 userID）。
+	// 不同 userID 互不阻塞 —— LockFor 返回独立 *sync.Mutex；scanner 不会因为一个
+	// user 的锁竞争阻塞所有 reconcile，hook 也不会因为别 user 阻塞当前 register。
 	//
 	// 锁拿取走 r3 P2 lesson 的 "Load fast path"：见 userKeyedMutex 文档。
-	// 详见 lesson 2026-05-07-fire-and-forget-hooks-need-per-user-mutex-10-6-r8.md。
-	var presenceHooksWG sync.WaitGroup
-	var userPresenceMu userKeyedMutex // 同 userID 的 hook 串行（r8 P1 加；类型 godoc 详述）
+	// 详见 lesson 2026-05-07-presence-hooks-must-be-synchronous-shared-mutex-10-6-r9.md。
+	var userPresenceMu userKeyedMutex // 同 userID 的 hook 与 scanner 共享 mutex（r9 P1 加；实装 ws.UserPresenceMutex）
 	sessionMgr := wsapp.NewSessionManager(
 		wsapp.WithRegisterHook(func(s *wsapp.Session) {
-			presenceHooksWG.Add(1)
-			go func() {
-				defer presenceHooksWG.Done()
-				// 同 userID 的 Add/Remove 串行（r8 P1）—— Lock 必须在 ctx WithTimeout
-				// 之前拿，否则 timeout 期已经从锁队列里出去了再做 Redis I/O 没意义
-				mu := userPresenceMu.lockFor(s.UserID())
-				mu.Lock()
-				defer mu.Unlock()
-				hookCtx, cancel := context.WithTimeout(context.Background(), presenceHookTimeout)
-				defer cancel()
-				if err := presenceRepo.AddOnline(hookCtx, s.RoomID(), s.UserID(), s.SessionID()); err != nil {
-					slog.Warn("presence add online failed",
-						slog.String("sessionId", s.SessionID()),
-						slog.Uint64("userId", s.UserID()),
-						slog.Uint64("roomId", s.RoomID()),
-						slog.Any("error", err),
-					)
-				}
-			}()
+			// **r9 P1**：同步调用（不再 goroutine）。Lock 必须在 ctx WithTimeout 之前
+			// 拿，否则 timeout 期已经从锁队列里出去了再做 Redis I/O 没意义。
+			mu := userPresenceMu.LockFor(s.UserID())
+			mu.Lock()
+			defer mu.Unlock()
+			hookCtx, cancel := context.WithTimeout(context.Background(), presenceHookTimeout)
+			defer cancel()
+			if err := presenceRepo.AddOnline(hookCtx, s.RoomID(), s.UserID(), s.SessionID()); err != nil {
+				slog.Warn("presence add online failed",
+					slog.String("sessionId", s.SessionID()),
+					slog.Uint64("userId", s.UserID()),
+					slog.Uint64("roomId", s.RoomID()),
+					slog.Any("error", err),
+				)
+			}
 		}),
 		wsapp.WithUnregisterHook(func(s *wsapp.Session) {
-			presenceHooksWG.Add(1)
-			go func() {
-				defer presenceHooksWG.Done()
-				// 同 userID 的 Add/Remove 串行（r8 P1）
-				mu := userPresenceMu.lockFor(s.UserID())
-				mu.Lock()
-				defer mu.Unlock()
-				hookCtx, cancel := context.WithTimeout(context.Background(), presenceHookTimeout)
-				defer cancel()
-				// **关键**（Story 10.6 r1 P1 修）：必须传入 s.SessionID() 让 RemoveOnline
-				// 走 sessionID guard 的 Lua script 路径。reconnect 替换场景下旧 Session
-				// 延后 Unregister 触发本钩子时，user:{id}:ws_session 已被新 Session 覆盖
-				// 为新 sessionID → script 比较失败走 no-op，不会清掉新 Session 的 presence。
-				// 详见 lesson 2026-05-07-redis-presence-remove-needs-session-id-guard-10-6-r1.md。
-				if err := presenceRepo.RemoveOnline(hookCtx, s.RoomID(), s.UserID(), s.SessionID()); err != nil {
-					slog.Warn("presence remove online failed",
-						slog.String("sessionId", s.SessionID()),
-						slog.Uint64("userId", s.UserID()),
-						slog.Uint64("roomId", s.RoomID()),
-						slog.Any("error", err),
-					)
-				}
-			}()
+			// **r9 P1**：同步调用（不再 goroutine）+ 共享 userPresenceMu。
+			mu := userPresenceMu.LockFor(s.UserID())
+			mu.Lock()
+			defer mu.Unlock()
+			hookCtx, cancel := context.WithTimeout(context.Background(), presenceHookTimeout)
+			defer cancel()
+			// **关键**（Story 10.6 r1 P1 修）：必须传入 s.SessionID() 让 RemoveOnline
+			// 走 sessionID guard 的 Lua script 路径。reconnect 替换场景下旧 Session
+			// 延后 Unregister 触发本钩子时，user:{id}:ws_session 已被新 Session 覆盖
+			// 为新 sessionID → script 比较失败走 no-op，不会清掉新 Session 的 presence。
+			// 详见 lesson 2026-05-07-redis-presence-remove-needs-session-id-guard-10-6-r1.md。
+			if err := presenceRepo.RemoveOnline(hookCtx, s.RoomID(), s.UserID(), s.SessionID()); err != nil {
+				slog.Warn("presence remove online failed",
+					slog.String("sessionId", s.SessionID()),
+					slog.Uint64("userId", s.UserID()),
+					slog.Uint64("roomId", s.RoomID()),
+					slog.Any("error", err),
+				)
+			}
 		}),
 	)
 	slog.Info("ws session manager ready (with presence hooks)")
@@ -414,7 +405,7 @@ func main() {
 	// session 续 presence TTL（默认 5min）—— 防 long-lived WS session 被 Redis
 	// 自动过期误报为 offline。详见 docs/lessons/2026-05-07-presence-ttl-renewal-via-heartbeat-scanner-10-6-r2.md。
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
-	heartbeatScanner := wsapp.NewHeartbeatScanner(sessionMgr, cfg.WS.HeartbeatTimeoutSec, slog.Default(), presenceRepo)
+	heartbeatScanner := wsapp.NewHeartbeatScanner(sessionMgr, cfg.WS.HeartbeatTimeoutSec, slog.Default(), presenceRepo, &userPresenceMu)
 	scannerDone := make(chan struct{})
 	go func() {
 		defer close(scannerDone)
@@ -429,21 +420,19 @@ func main() {
 		//    close 路径。
 		<-scannerDone
 		slog.Info("ws heartbeat scanner stopped")
-		// 3. 现在批量清 Session，没有 4005 race。每个 Session.Close 触发 onUnregister
-		//    钩子 → dispatch 一个 fire-and-forget RemoveOnline goroutine（presenceHooksWG.Add(1)）。
+		// 3. 现在批量清 Session，没有 4005 race。**review 10-6 r9 P1 修**：每个
+		//    Session.Close 触发 onUnregister 钩子 → 钩子内**同步**调 RemoveOnline
+		//    （不再 fire-and-forget）；sessionMgr.Close 串行调 Unregister，每个
+		//    RemoveOnline 在前一个返回后才跑（normal Redis 下每个 ~10ms × N session
+		//    = 1秒级，N=100 也只 1s 完全在 K8s termination grace 内）。RemoveOnline
+		//    全部跑完 → sessionMgr.Close 才返回 → 本 defer 才返回 → 后续 redisClient
+		//    defer 才关 client，自然不再有"in-flight RemoveOnline 撞 redis: client
+		//    is closed"的 race（r7 P2 用 presenceHooksWG.Wait 解决的问题被同步调用
+		//    架构性消除）。详见 lesson
+		//    2026-05-07-presence-hooks-must-be-synchronous-shared-mutex-10-6-r9.md。
 		if cerr := sessionMgr.Close(); cerr != nil {
 			slog.Error("session manager close failed", slog.Any("error", cerr))
 		}
-		// 4. **review 10-6 r7 P2 修**：等所有 hook goroutine 跑完才让本 defer 返回 ——
-		//    本 defer 是 main 退出栈上**最早**注册的（在 redisClient defer 之后），
-		//    LIFO 让 redisClient.Close() 在本 defer 返回**之后**才跑。如果不等
-		//    presenceHooksWG，Close() 会立刻关 client → in-flight RemoveOnline 撞
-		//    "redis: client is closed" → presence 留 stale 到 TTL 5min 过期。
-		//    每个 hook goroutine 上限 = presenceHookTimeout（2s），N 个 session 并发
-		//    跑总等待时间 ≈ 单个 timeout 上限（不是 O(N×2s) 串行），完全在 K8s
-		//    termination grace 内。详见 lesson
-		//    2026-05-07-presence-same-room-reconnect-needs-room-aware-guard-10-6-r7.md。
-		presenceHooksWG.Wait()
 		slog.Info("ws presence hooks drained")
 	}()
 	slog.Info("ws heartbeat scanner ready",
