@@ -4200,6 +4200,80 @@ func TestHeartbeatScanner_ScanOnce_RegisteredSession_StillReconciles(t *testing.
 	}
 }
 
+// ---------- review 10-6 r8 P1: scanner reconcile 必须用 IsCurrentForUser 而非 IsRegistered ----------
+
+// notCurrentMgr 是一个 SessionManager 包装器，让 IsRegistered=true 但
+// IsCurrentForUser=false —— 模拟 reconnect 替换中场（OLD 仍在 sessionsByID 直到
+// oldS.Close 跑完，但 userToSessionID[u] 已指向 NEW）。
+//
+// 用途：单测 review 10-6 r8 P1 修 —— scanner reconcile 必须用 IsCurrentForUser
+// 做 gate；如果用 IsRegistered，OLD 在替换中场会通过 → AddOnline(OLD) 把 user_key
+// 改回 OLD session/room → 后续 RemoveOnline(oldSessionID) 在 Lua script 看到
+// currentSession==OLD 走 case 2 完整清理 → 真正活的 NEW 的 presence 被清掉。
+type notCurrentMgr struct {
+	wsapp.SessionManager
+	// IsRegistered 返 true（让 r4 P2 的 guard 不命中），IsCurrentForUser 返 false
+	// （让 r8 P1 的 guard 命中 → skip）
+}
+
+func (m *notCurrentMgr) IsRegistered(_ context.Context, _ string) bool {
+	return true
+}
+
+func (m *notCurrentMgr) IsCurrentForUser(_ context.Context, _ string) bool {
+	return false
+}
+
+// TestHeartbeatScanner_ScanOnce_NotCurrentForUser_SkipsReconcile:
+// **review 10-6 r8 P1 核心 case** —— OLD session 在 reconnect 替换中场仍 IsRegistered=true，
+// 但 IsCurrentForUser=false（NEW 已抢占 userToSessionID[u]）。scanner 必须用
+// IsCurrentForUser 做 gate，跳过 OLD 的 reconcile，避免污染 NEW 的 presence。
+//
+// 时序模拟：
+//  1. user A 注册 OLD session（在 sessionsByID + userToSessionID[A]=OLD）
+//  2. user A reconnect 触发 Register(NEW) —— Register 锁内把 sessionsByRoom[room][OLD]
+//     移到 NEW，把 userToSessionID[A] 指 NEW；OLD 仍在 sessionsByID（保留以触发
+//     Unregister 钩子）
+//  3. scanner snapshot 拿到 OLD（仍 active = idle 不超时）
+//  4. scanner reconcile OLD：IsCurrentForUser(OLD) = false（userToSessionID 已指 NEW）
+//     → skip AddOnline，不污染 NEW 的 user_key
+//
+// 验证：renewer.AddOnline 没被调（count == 0）。
+func TestHeartbeatScanner_ScanOnce_NotCurrentForUser_SkipsReconcile(t *testing.T) {
+	realMgr := wsapp.NewSessionManager()
+	defer realMgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, sess, ts := useGatewayDial(t, realMgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	// 拿真实 snapshot（session 仍在 manager）
+	snapshot := realMgr.ListAllSessions(context.Background())
+	if len(snapshot) != 1 {
+		t.Fatalf("snapshot len = %d, want 1", len(snapshot))
+	}
+
+	// session 仍在 manager；IsRegistered=true（基线）
+	if !realMgr.IsRegistered(context.Background(), sess.SessionID()) {
+		t.Fatalf("baseline: IsRegistered should be true")
+	}
+
+	// 注入 notCurrentMgr：模拟 reconnect 替换中场 —— ListAllSessions 返 snapshot
+	// 给 reconcile 路径，IsRegistered=true（让旧 r4 P2 guard 不命中），但
+	// IsCurrentForUser=false（让 r8 P1 guard 命中 → skip）
+	mgr := &notCurrentMgr{SessionManager: realMgr}
+
+	renewer := &fakeRenewer{}
+	scanner := wsapp.NewHeartbeatScannerForTestWithRenewer(mgr, 10*1000, 200*time.Millisecond, idleTestLogger(), renewer)
+	scanner.ScanOnceAndDrainForTest(context.Background(), time.Now())
+
+	// **关键断言**：r8 P1 修后 IsCurrentForUser guard 让 AddOnline 不被调
+	// （否则会把 user_key 改回 OLD session/room → 污染 NEW 的 presence）
+	if got := renewer.count.Load(); got != 0 {
+		t.Errorf("AddOnline count = %d, want 0 (not-current session should not be reconciled per r8 P1)", got)
+	}
+}
+
 // ---------- review 10-6 r5 P1: reconcile fanout 不阻塞主 sweep ----------
 
 // slowRenewer 是 PresenceRenewer 替身（review 10-6 r5 P1），让每次 AddOnline

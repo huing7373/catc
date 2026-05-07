@@ -242,6 +242,35 @@ func formatUserValue(sessionID string, roomID uint64) string {
 	return sessionID + userValueSeparator + strconv.FormatUint(roomID, 10)
 }
 
+// addRoomMemberLuaScript 把 SADD + EXPIRE 包成一个 Lua 段，让 room set member
+// 加入与 TTL 设置在 Redis 端**原子**完成 —— 走 EVAL 路径不可被 server crash /
+// 命令间断点 split。
+//
+// KEYS[1] = roomKey(roomID)            （目标 set key）
+// ARGV[1] = userID 字符串              （SADD 的 member）
+// ARGV[2] = TTL 秒数（整数字符串）     （EXPIRE 的 seconds）
+//
+// 返回 1（固定）—— 上层不区分；调用方仅通过 EVAL error 判断整段成功 / 失败。
+//
+// **review 10-6 r8 P2 修**：原版 AddOnline 用 SADD → EXPIRE 两条独立命令，partial
+// fail 矩阵里 "SADD 成功 + EXPIRE 失败" 路径让 room set 写入 member 但**无 TTL**
+// → process crash 时 user_key 因 SET KEY VAL EX 自带 TTL 在 5min 后自然过期，但
+// room set 上的 member 会**永久残留**（无 TTL 兜底；下次 RemoveOnline 走 Lua
+// script Get 拿到的 user_key 已不存在 → 走 case 1 仅 SREM 这一个 member —— 但
+// 如果 user 一直没 reconnect 也没 unregister 触发，没人 SREM）。后果：IsOnline /
+// ListOnline 永久 over-report 该 (room, user)，违反 "TTL 兜底清理 zombie" 设计意图。
+//
+// 修法：把 SADD + EXPIRE 包进 Lua —— Redis 单线程串行执行 EVAL 整段，要么两条都
+// 成功要么 EVAL 整体失败（network / Redis crash）。EVAL 失败时 SADD 也没执行
+// （如果 SADD 已写入 server 但回包失败前 Redis crash，AOF / RDB 持久化路径上是
+// 一个非常窄的 corner —— 即便发生，下次 AddOnline 同 user 触发 SADD（idempotent）+
+// EXPIRE 立刻自愈；scanner 30s reconcile tick 也走同路径自愈）。
+//
+// 详见 docs/lessons/2026-05-07-fire-and-forget-hooks-need-per-user-mutex-10-6-r8.md。
+const addRoomMemberLuaScript = `redis.call("SADD", KEYS[1], ARGV[1])
+redis.call("EXPIRE", KEYS[1], ARGV[2])
+return 1`
+
 // AddOnline 实装 PresenceRepo.AddOnline（详见 interface godoc）。
 //
 // **review 10-6 r2 P2 修**：命令顺序改为 SET → SADD → EXPIRE（原版是
@@ -255,21 +284,21 @@ func formatUserValue(sessionID string, roomID uint64) string {
 // （仍要 SREM 旧 room，让 user 干净离开旧 room set）。详见 removeOnlineLuaScript
 // 注释 + lesson 2026-05-07-presence-same-room-reconnect-needs-room-aware-guard-10-6-r7.md。
 //
-// 修后顺序的 partial-fail 矩阵：
-//   - SET 失败 → return → SADD 没执行 → 不留任何残留（最干净）
-//   - SET 成功 + SADD 失败 → return → user:{id}:ws_session 已写入但有 TTL（SET KEY
-//     VAL EX 单命令原子）→ 5min 后自然过期 → 不 zombie
-//   - SET 成功 + SADD 成功 + EXPIRE 失败 → return → user:{id}:ws_session 有 TTL，
-//     room set 没 TTL；但 room set 的存活由 SREM/DEL 在 RemoveOnline 路径走 Lua
-//     script 清理（user→sessionID DEL 后 SREM 同步执行），不会真正永久 zombie ——
-//     最坏情况是某 user 在 TTL 5min 内未 reconnect / unregister，room set 上残留
-//     该 user member 直到下一次 AddOnline 同 room 触发 EXPIRE 续期；与原版
-//     "SADD 后 SET 失败 → return → room set 永久无 TTL" 相比，影响范围由"永久"
-//     缩到"最多一次 AddOnline cycle 内"，且 RemoveOnline 走 Lua 仍能 SREM 干净。
+// **review 10-6 r8 P2 修**：SADD + EXPIRE 改用 Lua script 原子段（addRoomMemberLuaScript）。
+// 原版 r2 修后注释里说"SADD 成功 + EXPIRE 失败 → 影响范围由永久缩到一次 AddOnline
+// cycle"，实测仍存在永久残留 corner —— process crash 在 EXPIRE 失败后让 user_key
+// TTL 5min 过期，但 room set 上 member 没人触发 SREM 永久残留。修法：SADD + EXPIRE
+// Lua 原子化，要么两条都跑要么都没跑。
 //
-// 三连写仍非原子（Redis 单 client 命令间不保事务）；本简化版接受 "短窗口轻度
-// 不一致 + TTL 自愈" 而不是 Lua script 升级 —— Lua 改动范围更大且本 partial-fail
-// 场景下后果已可接受。详见 docs/lessons/2026-05-07-presence-add-online-command-order-and-ttl-guarantee-10-6-r2.md。
+// 修后 partial-fail 矩阵：
+//   - SET 失败 → return → Lua 段没执行 → 不留任何残留（最干净）
+//   - SET 成功 + Lua 段失败 → return → user:{id}:ws_session 已写入有 TTL，room
+//     set 不变（要么 SADD+EXPIRE 都成功要么都没执行）。下次 AddOnline 同 user
+//     重试自愈（SET 覆盖 + Lua 重跑 → 完整恢复）。process crash 时 user_key TTL
+//     过期，room set 也不变（无残留）。
+//   - SET 成功 + Lua 段成功 → 完整一致状态。
+//
+// 详见 docs/lessons/2026-05-07-fire-and-forget-hooks-need-per-user-mutex-10-6-r8.md。
 func (r *presenceRepo) AddOnline(ctx context.Context, roomID, userID uint64, sessionID string) error {
 	rk := roomKey(roomID)
 	uk := userKey(userID)
@@ -278,25 +307,19 @@ func (r *presenceRepo) AddOnline(ctx context.Context, roomID, userID uint64, ses
 
 	// 第一步：SET user:{id}:ws_session 走 SET KEY VAL EX 单命令原子（包含 TTL）。
 	// SET nx=false：reconnect 替换路径能更新 sessionID（同 user 二次 AddOnline 覆盖旧值）。
-	// 失败立即 return，**之前没动** SADD —— 不留任何残留。
+	// 失败立即 return，**之前没动** Lua 段 —— 不留任何残留。
 	// value = "sessionID|roomID"（review 10-6 r7 P1 修）让 RemoveOnline Lua script
 	// 能比较 currentRoom vs oldRoom 区分 same-room / cross-room reconnect。
 	if _, err := r.client.Set(ctx, uk, userValue, r.ttl, false); err != nil {
 		return fmt.Errorf("presence add online set: %w", err)
 	}
-	// 第二步：SADD room:{id}:online_users 把 user 加入 set。失败 return → user
-	// 已写入 user:{id}:ws_session 但**有 TTL**（5min 后自然过期），不 zombie；下一次
-	// AddOnline 同 user 调用会重写 user:{id}:ws_session + 重新 SADD（语义恢复）。
-	if _, err := r.client.SAdd(ctx, rk, uidStr); err != nil {
-		return fmt.Errorf("presence add online sadd: %w", err)
-	}
-	// 第三步：EXPIRE room set —— SADD 不带 TTL 选项，需要单独命令兜底防 set key
-	// 永久存活。每次 AddOnline 都覆盖 room set 的 TTL（与 SET nx=false 同模式）；
-	// 这让 active room 自然续期，与"心跳路径 RenewTTL"分工：AddOnline 续 room TTL
-	// 一次，RenewTTL（review 10-6 r2 P1 钩在 HeartbeatScanner 30s tick 上）主动
-	// 定期续期。
-	if _, err := r.client.Expire(ctx, rk, r.ttl); err != nil {
-		return fmt.Errorf("presence add online expire room: %w", err)
+	// 第二步：Lua 段 SADD + EXPIRE 原子化（review 10-6 r8 P2 修）。
+	// 原版分两条命令的 partial-fail 路径让 room set 在 EXPIRE 失败时写入 member
+	// 但无 TTL → process crash 后永久残留。Lua 段把两步打包，保证 SADD 写入 ↔
+	// TTL 设置原子绑定；EVAL 失败时 SADD 也未生效，残留风险 = 0。
+	ttlSeconds := int64(r.ttl / time.Second)
+	if _, err := r.client.Eval(ctx, addRoomMemberLuaScript, []string{rk}, uidStr, ttlSeconds); err != nil {
+		return fmt.Errorf("presence add online sadd+expire: %w", err)
 	}
 	return nil
 }

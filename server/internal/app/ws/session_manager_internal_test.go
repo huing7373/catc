@@ -8,6 +8,106 @@ import (
 	"testing"
 )
 
+// TestSessionManager_IsCurrentForUser_RegisteredSession_ReturnsTrue:
+// review 10-6 r8 P1 加 IsCurrentForUser —— happy path：单 session 注册后
+// IsCurrentForUser 必须返 true（双索引一致：sessionsByID[id] != nil + userToSessionID[u] == id）。
+func TestSessionManager_IsCurrentForUser_RegisteredSession_ReturnsTrue(t *testing.T) {
+	mgr := NewSessionManager().(*sessionManager)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s := &Session{userID: 1001, roomID: 3001, logger: logger}
+	id, err := mgr.Register(context.Background(), s)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	if !mgr.IsCurrentForUser(context.Background(), id) {
+		t.Fatalf("IsCurrentForUser(%q) = false, want true (single registered session)", id)
+	}
+	// IsRegistered 也应返 true（基线对照）
+	if !mgr.IsRegistered(context.Background(), id) {
+		t.Fatalf("IsRegistered should also be true for live session")
+	}
+}
+
+// TestSessionManager_IsCurrentForUser_AfterUnregister_ReturnsFalse:
+// session Unregister 后 sessionsByID 已删 → IsCurrentForUser 返 false。
+// 与 IsRegistered 行为一致（路径回归）。
+func TestSessionManager_IsCurrentForUser_AfterUnregister_ReturnsFalse(t *testing.T) {
+	mgr := NewSessionManager().(*sessionManager)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s := &Session{userID: 1002, roomID: 3001, logger: logger}
+	id, err := mgr.Register(context.Background(), s)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	if err := mgr.Unregister(context.Background(), id); err != nil {
+		t.Fatalf("Unregister: %v", err)
+	}
+
+	if mgr.IsCurrentForUser(context.Background(), id) {
+		t.Fatalf("IsCurrentForUser(%q) = true after Unregister, want false", id)
+	}
+}
+
+// TestSessionManager_IsCurrentForUser_OldSessionAfterReplacement_ReturnsFalse:
+// **review 10-6 r8 P1 核心 case** —— reconnect 替换路径下 OLD session 仍在
+// sessionsByID（保留到 oldS.Close 跑完触发 Unregister 走标准路径），但
+// userToSessionID[u] 已指向 NEW。
+//
+// IsRegistered(OLD) = true（语义"会话还活着"），IsCurrentForUser(OLD) = false
+// （NEW 已抢占 user 的 current session 位置）。这正是 scanner reconcile 必须用
+// IsCurrentForUser 而非 IsRegistered 做 gate 的原因 —— 否则 scanner 会对 OLD
+// AddOnline 把 user_key 改回 OLD session/room，污染 NEW 的 presence。
+//
+// 模拟方法：直接构造两个 Session 引用，手动塞 sessionsByID + userToSessionID
+// 模拟"OLD 仍在 sessionsByID（Close 还没跑完）+ userToSessionID 已指 NEW"中场态。
+// 不走真实 Register（Register 锁内会 close OLD，无法暂停在中场）。
+func TestSessionManager_IsCurrentForUser_OldSessionAfterReplacement_ReturnsFalse(t *testing.T) {
+	mgr := NewSessionManager().(*sessionManager)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	const userID = uint64(1003)
+	oldID := "session-old"
+	newID := "session-new"
+	oldS := &Session{userID: userID, roomID: 3001, sessionID: oldID, logger: logger}
+	newS := &Session{userID: userID, roomID: 3001, sessionID: newID, logger: logger}
+
+	// 手动模拟"reconnect 替换中场"状态：
+	//   - sessionsByID 里 OLD 和 NEW 都在（OLD 保留以触发 onUnregister 钩子）
+	//   - sessionsByRoom 已被 Register 段从 OLD 移到 NEW（Register 锁内修法）
+	//   - userToSessionID[user] 指向 NEW（Register 段已覆盖）
+	mgr.mu.Lock()
+	mgr.sessionsByID[oldID] = oldS
+	mgr.sessionsByID[newID] = newS
+	mgr.sessionsByRoom[3001] = map[string]*Session{newID: newS} // OLD 已被移除
+	mgr.userToSessionID[userID] = newID
+	mgr.mu.Unlock()
+
+	// **关键不变量**（r8 P1 加）：OLD 在替换中场 IsRegistered=true（仍在
+	// sessionsByID），但 IsCurrentForUser=false（userToSessionID 已不指 OLD）。
+	if !mgr.IsRegistered(context.Background(), oldID) {
+		t.Fatalf("IsRegistered(OLD) should still be true during replacement window")
+	}
+	if mgr.IsCurrentForUser(context.Background(), oldID) {
+		t.Fatalf("IsCurrentForUser(OLD) = true during replacement window, want false (would let scanner pollute NEW's presence)")
+	}
+
+	// NEW 必须返 true（reconcile 应继续对 NEW 续期）
+	if !mgr.IsCurrentForUser(context.Background(), newID) {
+		t.Fatalf("IsCurrentForUser(NEW) should be true (NEW is the current active session)")
+	}
+}
+
+// TestSessionManager_IsCurrentForUser_UnknownSession_ReturnsFalse:
+// 不存在的 sessionID → 返 false（不抛 error，与 IsRegistered 同语义）。
+func TestSessionManager_IsCurrentForUser_UnknownSession_ReturnsFalse(t *testing.T) {
+	mgr := NewSessionManager().(*sessionManager)
+	if mgr.IsCurrentForUser(context.Background(), "no-such-session") {
+		t.Fatalf("IsCurrentForUser of unknown sessionID = true, want false")
+	}
+}
+
 // TestNewSessionID_FullUUIDFormat: review r9 P3 修后 newSessionID 必须返完整 uuid v4
 // （36 字符 + 4 个 hyphen），而不是早期实装的 8 字符前缀截断。
 //

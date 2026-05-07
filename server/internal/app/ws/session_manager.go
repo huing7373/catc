@@ -86,7 +86,35 @@ type SessionManager interface {
 	//
 	// 错误语义：sessionID 不存在 → 返 false（不报 error，与 ListAllSessions 等
 	// 查询接口一致）。ctx 当前不消费，保留参数让未来 distributed 实装可消费。
+	//
+	// **不要用本方法做 reconcile 路径的 gate**：reconnect 替换路径**有意**保留
+	// OLD session 在 sessionsByID 直到 oldS.Close() 跑完（r2 P1 不变量），导致 OLD
+	// 在 IsRegistered 下仍返 true —— scanner 在这个窗口内对 OLD AddOnline 会把
+	// user_key 改回 OLD session/room，污染已重连到 NEW 的 user。reconcile gate 必须
+	// 用 IsCurrentForUser（review 10-6 r8 P1 加）。本接口保留作为更弱的"会话还活着"
+	// check 供其他 caller 使用。
 	IsRegistered(ctx context.Context, sessionID string) bool
+
+	// IsCurrentForUser 检查 sessionID 是否仍是该 user 的"当前 active session"
+	// （即 sessionsByID 命中 + userToSessionID[user] 仍指向该 sessionID）。
+	// review 10-6 r8 P1 加。
+	//
+	// 用途：HeartbeatScanner.scanOnce 的 reconcile 路径必须用本方法而非 IsRegistered
+	// 做 gate。reconnect 替换中场窗口（OLD session 在 sessionsByID **保留**到
+	// oldS.Close() 跑完，但 userToSessionID[u] 已指向 NEW），IsRegistered 会让 OLD
+	// 通过 → AddOnline(OLD) 改写 user:{id}:ws_session 回 OLD session/room 或重新
+	// SADD OLD 到旧 room set；后续 RemoveOnline(oldSessionID) 在 Lua script 看到
+	// currentSession==OLD 走 case 2 完整清理 → 真正活的 NEW 的 presence 被清掉。
+	//
+	// 本方法严格匹配"双索引一致" —— 只有 sessionsByID[id] != nil **且**
+	// userToSessionID[user] == id 时才返 true。reconnect 替换路径下 OLD 会返 false
+	// （userToSessionID 已指向 NEW），scanner 跳过 OLD 的 reconcile，不污染 NEW。
+	//
+	// 走 read lock 直接 lookup 双索引；O(1)，与 IsRegistered 同量级。错误语义同
+	// IsRegistered（不抛 error，sessionID 不存在 / 已被替换 → false）。
+	//
+	// 详见 docs/lessons/2026-05-07-fire-and-forget-hooks-need-per-user-mutex-10-6-r8.md。
+	IsCurrentForUser(ctx context.Context, sessionID string) bool
 
 	// Close 关闭 manager：批量 close 所有 Session（不主动推 close 1001 frame，
 	// graceful shutdown 业务由 Epic 36 接管）。
@@ -391,6 +419,32 @@ func (m *sessionManager) IsRegistered(ctx context.Context, sessionID string) boo
 	defer m.mu.RUnlock()
 	_, ok := m.sessionsByID[sessionID]
 	return ok
+}
+
+// IsCurrentForUser 实装 SessionManager.IsCurrentForUser（review 10-6 r8 P1 加）。
+//
+// 双 map lookup：
+//  1. sessionsByID[sessionID] —— 验证 session 仍在 manager 索引中
+//  2. userToSessionID[sess.userID] == sessionID —— 验证仍是该 user 的"当前 session"
+//     （reconnect 替换路径已把 userToSessionID 指向 NEW，OLD 在这一步返 false）
+//
+// 严格走"双索引一致" gate，比 IsRegistered 更精确：
+//   - reconnect 替换中场（OLD 仍在 sessionsByID + userToSessionID 已指向 NEW）：
+//     IsRegistered=true，IsCurrentForUser=false（本方法保留 NEW 的 presence 不被
+//     scanner reconcile 误改回 OLD）
+//   - 普通 active session（OLD 已 Close + Unregister 跑完）：sessionsByID 已删 OLD，
+//     IsRegistered=false，IsCurrentForUser=false（路径回归一致）
+//   - 普通 active session 自己 reconcile：sessionsByID 命中 + userToSessionID 指自己，
+//     IsRegistered=true，IsCurrentForUser=true（reconcile 正常进行）
+func (m *sessionManager) IsCurrentForUser(ctx context.Context, sessionID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	sess, ok := m.sessionsByID[sessionID]
+	if !ok {
+		return false
+	}
+	currentID, ok := m.userToSessionID[sess.userID]
+	return ok && currentID == sessionID
 }
 
 // Close 实装 SessionManager.Close。批量 close 所有 Session + 清空索引（idempotent）。

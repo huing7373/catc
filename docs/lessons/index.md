@@ -198,3 +198,4 @@
 | 2026-05-07 | [Scanner periodic reconcile 必须 fanout goroutine + per-call ctx timeout，不能在主 sweep 内同步调 Redis（10-6 r5）](2026-05-07-scanner-presence-reconcile-must-fanout-not-block-sweep-10-6-r5.md) | 1 | perf | `<pending>` |
 | 2026-05-07 | [Presence lifecycle hook 必须 fire-and-forget & TTL 硬下限必须 prod-only env gate（10-6 r6）](2026-05-07-presence-hooks-fire-and-forget-and-ttl-floor-env-gate-10-6-r6.md) | 3 | perf, config | `<pending>` |
 | 2026-05-07 | [Presence same-room reconnect 必须 room-aware guard & shutdown 必须等 fire-and-forget hook 跑完才关共享 client（10-6 r7）](2026-05-07-presence-same-room-reconnect-needs-room-aware-guard-and-shutdown-must-wait-hooks-10-6-r7.md) | 2 | architecture, shutdown | `<pending>` |
+| 2026-05-07 | [fire-and-forget hooks 同 user 串行化 + scanner reconcile guard 升级 + AddOnline SADD/EXPIRE 原子化（10-6 r8）](2026-05-07-fire-and-forget-hooks-need-per-user-mutex-10-6-r8.md) | 3 | architecture, error-handling | `<pending>` |

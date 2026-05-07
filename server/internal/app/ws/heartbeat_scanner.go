@@ -365,11 +365,16 @@ func (s *HeartbeatScanner) scanOnce(ctx context.Context, now time.Time) {
 						return
 					default:
 					}
-					// IsRegistered guard（r4 P2 不变量保留）：snapshot 与 dispatch
-					// 之间 session 可能已 unregister；此时 reconcile 会复活已离线
-					// session 的 presence 让 zombie 持续到 TTL 过期。RLock map
-					// lookup O(1)，开销可忽略。
-					if !s.mgr.IsRegistered(ctx, target.SessionID()) {
+					// IsCurrentForUser guard（review 10-6 r8 P1 修；前身 r4 P2 IsRegistered）：
+					// snapshot 与 dispatch 之间 session 可能已 unregister 或被 reconnect
+					// 替换。IsRegistered 在 reconnect 替换中场返 true（OLD 仍在
+					// sessionsByID 直到 oldS.Close() 跑完），让 scanner reconcile 把
+					// user:{id}:ws_session 改回 OLD session/room → NEW 的 presence 被
+					// 后续 RemoveOnline(oldSessionID) 误清。改用 IsCurrentForUser 严格
+					// 比对 userToSessionID[user] == sessionID，OLD 在替换中场返 false，
+					// 跳过 reconcile，不污染 NEW。RLock map lookup O(1)，开销可忽略。
+					// 详见 docs/lessons/2026-05-07-fire-and-forget-hooks-need-per-user-mutex-10-6-r8.md。
+					if !s.mgr.IsCurrentForUser(ctx, target.SessionID()) {
 						return
 					}
 					// per-call ctx timeout：单 hang 不影响主 loop（review r5 P1）

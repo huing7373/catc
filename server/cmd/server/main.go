@@ -53,6 +53,44 @@ const presenceHookTimeout = 2 * time.Second
 // lifecycle 不受影响。详见 docs/lessons/2026-04-26-startup-blocking-io-needs-deadline.md。
 const dbOpenTimeout = 5 * time.Second
 
+// userKeyedMutex 是同 userID 串行化的小工具：每个 userID 关联一把 *sync.Mutex，
+// 同 userID 的多次 Lock 排队，不同 userID 互不阻塞。
+//
+// review 10-6 r8 P1 加：fire-and-forget hook goroutines 同 userID 的 Add/Remove
+// 必须**串行**执行 —— quick connect-then-close 或 reconnect 替换路径下 AddOnline(new)
+// 与 RemoveOnline(old) 两个独立 goroutine 调度顺序不定，可能 RemoveOnline 先跑 →
+// AddOnline 后跑，让 presence 复活已离线 session 的 keys 直到 TTL 自然过期（IsOnline
+// / ListOnline over-report 5min）。
+//
+// 用 sync.Map[userID]*sync.Mutex 而非裸 map + 全局 RWMutex：sync.Map 在 read-heavy
+// + key 集合稳定的场景（同 userID 短时间内多次 Add/Remove，不同 userID 之间几乎
+// 无重叠）下走无锁 fast path；与 r3 P2 lesson "Load fast path" 模式一致。
+//
+// 内存模型：sync.Map entry 不会自动回收 —— 长生命周期 server 累积大量 user 的
+// mutex 是 O(active users) 内存开销。考虑到单实例 MVP < 万级 user，每条 entry
+// 约 48 字节（uint64 key + *Mutex value + sync.Map 内部开销）= < 0.5 MB，可接受。
+// 节点 13+ 多实例水平扩展时如果出现内存压力，再考虑加 LRU evict（需要锁保护让
+// evict 与正在持锁的 goroutine 不冲突）。
+//
+// 详见 docs/lessons/2026-05-07-fire-and-forget-hooks-need-per-user-mutex-10-6-r8.md。
+type userKeyedMutex struct {
+	m sync.Map // map[uint64]*sync.Mutex
+}
+
+// lockFor 返回 userID 对应的 *sync.Mutex —— 调用方拿到后调 Lock/Unlock 自行控制
+// 临界区。多次 lockFor 同 userID 返回同一 *Mutex 实例（sync.Map LoadOrStore 保证
+// 首次 store 后续 Load 命中同地址）。
+//
+// 走 r3 P2 lesson 的 "Load fast path"：先 m.Load 单次原子命中，miss 才走
+// LoadOrStore（避免每次 hook 都分配一个 *sync.Mutex 然后又被 GC）。
+func (u *userKeyedMutex) lockFor(userID uint64) *sync.Mutex {
+	if muVal, ok := u.m.Load(userID); ok {
+		return muVal.(*sync.Mutex)
+	}
+	muVal, _ := u.m.LoadOrStore(userID, &sync.Mutex{})
+	return muVal.(*sync.Mutex)
+}
+
 // redisOpenTimeout 是启动阶段调 redis.Open 的最大等待。
 //
 // 与 dbOpenTimeout 同模式（详见上文）：主 signal-ctx 没 deadline，碰到 blackhole
@@ -277,12 +315,32 @@ func main() {
 	// shutdown 必须清空 presence"的设计意图。修法：sync.WaitGroup + 在 sessionMgr.Close()
 	// 之后调 wg.Wait() 让 Redis 关闭推迟到所有 hook goroutine 真正退出。
 	// 详见 lesson 2026-05-07-presence-same-room-reconnect-needs-room-aware-guard-10-6-r7.md。
+	//
+	// **review 10-6 r8 P1 修**：fire-and-forget hook goroutines 同 userID 的 Add/Remove
+	// 必须**串行**执行 —— 否则 quick connect-then-close 或 reconnect 替换路径下
+	// AddOnline(new) 与 RemoveOnline(old) 两个独立 goroutine 调度顺序不定，可能
+	// RemoveOnline 先跑 → AddOnline 后跑，让 presence 复活已离线 session 的 keys
+	// 直到 TTL 自然过期（IsOnline / ListOnline over-report 5min）。
+	//
+	// 修法：用 sync.Map[userID]*sync.Mutex；同 userID 的 hook goroutine 在内部抢同
+	// 一把锁 → 强制 register / unregister 在 Redis 端的命令顺序与 SessionManager
+	// 端的钩子触发顺序一致。同 user 不同 session 的 Add/Remove 也走这把锁（reconnect
+	// 替换路径下 AddOnline(new) 与 RemoveOnline(old) 都是同 userID）。
+	//
+	// 锁拿取走 r3 P2 lesson 的 "Load fast path"：见 userKeyedMutex 文档。
+	// 详见 lesson 2026-05-07-fire-and-forget-hooks-need-per-user-mutex-10-6-r8.md。
 	var presenceHooksWG sync.WaitGroup
+	var userPresenceMu userKeyedMutex // 同 userID 的 hook 串行（r8 P1 加；类型 godoc 详述）
 	sessionMgr := wsapp.NewSessionManager(
 		wsapp.WithRegisterHook(func(s *wsapp.Session) {
 			presenceHooksWG.Add(1)
 			go func() {
 				defer presenceHooksWG.Done()
+				// 同 userID 的 Add/Remove 串行（r8 P1）—— Lock 必须在 ctx WithTimeout
+				// 之前拿，否则 timeout 期已经从锁队列里出去了再做 Redis I/O 没意义
+				mu := userPresenceMu.lockFor(s.UserID())
+				mu.Lock()
+				defer mu.Unlock()
 				hookCtx, cancel := context.WithTimeout(context.Background(), presenceHookTimeout)
 				defer cancel()
 				if err := presenceRepo.AddOnline(hookCtx, s.RoomID(), s.UserID(), s.SessionID()); err != nil {
@@ -299,6 +357,10 @@ func main() {
 			presenceHooksWG.Add(1)
 			go func() {
 				defer presenceHooksWG.Done()
+				// 同 userID 的 Add/Remove 串行（r8 P1）
+				mu := userPresenceMu.lockFor(s.UserID())
+				mu.Lock()
+				defer mu.Unlock()
 				hookCtx, cancel := context.WithTimeout(context.Background(), presenceHookTimeout)
 				defer cancel()
 				// **关键**（Story 10.6 r1 P1 修）：必须传入 s.SessionID() 让 RemoveOnline

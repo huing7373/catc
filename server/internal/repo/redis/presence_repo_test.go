@@ -428,11 +428,13 @@ type faultInjectingClient struct {
 	setCount    int
 	sAddCount   int
 	expireCount int
+	evalCount   int
 
 	// 命令调用 N 次（1-indexed）时是否返 error；nil = 不注入错误
 	setFailAt    *int
 	sAddFailAt   *int
 	expireFailAt *int
+	evalFailAt   *int
 }
 
 func intp(i int) *int { return &i }
@@ -480,6 +482,10 @@ func (f *faultInjectingClient) SMembers(ctx context.Context, key string) ([]stri
 }
 
 func (f *faultInjectingClient) Eval(ctx context.Context, script string, keys []string, args ...interface{}) (interface{}, error) {
+	f.evalCount++
+	if f.evalFailAt != nil && f.evalCount == *f.evalFailAt {
+		return nil, errFault
+	}
 	return f.inner.Eval(ctx, script, keys, args...)
 }
 
@@ -528,24 +534,24 @@ func TestPresenceRepo_AddOnline_SetFails_NoLeftover(t *testing.T) {
 	require.Empty(t, members, "SET 失败 → room set 不应有残留")
 }
 
-// TestPresenceRepo_AddOnline_SAddFails_UserKeyHasTTL_RoomSetEmpty 验证 review
-// 10-6 r2 P2：SET 成功 + SADD 失败 → user:{id}:ws_session 已写入但**有 TTL**
-// （SET KEY VAL EX 单命令原子）→ 5min 后自然过期 → 不 zombie。room set 还没 SADD
-// 过 → 没 member。
+// TestPresenceRepo_AddOnline_SAddExpireLuaFails_NoLeftover 验证 review 10-6 r8 P2：
+// SET 成功 + SADD+EXPIRE Lua 段失败 → user:{id}:ws_session 已写入有 TTL，room set
+// **不变**（要么 SADD+EXPIRE 都执行要么都没执行；Lua 原子保证）。
 //
-// 关键不变量：user:{id}:ws_session 必须**有** TTL（不能是永久 key），否则
-// reconnect / 其他 user 路径会看到 stale sessionID 且永不自愈。
-func TestPresenceRepo_AddOnline_SAddFails_UserKeyHasTTL_RoomSetEmpty(t *testing.T) {
+// 这是 r8 P2 修的核心断言 —— 修前 SADD+EXPIRE 是两条独立命令，SADD 成功 + EXPIRE
+// 失败让 room set 写入 member 但**无 TTL** → process crash 后永久 zombie。修后两步
+// 用 Lua 包成原子段，failed EVAL 时 SADD 也未生效，残留风险 = 0。
+//
+// 关键不变量：room set 不应在 EVAL 失败后含任何 member。
+func TestPresenceRepo_AddOnline_SAddExpireLuaFails_NoLeftover(t *testing.T) {
 	repo, fault, inner := newFaultInjectingRepo(t)
 	ctx := context.Background()
 
-	fault.sAddFailAt = intp(1)
+	// 注入 Eval 第 1 次调用失败（AddOnline 路径上的 SADD+EXPIRE 段就是第一次 Eval）
+	fault.evalFailAt = intp(1)
 
 	err := repo.AddOnline(ctx, 100, 42, "s1")
-	require.Error(t, err, "SADD 失败应让 AddOnline 返 error")
-
-	// 验证 EXPIRE 没被调用（SADD 失败立即 return）
-	require.Equal(t, 0, fault.expireCount, "SADD 失败 → EXPIRE 不应被调用")
+	require.Error(t, err, "SADD+EXPIRE Lua 段失败应让 AddOnline 返 error")
 
 	// 验证 user:{id}:ws_session 已被 SET（含 TTL，因为 Set 走 KEY VAL EX 原子）
 	// **review 10-6 r7 P1**：value 编码 "sessionID|roomID"
@@ -553,14 +559,17 @@ func TestPresenceRepo_AddOnline_SAddFails_UserKeyHasTTL_RoomSetEmpty(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, "s1|100", val, "SET 已成功 → user:{id}:ws_session 应有 sessionID|roomID 值")
 
-	// 验证 room set 没 member（SADD 失败前没数据）
+	// **关键不变量** (r8 P2)：room set 不应有残留 —— SADD+EXPIRE Lua 段失败时
+	// 整段没在 Redis 执行，SADD 也没写入。这是 r8 P2 相对 r2 命令分离方案的核心
+	// 改进 —— 之前 SADD 成功 + EXPIRE 失败让 room set 写入 member 但无 TTL，
+	// 这里改成 Lua 原子化后 EXPIRE 失败 ↔ SADD 也没执行。
 	members, err := inner.SMembers(ctx, "room:100:online_users")
 	require.NoError(t, err)
-	require.Empty(t, members, "SADD 失败 → room set 不应有残留")
+	require.Empty(t, members, "Lua 段失败 → room set 不应有残留 member（原子保证）")
 
 	// **关键**：下一次 AddOnline 同 user 应能恢复（覆盖 user:{id}:ws_session +
-	// 重新 SADD），让"暂时性 SADD 失败"路径有自然 retry 通道。
-	fault.sAddFailAt = nil // 解除 SADD 失败注入
+	// 重新执行 Lua 段），让"暂时性 EVAL 失败"路径有自然 retry 通道。
+	fault.evalFailAt = nil // 解除失败注入
 	require.NoError(t, repo.AddOnline(ctx, 100, 42, "s2"))
 
 	online, err := repo.IsOnline(ctx, 100, 42)
@@ -568,35 +577,28 @@ func TestPresenceRepo_AddOnline_SAddFails_UserKeyHasTTL_RoomSetEmpty(t *testing.
 	require.True(t, online, "重试 AddOnline 应能完整恢复 presence")
 }
 
-// TestPresenceRepo_AddOnline_ExpireFails_UserKeyHasTTL 验证 review 10-6 r2 P2：
-// SET + SADD 都成功 + EXPIRE 失败 → user:{id}:ws_session 已写入**有 TTL**，room
-// set 没 TTL。Lesson 中详述：room set 没 TTL 是已知的轻度不一致 —— RemoveOnline
-// 走 Lua script 仍能正确 SREM 干净；最坏路径是某 user 5min 内未 unregister 时
-// room set 上残留 member 直到下一次 AddOnline 触发 EXPIRE 续期。
+// TestPresenceRepo_AddOnline_HappyPath_RoomSetHasTTL 验证 review 10-6 r8 P2：
+// AddOnline happy path 下 room set 必须**有** TTL（由 Lua 段 EXPIRE 命令设置）。
 //
-// 关键不变量：user:{id}:ws_session 仍**有 TTL**（5min），不会留永久 zombie key。
-func TestPresenceRepo_AddOnline_ExpireFails_UserKeyHasTTL(t *testing.T) {
+// 这是修后 Lua 段语义的正向覆盖 —— 走完整路径 SET → Lua(SADD+EXPIRE) → room set
+// 上既有 member 又有 TTL（FastForward 超过 TTL 后 set 自动过期）。
+func TestPresenceRepo_AddOnline_HappyPath_RoomSetHasTTL(t *testing.T) {
 	mr, _ := testhelper.NewMiniRedis(t)
-	inner := redisinfra.NewRedisClientFromMiniredis(t, mr)
-	fault := &faultInjectingClient{inner: inner}
-	repo := redisrepo.NewPresenceRepo(fault, 5*time.Minute)
+	client := redisinfra.NewRedisClientFromMiniredis(t, mr)
+	repo := redisrepo.NewPresenceRepo(client, 5*time.Second) // 短 TTL 让 FastForward 起效
 	ctx := context.Background()
 
-	fault.expireFailAt = intp(1)
+	require.NoError(t, repo.AddOnline(ctx, 100, 42, "s1"))
 
-	err := repo.AddOnline(ctx, 100, 42, "s1")
-	require.Error(t, err, "EXPIRE 失败应让 AddOnline 返 error")
-
-	// 验证 user:{id}:ws_session 有值（SET 已成功）
-	// **review 10-6 r7 P1**：value 编码 "sessionID|roomID"
-	val, err := inner.Get(ctx, "user:42:ws_session")
+	// 验证 user 已加入 room set
+	online, err := repo.IsOnline(ctx, 100, 42)
 	require.NoError(t, err)
-	require.Equal(t, "s1|100", val)
+	require.True(t, online)
 
-	// 验证 user:{id}:ws_session **有** TTL（由 Set KEY VAL EX 原子带入；不依赖
-	// 后续 EXPIRE 命令）—— 走 FastForward 6 分钟后应过期
-	mr.FastForward(6 * time.Minute)
-	val, err = inner.Get(ctx, "user:42:ws_session")
+	// 关键断言：room set 自带 TTL（Lua 段 EXPIRE 已设置）—— FastForward 超过 TTL
+	// 后整个 set key 应过期，IsOnline 返 false 验证 TTL 真的写入了
+	mr.FastForward(6 * time.Second) // > 5s TTL
+	online, err = repo.IsOnline(ctx, 100, 42)
 	require.NoError(t, err)
-	require.Empty(t, val, "user:{id}:ws_session 应在 5min TTL 后自然过期（验证 SET KEY VAL EX 已带 TTL）")
+	require.False(t, online, "TTL 后 room set 应过期（验证 Lua 段 EXPIRE 已写入 TTL）")
 }
