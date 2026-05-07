@@ -73,6 +73,21 @@ type SessionManager interface {
 	// 时可以走 ctx-aware 实装。
 	ListAllSessions(ctx context.Context) []*Session
 
+	// IsRegistered 检查 sessionID 当前是否仍在 manager 索引中（review 10-6 r4 P2 加）。
+	//
+	// 用途：HeartbeatScanner.scanOnce 拿到 ListAllSessions 快照后异步对每个 active
+	// session 调 PresenceRenewer.AddOnline 重写 presence。snapshot 与 AddOnline 之
+	// 间的窗口期里 session 可能已经 disconnect → manager 已 Unregister → 钩子已
+	// RemoveOnline 清干净 presence。如果 scanner 不 check 仍然 AddOnline，会"复活"
+	// 已离线 session 的 presence keys，造成 zombie online entry 直到 TTL 自然过期。
+	//
+	// 走 read lock 直接 lookup `sessionsByID[sessionID]`；零分配 + nanos 量级 ——
+	// scanner 每 tick 对每个 session 调一次，性能开销可忽略。
+	//
+	// 错误语义：sessionID 不存在 → 返 false（不报 error，与 ListAllSessions 等
+	// 查询接口一致）。ctx 当前不消费，保留参数让未来 distributed 实装可消费。
+	IsRegistered(ctx context.Context, sessionID string) bool
+
 	// Close 关闭 manager：批量 close 所有 Session（不主动推 close 1001 frame，
 	// graceful shutdown 业务由 Epic 36 接管）。
 	// 必须幂等（与 *sql.DB.Close 一致）。
@@ -357,6 +372,25 @@ func (m *sessionManager) ListAllSessions(ctx context.Context) []*Session {
 		return out[i].sessionID < out[j].sessionID
 	})
 	return out
+}
+
+// IsRegistered 实装 SessionManager.IsRegistered（review 10-6 r4 P2 加）。
+//
+// 走 RLock + map lookup，无分配。HeartbeatScanner.scanOnce 在 reconcile 路径
+// （review 10-6 r2 P1 / r3 P2 引入）拿到 ListAllSessions 快照后调本方法 gate
+// PresenceRenewer.AddOnline，避免"快照已过期 → session 已 unregister → 仍 AddOnline
+// 复活 presence" 的 zombie 路径。
+//
+// 注意：本方法只看 sessionsByID 索引；reconnect 替换路径下 OLD session 在
+// sessionsByID **保留**到 Close → notifyClosed → Unregister 跑完才被清，所以
+// scanner 在 OLD 还没真正销毁前看到 IsRegistered=true 是预期行为（OLD 的 AddOnline
+// 写的是 oldRoom + oldID，不会污染 NEW 的 presence；OLD 销毁后下一 tick 不再
+// 看到它）。
+func (m *sessionManager) IsRegistered(ctx context.Context, sessionID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.sessionsByID[sessionID]
+	return ok
 }
 
 // Close 实装 SessionManager.Close。批量 close 所有 Session + 清空索引（idempotent）。

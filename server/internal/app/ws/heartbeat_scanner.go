@@ -303,7 +303,21 @@ func (s *HeartbeatScanner) scanOnce(ctx context.Context, now time.Time) {
 			// 重建 SADD member）。AddOnline 是 idempotent（SET nx=false 覆盖、
 			// SADD 已存在 no-op、EXPIRE 总是续）—— 重复调安全。renewer == nil
 			// （未接 Redis 的最小路径 / 单测）跳过。
+			//
+			// **review 10-6 r4 P2**：AddOnline 之前必须 IsRegistered guard。
+			// snapshot 与 AddOnline 之间窗口期里 session 可能已 disconnect —— manager
+			// 已 Unregister + onUnregister 钩子已 RemoveOnline 清干净 presence；
+			// 此时 scanner 仍 AddOnline 会"复活" presence keys 让已离线 session
+			// 看似 online 直到 TTL 过期（zombie online entry，5min 视野污染）。
+			// IsRegistered 走 RLock map lookup（O(1)，nanos 量级），开销可忽略 ——
+			// 比 zombie 风险换性能成本对 SLO 更友好。
 			if s.renewer != nil {
+				if !s.mgr.IsRegistered(ctx, sess.SessionID()) {
+					// snapshot 后 session 已 unregister，跳过 reconcile 避免复活
+					// 已离线 session 的 presence。下一 tick 不会再看到它（已从
+					// sessionsByID 移除），AddOnline 不会被错误重写。
+					continue
+				}
 				if err := s.renewer.AddOnline(ctx, sess.RoomID(), sess.UserID(), sess.SessionID()); err != nil {
 					// 一次失败不阻塞遍历下一 session；下一 tick 30s 后重试，TTL
 					// 5min 远 > 30s × 几次重试，足以容忍偶发 Redis 抖动。log warn

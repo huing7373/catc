@@ -178,19 +178,18 @@ func TestPresenceRepo_RemoveOnline_NotExists_NoError(t *testing.T) {
 	require.NoError(t, repo.RemoveOnline(ctx, 100, 42, "session-x"))
 }
 
-// TestPresenceRepo_RemoveOnline_ReconnectRace_GuardsNewSession 验证 Story 10.6 r1
-// P1 修的关键场景：reconnect 路径下旧 Session 的延后 Unregister 钩子调
-// RemoveOnline(oldSessionID) 时，user:{id}:ws_session 已被新 Session 覆盖为
-// newSessionID → sessionID guard 让 SREM/DEL no-op，新 Session 的 presence 完整保留。
+// TestPresenceRepo_RemoveOnline_ReconnectRace_GuardsUserKey 验证 Story 10.6 r1
+// P1 + r4 P1 修后的 user key 保护语义：sessionID 不匹配（user key 已被新 session
+// 覆盖）时**不**动 user key 的 DEL —— 仅 SREM 旧 room（r4 P1 修；让 cross-room
+// reconnect 旧 room 总被清）。
 //
-// 时序模拟（与 SessionManager.Register 替换路径行为一致）：
-//  1. old session: AddOnline(roomID, userID, oldSessionID)
-//  2. new session: AddOnline(roomID, userID, newSessionID) 覆盖 user:{id}:ws_session
-//  3. old session 异步 Unregister 钩子触发: RemoveOnline(roomID, userID, oldSessionID)
-//     → 期望: no-op（不清新 session 的 presence）
-//  4. IsOnline / ListOnline 仍返 user 在线（新 session active）
-//  5. user:{id}:ws_session 仍 == newSessionID（未被误删）
-func TestPresenceRepo_RemoveOnline_ReconnectRace_GuardsNewSession(t *testing.T) {
+// 同 room 的同步快照下 SREM 会让 user 短暂离开 room set，但生产路径上紧跟着
+// 的 NEW AddOnline / scanner reconcile 会 SADD 把 user 加回，最终自愈。本 case
+// 仅断言：r1 P1 的 user key 保护语义保留（sessionID guard 仍然在 DEL 路径生效）。
+//
+// 同 room 全态自愈链路由 TestPresenceRepo_RemoveOnline_SameRoomReconnect_SelfHealsAfterReAdd
+// 覆盖；本 case 仅锁定"user key DEL 受 sessionID guard 保护"这一关键不变量。
+func TestPresenceRepo_RemoveOnline_ReconnectRace_GuardsUserKey(t *testing.T) {
 	repo, _, client := newPresenceRepo(t)
 	ctx := context.Background()
 
@@ -211,22 +210,127 @@ func TestPresenceRepo_RemoveOnline_ReconnectRace_GuardsNewSession(t *testing.T) 
 	require.Equal(t, newSessionID, val)
 
 	// Step 3: old session 延后 Unregister 钩子触发: RemoveOnline(oldSessionID)
-	// → 期望 no-op，不清新 session 的 presence
+	// → 期望 user key 不动（sessionID guard 阻止 DEL）；但 SREM 旧 room 仍执行
+	// （r4 P1 修：cross-room 不变量也覆盖 same-room 路径，user key 保护与 SREM 解耦）
 	require.NoError(t, repo.RemoveOnline(ctx, roomID, userID, oldSessionID))
 
-	// Step 4: IsOnline / ListOnline 仍返 user 在线（presence 完整保留）
-	online, err := repo.IsOnline(ctx, roomID, userID)
-	require.NoError(t, err)
-	require.True(t, online, "新 session 的 presence 不应被旧 session 的延后 RemoveOnline 误删")
-
-	users, err := repo.ListOnline(ctx, roomID)
-	require.NoError(t, err)
-	require.Equal(t, []uint64{userID}, users)
-
-	// Step 5: user:{id}:ws_session 仍 == newSessionID（未被误删）
+	// Step 4: user:{id}:ws_session 仍 == newSessionID（**关键不变量** —— DEL 受
+	// sessionID guard 保护，不会被旧 session 的延后 RemoveOnline 误删，让上层
+	// 后续 RemoveOnline(newSessionID) 路径仍能正确比对）
 	val, err = client.Get(ctx, "user:42:ws_session")
 	require.NoError(t, err)
-	require.Equal(t, newSessionID, val, "user:{id}:ws_session 应保留 newSessionID（旧 RemoveOnline 不应清）")
+	require.Equal(t, newSessionID, val, "user:{id}:ws_session 应保留 newSessionID（DEL 受 sessionID guard 保护）")
+}
+
+// TestPresenceRepo_RemoveOnline_SameRoomReconnect_SelfHealsAfterReAdd 验证
+// review 10-6 r4 P1 修后的 same-room 自愈语义：旧 RemoveOnline（sessionID 不匹配）
+// SREM 旧 room → user 暂离 room set；NEW session 的 AddOnline / scanner reconcile
+// SADD 把 user 加回 → IsOnline 自愈。
+//
+// 时序：
+//  1. AddOnline(roomA, userID, oldID)
+//  2. AddOnline(roomA, userID, newID) —— 模拟 NEW session AddOnline 抢先（scanner
+//     reconcile race / hook adapter 顺序）
+//  3. RemoveOnline(roomA, userID, oldID) —— 旧 unregister 钩子；r4 P1 新 Lua case 3
+//     SREM 旧 room（user 暂离）
+//  4. AddOnline(roomA, userID, newID) —— 后续 scanner reconcile / NEW Register
+//     onRegister 钩子；SADD 自愈
+//
+// 期望：最终 IsOnline 返 true、user key 仍 == newID。
+func TestPresenceRepo_RemoveOnline_SameRoomReconnect_SelfHealsAfterReAdd(t *testing.T) {
+	repo, _, client := newPresenceRepo(t)
+	ctx := context.Background()
+
+	const roomID = uint64(100)
+	const userID = uint64(42)
+	const oldSessionID = "session-old"
+	const newSessionID = "session-new"
+
+	require.NoError(t, repo.AddOnline(ctx, roomID, userID, oldSessionID))
+	require.NoError(t, repo.AddOnline(ctx, roomID, userID, newSessionID))
+
+	// 旧 RemoveOnline 走 Lua case 3 —— SREM 旧 room（user 暂离 set），保留 user key
+	require.NoError(t, repo.RemoveOnline(ctx, roomID, userID, oldSessionID))
+
+	// 中间瞬时态：user 不在 room set，但 user key 仍指 newID
+	online, err := repo.IsOnline(ctx, roomID, userID)
+	require.NoError(t, err)
+	require.False(t, online, "SREM 后 user 暂离 room set（瞬时态，预期）")
+	val, err := client.Get(ctx, "user:42:ws_session")
+	require.NoError(t, err)
+	require.Equal(t, newSessionID, val, "user key 受 sessionID guard 保护，不被旧 RemoveOnline DEL")
+
+	// 后续 scanner reconcile / NEW Register 钩子的 AddOnline 把 user 加回
+	require.NoError(t, repo.AddOnline(ctx, roomID, userID, newSessionID))
+
+	online, err = repo.IsOnline(ctx, roomID, userID)
+	require.NoError(t, err)
+	require.True(t, online, "AddOnline 后 user 自愈回 room set")
+	val, err = client.Get(ctx, "user:42:ws_session")
+	require.NoError(t, err)
+	require.Equal(t, newSessionID, val)
+}
+
+// TestPresenceRepo_RemoveOnline_CrossRoomReconnect_SREMsOldRoom 验证 review
+// 10-6 r4 P1 修的核心场景：cross-room reconnect 路径下旧 RemoveOnline 的 SREM
+// 必须执行（无论 sessionID 是否匹配）。
+//
+// 时序模拟（scanner reconcile race 路径）：
+//  1. user 在 roomA：AddOnline(roomA, userID, oldID)
+//  2. user 重连到 roomB：AddOnline(roomB, userID, newID) 覆盖 user key = newID +
+//     SADD user 到 roomB（roomA set 仍有 user member）
+//  3. 旧 unregister 钩子：RemoveOnline(roomA, userID, oldID)
+//     → r4 P1 修前：Lua GET → newID ≠ oldID → 跳过 SREM → user 永久留在 roomA set
+//     → r4 P1 修后：Lua GET → newID ≠ oldID → 走 case 3 → SREM roomA → user 离开 roomA set
+//  4. ListOnline(roomA) 不含 user；ListOnline(roomB) 含 user
+//
+// 这是 r4 P1 修的**最核心 case**：旧版本 cross-room reconnect 让 user 同时在
+// roomA + roomB 两个 set，roomA 其他活跃 user 周期续 TTL → user 永远看似 online
+// 在 roomA。新版本 SREM 总是执行 → user 干净离开 roomA。
+func TestPresenceRepo_RemoveOnline_CrossRoomReconnect_SREMsOldRoom(t *testing.T) {
+	repo, _, client := newPresenceRepo(t)
+	ctx := context.Background()
+
+	const roomA = uint64(100)
+	const roomB = uint64(200)
+	const userID = uint64(42)
+	const oldSessionID = "session-old"
+	const newSessionID = "session-new"
+
+	// Step 1: user 在 roomA
+	require.NoError(t, repo.AddOnline(ctx, roomA, userID, oldSessionID))
+
+	// Step 2: 重连到 roomB（覆盖 user key + SADD roomB；roomA set 仍有 user）
+	require.NoError(t, repo.AddOnline(ctx, roomB, userID, newSessionID))
+
+	// 中间状态：roomA + roomB 都含 user（user key 已切到 newID）
+	online, err := repo.IsOnline(ctx, roomA, userID)
+	require.NoError(t, err)
+	require.True(t, online, "roomA 中 user 残留（AddOnline 不清旧 room）")
+	online, err = repo.IsOnline(ctx, roomB, userID)
+	require.NoError(t, err)
+	require.True(t, online, "roomB 中 user 已加入")
+
+	// Step 3: 旧 unregister 钩子触发 RemoveOnline(roomA, oldSessionID)
+	// → 新 Lua case 3：SREM roomA（无论 sessionID 是否匹配），不动 user key
+	require.NoError(t, repo.RemoveOnline(ctx, roomA, userID, oldSessionID))
+
+	// Step 4: roomA 应不再含 user；roomB 仍含 user；user key 保留 newID
+	online, err = repo.IsOnline(ctx, roomA, userID)
+	require.NoError(t, err)
+	require.False(t, online, "r4 P1 修：roomA 的 SREM 总是执行，user 应离开 roomA set")
+
+	users, err := repo.ListOnline(ctx, roomA)
+	require.NoError(t, err)
+	require.Empty(t, users, "roomA 应空（user 唯一成员已被 SREM）")
+
+	online, err = repo.IsOnline(ctx, roomB, userID)
+	require.NoError(t, err)
+	require.True(t, online, "roomB 不应受影响（RemoveOnline 仅清传入的 roomA）")
+
+	val, err := client.Get(ctx, "user:42:ws_session")
+	require.NoError(t, err)
+	require.Equal(t, newSessionID, val, "user key 仍 == newSessionID（DEL 受 sessionID guard 保护）")
 }
 
 // TestPresenceRepo_RemoveOnline_MatchingSessionID_ClearsPresence 验证

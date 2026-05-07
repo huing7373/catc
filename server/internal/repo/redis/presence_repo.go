@@ -102,29 +102,55 @@ type PresenceRepo interface {
 	//     内自然清除）
 	AddOnline(ctx context.Context, roomID, userID uint64, sessionID string) error
 
-	// RemoveOnline 从 presence 删除 (roomID, userID)，**仅当**当前 user→sessionID
-	// 映射等于传入 sessionID 时才删除（sessionID guard）。
+	// RemoveOnline 从 presence 删除 (roomID, userID)。**总是** SREM 旧 room（按
+	// 传入的 roomID 定位），但**仅当**当前 user→sessionID 映射等于传入 sessionID
+	// 时才 DEL user key（sessionID guard）。
 	//
 	// 流程（**原子** Lua script 跑在 Redis 端）：
 	//  1. GET user:{userID}:ws_session
-	//  2. 若返回值 == 传入 sessionID **或** key 不存在（首次 / TTL 已过）→
-	//     SREM room:{roomID}:online_users {userID-string} + DEL user:{userID}:ws_session
-	//  3. 否则（user→sessionID 已被 reconnect 覆盖为新 sessionID）→ no-op，跳过 SREM/DEL
+	//  2. 若 key 不存在 → 仅 SREM 旧 room（user 已完全离线；user key 已不存在
+	//     不需要清；返 1）
+	//  3. 若返回值 == 传入 sessionID（无 reconnect 抢占）→
+	//     SREM 旧 room + DEL user key（完整清理；返 2）
+	//  4. 若返回值 != 传入 sessionID（reconnect 抢占，user key 已被新 session
+	//     覆盖）→ **仍 SREM 旧 room**，不动 user key（新 session 接管 user key；
+	//     返 3）
 	//
-	// **关键修法**（Story 10.6 r1 P1）：sessionID guard 防 reconnect 路径误删新 session 的
-	// presence。SessionManager.Register 替换路径设计是"new Session 完成 Register（新
-	// AddOnline 写 user:{id}:ws_session=newSessionID）→ old Session 异步 Close → 旧
-	// Unregister 触发钩子调 RemoveOnline"。如果 RemoveOnline 不带 guard 直接 SREM/DEL，
-	// 旧 Unregister 会清掉新 session 刚写入的 presence，让 IsOnline / ListOnline 误报
-	// user offline 即使 active WS 还在。Lua script 的 GET + SREM + DEL 三命令必须**原子**
-	// （非 pipeline）—— 比较 + 删除若拆成两步 check-then-delete，仍存在 race window。
+	// **关键修法**（Story 10.6 r4 P1）：旧实装把 case 4 当作完整 no-op（跳过 SREM
+	// 也跳过 DEL），导致以下 race 路径下旧 room 的 SREM 永远不被执行：
 	//
-	// **idempotent**：连续两次 RemoveOnline(sameSessionID) 第二次自动 no-op：第一次执行后
-	// user:{id}:ws_session 已被 DEL，第二次 GET 拿 nil → script 把 nil 当作 "首次 / TTL
-	// 已过" 分支，会再尝试 SREM / DEL，但底层 SREM / DEL 对不存在 key 都是 no-op，所以
-	// 无副作用。
+	//   - **scanner reconcile race**（最常触发）：HeartbeatScanner（Story 10.4 +
+	//     review 10-6 r3 P2）每 30s tick 给所有 active session 调 AddOnline
+	//     reconcile。SessionManager.Register 替换路径在 lock-internal 把 NEW 加
+	//     到 sessionsByID 后释放锁；锁释放到 replaced.Close()→onUnregister→
+	//     RemoveOnline 之间存在窗口。scanner tick 命中此窗口时会先 AddOnline NEW
+	//     →写 user:{id}:ws_session = newSessionID。后续 RemoveOnline(oldRoom,
+	//     userID, oldSessionID) 走 Lua GET 拿到 newSessionID ≠ oldSessionID →
+	//     旧版本返 0 跳过 SREM → user 留在 oldRoom 永不清。
 	//
-	// 错误语义：底层 EVAL 命令失败 → 返 error；script 返 0 (no-op) 不视为 error。
+	//   - **cross-room reconnect 后果放大**：上面的 race 在 cross-room 路径下
+	//     （user 从 roomA 重连到 roomB）尤其严重 —— user 同时在 roomA + roomB
+	//     两个 set 里。roomA 其他活跃 user 周期 AddOnline 续 roomA TTL → user 永远
+	//     看似 online 在 roomA（直到 roomA 完全没人活跃 / TTL 5min 自然过期）。
+	//
+	// 修法：把 case 4 的 SREM 单独执行（与 user key 的 DEL 解耦）—— SREM 是按
+	// (传入 roomID, 传入 userID) 双键定位的 set-member 操作，无论 user key 当前
+	// 指向哪个 sessionID，传入的 roomID 对应的旧 room 该清就该清。user key 的
+	// DEL 仍受 sessionID guard 保护（避免旧 unregister 误清新 session 的 user key）。
+	//
+	// **idempotent**：连续两次 RemoveOnline(sameSessionID) 第二次自动 no-op：
+	// 第一次执行后 user:{id}:ws_session 已被 DEL，第二次 GET 拿 nil → script 走
+	// case 1 仅 SREM；底层 SREM 对不存在 member 是 no-op，所以无副作用。
+	//
+	// **same-room reconnect 语义**：user 在同 room 重连（roomA → roomA），无论
+	// 是 race 路径还是正常路径，最终状态都是 NEW session AddOnline(roomA, userID,
+	// newSessionID) 把 user 加入 roomA + user key = newSessionID。本 script 的
+	// case 3/4 SREM 会移除 userID-member，但 NEW session 的 AddOnline SADD 会
+	// 把 userID-member 重新加回。短窗口内 IsOnline(roomA, userID) 可能瞬时返 false，
+	// 但下一秒就自愈 —— 与 V1 §12 "presence 是 ephemeral 在线态" 的语义钦定一致。
+	// 详见 lesson 2026-05-07-presence-cross-room-reconnect-srem-old-room-10-6-r4。
+	//
+	// 错误语义：底层 EVAL 命令失败 → 返 error；script 返 1/2/3 都不视为 error。
 	RemoveOnline(ctx context.Context, roomID, userID uint64, sessionID string) error
 
 	// IsOnline 检查 user 是否在 room 内 online。
@@ -263,48 +289,64 @@ func (r *presenceRepo) AddOnline(ctx context.Context, roomID, userID uint64, ses
 }
 
 // removeOnlineLuaScript 是 RemoveOnline 用的 Lua script，跑在 Redis 端**原子**完成
-// "compare-and-delete"：仅当 user:{id}:ws_session 当前值 == 传入 sessionID（或 key 不
-// 存在 / 已 TTL 过期）时才执行 SREM + DEL。
+// "总是 SREM 旧 room；仅 sessionID 匹配 / 已不存在时才 DEL user key"。
 //
-// KEYS[1] = roomKey(roomID)         （SREM 的 set key）
-// KEYS[2] = userKey(userID)         （GET / DEL 的 string key）
-// ARGV[1] = sessionID               （要删的目标 session）
+// KEYS[1] = roomKey(roomID)         （SREM 的 set key —— 调用方传入的旧 room）
+// KEYS[2] = userKey(userID)         （GET / DEL 的 string key —— user → sessionID 映射）
+// ARGV[1] = sessionID               （要清的目标旧 sessionID）
 // ARGV[2] = userID 字符串            （SREM 的 member）
 //
-// 返回值：
-//   - 1: compare 命中 / key 不存在，已执行 SREM + DEL（删除路径）
-//   - 0: compare 失败（user:{id}:ws_session 已被 reconnect 覆盖为新 sessionID），no-op
+// 返回值（用于单测断言走对了哪个分支；上层不区分）：
+//   - 1: GET 返 false（user key 不存在 / TTL 过期）—— 仅 SREM 旧 room
+//   - 2: GET == 传入 sessionID（无 reconnect 抢占）—— SREM 旧 room + DEL user key
+//   - 3: GET != 传入 sessionID（已被 reconnect 抢占 → 新 session 写入了新值）——
+//        **仍 SREM 旧 room**（按传入的 roomID + userID 定位），但**不**动 user key
+//
+// **关键不变量**（review 10-6 r4 P1）：旧 room 的 SREM **永远**执行（无论 GET 命中
+// 哪个分支）。SREM 是按 (传入 roomID, userID) 双键定位的，与 user key 当前指向无关 ——
+// 调用方传入 oldRoom 就该清 oldRoom。user key 的 DEL 受 sessionID guard 保护
+// （case 3 跳过 DEL）才不会误删新 session 的映射。
 //
 // **为什么必须 Lua script 而非 pipeline / 三命令分开**：
 //   - Pipeline 不保证原子性 —— GET 与 SREM/DEL 之间可能被另一 client 的 SET 插入，
 //     仍有 race window
 //   - Lua script 在 Redis 端 single-thread 执行，GET + SREM + DEL 三命令原子；
-//     reconnect 路径若在 script 执行期发生，会被 Redis 的 single-thread 序列化
+//     reconnect 抢占若在 script 执行期发生，会被 Redis 的 single-thread 序列化
 //     （要么发生在 script 之前要么之后，永远不会"夹在中间"）
 //
-// **为什么 GET == false（key 不存在）也走删除分支**：
-//   - 首次 RemoveOnline 之后 user:{id}:ws_session 已被 DEL；再次调 RemoveOnline 时
-//     GET 返 false → 仍走 SREM/DEL no-op 路径（底层 SREM/DEL 对不存在 key 无副作用）
-//   - TTL 自然过期路径 / scanner 清理路径同样合理：key 不存在意味着 "user 已不在线"，
-//     SREM/DEL 兜底清残留是正确语义
-//   - 若严格 "key 不存在 → 不删" 反而会让 SREM 在 user:{id}:ws_session TTL 提前过期
-//     但 room set 还有 member 的边角场景下漏清 → 残留到 room set TTL（5min）才清，
-//     违反"unregister 应清干净"的语义
+// **r4 P1 修前的 bug**：旧 script 是 `if current == false or current == ARGV[1] then
+// SREM + DEL else return 0 end` —— case 3（GET != ARGV[1]）路径下 SREM 也被跳过。
+// 配合 HeartbeatScanner 的 AddOnline reconcile 路径（review 10-6 r3 P2 加），存在
+// 窗口让 scanner 把 user key 改写为 newSessionID，然后旧 RemoveOnline 走 case 3
+// → 跳过 SREM → user 永远留在 oldRoom set。cross-room reconnect 路径下 user 同时
+// 出现在 roomA + roomB，roomA 其他 user 周期续 TTL → 永不自愈。修法：case 3
+// 的 SREM 与 user key DEL 解耦，旧 room SREM 总是执行。详见 lesson
+// 2026-05-07-presence-cross-room-reconnect-srem-old-room-10-6-r4.md。
 const removeOnlineLuaScript = `local current = redis.call("GET", KEYS[2])
-if current == false or current == ARGV[1] then
+if current == false then
   redis.call("SREM", KEYS[1], ARGV[2])
-  redis.call("DEL", KEYS[2])
   return 1
 end
-return 0`
+if current == ARGV[1] then
+  redis.call("SREM", KEYS[1], ARGV[2])
+  redis.call("DEL", KEYS[2])
+  return 2
+end
+redis.call("SREM", KEYS[1], ARGV[2])
+return 3`
 
 // RemoveOnline 实装 PresenceRepo.RemoveOnline（详见 interface godoc）。
 //
-// Story 10.6 r1 P1 修：原实装是 SREM + DEL 双命令直接删除，会让 reconnect 替换路径
-// 旧 Session 的延后 Unregister 钩子误删新 Session 的 presence。改用 Lua script 跑在
-// Redis 端原子 compare-and-delete：仅当 user:{id}:ws_session 当前值 == 传入 sessionID
-// （或 key 不存在）时才删除。详见 removeOnlineLuaScript 注释 + lesson
-// 2026-05-07-redis-presence-remove-needs-session-id-guard-10-6-r1.md。
+// 修法历程：
+//   - Story 10.6 r1 P1：原实装是 SREM + DEL 双命令直接删除，会让 reconnect 替换路径
+//     旧 Session 的延后 Unregister 钩子误删新 Session 的 user key。改用 Lua script 跑
+//     在 Redis 端原子 compare-and-delete：仅当 user:{id}:ws_session 当前值 == 传入
+//     sessionID（或 key 不存在）时才执行 SREM + DEL。
+//   - Story 10.6 r4 P1：r1 实装存在反向缺陷 —— sessionID 不匹配（被 scanner /
+//     reconnect 抢占）时连 SREM 都跳过，cross-room reconnect 路径下 user 永远留在
+//     旧 room set。改成"无论 GET 走哪个分支，旧 room 的 SREM 都执行；仅 user key
+//     DEL 受 sessionID guard 保护"。详见 removeOnlineLuaScript 注释 + lesson
+//     2026-05-07-presence-cross-room-reconnect-srem-old-room-10-6-r4.md。
 func (r *presenceRepo) RemoveOnline(ctx context.Context, roomID, userID uint64, sessionID string) error {
 	rk := roomKey(roomID)
 	uk := userKey(userID)

@@ -4098,3 +4098,99 @@ func TestHeartbeatScanner_ScanOnce_RenewerError_LoggedNotAborted(t *testing.T) {
 	}
 }
 
+// ---------- review 10-6 r4 P2: scanner IsRegistered guard 集成测试 ----------
+
+// staleSnapshotMgr 是一个 SessionManager 包装器，让 ListAllSessions 返回**调用方
+// 注入**的 stale 快照（模拟 scanner snapshot 与 AddOnline 之间 session 已 unregister
+// 的 race），但 IsRegistered 委托给底层 real manager（让 r4 P2 修后的 IsRegistered
+// guard 路径可观察）。
+//
+// 用途：单测 review 10-6 r4 P2 修 —— scanner 在调 AddOnline 前必须先 IsRegistered
+// 校验，避免"复活"已 unregister session 的 presence 让 zombie online entry 持续
+// 到 TTL 过期。
+type staleSnapshotMgr struct {
+	wsapp.SessionManager
+	stale []*wsapp.Session
+}
+
+func (m *staleSnapshotMgr) ListAllSessions(_ context.Context) []*wsapp.Session {
+	return m.stale
+}
+
+// TestHeartbeatScanner_ScanOnce_UnregisteredSession_SkipsReconcile：snapshot 后
+// session 已 unregister → scanner 调 IsRegistered 返 false → skip AddOnline，避免
+// 复活 zombie presence。
+//
+// 时序模拟（r4 P2 race）：
+//  1. session 已注册到 manager
+//  2. scanner snapshot 拿到该 session
+//  3. session disconnect → manager Unregister 清出
+//  4. scanner 遍历 snapshot 调 IsRegistered → false → skip AddOnline
+//
+// 验证：renewer.count == 0（即使 snapshot 含 session，AddOnline 也不被调用）
+func TestHeartbeatScanner_ScanOnce_UnregisteredSession_SkipsReconcile(t *testing.T) {
+	realMgr := wsapp.NewSessionManager()
+	defer realMgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, sess, ts := useGatewayDial(t, realMgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	// 拿真实 snapshot（此时 session 仍在 manager）
+	snapshot := realMgr.ListAllSessions(context.Background())
+	if len(snapshot) != 1 {
+		t.Fatalf("snapshot len = %d, want 1", len(snapshot))
+	}
+
+	// 模拟 race window：scanner 拿到 snapshot 后 session 被 unregister
+	// （现实路径：disconnect → manager.Unregister → onUnregister hook → presence 清干净）
+	if err := realMgr.Unregister(context.Background(), sess.SessionID()); err != nil {
+		t.Fatalf("Unregister: %v", err)
+	}
+	// 验证 IsRegistered 已返 false
+	if realMgr.IsRegistered(context.Background(), sess.SessionID()) {
+		t.Fatalf("IsRegistered should be false after Unregister")
+	}
+
+	// 注入 staleSnapshotMgr：ListAllSessions 返 snapshot（含已 unregister 的 session），
+	// IsRegistered 委托给 realMgr（返 false）
+	staleMgr := &staleSnapshotMgr{SessionManager: realMgr, stale: snapshot}
+
+	renewer := &fakeRenewer{}
+	// timeoutMs=10s 让 session 视为 active（idle 远 < 10s）
+	scanner := wsapp.NewHeartbeatScannerForTestWithRenewer(staleMgr, 10*1000, 200*time.Millisecond, idleTestLogger(), renewer)
+
+	scanner.ScanOnceForTest(context.Background(), time.Now())
+
+	// **关键断言**：r4 P2 修后 IsRegistered guard 让 AddOnline 不被调
+	// （否则会复活已 unregister session 的 presence → zombie 直到 TTL）
+	if got := renewer.count.Load(); got != 0 {
+		t.Errorf("AddOnline count = %d, want 0 (unregistered session should not be reconciled)", got)
+	}
+}
+
+// TestHeartbeatScanner_ScanOnce_RegisteredSession_StillReconciles：r4 P2 修不破坏
+// happy path —— session 仍在 manager 时 IsRegistered 返 true → AddOnline 正常调用。
+func TestHeartbeatScanner_ScanOnce_RegisteredSession_StillReconciles(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	defer mgr.Close()
+	repo := &stubRoomMemberRepo{}
+	conn, sess, ts := useGatewayDial(t, mgr, repo, 1001, 3001)
+	defer ts.Close()
+	defer conn.Close()
+
+	// session 仍在 manager
+	if !mgr.IsRegistered(context.Background(), sess.SessionID()) {
+		t.Fatalf("IsRegistered should be true for live session")
+	}
+
+	renewer := &fakeRenewer{}
+	scanner := wsapp.NewHeartbeatScannerForTestWithRenewer(mgr, 10*1000, 200*time.Millisecond, idleTestLogger(), renewer)
+	scanner.ScanOnceForTest(context.Background(), time.Now())
+
+	// IsRegistered=true → AddOnline 正常调
+	if got := renewer.count.Load(); got != 1 {
+		t.Errorf("AddOnline count = %d, want 1 (live session should reconcile)", got)
+	}
+}
+
