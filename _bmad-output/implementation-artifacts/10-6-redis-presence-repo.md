@@ -1,6 +1,6 @@
 # Story 10.6: Redis presence repo（房间在线用户 + WS session 映射 + lifecycle 钩子挂载 + TTL 续期 + 单测/集成测覆盖）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
