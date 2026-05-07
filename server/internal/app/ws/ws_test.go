@@ -2663,6 +2663,112 @@ func TestHeartbeatScanner_Run_DrainsFanoutBeforeReturn(t *testing.T) {
 	// wg.Done，go test -race 在 wg 内部探测下会暴露。本测试在 -race 下跑就足够。
 }
 
+// TestHeartbeatScanner_ShutdownOrdering_NoFourThousandFiveAfterScannerExit：
+// review r6 P1 regression。
+//
+// 背景（r6 P1）：r5 让 scanner.Run 的 defer 加了 wg.Wait 阻塞到所有 in-flight
+// fanout drain 完才返回；但 main.go 的 shutdown 路径只 cancelHeartbeat() 然后
+// 让另一个 deferred 函数跑 sessionMgr.Close —— cancel 与 Run 真正 return 之间
+// 存在窗口。这个窗口内已通过 ctx-check 的 fanout goroutine 仍可调
+// CloseWithCode(4005,...)，与 sessionMgr.Close 标准 close 路径并发 race，导致
+// idle client 收到 4005 而非正常 shutdown close（恰好是 r4 想消灭的"误重连"）。
+//
+// 修法（main.go r6）：cancelHeartbeat → wait scannerDone → sessionMgr.Close
+// 收成一个 deferred 函数，串行确定。
+//
+// 测试策略（不真跑 main，模拟 shutdown helper 的 ordering 不变量）：
+//  1. 起 N 个 idle session（lastHeartbeatAt 拖很久前 → idle 必 > timeoutMs）
+//  2. 起 scanner.Run；让一两个 tick 跑 → fanout dispatched
+//  3. cancelHeartbeat() → 立即 wait scannerDone → sessionMgr.Close
+//  4. 断言：sessionMgr.Close 调用之前 scanner.Run **必须**已 return（用 chan
+//     timing 验证），否则 race 仍存在
+//
+// **关键不变量**：shutdown helper 的执行顺序必须满足
+//   cancelHeartbeat completes < scannerDone closed < sessionMgr.Close called
+// 反之（cancel → sessionMgr.Close 不等 Run 退出）会让 fanout 在 sessionMgr.Close
+// 进行中仍 emit 4005。
+func TestHeartbeatScanner_ShutdownOrdering_NoFourThousandFiveAfterScannerExit(t *testing.T) {
+	mgr := wsapp.NewSessionManager()
+	repo := &stubRoomMemberRepo{}
+
+	// 起几个 idle session（足够让 fanout dispatched，但不要太多以免拖测试时间）
+	const N = 5
+	conns := make([]*websocket.Conn, 0, N)
+	tss := make([]*httptest.Server, 0, N)
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+		for _, ts := range tss {
+			ts.Close()
+		}
+	}()
+	staleMs := time.Now().UnixMilli() - 10_000
+	for i := 0; i < N; i++ {
+		conn, sess, ts := useGatewayDial(t, mgr, repo, uint64(7000+i), 7500)
+		conns = append(conns, conn)
+		tss = append(tss, ts)
+		sess.SetLastHeartbeatAtForTest(staleMs)
+	}
+
+	scanner := wsapp.NewHeartbeatScannerForTest(mgr, 50, 30*time.Millisecond, idleTestLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	scannerDone := make(chan struct{})
+	go func() {
+		defer close(scannerDone)
+		scanner.Run(ctx)
+	}()
+
+	// 让几个 tick 跑过，fanout dispatched
+	time.Sleep(120 * time.Millisecond)
+
+	// 模拟 main.go r6 shutdown helper 的关键 ordering:
+	//   1. cancel
+	//   2. wait scannerDone (Run 真正退出，含 wg.Wait drain)
+	//   3. mgr.Close (这一步必须在 scanner 完全静默后才调)
+	cancel()
+
+	// 记录 mgr.Close 调用时机；scanner.Run **必须**先 return 才能调 mgr.Close
+	// 用 chan + select 验证 ordering：scannerDone 必须 close 在 mgr.Close 调用之前
+	closeStarted := make(chan struct{})
+	closeDone := make(chan struct{})
+	go func() {
+		select {
+		case <-scannerDone:
+			// good — scanner 已退出，可以安全调 Close
+		case <-time.After(2 * time.Second):
+			t.Errorf("scanner.Run did not return within 2s after cancel; r5 P2 wg.Wait drain regression")
+			return
+		}
+		close(closeStarted)
+		_ = mgr.Close()
+		close(closeDone)
+	}()
+
+	// 等 closeStarted（说明 scannerDone 已先 close）
+	select {
+	case <-closeStarted:
+		// 验证 closeStarted 触发时 scannerDone 必已 close
+		select {
+		case <-scannerDone:
+			// good — ordering correct: scannerDone closed BEFORE mgr.Close called
+		default:
+			t.Fatalf("ordering violation: mgr.Close started but scanner.Run not returned (r6 P1: must wait scannerDone before sessionMgr.Close)")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("shutdown helper did not advance to mgr.Close within 3s; scanner.Run probably stuck")
+	}
+
+	// 等整个 shutdown helper 完成
+	select {
+	case <-closeDone:
+		// good
+	case <-time.After(2 * time.Second):
+		t.Fatalf("mgr.Close did not return within 2s")
+	}
+}
+
 // TestSessionManager_ListAllSessions_NoLockHeldDuringSort：review r5 P2 regression。
 //
 // 背景（r5 P2）：ListAllSessions 持 RLock 全程包括 O(N log N) sort；每 30s heartbeat

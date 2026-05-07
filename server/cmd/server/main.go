@@ -200,13 +200,6 @@ func main() {
 	// 本 story 阶段不挂任何 lifecycle 钩子（10.6 才挂 Redis presence 钩子）。
 	// SessionManager 是纯内存对象（map + sync.RWMutex），构造无 IO；不需要 timeout ctx。
 	sessionMgr := wsapp.NewSessionManager()
-	// **defer LIFO 顺序约束**（Story 10.4 引入；详见 heartbeat scanner 段注释）：
-	// sessionMgr.Close 必须**先**注册（后执行）；scanner 的 cancel 必须**后**注册（先执行）。
-	defer func() {
-		if cerr := sessionMgr.Close(); cerr != nil {
-			slog.Error("session manager close failed", slog.Any("error", cerr))
-		}
-	}()
 	slog.Info("ws session manager ready")
 
 	// Story 10.4：HeartbeatScanner 构造 + 启动后台 goroutine。
@@ -217,12 +210,6 @@ func main() {
 	// 用 ctx + cancel 让 scanner 在 main 退出（graceful shutdown）时优雅退出；
 	// 不需要 .Stop() 方法（与 Story 8.5 步数同步触发器同模式）。
 	//
-	// **defer LIFO 顺序**：cancelHeartbeat 在 sessionMgr.Close 之后注册 → main 退出时
-	// 先执行（LIFO）→ scanner 先停 ticker / 不再 fanout 新 close → 再 sessionMgr.Close
-	// 批量清理 Session。反序会让 sessionMgr.Close 跑批量 s.Close() 同时 scanner 还在
-	// fanout CloseWithCode → 双方对同 Session 并发 close（虽然 Close 幂等不 panic，但
-	// 日志噪声 + onUnregister 钩子可能多调）。
-	//
 	// **review r4 P1 修**：heartbeatCtx 必须从 main 的 signal ctx 派生（而非
 	// context.Background()）。原版用 Background → SIGTERM 只 cancel main ctx 让
 	// bootstrap.Run 退出，scanner 仍然在跑直到 main 返回执行 deferred cancelHeartbeat。
@@ -232,12 +219,38 @@ func main() {
 	// WithCancel(ctx) 后，SIGTERM 立即 cancel scanner.Run 主循环 + 已 dispatched
 	// fanout goroutines（fanout 内部本就有 ctx.Done() 入口 check / recheck）。
 	// 详见 docs/lessons/2026-05-06-heartbeat-scanner-ctx-tie-to-shutdown-signal.md。
+	//
+	// **review r6 P1 修**：shutdown 必须**串行等 scanner.Run 真正返回**才能调
+	// sessionMgr.Close。原版只 cancelHeartbeat() 然后立刻让另一个 deferred 函数跑
+	// sessionMgr.Close —— 由于 r5 给 scanner.Run 的 defer 加了 wg.Wait()（让 Run 在
+	// 所有 in-flight fanout drain 完才返回），cancel 与 Run 实际 return 之间存在窗口。
+	// 这个窗口内已经过 ctx-check 的 fanout goroutine 仍可调 CloseWithCode(4005,...)，
+	// 而 sessionMgr.Close 也在并行跑标准 close 路径 —— 双方对同 Session 并发 close
+	// 会让 idle client 收到 4005 而非正常 shutdown close，恰好触发 r4 想消灭的"误重连"。
+	//
+	// 修法：scannerDone chan 跟踪 Run 真正退出；把 cancelHeartbeat → wait scannerDone →
+	// sessionMgr.Close 收成**一个 deferred 函数**（顺序确定，不依赖 LIFO 间接对齐）。
+	// 详见 docs/lessons/2026-05-07-shutdown-must-wait-for-goroutine-exit-not-just-signal.md。
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
 	heartbeatScanner := wsapp.NewHeartbeatScanner(sessionMgr, cfg.WS.HeartbeatTimeoutSec, slog.Default())
-	go heartbeatScanner.Run(heartbeatCtx)
+	scannerDone := make(chan struct{})
+	go func() {
+		defer close(scannerDone)
+		heartbeatScanner.Run(heartbeatCtx)
+	}()
 	defer func() {
+		// 1. signal scanner 开始退出。
 		cancelHeartbeat()
 		slog.Info("ws heartbeat scanner cancel signaled")
+		// 2. 等 Run 真正返回（含 wg.Wait drain 所有 in-flight fanout）。这一步
+		//    完成 = scanner 不会再 emit 任何 4005，sessionMgr.Close 可独占走标准
+		//    close 路径。
+		<-scannerDone
+		slog.Info("ws heartbeat scanner stopped")
+		// 3. 现在批量清 Session，没有 4005 race。
+		if cerr := sessionMgr.Close(); cerr != nil {
+			slog.Error("session manager close failed", slog.Any("error", cerr))
+		}
 	}()
 	slog.Info("ws heartbeat scanner ready",
 		slog.Int("heartbeatTimeoutSec", cfg.WS.HeartbeatTimeoutSec),

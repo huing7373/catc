@@ -151,7 +151,10 @@ func newHeartbeatScannerForTest(mgr SessionManager, timeoutMs int64, interval ti
 //     goroutine 跑完。fanout 入口 ctx-check 会让 ctx-cancelled 路径立即 return；
 //     已经过 ctx-check 的 goroutine 会跑到 CloseWithCode 完成 —— 两种路径都收敛
 //     后 wg.Wait() 解除阻塞，Run 才返回。这样保证 Run 返回 = scanner 全部安静，
-//     与 main.go defer LIFO（cancelHeartbeat → sessionMgr.Close）的钦定时序对齐。
+//     与 main.go shutdown helper（review r6 P1：cancelHeartbeat → wait scannerDone →
+//     sessionMgr.Close 串行 deferred 函数）的钦定时序对齐。仅靠 defer LIFO 不够 ——
+//     LIFO 只保证 deferred 函数注册顺序，不保证 cancelHeartbeat 后 scanner 实际
+//     已退出，必须 chan signal 显式 wait。
 func (s *HeartbeatScanner) Run(ctx context.Context) {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
@@ -204,8 +207,8 @@ func (s *HeartbeatScanner) Run(ctx context.Context) {
 //     check + recheck 后 close 之前再 check。原因：scanner.Run 在 ctx.Done 后主
 //     循环立即退出，但已经 dispatch 的 per-session goroutines 仍然在跑。如果
 //     SIGTERM 落在 tick 与 fanout 之间，goroutine 会在 cancelHeartbeat 之后继续
-//     调 CloseWithCode 写 4005 close frame，与 main.go defer LIFO 钦定的
-//     "scanner 先停 → sessionMgr.Close 走标准 close 路径"流程 race —— 用户
+//     调 CloseWithCode 写 4005 close frame，与 main.go shutdown helper 钦定的
+//     "scanner 先停 → wait scannerDone → sessionMgr.Close 走标准 close 路径"流程 race —— 用户
 //     SIGTERM 期间正常下线却收到 4005 错误地触发自动重连。修法：在 fanout
 //     goroutine 入口 select ctx.Done → return，绕过 close path；recheck 之后再
 //     check 一次防 sleep 在 nanos 间被 cancel。

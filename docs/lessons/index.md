@@ -187,3 +187,4 @@
 | 2026-05-06 | [closeInternal wait 上限不足 cover writeTimeout & scanner fanout 不响应 ctx（10-4 r3）](2026-05-06-ws-close-wait-timeout-and-shutdown-fanout-10-4-r3.md) | 2 | concurrency | `<pending>` |
 | 2026-05-06 | [heartbeat scanner ctx 必须挂主 signal ctx & closeInternal wait 仅限 emitClose 路径（10-4 r4）](2026-05-06-ws-heartbeat-shutdown-ctx-and-close-wait-only-emit-10-4-r4.md) | 2 | architecture, perf | `<pending>` |
 | 2026-05-07 | [heartbeat fanout 必须用 WaitGroup drain & List 操作把 sort 移到 RUnlock 之后（10-4 r5）](2026-05-07-ws-heartbeat-fanout-drain-and-list-sort-outside-lock-10-4-r5.md) | 2 | architecture, perf | `<pending>` |
+| 2026-05-07 | [shutdown 必须 wait goroutine 退出而不是只 signal cancel（10-4 r6）](2026-05-07-ws-shutdown-must-wait-for-goroutine-exit-not-just-signal-10-4-r6.md) | 1 | architecture | `<pending>` |
