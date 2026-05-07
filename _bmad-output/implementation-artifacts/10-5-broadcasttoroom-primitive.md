@@ -1,6 +1,6 @@
 # Story 10.5: BroadcastToRoom primitive（房间广播原语 + SessionManager 拿目标 + goroutine fanout 并发 Send + log 错误不阻塞）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
