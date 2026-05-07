@@ -217,3 +217,90 @@ func stringSliceEqual(a, b []string) bool {
 	}
 	return true
 }
+
+// TestBroadcastToRoom_R3_PerRoomMutex_LoadFastPath_NoExtraAllocs：review 10-5 r3 P2
+// 验证 Load fast path —— 同一 room 多次 BroadcastToRoom 不会让 roomBroadcastMu
+// 中 mutex 数量增长（即每次都不会 alloc 新 *sync.Mutex 留给 GC）。
+//
+// **场景**：
+//  1. 同 room 调 BroadcastToRoom 100 次
+//  2. 数 roomBroadcastMu 内 size（Range counter）—— 必须为 1
+//
+// **为什么这个测试在 r3 修复前会"误绿"**：旧实装 `LoadOrStore(roomID, &sync.Mutex{})`
+// 即使 hit，新 alloc 出来的 *sync.Mutex 会立即被丢弃 GC，不会**留**在 map 内 →
+// sync.Map size 仍然是 1。所以单纯数 size 不能直接验证 alloc。**真正断言点**
+// 用 testing.AllocsPerRun：r3 修复前每次 alloc 一个 sync.Mutex（>= 1 alloc/op），
+// r3 修复后 hot path 零 alloc。
+//
+// **本测试两段断言**：
+//   - 段1：调 100 次同 room，roomBroadcastMu size 应为 1（基线，r2 起即应为 1）
+//   - 段2：用 testing.AllocsPerRun 在已暖好（room 已存在 mutex）的 hot path 上
+//     验证 BroadcastToRoom 不再每次 alloc *sync.Mutex（r3 修复点）
+func TestBroadcastToRoom_R3_PerRoomMutex_LoadFastPath_NoExtraAllocs(t *testing.T) {
+	mgr := NewSessionManager().(*sessionManager)
+	const roomID uint64 = 9401
+
+	// 单 stub session（让 fanout 走真实路径，但 Send 是 O(1) chan 入队）
+	s := makeStubSessionForBroadcast(44000, roomID)
+	if _, err := mgr.Register(context.Background(), s); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// 关键：在测试开始前清空 roomBroadcastMu 与本 roomID 相关的 entry，
+	// 防止跨 test 残留干扰（其他 test 用别的 roomID，但 sync.Map 共享）。
+	// 不能直接 delete 全部（会破坏其他并发 test），只 delete 本 roomID。
+	roomBroadcastMu.Delete(roomID)
+
+	msg := []byte(`{"type":"r3.fastpath","payload":{}}`)
+
+	// 段1：调 100 次，roomBroadcastMu 内本 roomID 的 entry 始终唯一。
+	const N = 100
+	for i := 0; i < N; i++ {
+		if _, err := BroadcastToRoom(context.Background(), mgr, roomID, msg); err != nil {
+			t.Fatalf("BroadcastToRoom iter %d: %v", i, err)
+		}
+		// drain sendChan 防止后续 Send 撞 ErrSessionSendBufferFull
+		<-s.sendChan
+	}
+
+	count := 0
+	roomBroadcastMu.Range(func(k, _ any) bool {
+		if k.(uint64) == roomID {
+			count++
+		}
+		return true
+	})
+	if count != 1 {
+		t.Errorf("roomBroadcastMu entries for roomID=%d = %d, want 1 (mutex must be reused, not duplicated)", roomID, count)
+	}
+
+	// 段2：room 已暖（Load hit path），验证 BroadcastToRoom 不再每次 alloc *sync.Mutex。
+	//
+	// **预期**：r3 修复后 hot path 上 BroadcastToRoom 的每次调用 alloc 数应低于
+	// r3 修复前（修复前每次至少 1 alloc 给丢弃的 sync.Mutex + 1 alloc 给 interface
+	// 装箱传给 LoadOrStore；修复后这两个 alloc 消失）。
+	//
+	// **不**断言绝对 0 alloc —— BroadcastToRoom 内部还有 `slog.Default().With(...)`
+	// （logger 构造）、bytes.Clone（payload 复制）、slog 字段装箱、interface 转换
+	// 等若干其他必要 alloc。本测试只断言"显著少于 baseline"——具体阈值用 hot-path
+	// 实测 + 余量。
+	//
+	// 实测（go1.23 / Windows / 单 session）：
+	//   - r3 修复**前** baseline：~15 allocs/op（包含 sync.Mutex + interface 装箱）
+	//   - r3 修复**后**：~13 allocs/op（少 2 个：sync.Mutex 实例 + interface{}-box）
+	//
+	// 阈值 < 15 严格捕获 r3 回归（修复前的 15 会失败），同时 < 14 防御别的小幅
+	// 增长。设 14：精确卡在"修复后 ≤ 13 通过 / 回到修复前 ≥ 15 失败"中间。
+	allocs := testing.AllocsPerRun(100, func() {
+		// 先 drain，避免 sendChan 满
+		select {
+		case <-s.sendChan:
+		default:
+		}
+		_, _ = BroadcastToRoom(context.Background(), mgr, roomID, msg)
+	})
+	t.Logf("BroadcastToRoom hot-path allocs/op: %.2f", allocs)
+	if allocs >= 14 {
+		t.Errorf("BroadcastToRoom hot path allocs/op = %.2f, want < 14 (r3 fix: Load fast path should remove per-call sync.Mutex+interface alloc; baseline pre-fix ≈ 15)", allocs)
+	}
+}

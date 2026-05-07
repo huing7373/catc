@@ -175,10 +175,19 @@ func BroadcastToRoom(ctx context.Context, mgr SessionManager, roomID uint64, msg
 //     仅 µs 级），跨 room broadcast 走不同 mutex 不互相阻塞
 func broadcastToRoomFanout(ctx context.Context, mgr SessionManager, roomID uint64, msg []byte) (int, error) {
 	// review 10-5 r2 P2 fix：per-room mutex 串行化同 room 并发 broadcast。
-	// LoadOrStore 双重 lookup 保证多 goroutine 同时首次进入 roomX 时只创建
-	// 一个 mutex（sync.Map 内部 atomic）。mutex 一旦创建不删除（room archive
+	// review 10-5 r3 P2 fix：Load fast path —— hot path（active room 第二次以后
+	// 的 broadcast）零分配。直接 LoadOrStore 会**每次** alloc 一个新 *sync.Mutex
+	// 实例传给 LoadOrStore（即使 hit 时第二参立即被丢弃 GC），active room 持续
+	// broadcast 时这是稳态 GC pressure。改成先 Load，miss 才 LoadOrStore：
+	//   - room 首次 broadcast：Load miss → LoadOrStore alloc 一个 mutex（一次性）
+	//   - room 第二次起：Load hit → 零分配
+	// LoadOrStore 自身的双重 check 仍保证多 goroutine 同时首次进入 roomX 时只
+	// 留一个 mutex（sync.Map 内部 atomic）。mutex 一旦创建不删除（room archive
 	// 后 mutex 仍在 map 中，但每 room < 100B，可忽略）。
-	muVal, _ := roomBroadcastMu.LoadOrStore(roomID, &sync.Mutex{})
+	muVal, ok := roomBroadcastMu.Load(roomID)
+	if !ok {
+		muVal, _ = roomBroadcastMu.LoadOrStore(roomID, &sync.Mutex{})
+	}
 	mu := muVal.(*sync.Mutex)
 	mu.Lock()
 	defer mu.Unlock()
