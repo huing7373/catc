@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	wsapp "github.com/huing/cat/server/internal/app/ws"
 	apperror "github.com/huing/cat/server/internal/pkg/errors"
@@ -2759,5 +2760,137 @@ func TestRoomService_LeaveRoom_PrecheckFail_BroadcastNotCalled(t *testing.T) {
 
 	if got := bcast.callCount(); got != 0 {
 		t.Errorf("broadcastFn call count = %d, want 0 (precheck fail path)", got)
+	}
+}
+
+// case Order1（codex review r4 [P1] fix 验证）：
+// 同一 roomID 上 JoinRoom → LeaveRoom 快速触发，post-commit 异步 hooks 必须按
+// caller 调用顺序串行执行（per-room serialization）—— 即使第一个 hook（join 的
+// broadcastMemberJoined）的 user/pet enrichment 被人为拖慢，第二个 hook（leave 的
+// broadcastMemberLeft）也必须等第一个 hook 完成才开始，保证 client 收到的事件
+// 顺序为 member.joined → member.left（绝不反转）。
+//
+// 实现：通过 userRepo.FindByID 注入 channel-blocking 让 join 路径 enrichment 阻塞
+// 直到 release；release 前发起 LeaveRoom；release 后 wg.Wait()；断言 bcast.calls
+// 顺序 [member.joined, member.left]。
+func TestRoomService_PostCommit_PerRoomSerialization_PreservesCausalOrdering(t *testing.T) {
+	const userID = uint64(1002)
+	const roomID = uint64(3001)
+	const petID = uint64(7001)
+
+	// gate 控制 join 路径的 broadcastMemberJoined enrichment（FindByID 调用）阻塞，
+	// 让 leave 路径的 transaction commit 先完成 + post-commit hook 已 enqueue，
+	// 验证 per-room mutex 阻止 leave hook 抢跑。
+	gate := make(chan struct{})
+
+	// FindByID：预检调用立即返回；post-commit enrichment 调用阻塞等 gate（仅第一次
+	// 阻塞，后续调用不阻塞 —— 否则 leave 自己的预检也会卡住）。
+	var findByIDCalls atomic.Int64
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			n := findByIDCalls.Add(1)
+			user := &mysql.User{
+				ID:        userID,
+				Nickname:  "U",
+				AvatarURL: "https://avatar/1002",
+			}
+			// n==1: join 预检（CurrentRoomID=nil 让 join 通过）
+			// n==2: join post-commit enrichment（**阻塞**，等 gate close）
+			// n==3: leave 预检（CurrentRoomID=&roomID 让 leave 通过）
+			switch n {
+			case 1:
+				user.CurrentRoomID = nil
+			case 2:
+				<-gate // 阻塞 join 的 broadcastMemberJoined 直到测试主动 release
+				user.CurrentRoomID = nil
+			default:
+				roomIDCopy := roomID
+				user.CurrentRoomID = &roomIDCopy
+			}
+			return user, nil
+		},
+		updateCurrentRoomIDFn: func(ctx context.Context, uid uint64, rid *uint64) error { return nil },
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDForUpdateFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
+		},
+		updateStatusFn: func(ctx context.Context, rid uint64, status int8) error { return nil },
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		countByRoomIDFn: func(ctx context.Context, rid uint64) (int, error) { return 0, nil },
+		createFn:        func(ctx context.Context, m *mysql.RoomMember) error { return nil },
+		deleteByRoomAndUserFn: func(ctx context.Context, rid, uid uint64) (int64, error) {
+			return 1, nil
+		},
+	}
+	petRepo := &roomTestStubPetRepo{
+		findDefaultByUserIDFn: func(ctx context.Context, uid uint64) (*mysql.Pet, error) {
+			return &mysql.Pet{ID: petID, UserID: uid, IsDefault: 1, CurrentState: 1}, nil
+		},
+	}
+	bcast, _, fn, exceptFn := newRoomTestStubBroadcastFnWithSeq()
+	sessionMgr := &roomTestStubSessionMgr{}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, sessionMgr, fn, exceptFn)
+	wg := &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
+
+	// (1) JoinRoom → 启动 goroutine A（broadcastMemberJoined），其 enrichment 卡在 gate
+	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userID, RoomID: roomID}); err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+
+	// 等待 goroutine A 真正进入 mu 临界区 + 触发 FindByID（n==2）—— 否则下面
+	// LeaveRoom 启动的 goroutine B 可能抢跑拿到 mu，掩盖 per-room serialization
+	// 行为（让本测试在缺乏 per-room mutex 时也能巧合通过）。
+	deadline := time.Now().Add(2 * time.Second)
+	for findByIDCalls.Load() < 2 {
+		if time.Now().After(deadline) {
+			close(gate) // 防止 goroutine 泄漏
+			t.Fatalf("goroutine A did not enter post-commit FindByID within deadline")
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+
+	// (2) LeaveRoom → 启动 goroutine B（broadcastMemberLeft）；
+	// 因为 per-room mutex 已被 A 持有，B 会阻塞在 mu.Lock 排队，**不会**抢跑发出
+	// member.left。
+	if _, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userID, RoomID: roomID}); err != nil {
+		t.Fatalf("LeaveRoom: %v", err)
+	}
+
+	// (3) Release gate → A 完成 enrichment + 发出 member.joined → 释放 mu →
+	// B 拿到 mu → 完成 member.left
+	close(gate)
+
+	wg.Wait()
+
+	// (5) 断言：bcast.calls 长度 == 2，顺序 [member.joined, member.left]
+	bcast.mu.Lock()
+	defer bcast.mu.Unlock()
+	if len(bcast.calls) != 2 {
+		t.Fatalf("broadcast call count = %d, want 2 (1 join + 1 leave)", len(bcast.calls))
+	}
+
+	var env0, env1 story118EnvelopeForTest
+	if err := json.Unmarshal(bcast.calls[0].msg, &env0); err != nil {
+		t.Fatalf("unmarshal call[0]: %v", err)
+	}
+	if err := json.Unmarshal(bcast.calls[1].msg, &env1); err != nil {
+		t.Fatalf("unmarshal call[1]: %v", err)
+	}
+	// **关键断言**（per-room serialization）：causal ordering 必须保留 ——
+	// 即使 join 的 enrichment 被人为拖慢，leave 的 broadcast 也必须排在后面。
+	if env0.Type != "member.joined" {
+		t.Errorf("call[0].type = %q, want \"member.joined\" (causal ordering violated by per-room serialization bug)", env0.Type)
+	}
+	if env1.Type != "member.left" {
+		t.Errorf("call[1].type = %q, want \"member.left\" (causal ordering violated by per-room serialization bug)", env1.Type)
+	}
+	// seq 单调递增（让 close[Unregister] < broadcastMemberLeft 也得到保证；本 case
+	// 主要验证两条 broadcast 的相对顺序）
+	if bcast.calls[0].seq >= bcast.calls[1].seq {
+		t.Errorf("seq order: call[0].seq=%d should be < call[1].seq=%d", bcast.calls[0].seq, bcast.calls[1].seq)
 	}
 }
