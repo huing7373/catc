@@ -978,6 +978,19 @@ CREATE TABLE emoji_configs (
 
 ---
 
+## 8.8 房间详情读快照事务
+
+`GET /api/v1/rooms/{roomId}`（V1 接口设计 §10.3）虽然为只读查询，但需要在同一 MySQL 事务内（隔离级别 = **REPEATABLE READ**，InnoDB 默认）完成两次 SELECT：
+
+- 步骤 1：`SELECT users.current_room_id` —— ACL 校验（caller 是否仍是该房间成员）
+- 步骤 3：`SELECT room_members JOIN users JOIN pets` —— 受 ACL 保护的 roster 隐私数据
+
+**rationale**：若两次 SELECT 各自独立、不共享 snapshot，则 caller 并发 `POST /rooms/{roomId}/leave` 在步骤 1 → 步骤 3 之间提交时，本请求仍会返回完整 roster —— ACL 已失效但隐私数据照下发，绕过本接口的隐私边界。事务 snapshot 让两次 SELECT 看到同一时刻的状态，从而**ACL 校验与受 ACL 保护的数据返回 atomically 在同一 snapshot 内**。
+
+本读事务与写事务（§8.1 / §8.6 / §8.7）并列，归入"读快照事务"类型，方便后续 audit 时统一识别"哪些只读接口需要 snapshot 一致性"。后续若新增"`/me` 读个人 + 关联资源"等多次 SELECT 形态、且任一次 SELECT 是 ACL 校验 / 任一次 SELECT 是受 ACL 保护的数据，应同样开读快照事务。
+
+---
+
 ## 9. Redis 职责边界
 
 ## 9.1 建议放 Redis 的数据

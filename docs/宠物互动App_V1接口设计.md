@@ -1244,14 +1244,16 @@ JSON 示例（用户当前不在任何房间）：
 
 #### 服务端逻辑
 
-按顺序执行：
+**事务边界**：开 MySQL 事务（隔离级别 = **REPEATABLE READ**，MySQL InnoDB 默认级别即是；事务内所有 SELECT 共享同一 snapshot）包以下全部 4 个步骤。**rationale**：步骤 1 是 ACL 校验（caller 是否仍是该房间成员），步骤 3 是隐私数据返回（roster）；若步骤 1 + 步骤 3 各自独立 SELECT、不在同一 snapshot 内，则 caller 并发 `POST /rooms/{roomId}/leave` 在两次 SELECT 之间提交时，本请求仍会返回完整 roster —— ACL 已失效但隐私数据照下发，绕过本接口隐私边界。**ACL 校验 + 受 ACL 保护的数据返回必须 atomically 在同一 snapshot 内完成**，与 §10.5 leave 步骤 1 / §10.4 join 步骤 5 写事务内 race 兜底同一安全模式（详见数据库设计 §8.8）。
+
+按顺序执行（**全部在同一 REPEATABLE READ 事务内**）：
 
 1. 查 `users.current_room_id`，**与请求的 `roomId` 不一致**（含 `current_room_id` 为 null）→ 立即返回 **6004 用户不在房间中**（caller 不是该房间成员，禁止查看其他成员隐私字段）
-2. 查 `rooms WHERE id = ?`，**找不到** → 返回 **6001 房间不存在**（理论上步骤 1 已通过意味着 caller 在该房间，rooms 行必存在；本步骤是兜底，避免 step1-step3 之间的极端 race —— 如 caller 在被并发 leave 流程改 row 的窗口内）
+2. 查 `rooms WHERE id = ?`，**找不到** → 返回 **6001 房间不存在**（理论上步骤 1 已通过意味着 caller 在该房间，rooms 行必存在；本步骤是兜底）
 3. 查 `room_members WHERE room_id = ?` + JOIN `users` / `pets` 聚合（按 `room_members.joined_at ASC` 稳定排序）
-4. 返回 `data.{room, members}`
+4. 提交事务并返回 `data.{room, members}`
 
-**注**：本接口为只读查询，**不**开 MySQL 事务（步骤 1 + 步骤 3 各自独立 SELECT，允许在两次 SELECT 之间出现 roster 微小漂移；client 解析层按 §10.3 不变量"`memberCount === members[].length`"自洽即可，不要求"强一致快照"语义）。
+**注**：虽然本接口只读、不修改任何行，但事务的 snapshot 隔离语义对**多次 SELECT 的一致性**至关重要 —— 不开事务等于把 ACL race 的风险转嫁给"client 自洽不变量"，而 ACL 是隐私边界、不能由 client 兜底。"`memberCount === members[].length`"等不变量仍然成立（步骤 3 内部一次 SELECT 自然原子），但**跨步骤的 ACL 一致性由事务 snapshot 提供**。本读事务在数据库设计 §8.8 中归类为"读快照事务"，与写事务（§8.1 / §8.6 / §8.7）并列。
 
 #### 响应体
 
