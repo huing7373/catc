@@ -1001,9 +1001,11 @@ CREATE TABLE emoji_configs (
 
 **rationale**：
 
-- **snapshot 隔离仅提供"事务内部一致性"**：两次 SELECT 看到同一时刻的状态。但**不**保证 "caller 在 HTTP 响应发出时仍是成员" —— 具体 race（r9 P1#1 锁定）：(t0) 本 GET 事务开始，snapshot 锁定在 t0 状态（caller 是成员）→ (t1) 并发 `POST /rooms/{roomId}/leave` 提交 DELETE → (t2) 本 GET 步骤 3 用 t0 snapshot SELECT 看到 caller 仍是成员，照返完整 roster → (t3) HTTP 响应发出，但 caller 已离开。snapshot 没有阻止 t1 的 DELETE 提交，因此**外部一致性**被破坏。
-- **FOR SHARE 行锁提供"外部一致性"**：让并发 leave 的 DELETE 必须等本读事务 commit / rollback 才能继续，从而保证响应发出时 ACL 仍然成立。
+- **snapshot 隔离仅提供"事务内部一致性"**：两次 SELECT 看到同一时刻的状态。但**不**保证 "caller 在事务持续期间仍是成员" —— 具体 race（r9 P1#1 锁定）：(t0) 本 GET 事务开始，snapshot 锁定在 t0 状态（caller 是成员）→ (t1) 并发 `POST /rooms/{roomId}/leave` 提交 DELETE → (t2) 本 GET 步骤 3 用 t0 snapshot SELECT 看到 caller 仍是成员，照返完整 roster → (t3) 事务 commit + HTTP 响应发出，但 caller 已离开。snapshot 没有阻止 t1 的 DELETE 提交，因此**外部一致性**被破坏。
+- **FOR SHARE 行锁提供"外部一致性"**：让并发 leave 的 DELETE 必须等本读事务 commit / rollback 才能继续，从而保证**事务持续期间（含 SELECT roster 步骤；commit 时 lock 释放）**ACL 仍然成立。
 - 两个机制缺一不可：仅 snapshot 没锁 → race 仍存在；仅 FOR SHARE 没 snapshot → 步骤 1 与步骤 3 可能看到不同状态（read committed 即每次 SELECT 看到最新 commit）。
+
+**关于 commit-after-response 残留窗口（r12 锁定）**：FOR SHARE 锁在事务 commit 时释放，而 handler 通常执行顺序是 `commit tx → 序列化 JSON → flush response body`，因此 **commit → flush** 之间存在 μs 量级窗口，并发 leave 可能在该窗口内 commit DELETE → roster 字节流到达对端时 caller 已离开。本协议层面**承认**该 best-effort 残留 race，**不**强制 server 在 commit 前先序列化 + flush 后再 commit（实装代价大，需重构 handler 模式）。该窗口的端到端实质安全由 **client 防御性 discard**（client 已 leave 后收到的 stale roster 直接丢弃）兜底，而非 server 端协议保证。详见 V1接口设计.md §10.3 "rationale" 段同源说明。
 
 **关于 deadlock 风险**：caller 锁的是 `(room_id, user_id=caller)` 这一**特定行**；并发 leave 也只锁 `user_id=caller` 这一行（取排他锁后 DELETE）；其他成员 / 其他房间走的是不同 `(room_id, user_id)` 锁路径，不存在锁顺序循环 → 无 deadlock 风险。最坏情况是并发 leave 等本读事务 commit 后再提交，等待时长 = 本读事务全步骤时长（μs ~ 数 ms 量级），可忽略。
 

@@ -1247,9 +1247,11 @@ JSON 示例（用户当前不在任何房间）：
 **事务边界**：开 MySQL 事务（隔离级别 = **REPEATABLE READ**，MySQL InnoDB 默认级别即是；事务内所有 SELECT 共享同一 snapshot）包以下全部 4 个步骤。**snapshot 隔离 + FOR SHARE 行锁两个机制是互补的，缺一不可**：
 
 - **snapshot 隔离**保证步骤 1 + 步骤 3 看到同一时刻的状态（**事务内部一致性**），即两次 SELECT 在 snapshot 这一维度同步；
-- **FOR SHARE 行锁**（步骤 1）保证 caller **在 HTTP 响应发出时仍是房间成员**（**外部一致性**：阻止并发 `POST /rooms/{roomId}/leave` 在本读事务内提交其 DELETE）—— snapshot 仅锁定"读到的状态"，**不**阻止其他 tx 在期间提交对相同行的写入；只有显式行锁才能让并发 leave 的 DELETE 必须等本读事务提交后才能 commit。
+- **FOR SHARE 行锁**（步骤 1）保证 caller **在本读事务持续期间（含步骤 3 SELECT roster）仍是房间成员**（**外部一致性**：阻止并发 `POST /rooms/{roomId}/leave` 在本读事务 commit 前提交其 DELETE）—— snapshot 仅锁定"读到的状态"，**不**阻止其他 tx 在期间提交对相同行的写入；只有显式行锁才能让并发 leave 的 DELETE 必须等本读事务提交后才能 commit。FOR SHARE 锁随事务 commit 释放，因此该外部一致性保证的精确边界是**事务持续期间（含 SELECT roster 步骤；commit 时 lock 释放）**，而**不**是"HTTP 响应字节发出时"。
 
-**rationale**：r8 用 REPEATABLE READ snapshot 包步骤 1 + 步骤 3 的 fix **不充分** —— 具体 race：(t0) 本 GET 事务开始，snapshot 锁定在 t0 状态（caller 是成员）→ (t1) 并发 `POST /rooms/{roomId}/leave` 提交 DELETE + UPDATE → (t2) 本 GET 步骤 3 用 t0 snapshot SELECT，看到 caller 仍是成员，照返完整 roster → (t3) HTTP 响应发出，但 caller 已离开，roster 仍泄漏给已离开用户。snapshot 隔离仅保证两次读看到同一时刻的状态（**内部一致性**），**不**保证 "caller 在 HTTP 响应发出时仍是成员"（**外部一致性**）。须在步骤 1 显式加 FOR SHARE 共享锁锁定 caller 自己的 `room_members` 行，让并发 leave 的 DELETE 必须等本读事务 commit / rollback 才能继续 —— 这才是真正阻止 post-leave 数据泄漏的 lock。
+**rationale**：r8 用 REPEATABLE READ snapshot 包步骤 1 + 步骤 3 的 fix **不充分** —— 具体 race：(t0) 本 GET 事务开始，snapshot 锁定在 t0 状态（caller 是成员）→ (t1) 并发 `POST /rooms/{roomId}/leave` 提交 DELETE + UPDATE → (t2) 本 GET 步骤 3 用 t0 snapshot SELECT，看到 caller 仍是成员，照返完整 roster → (t3) HTTP 响应发出，但 caller 已离开，roster 仍泄漏给已离开用户。snapshot 隔离仅保证两次读看到同一时刻的状态（**内部一致性**），**不**保证 "caller 在事务持续期间仍是成员"（**外部一致性**）。须在步骤 1 显式加 FOR SHARE 共享锁锁定 caller 自己的 `room_members` 行，让并发 leave 的 DELETE 必须等本读事务 commit / rollback 才能继续 —— 这才是真正阻止 post-leave 数据泄漏的 lock。
+
+**关于 commit-after-response 残留窗口（r12 锁定）**：FOR SHARE 锁在事务 commit 时释放，而 handler 通常的执行顺序是 `commit tx → 序列化 JSON → ctx.WriteJSON / flush response body`，因此存在一个 **commit → flush** 之间的窗口（μs 量级）：在该窗口内并发 leave 可能 commit 其 DELETE，从而 caller 的 roster 字节流是在 caller 已离开后才到达对端 —— 这是**协议层面**承认的 best-effort 残留 race，**不**强制要求 server 在 commit 前先序列化 + WriteJSON 后再 commit（该模式实装代价大，需重构 handler 流程，与 ROI 不匹配）。**责任划分**：本协议层面只保证"事务持续期间 ACL 成立"；client 解析层应**防御性接受**"我刚 leave 但仍收到一份 stale roster"的极端 race（窗口宽度 ≤ 一次 DB commit + 内核 socket 写出耗时，量级 μs ~ 单 ms）—— 收到时直接 discard / 不写入 RoomView state（client 已知道自己 leave 结果）。该窗口不可在协议层完全消除，但可通过"client 防御性 discard"达成端到端实质安全。
 
 按顺序执行（**全部在同一 REPEATABLE READ 事务内**）：
 

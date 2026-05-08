@@ -459,7 +459,7 @@ sequenceDiagram
     Service->>MySQL: 提交事务
     Note over Service,WSGateway: 事务提交后（post-commit）触发广播<br/>**顺序**：broadcast → HTTP 200<br/>（与 V1接口设计.md §10.4 步骤 8/9 zip 对齐；fire-and-forget 仅 log，不影响 HTTP 200 响应；自 Story 11.1 r7 锚定）
     Service->>WSGateway: BroadcastToRoom(roomId, member.joined)
-    WSGateway->>Others: WS 推送 member.joined<br/>{userId, nickname, avatarUrl, pet:{petId, currentState}}
+    WSGateway->>Others: WS 推送 member.joined<br/>{userId, nickname, avatarUrl, pet: object \| null}<br/>**注（r10/r12 锁定）**：`pet` 为 nullable —— pet-less 账号下发 `null`，<br/>非 null 时含 `{petId, currentState}`；与 V1接口设计.md §10.4 / §10.3 字段表对齐
     Service-->>API: 返回 joined = true
     API-->>Client: HTTP 200 加入成功
 ```
