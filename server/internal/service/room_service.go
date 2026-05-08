@@ -341,13 +341,14 @@ type RoomService interface {
 //   - broadcastFn: WS 广播函数值（Story 11.8 引入；10.5 落地的 BroadcastFn type alias）；
 //     用于 fire-and-forget 推 member.joined / member.left 给房间其他在线 Session
 type roomServiceImpl struct {
-	txMgr          tx.Manager
-	userRepo       mysql.UserRepo
-	roomRepo       mysql.RoomRepo
-	roomMemberRepo mysql.RoomMemberRepo
-	petRepo        mysql.PetRepo     // Story 11.8 加：member.joined 事件 pet enrichment
-	sessionMgr     ws.SessionManager // Story 11.8 加：close leaver Session（leave 路径）
-	broadcastFn    ws.BroadcastFn    // Story 11.8 加：fire-and-forget broadcast（join / leave 路径）
+	txMgr             tx.Manager
+	userRepo          mysql.UserRepo
+	roomRepo          mysql.RoomRepo
+	roomMemberRepo    mysql.RoomMemberRepo
+	petRepo           mysql.PetRepo           // Story 11.8 加：member.joined 事件 pet enrichment
+	sessionMgr        ws.SessionManager       // Story 11.8 加：close leaver Session（leave 路径）
+	broadcastFn       ws.BroadcastFn          // Story 11.8 加：fire-and-forget broadcast（保留兼容；当前 join/leave 都走 broadcastExceptFn）
+	broadcastExceptFn ws.BroadcastExceptFn    // Story 11.8 r3 P1 fix：member.joined / member.left 必须排除事件主体自己（V1 §12.3 行 2063）
 
 	// postCommitWG **仅供测试同步**（Story 11.8 codex review r2 修复引入）：tests
 	// 注入一个 *sync.WaitGroup 让 runPostCommitAsync 启动 goroutine 时 Add(1)、
@@ -425,23 +426,29 @@ func (s *roomServiceImpl) runPostCommitAsync(ctx context.Context, fn func(detach
 	}()
 }
 
-// NewRoomService 构造 RoomService（Story 11.8 扩展为 7 参数）。
+// NewRoomService 构造 RoomService（Story 11.8 扩展为 8 参数；r3 加 broadcastExceptFn）。
 //
 // 全部依赖通过参数显式注入；不引入 wire / fx 框架（与 4.2 / 4.4 / 4.5 / 4.6 / 7.3 /
 // 11.3 ~ 11.7 同模式）。
 //
-// Story 11.8 新增 3 参数：
+// Story 11.8 新增参数：
 //   - petRepo: pets 表访问；用于 JoinRoom post-commit 阶段查询加入者默认宠物以
 //     构造 member.joined.payload.pet（pet-less → ErrPetNotFound 走 nil 路径）
 //   - sessionMgr: WS Session 注册中心（10.3 落地）；用于 LeaveRoom post-commit
 //     阶段查询 leaver 在该 roomID 的 Session + close 4007 + Unregister
-//   - broadcastFn: WS 广播函数值（10.5 落地的 BroadcastFn type alias）；用于
-//     fire-and-forget 推 member.joined / member.left 给房间其他在线 Session
+//   - broadcastFn: WS 广播函数值（10.5 落地的 BroadcastFn type alias）；保留兼容，
+//     当前 member.joined / member.left 路径已切到 broadcastExceptFn（不再调用；
+//     未来其他广播路径如 chat 类全 fanout 时可使用本函数）
+//   - broadcastExceptFn: WS 广播函数值（r3 加；对应 ws.BroadcastToRoomExcept）；
+//     用于 fire-and-forget 推 member.joined / member.left 给**除事件主体外**
+//     的其他在线 Session（V1 §12.3 行 2063 钦定 "joiner 不收自己的 member.joined"
+//     语义；Story 11.8 r3 [P1] fix 由 service 层显式 exclude 防御 joiner 在
+//     post-commit 异步段已建立 WS 的 race）
 //
 // **关键决策**：sessionMgr 直接传 SessionManager 实例（用于 ListSessionsByRoomID
-// / Unregister 双方法调用，无现成函数 alias 抽象）；broadcastFn 传 BroadcastFn
-// 函数值（让单测注入 mock closure 简单，与 ws/broadcast.go 行 40-69 钦定的
-// BroadcastFn 注入模式一致）。
+// / Unregister 双方法调用，无现成函数 alias 抽象）；broadcastFn / broadcastExceptFn
+// 传 BroadcastFn / BroadcastExceptFn 函数值（让单测注入 mock closure 简单，与
+// ws/broadcast.go 行 40-69 钦定的注入模式一致）。
 func NewRoomService(
 	txMgr tx.Manager,
 	userRepo mysql.UserRepo,
@@ -450,15 +457,17 @@ func NewRoomService(
 	petRepo mysql.PetRepo,
 	sessionMgr ws.SessionManager,
 	broadcastFn ws.BroadcastFn,
+	broadcastExceptFn ws.BroadcastExceptFn,
 ) RoomService {
 	return &roomServiceImpl{
-		txMgr:          txMgr,
-		userRepo:       userRepo,
-		roomRepo:       roomRepo,
-		roomMemberRepo: roomMemberRepo,
-		petRepo:        petRepo,
-		sessionMgr:     sessionMgr,
-		broadcastFn:    broadcastFn,
+		txMgr:             txMgr,
+		userRepo:          userRepo,
+		roomRepo:          roomRepo,
+		roomMemberRepo:    roomMemberRepo,
+		petRepo:           petRepo,
+		sessionMgr:        sessionMgr,
+		broadcastFn:       broadcastFn,
+		broadcastExceptFn: broadcastExceptFn,
 	}
 }
 
@@ -655,6 +664,12 @@ func (s *roomServiceImpl) JoinRoom(ctx context.Context, in JoinRoomInput) (*Join
 	// userRepo.FindByID / petRepo.FindDefaultByUserID 会 fail "context canceled"
 	// → broadcast 静默 skip / payload 字段空），且不阻塞 HTTP 200 响应。详见
 	// runPostCommitAsync 注释。
+	//
+	// **r3 修复**（codex review r3 [P1]）：HTTP join 200 → client 立即建 WS →
+	// joiner Session 完成 SessionManager.Register → 此时异步 goroutine 才 fanout
+	// → joiner Session 在 ListSessionsByRoomID 列表中 → joiner 收到自己的
+	// member.joined（违反 V1 §12.3 行 2063 钦定）。修法：broadcastMemberJoined
+	// 内部走 BroadcastToRoomExcept(joinerUserID) 显式 exclude joiner Session。
 	s.runPostCommitAsync(ctx, func(detachedCtx context.Context) {
 		s.broadcastMemberJoined(detachedCtx, in.RoomID, in.UserID)
 	})
@@ -688,13 +703,19 @@ func (s *roomServiceImpl) JoinRoom(ctx context.Context, in JoinRoomInput) (*Join
 // ctx —— 用错 ctx 会绕过 tx 走 db pool 新连接，FOR UPDATE 锁立即释放，并发保护
 // 失效，r9 cross-tx race 重新出现。
 //
-// **post-commit 阶段（V1 §10.5 步骤 7 + 步骤 8 钦定，r13 顺序）**：commit 成功后
-// **先**走步骤 7（s.closeLeaverSession：从 SessionManager 撤销 leaver Session +
-// close 4007 reason "left room via HTTP"），**后**走步骤 8（s.broadcastMemberLeft：
-// BroadcastToRoom member.left）；两步均 fire-and-forget 不影响 HTTP 200 响应。
-// 步骤 7 在步骤 8 之前的顺序由 V1 §10.5 r13 钦定 —— 让 broadcast fanout 时
-// ListSessionsByRoomID 返回列表自然不含 leaver Session，无需 BroadcastToRoom
-// primitive 加 excludeUserID 参数。
+// **post-commit 阶段（V1 §10.5 步骤 7 + 步骤 8 钦定，r13 顺序；r3 hybrid 切分）**：
+// commit 成功后**先**走步骤 7（s.unregisterLeaverSessionSync：同步 Unregister leaver
+// Session 让其立即从 SessionManager 索引消失；CloseWithCode 走异步段
+// closeLeaverSessionAsync），**后**走步骤 8（s.broadcastMemberLeft：调
+// BroadcastToRoomExcept(leaverUserID) member.left）。
+//
+// **r3 hybrid 切分背景**：r2 整体异步化引入"HTTP leave 200 → leaver 仍在
+// SessionManager → stale broadcast"regression（违反 §10.5 步骤 7 "HTTP leave
+// immediately detaches WS"）。r3 把 Unregister 提回同步段（map 操作 O(1) 不阻塞
+// HTTP），CloseWithCode 留异步段（~5s drain）。
+//
+// **r3 BroadcastToRoomExcept**：broadcast 路径显式 exclude leaver UserID（V1 §12.3
+// 行 2063 钦定 + belt-and-suspenders 防御 race）。
 func (s *roomServiceImpl) LeaveRoom(ctx context.Context, in LeaveRoomInput) (*LeaveRoomOutput, error) {
 	// (1) 预检 user.current_room_id（事务外，普通连接池查询）
 	user, err := s.userRepo.FindByID(ctx, in.UserID)
@@ -756,25 +777,36 @@ func (s *roomServiceImpl) LeaveRoom(ctx context.Context, in LeaveRoomInput) (*Le
 		return nil, apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
 	}
 
-	// (4) 事务 commit 成功 → 按 V1 §10.5 r13 钦定顺序：先 close 4007 + unregister
-	// leaver Session，后 broadcast member.left（让 broadcast fanout 时 ListSessionsByRoomID
-	// 返回列表自然不含 leaver Session，无需 BroadcastToRoom primitive 加 excludeUserID
-	// 参数）；两步均 fire-and-forget（V1 §10.5 步骤 7 / 8 钦定，broadcast 失败不影响
-	// HTTP 200 响应）。
+	// (4) 事务 commit 成功 → 按 V1 §10.5 r13 钦定顺序处理 post-commit。
 	//
-	// **r2 修复**（codex review r2 [P1] + [P2]）：close + broadcast 整体放进单个
-	// post-commit goroutine（顺序保留 r13：close 在 broadcast 之前），用 detached
-	// ctx + 10s timeout 兜底。
+	// **r3 [P1] fix（hybrid sync/async 切分）**：
 	//
-	// [P1] 修复要点：原同步调用 closeLeaverSession 会等 Session.CloseWithCode → write
-	// loop drain（默认 ~5s WS write timeout），违反 fire-and-forget 语义、延迟 HTTP
-	// 200 响应、延迟 member.left broadcast；整体异步化后 caller 立刻返回。
+	//   - **同步段**：unregisterLeaverSessionSync —— ListSessionsByRoomID + Unregister
+	//     是 map 操作 O(1) 瞬时完成（不涉及 IO），同步执行不影响 HTTP 响应延迟。
+	//     **关键收益**：HTTP 200 返回前 leaver Session 已从 SessionManager 索引消失
+	//     → 后续任何 broadcast（如另一 user 在 leave 完成瞬间 join）调
+	//     ListSessionsByRoomID 都不会再返 leaver Session → 修复 r2 引入的
+	//     "HTTP leave 200 → leaver 仍在 SessionManager → stale broadcast" regression
+	//     （违反 V1 §10.5 步骤 7 "HTTP leave immediately detaches WS"）。
 	//
-	// [P2] 修复要点：原 broadcastMemberLeft / closeLeaverSession 用 request ctx，
-	// client 断开 / handler deadline cancel 后会触发 SessionManager 调用 fail；改用
-	// detached ctx 解除 cancel 信号传导。
+	//   - **异步段**：closeLeaverSessionAsync + broadcastMemberLeft —— 走 detached
+	//     ctx + 10s timeout 兜底；CloseWithCode 内部 drain write loop ~5s 慢路径
+	//     不阻塞 HTTP 200，broadcast 走 detached ctx 不被 request ctx cancel 误中断。
+	//     CloseWithCode → notifyClosed → Unregister 二次调用 idempotent no-op
+	//     （sync 段已先 Unregister）。
+	//
+	// **r3 [P1] fix（broadcastMemberLeft 用 BroadcastToRoomExcept）**：
+	//   - sync Unregister 已让 leaver 从 ListSessionsByRoomID 列表消失 → 此处 broadcast
+	//     fanout 自然跳过 leaver；但 broadcastMemberLeft 内部仍调 BroadcastToRoomExcept
+	//     显式 exclude leaver UserID 提供 belt-and-suspenders 防护（任何潜在 race
+	//     让 leaver 短暂回到列表也能拦截）。
+	//
+	// **r2 → r3 演进**：r2 把整个 closeLeaverSession 异步化引入两条 P1 regression
+	// （R1 joiner self-fanout / R2 leaver stale subscription），r3 用 hybrid 切分
+	// 修复 R2，用 BroadcastToRoomExcept 修复 R1（broadcastMemberJoined / Left 都改）。
+	target, _ := s.unregisterLeaverSessionSync(ctx, in.RoomID, in.UserID)
 	s.runPostCommitAsync(ctx, func(detachedCtx context.Context) {
-		s.closeLeaverSession(detachedCtx, in.RoomID, in.UserID)
+		s.closeLeaverSessionAsync(detachedCtx, in.RoomID, in.UserID, target)
 		s.broadcastMemberLeft(detachedCtx, in.RoomID, in.UserID)
 	})
 	return &LeaveRoomOutput{
@@ -941,12 +973,16 @@ func (s *roomServiceImpl) GetRoomDetail(ctx context.Context, in GetRoomDetailInp
 // txMgr.WithTx fn 内 —— 与数据库设计 §8.6 加入房间事务边界 + V1 §10.4 步骤 8
 // 钦定一致。
 //
-// **加入者收不到自己的 member.joined**（V1 §12.3 行 2063 钦定）：BroadcastToRoom
-// primitive 走 ListSessionsByRoomID 全量 fanout（不带 excludeUserID 参数），但
-// 节点 4 阶段时序事实上加入者尚未建立该 roomID 的 WS 连接（HTTP join → broadcast
-// 是同步顺序，broadcast 入队时加入者 WS 还没握手），所以加入者 Session 不在
-// ListSessionsByRoomID 列表中，自然收不到自己的 member.joined —— 无需在 service
-// 层做任何 excludeUserID 过滤。
+// **加入者收不到自己的 member.joined**（V1 §12.3 行 2063 钦定）：本路径调用
+// `s.broadcastExceptFn(ctx, roomID, joinerUserID, msg)`（即包级 BroadcastToRoomExcept
+// 经 closure 包装），fanout 时显式跳过 Session.UserID() == joinerUserID 的 Session。
+//
+// **r3 [P1] fix 引入显式 exclude 的原因**：r2 把 broadcastMemberJoined 整体放入
+// 异步 post-commit goroutine 后，HTTP join 200 → client 立即建 WS → joiner Session
+// 完成 SessionManager.Register → 此时异步 goroutine 才开始 ListSessionsByRoomID
+// → 列表含 joiner 自己 → joiner 收到自己的 member.joined（违反 V1 §12.3 行 2063）。
+// r1 同步路径下"broadcast 入队时加入者 WS 还没握手"的隐含 race-free 假设在 r2
+// 之后不再成立 → r3 用 BroadcastToRoomExcept 显式 exclude 修复。
 func (s *roomServiceImpl) broadcastMemberJoined(ctx context.Context, roomID, joinerUserID uint64) {
 	logger := slog.Default().With(
 		slog.String("component", "room-service-broadcast"),
@@ -996,10 +1032,13 @@ func (s *roomServiceImpl) broadcastMemberJoined(ctx context.Context, roomID, joi
 		return
 	}
 
-	// (5) fire-and-forget broadcast
-	sent, err := s.broadcastFn(ctx, roomID, msgBytes)
+	// (5) fire-and-forget broadcast；r3 [P1] fix：用 BroadcastToRoomExcept 显式
+	// exclude joiner UserID，防御 joiner 在 post-commit 异步段已完成 WS Register
+	// 的 race（HTTP join 200 → client 立即建 WS → joiner Session 进入
+	// SessionManager → 异步 goroutine 此时才开始 fanout 会包含 joiner 自己）。
+	sent, err := s.broadcastExceptFn(ctx, roomID, joinerUserID, msgBytes)
 	if err != nil {
-		logger.Warn("ws broadcast: broadcastFn failed",
+		logger.Warn("ws broadcast: broadcastExceptFn failed",
 			slog.Int("targetSessions", sent),
 			slog.Any("error", err))
 		return
@@ -1008,51 +1047,55 @@ func (s *roomServiceImpl) broadcastMemberJoined(ctx context.Context, roomID, joi
 		slog.Int("targetSessions", sent))
 }
 
-// closeLeaverSession 实装 V1 §10.5 步骤 7（Story 11.8 引入）：
-// 从 SessionManager 撤销 leaver 在该 roomID 的 Session + close 4007 reason
-// "left room via HTTP"。
+// unregisterLeaverSessionSync 实装 V1 §10.5 步骤 7 的**同步部分**（Story 11.8 r3
+// [P1] fix 引入 hybrid sync/async 切分）：
+//
+// 从 SessionManager 找 leaver 在该 roomID 的 Session + 立即 Unregister（清空双索引）。
+// **不**调 Session.CloseWithCode —— close 走 closeLeaverSessionAsync 异步段处理。
+//
+// **为什么必须同步执行**（r3 [P1] R2 fix）：r2 把整个 closeLeaverSession 放进
+// post-commit goroutine 后引入 regression：HTTP leave 200 → leaver Session 仍
+// 在 SessionManager → 期间任何 broadcast（如另一 user 的 join）仍 fanout 给
+// stale leaver session，违反 V1 §10.5 步骤 7 "HTTP leave immediately detaches
+// WS" 语义。
+//
+// **修复策略**：把 Unregister（map 操作 O(1) 瞬时完成，不涉及 IO）放回 LeaveRoom
+// 同步段 —— HTTP 200 返回前 leaver Session 已从 SessionManager 索引消失，任何
+// 后续 broadcast 不会再 fanout 给 leaver。CloseWithCode（drain write loop ~5s
+// 慢路径）仍走异步 goroutine，不阻塞 HTTP 200。
 //
 // 流程：
 //  1. s.sessionMgr.ListSessionsByRoomID(ctx, roomID) 拿该 roomID 全部 active Session
 //  2. 线性扫描找到 Session.UserID() == leaverUserID 的 Session（节点 4 阶段单 room
-//     最多 4 user，O(N) 可接受 —— ws/session_manager.go 钦定单 user 单 session
-//     假设由 Register 替换路径兜底）
-//  3. 命中 → session.CloseWithCode(4007, "left room via HTTP") + sessionMgr.Unregister
-//     —— **两步顺序**：先 CloseWithCode（写 close frame）后 Unregister（清索引）；
-//     CloseWithCode 内部走 notifyClosed → Unregister 自动闭环（10.3 落地），但
-//     显式 Unregister 兜底保证即使 Close 内部 race / panic 索引仍被清理（Unregister
-//     idempotent，二次调用 no-op 无副作用）
-//  4. 未命中（leaver 未持该 roomID 的 WS / 已断开）→ no-op + log info（合法场景）
+//     最多 4 user，O(N) 可接受）
+//  3. 命中 → s.sessionMgr.Unregister(ctx, sessionID)；返回 (target, true) 让
+//     caller 调用方接力发起 CloseWithCode 异步段
+//  4. 未命中（leaver 未持该 roomID 的 WS / 已断开）→ 返回 (nil, false)，async 段
+//     无需启动
 //
-// **fire-and-forget 严格语义**（V1 §10.5 步骤 7 钦定）：本方法**永远不返 error** ——
-// CloseWithCode / Unregister 的 error 一律 log warn / log info 不返；caller (LeaveRoom)
-// 不需要走错误分流。Session 撤销失败（leaver 未持 WS / 已断开）→ no-op，不影响
-// HTTP 200 响应。
+// **nil sessionMgr guard**：HTTP-only / test wiring 场景可能不注入 sessionMgr ——
+// 此时直接返 (nil, false) 不 panic（fire-and-forget 严格语义）。
 //
-// **事务外严格性**：本方法在 LeaveRoom 事务 commit 成功**之后**调用，**不**包入
-// txMgr.WithTx fn 内（与数据库设计 §8.7 退出房间事务边界 + V1 §10.5 步骤 7 钦定一致）。
+// **fire-and-forget 严格语义**（V1 §10.5 步骤 7 钦定）：本方法**永远不返 error**——
+// Unregister 的 error 一律 log warn 不返。
 //
-// **r13 顺序约束**：本方法**必须**在 broadcastMemberLeft **之前**调用，让 broadcast
-// fanout 时 ListSessionsByRoomID 返回列表自然不含 leaver Session（无需 BroadcastToRoom
-// primitive 加 excludeUserID 参数）。
-func (s *roomServiceImpl) closeLeaverSession(ctx context.Context, roomID, leaverUserID uint64) {
-	// **nil sessionMgr guard**：HTTP-only / test wiring 场景下 RoomService 可能不
-	// 注入 sessionMgr（与 router.go broadcastFn closure `if deps.SessionMgr == nil`
-	// 同模式）—— 此时 LeaveRoom 事务 commit 后 fire-and-forget 调用本方法不应 panic，
-	// 直接 no-op 返回（fire-and-forget 严格语义：永远不返 error，no-op 不影响 HTTP 200）。
+// 返回：
+//   - target: 命中的 leaver Session（caller 用于 closeLeaverSessionAsync 调用）；
+//     未命中或 nil sessionMgr → nil
+//   - found: 是否命中并已成功 Unregister
+func (s *roomServiceImpl) unregisterLeaverSessionSync(ctx context.Context, roomID, leaverUserID uint64) (target *ws.Session, found bool) {
 	if s.sessionMgr == nil {
-		return
+		return nil, false
 	}
 
 	logger := slog.Default().With(
 		slog.String("component", "room-service-broadcast"),
-		slog.String("event", "close.4007"),
+		slog.String("event", "close.4007.sync"),
 		slog.Uint64("roomId", roomID),
 		slog.Uint64("leaverUserId", leaverUserID),
 	)
 
 	sessions := s.sessionMgr.ListSessionsByRoomID(ctx, roomID)
-	var target *ws.Session
 	for _, sess := range sessions {
 		if sess.UserID() == leaverUserID {
 			target = sess
@@ -1060,29 +1103,68 @@ func (s *roomServiceImpl) closeLeaverSession(ctx context.Context, roomID, leaver
 		}
 	}
 	if target == nil {
-		logger.Info("ws close 4007: leaver session not registered; skip (合法场景)")
-		return
+		logger.Info("ws close 4007 sync: leaver session not registered; skip (合法场景)")
+		return nil, false
 	}
 
 	sessionID := target.SessionID()
-	if err := target.CloseWithCode(4007, "left room via HTTP"); err != nil {
-		// ErrSessionClosed (target 已被并发 close) → 走 Unregister 兜底（idempotent）；
-		// 其他 raw error → log warn 不返
-		logger.Warn("ws close 4007: CloseWithCode returned error",
+	// **关键同步段**：Unregister 立即从 SessionManager 双索引清除 leaver Session ——
+	// 后续任何 broadcast 调 ListSessionsByRoomID 都不会再返 leaver Session，
+	// "HTTP leave immediately detaches WS" 语义达成。
+	if err := s.sessionMgr.Unregister(ctx, sessionID); err != nil {
+		logger.Warn("ws close 4007 sync: Unregister returned error",
 			slog.String("sessionId", sessionID),
 			slog.Any("error", err))
+		// Unregister 失败仍返回 target + found=true 让异步段尝试 CloseWithCode
+		// 兜底（idempotent，二次调用 no-op 无副作用）
+	} else {
+		logger.Info("ws close 4007 sync: leaver session unregistered",
+			slog.String("sessionId", sessionID))
+	}
+	return target, true
+}
+
+// closeLeaverSessionAsync 实装 V1 §10.5 步骤 7 的**异步部分**（Story 11.8 r3 [P1]
+// fix 引入 hybrid sync/async 切分）：
+//
+// 调用 Session.CloseWithCode(4007, "left room via HTTP") 写 close frame + drain
+// write loop。
+//
+// **为什么必须异步执行**（r2 [P1] fix 保留）：Session.CloseWithCode 内部走
+// notifyClosed → write loop drain，最坏耗时 ~5s WS write timeout —— 同步调用会
+// 让 LeaveRoom HTTP 响应延迟 ~5s，违反 fire-and-forget 语义。
+//
+// **idempotent**：CloseWithCode 内部走 notifyClosed → SessionManager.Unregister
+// 自动闭环，但 caller 已在 unregisterLeaverSessionSync 同步段先 Unregister；
+// CloseWithCode 路径触发的 Unregister 二次调用 no-op（map delete missing key
+// 是合法 no-op，10.3 钦定的 idempotent 语义）。
+//
+// **fire-and-forget 严格语义**：本方法**永远不返 error** —— CloseWithCode 的
+// error 一律 log warn 不返。
+//
+// 参数：
+//   - target: 由 unregisterLeaverSessionSync 同步段返回的 leaver Session 引用；
+//     不应为 nil（caller 在 found==true 时才调用本方法）
+func (s *roomServiceImpl) closeLeaverSessionAsync(ctx context.Context, roomID, leaverUserID uint64, target *ws.Session) {
+	if target == nil {
+		return
 	}
 
-	// **关键**：显式 Unregister 兜底（CloseWithCode → notifyClosed → Unregister 自动
-	// 闭环已就绪，但显式调用兜底；Unregister idempotent 双调安全）
-	if err := s.sessionMgr.Unregister(ctx, sessionID); err != nil {
-		logger.Warn("ws close 4007: Unregister returned error",
-			slog.String("sessionId", sessionID),
+	logger := slog.Default().With(
+		slog.String("component", "room-service-broadcast"),
+		slog.String("event", "close.4007.async"),
+		slog.Uint64("roomId", roomID),
+		slog.Uint64("leaverUserId", leaverUserID),
+		slog.String("sessionId", target.SessionID()),
+	)
+
+	if err := target.CloseWithCode(4007, "left room via HTTP"); err != nil {
+		// ErrSessionClosed (target 已被并发 close) / 其他 raw error → log warn 不返
+		logger.Warn("ws close 4007 async: CloseWithCode returned error",
 			slog.Any("error", err))
 		return
 	}
-	logger.Info("ws close 4007: leaver session closed and unregistered",
-		slog.String("sessionId", sessionID))
+	logger.Info("ws close 4007 async: leaver session close frame written")
 }
 
 // broadcastMemberLeft 触发 member.left WS 广播（Story 11.8 引入）。
@@ -1101,13 +1183,19 @@ func (s *roomServiceImpl) closeLeaverSession(ctx context.Context, roomID, leaver
 // 任何步骤失败（marshal / broadcast）一律 log warn 不返。
 //
 // **事务外严格性 + r13 顺序约束**：本方法在 LeaveRoom 事务 commit 成功之后调用，
-// **必须**在 closeLeaverSession 之**后**调用 —— 让 broadcast fanout 时 leaver
-// Session 已被 Unregister 不在 ListSessionsByRoomID 返回列表中，自然跳过 leaver。
+// **必须**在 closeLeaverSession Unregister 步骤之**后**调用 —— 让 broadcast fanout
+// 时 leaver Session 已被 Unregister 不在 ListSessionsByRoomID 返回列表中。
+//
+// **r3 [P1] fix 双保险**：除 closeLeaverSession 同步 Unregister 已让 leaver 从
+// 列表消失之外，本方法**亦**调用 BroadcastToRoomExcept 显式 exclude leaver UserID
+// （belt-and-suspenders）—— 即使未来某条 race 路径让 leaver 短暂回到 ListSessionsByRoomID
+// 列表，本路径也能拦截，绝不下发 stale member.left 给 leaver 自己（V1 §12.3 钦定
+// "广播范围：仅该房间内当前在线的其他 Session"语义）。
 //
 // **特例**：若 LeaveRoom 步骤 5 触发了 closed 转换（最后一人离开 → rooms.status=2），
-// 房间内已无其他在线广播对象 —— broadcast 路径仍调用 broadcastFn，但 fanout 时房间
-// 内已无其他在线 Session，broadcastFn 自然 no-op（详见 ws/broadcast.go：0 个 active
-// Session → 返 (0, nil)）。
+// 房间内已无其他在线广播对象 —— broadcast 路径仍调用 broadcastExceptFn，但 fanout
+// 时房间内已无其他在线 Session，broadcastExceptFn 自然 no-op（详见 ws/broadcast.go：
+// 0 个 active Session → 返 (0, nil)）。
 func (s *roomServiceImpl) broadcastMemberLeft(ctx context.Context, roomID, leaverUserID uint64) {
 	logger := slog.Default().With(
 		slog.String("component", "room-service-broadcast"),
@@ -1127,10 +1215,13 @@ func (s *roomServiceImpl) broadcastMemberLeft(ctx context.Context, roomID, leave
 		return
 	}
 
-	// (3) fire-and-forget broadcast
-	sent, err := s.broadcastFn(ctx, roomID, msgBytes)
+	// (3) fire-and-forget broadcast；r3 [P1] fix：用 BroadcastToRoomExcept 显式
+	// exclude leaver UserID（双保险 —— closeLeaverSession 同步 Unregister 已让
+	// leaver 从 ListSessionsByRoomID 列表消失，本路径再 belt-and-suspenders 防御
+	// 任何潜在 race 让 stale member.left 误发给 leaver）。
+	sent, err := s.broadcastExceptFn(ctx, roomID, leaverUserID, msgBytes)
 	if err != nil {
-		logger.Warn("ws broadcast: broadcastFn failed",
+		logger.Warn("ws broadcast: broadcastExceptFn failed",
 			slog.Int("targetSessions", sent),
 			slog.Any("error", err))
 		return

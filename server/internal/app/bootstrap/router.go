@@ -390,7 +390,16 @@ func NewRouter(deps Deps) *gin.Engine {
 			}
 			return wsapp.BroadcastToRoom(ctx, deps.SessionMgr, roomID, msg)
 		})
-		roomSvc := service.NewRoomService(deps.TxMgr, userRepo, roomRepo, roomMemberRepo, petRepo, deps.SessionMgr, roomBroadcastFn)
+		// Story 11.8 r3 [P1] fix：member.joined / member.left 必须排除事件主体自己
+		// （V1 §12.3 行 2063 钦定）—— wire 一个 BroadcastExceptFn 闭包包装
+		// wsapp.BroadcastToRoomExcept；nil-tolerant 同 roomBroadcastFn 模式。
+		roomBroadcastExceptFn := wsapp.BroadcastExceptFn(func(ctx context.Context, roomID, excludeUserID uint64, msg []byte) (int, error) {
+			if deps.SessionMgr == nil {
+				return 0, nil
+			}
+			return wsapp.BroadcastToRoomExcept(ctx, deps.SessionMgr, roomID, excludeUserID, msg)
+		})
+		roomSvc := service.NewRoomService(deps.TxMgr, userRepo, roomRepo, roomMemberRepo, petRepo, deps.SessionMgr, roomBroadcastFn, roomBroadcastExceptFn)
 		roomHandler := handler.NewRoomHandler(roomSvc)
 
 		api := r.Group("/api/v1")

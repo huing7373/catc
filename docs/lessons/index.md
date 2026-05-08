@@ -219,3 +219,4 @@
 | 2026-05-09 | [Leave 路径 WS Session 清理跨 story defer 至 11.8 — SECURITY-DEFER 注释 + cross-story traceability 让 r2 codex 不重复 flag（11-5 r1）](2026-05-09-leave-room-ws-session-cleanup-defer-to-11-8-11-5-r1.md) | 1 | architecture | `312312e` |
 | 2026-05-09 | [RoomService fire-and-forget 路径 nil sessionMgr guard 必须与 broadcastFn closure 同模式（11-8 r1）](2026-05-09-room-service-fire-and-forget-nil-sessionmgr-guard.md) | 1 | error-handling | `<pending>` |
 | 2026-05-09 | [post-commit fire-and-forget 必须 detached ctx + 独立 goroutine + timeout 兜底（11-8 r2）](2026-05-09-post-commit-hooks-must-detached-ctx-async-timeout-11-8-r2.md) | 2 | architecture | `<pending>` |
+| 2026-05-09 | [异步化必须保留同步可观察 invariants（11-8 r3：joiner self-fanout / leaver stale subscription）](2026-05-09-async-must-preserve-sync-observable-invariants-11-8-r3.md) | 2 | architecture | `<pending>` |

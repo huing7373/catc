@@ -185,7 +185,9 @@ func buildRoomHandlerIntegration(t *testing.T) (*gin.Engine, *sql.DB, *auth.Sign
 	// 验证由 service 层 dockertest case 14 / 15 / 16 覆盖）。
 	noopSessionMgr := wsapp.NewSessionManager()
 	noopBroadcastFn := wsapp.BroadcastFn(func(ctx context.Context, roomID uint64, msg []byte) (int, error) { return 0, nil })
-	roomSvc := service.NewRoomService(txMgr, userRepo, roomRepo, roomMemberRepo, petRepo, noopSessionMgr, noopBroadcastFn)
+	// r3 [P1] fix：NewRoomService 8 参数；no-op BroadcastExceptFn 与 BroadcastFn 同模式
+	noopBroadcastExceptFn := wsapp.BroadcastExceptFn(func(ctx context.Context, roomID, excludeUserID uint64, msg []byte) (int, error) { return 0, nil })
+	roomSvc := service.NewRoomService(txMgr, userRepo, roomRepo, roomMemberRepo, petRepo, noopSessionMgr, noopBroadcastFn, noopBroadcastExceptFn)
 
 	router := roomIntegrationTestRouter(roomSvc, signer)
 

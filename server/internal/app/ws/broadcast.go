@@ -68,6 +68,18 @@ var roomBroadcastMu sync.Map // map[uint64]*sync.Mutex
 //     不必反向 import ws.SessionManager
 type BroadcastFn func(ctx context.Context, roomID uint64, msg []byte) (sent int, err error)
 
+// BroadcastExceptFn 是 BroadcastToRoomExcept 的接口形态（让 service 层注入 mock 用）。
+//
+// 签名与包级函数 BroadcastToRoomExcept 完全一致；service 层（Story 11.8 r3 fix）的
+// 构造可接受 BroadcastExceptFn 形参用于 member.joined / member.left 广播 ——
+// 必须排除事件主体（joiner / leaver）自己接收 V1 §12.3 行 2063 钦定。
+//
+// 与 BroadcastFn 的差异：多一个 excludeUserID 参数；fanout 时 ListSessionsByRoomID
+// 返回列表中 Session.UserID() == excludeUserID 的 Session 会被跳过（防御性
+// self-fanout 拦截，与 ListSessionsByRoomID 取列表时刻无关 —— 即使 race 导致
+// 加入者 / 离开者 Session 仍在索引中，本路径仍能保证不下发给自己）。
+type BroadcastExceptFn func(ctx context.Context, roomID uint64, excludeUserID uint64, msg []byte) (sent int, err error)
+
 // BroadcastToRoom 把 msg 推送给 roomID 内所有 active Session（包级 primitive）。
 //
 // 流程：
@@ -136,7 +148,64 @@ type BroadcastFn func(ctx context.Context, roomID uint64, msg []byte) (sent int,
 // （等价于 Redis presence 数据源）；多实例阶段（节点 13+）才走 Pub/Sub 跨实例
 // 路径，本函数当前实装**不**消费 Redis。
 func BroadcastToRoom(ctx context.Context, mgr SessionManager, roomID uint64, msg []byte) (sent int, err error) {
-	return broadcastToRoomFanout(ctx, mgr, roomID, msg)
+	return broadcastToRoomFanout(ctx, mgr, roomID, nil, msg)
+}
+
+// BroadcastToRoomExcept 把 msg 推送给 roomID 内所有 active Session，**但跳过**
+// Session.UserID() == excludeUserID 的 Session（Story 11.8 codex review r3 [P1] fix
+// 引入）。
+//
+// **为什么需要本 helper**（V1 §12.3 行 2063 钦定）：
+//   - `member.joined` 事件不应下发给 joiner 自己（"广播范围：仅该房间内当前在线
+//     的其他 Session（不含加入者自己）"）
+//   - `member.left` 事件不应下发给 leaver 自己（同上语义；同时 leaver 已被
+//     LeaveRoom 路径 Unregister 双保险）
+//
+// **r2 → r3 background**：r2 修复把 broadcastMemberJoined / broadcastMemberLeft
+// 整体放进 post-commit 异步 goroutine 后引入两条 regression：
+//
+//   - **R1 (joiner self-fanout)**：HTTP join 200 → client 立即建 WS → joiner Session
+//     完成 Register 进 SessionManager → 此时 post-commit goroutine 才启动 broadcast
+//     → BroadcastToRoom fanout 列表含 joiner 自己 → joiner 收到自己的 member.joined
+//     （违反 V1 §12.3 行 2063）
+//
+//   - **R2 (leaver stale subscription)**：HTTP leave 200 → 期间另一 user join → 该
+//     join 路径触发 broadcastMemberJoined → fanout 时 leaver Session 仍在 SessionManager
+//     （CloseWithCode 异步进行中）→ leaver 收到 stale member.joined（违反 V1 §10.5
+//     步骤 7 "HTTP leave immediately detaches WS"）
+//
+// **R1 由本 helper 修复**：service 层 broadcastMemberJoined 调用 BroadcastToRoomExcept
+// 排除 joiner UserID → 即使 joiner Session 在 fanout 时已建立，也被路径过滤跳过。
+//
+// **R2 由 LeaveRoom 路径同步 Unregister 修复**（不在本 helper 范围）：service 层
+// closeLeaverSession 改成 hybrid sync/async —— Unregister 同步执行（map 操作 O(1)，
+// 不阻塞 HTTP 200），CloseWithCode 才走异步（drain write loop 的 ~5s 慢路径）。
+// HTTP 200 返回前 SessionManager 索引中已无 leaver Session → 任何后续 broadcast
+// 自然不 fanout 给 leaver。
+//
+// **本 helper 也用于 broadcastMemberLeft 的双保险**：虽然 closeLeaverSession 同步
+// Unregister 已让 leaver 从 ListSessionsByRoomID 列表消失，但本 helper 在 service
+// 层显式 exclude leaver UserID 提供 belt-and-suspenders 防护（即使未来某条 race
+// 路径让 leaver 短暂回到列表，本路径仍能拦截）。
+//
+// 流程（与 BroadcastToRoom 一致，仅多 1 个过滤步骤）：
+//  1. 取 per-room mutex（同 BroadcastToRoom）
+//  2. mgr.ListSessionsByRoomID(ctx, roomID) 取 active Session 切片
+//  3. **新增**：filter 掉 Session.UserID() == excludeUserID 的 Session
+//  4. bytes.Clone(msg) → payload
+//  5. 同步遍历 filter 后切片调 Session.Send(payload)
+//
+// 参数：
+//   - ctx / mgr / roomID / msg：与 BroadcastToRoom 一致
+//   - excludeUserID: 要排除的 user ID（== 0 时仍生效，但 Story 11.8 阶段 user ID
+//     从 1 开始单调递增，不会有 0 值；caller 不应传 0 作为"不排除"的语义，那应
+//     调 BroadcastToRoom 而非本函数）
+//
+// 返回：
+//   - sent: 实际发起 Send 的 Session 数量（已 filter 后的数量；可能 < len(slice)）
+//   - err: 永远 nil（与 BroadcastToRoom 同 future-proof error return）
+func BroadcastToRoomExcept(ctx context.Context, mgr SessionManager, roomID uint64, excludeUserID uint64, msg []byte) (sent int, err error) {
+	return broadcastToRoomFanout(ctx, mgr, roomID, &excludeUserID, msg)
 }
 
 // broadcastToRoomFanout 是 BroadcastToRoom 的核心实装（unexported helper）。
@@ -173,7 +242,7 @@ func BroadcastToRoom(ctx context.Context, mgr SessionManager, roomID uint64, msg
 //     入队 → 总耗时 = O(N) × O(1) Send 入队，不会 hang，无需 ctx-cancel hook）
 //   - 持 per-room mutex 全程是必要的（fanout 内每个 Send 都是 O(1) 入队，全程
 //     仅 µs 级），跨 room broadcast 走不同 mutex 不互相阻塞
-func broadcastToRoomFanout(ctx context.Context, mgr SessionManager, roomID uint64, msg []byte) (int, error) {
+func broadcastToRoomFanout(ctx context.Context, mgr SessionManager, roomID uint64, excludeUserID *uint64, msg []byte) (int, error) {
 	// review 10-5 r2 P2 fix：per-room mutex 串行化同 room 并发 broadcast。
 	// review 10-5 r3 P2 fix：Load fast path —— hot path（active room 第二次以后
 	// 的 broadcast）零分配。直接 LoadOrStore 会**每次** alloc 一个新 *sync.Mutex
@@ -201,16 +270,43 @@ func broadcastToRoomFanout(ctx context.Context, mgr SessionManager, roomID uint6
 	// goroutine fanout 中被 unregister，B goroutine 取 sessions 时已观察到
 	// 一致快照。
 	sessions := mgr.ListSessionsByRoomID(ctx, roomID)
+
+	// Story 11.8 r3 P1 fix：excludeUserID 过滤（仅 BroadcastToRoomExcept 调用路径
+	// 传非 nil；BroadcastToRoom 调用路径传 nil 走全量 fanout，与既有语义完全一致）。
+	// 持 per-room mutex 段内做过滤 → snapshot + filter + send 是原子段，与
+	// SessionManager 索引 mutate 不会 race。
+	originalCount := len(sessions)
+	excludedCount := 0
+	if excludeUserID != nil && len(sessions) > 0 {
+		filtered := sessions[:0:0] // 新 underlying array，避免改写 mgr.ListSessionsByRoomID 返回的切片
+		for _, s := range sessions {
+			if s.UserID() == *excludeUserID {
+				excludedCount++
+				continue
+			}
+			filtered = append(filtered, s)
+		}
+		sessions = filtered
+	}
+
 	if len(sessions) == 0 {
 		return 0, nil
 	}
 
 	logger := slog.Default().With(slog.String("component", "ws-broadcast"))
-	logger.Info("ws broadcast to room",
+	logFields := []any{
 		slog.Uint64("roomId", roomID),
 		slog.Int("targetSessions", len(sessions)),
 		slog.Int("msgBytes", len(msg)),
-	)
+	}
+	if excludeUserID != nil {
+		logFields = append(logFields,
+			slog.Uint64("excludeUserId", *excludeUserID),
+			slog.Int("originalSessions", originalCount),
+			slog.Int("excludedSessions", excludedCount),
+		)
+	}
+	logger.Info("ws broadcast to room", logFields...)
 
 	// review 10-5 r1 P2 fix：defensive copy msg → payload 与 caller buffer 隔离。
 	// caller return 后释放 / mutate 原 msg 完全安全；payload 由 Session.sendChan

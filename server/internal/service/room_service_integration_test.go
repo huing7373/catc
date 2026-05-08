@@ -86,8 +86,10 @@ func buildRoomServiceIntegration(t *testing.T) (svc service.RoomService, sqlDB *
 	// 构造（注入 capture broadcastFn 让 case 可断言调用次数 + 入参 wire 内容）。
 	noopSessionMgr := wsapp.NewSessionManager()
 	noopBroadcastFn := wsapp.BroadcastFn(func(ctx context.Context, roomID uint64, msg []byte) (int, error) { return 0, nil })
+	// r3 [P1] fix：NewRoomService 8 参数；no-op BroadcastExceptFn 与 BroadcastFn 同模式
+	noopBroadcastExceptFn := wsapp.BroadcastExceptFn(func(ctx context.Context, roomID, excludeUserID uint64, msg []byte) (int, error) { return 0, nil })
 
-	svc = service.NewRoomService(txMgr, userRepo, roomRepo, roomMemberRepo, petRepo, noopSessionMgr, noopBroadcastFn)
+	svc = service.NewRoomService(txMgr, userRepo, roomRepo, roomMemberRepo, petRepo, noopSessionMgr, noopBroadcastFn, noopBroadcastExceptFn)
 	wg = &sync.WaitGroup{}
 	service.SetPostCommitWaitGroupForTest(svc, wg)
 
@@ -1075,14 +1077,18 @@ func TestRoomServiceIntegration_GetRoomDetail_ClosedRoom_CallerAlreadyLeft_Retur
 // + capture broadcastFn）
 // ============================================================
 
-// recordedBroadcastCall 记录 capture broadcastFn 的单次调用。
+// recordedBroadcastCall 记录 capture broadcastFn / broadcastExceptFn 的单次调用
+// （r3 fix 起 excludeUserID 字段非 nil 表示 BroadcastExceptFn 路径调用）。
 type recordedBroadcastCall struct {
-	roomID uint64
-	msg    []byte
-	seq    int64 // 单调序号（与 capture-aware close 4007 路径中 SessionManager Unregister 共用同一时钟）
+	roomID        uint64
+	msg           []byte
+	seq           int64   // 单调序号（与 capture-aware close 4007 路径中 SessionManager Unregister 共用同一时钟）
+	excludeUserID *uint64 // r3：BroadcastExceptFn 调用时记录；BroadcastFn 调用时 nil
 }
 
-// captureBroadcastFn 包装 ws.BroadcastFn；内部记录所有调用便于断言。
+// captureBroadcastFn 包装 ws.BroadcastFn / ws.BroadcastExceptFn；内部统一记录所有
+// 调用便于断言（r3 起 service 层 broadcastMemberJoined / broadcastMemberLeft 走
+// BroadcastExceptFn 路径必须 exclude 事件主体；本 capture 同时支持两种 fn 注入）。
 type captureBroadcastFn struct {
 	mu     sync.Mutex
 	calls  []recordedBroadcastCall
@@ -1101,6 +1107,24 @@ func (c *captureBroadcastFn) fn() wsapp.BroadcastFn {
 			roomID: roomID,
 			msg:    copied,
 			seq:    c.seqGen.Add(1),
+		})
+		c.mu.Unlock()
+		return 0, nil
+	}
+}
+
+// exceptFn 返回 ws.BroadcastExceptFn type alias 兼容的 closure（r3 引入）。
+// 与 fn 共享 calls 切片；excludeUserID 字段非 nil 让断言能区分调用类型。
+func (c *captureBroadcastFn) exceptFn() wsapp.BroadcastExceptFn {
+	return func(ctx context.Context, roomID, excludeUserID uint64, msg []byte) (int, error) {
+		c.mu.Lock()
+		copied := append([]byte(nil), msg...)
+		excluded := excludeUserID
+		c.calls = append(c.calls, recordedBroadcastCall{
+			roomID:        roomID,
+			msg:           copied,
+			seq:           c.seqGen.Add(1),
+			excludeUserID: &excluded,
 		})
 		c.mu.Unlock()
 		return 0, nil
@@ -1154,7 +1178,7 @@ func buildRoomServiceIntegrationWithCapture(t *testing.T) (
 	seqGen := &atomic.Int64{}
 	capture = newCaptureBroadcastFn(seqGen)
 
-	svc = service.NewRoomService(txMgr, userRepo, roomRepo, roomMemberRepo, petRepo, sessionMgr, capture.fn())
+	svc = service.NewRoomService(txMgr, userRepo, roomRepo, roomMemberRepo, petRepo, sessionMgr, capture.fn(), capture.exceptFn())
 	wg = &sync.WaitGroup{}
 	service.SetPostCommitWaitGroupForTest(svc, wg)
 

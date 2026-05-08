@@ -176,20 +176,30 @@ func (s *roomTestStubPetRepo) FindDefaultByUserID(ctx context.Context, userID ui
 	return nil, mysql.ErrPetNotFound
 }
 
-// roomTestRecordedBroadcast 记录单次 broadcastFn 调用入参 + 调用时间戳（基于 atomic
-// 序号，单调递增）；用于断言 close 4007 与 broadcast 顺序（r13）。
+// roomTestRecordedBroadcast 记录单次 broadcastFn / broadcastExceptFn 调用入参 +
+// 调用时间戳（基于 atomic 序号，单调递增）；用于断言 close 4007 与 broadcast 顺序（r13）。
+//
+// **r3 fix**：新增 excludeUserID 字段记录 BroadcastExceptFn 调用的排除参数；
+// BroadcastFn 调用时为 nil（语义：未启用 exclude）。
 type roomTestRecordedBroadcast struct {
-	roomID uint64
-	msg    []byte
-	seq    int64 // 单调序号，让断言"close < broadcast"顺序时与 stubSessionMgr 共享
+	roomID        uint64
+	msg           []byte
+	seq           int64   // 单调序号，让断言"close < broadcast"顺序时与 stubSessionMgr 共享
+	excludeUserID *uint64 // r3：BroadcastExceptFn 调用时记录；BroadcastFn 调用时 nil
 }
 
-// roomTestStubBroadcastFn 包装 ws.BroadcastFn；内部记录所有调用 + 提供 fn 字段供
-// service.NewRoomService 注入。fn 字段类型与 ws.BroadcastFn 匹配。
+// roomTestStubBroadcastFn 包装 ws.BroadcastFn / ws.BroadcastExceptFn；内部统一记录
+// 所有调用 + 提供 fn / exceptFn 方法供 service.NewRoomService 注入。
+//
+// **r3 fix**：r3 起 service 层 broadcastMemberJoined / broadcastMemberLeft 切到
+// BroadcastExceptFn（必须 exclude 事件主体自己，V1 §12.3 行 2063）；测试需要同时
+// 注入两种 fn 让 service 构造成功。calls 切片由 fn / exceptFn 共享（按 seqGen 单调
+// 序号区分调用 + excludeUserID 字段区分类型）。
 type roomTestStubBroadcastFn struct {
-	mu       sync.Mutex
-	calls    []roomTestRecordedBroadcast
-	returnFn func(ctx context.Context, roomID uint64, msg []byte) (int, error) // optional override
+	mu             sync.Mutex
+	calls          []roomTestRecordedBroadcast
+	returnFn       func(ctx context.Context, roomID uint64, msg []byte) (int, error)                         // optional override（BroadcastFn 路径）
+	returnExceptFn func(ctx context.Context, roomID uint64, excludeUserID uint64, msg []byte) (int, error) // optional override（BroadcastExceptFn 路径）
 }
 
 // fn 返回 ws.BroadcastFn type alias 兼容的 closure。
@@ -206,6 +216,29 @@ func (s *roomTestStubBroadcastFn) fn(seqGen *atomic.Int64) wsapp.BroadcastFn {
 		s.mu.Unlock()
 		if s.returnFn != nil {
 			return s.returnFn(ctx, roomID, msg)
+		}
+		return 0, nil
+	}
+}
+
+// exceptFn 返回 ws.BroadcastExceptFn type alias 兼容的 closure（r3 引入）。
+//
+// 与 fn 共享同一 calls 切片：调用记录时 excludeUserID 字段非 nil，让断言能区分
+// "BroadcastFn 调用 vs BroadcastExceptFn 调用"。
+func (s *roomTestStubBroadcastFn) exceptFn(seqGen *atomic.Int64) wsapp.BroadcastExceptFn {
+	return func(ctx context.Context, roomID, excludeUserID uint64, msg []byte) (int, error) {
+		s.mu.Lock()
+		copied := append([]byte(nil), msg...)
+		excluded := excludeUserID
+		s.calls = append(s.calls, roomTestRecordedBroadcast{
+			roomID:        roomID,
+			msg:           copied,
+			seq:           seqGen.Add(1),
+			excludeUserID: &excluded,
+		})
+		s.mu.Unlock()
+		if s.returnExceptFn != nil {
+			return s.returnExceptFn(ctx, roomID, excludeUserID, msg)
 		}
 		return 0, nil
 	}
@@ -269,10 +302,13 @@ func (s *roomTestStubSessionMgr) Close() error {
 
 // newRoomTestStubBroadcastFnWithSeq 便利构造 roomTestStubBroadcastFn + seqGen，
 // 直接返回可注入 service.NewRoomService 的 ws.BroadcastFn closure + capture struct。
-func newRoomTestStubBroadcastFnWithSeq() (*roomTestStubBroadcastFn, *atomic.Int64, wsapp.BroadcastFn) {
+//
+// **r3 fix**：返回 (*roomTestStubBroadcastFn, *atomic.Int64, BroadcastFn, BroadcastExceptFn)
+// 4 元组（新增 BroadcastExceptFn）让 caller 一次拿齐 service 构造所需 2 个广播 fn。
+func newRoomTestStubBroadcastFnWithSeq() (*roomTestStubBroadcastFn, *atomic.Int64, wsapp.BroadcastFn, wsapp.BroadcastExceptFn) {
 	bcast := &roomTestStubBroadcastFn{}
 	seqGen := &atomic.Int64{}
-	return bcast, seqGen, bcast.fn(seqGen)
+	return bcast, seqGen, bcast.fn(seqGen), bcast.exceptFn(seqGen)
 }
 
 // roomTestStubTxMgr：直接执行 fn（不真开 tx；业务正确性靠 fn 内 repo 调用顺序断言；
@@ -359,7 +395,7 @@ func TestRoomService_CreateRoom_Happy_Inserts3Rows(t *testing.T) {
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	out, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: 1001})
 	if err != nil {
 		t.Fatalf("CreateRoom: %v", err)
@@ -432,7 +468,7 @@ func TestRoomService_CreateRoom_UserAlreadyInRoom_PrecheckReturns6003(t *testing
 		},
 	}
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	out, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: 1001})
 	if err == nil {
 		t.Fatalf("CreateRoom returned nil error, want 6003")
@@ -480,7 +516,7 @@ func TestRoomService_CreateRoom_RoomCreateFails_RollsBack(t *testing.T) {
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: 1001})
 	if err == nil {
 		t.Fatalf("CreateRoom returned nil error, want 1009")
@@ -525,7 +561,7 @@ func TestRoomService_CreateRoom_RoomMemberCreateUniqueUserIDFails_Returns6003(t 
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: 1001})
 	if err == nil {
 		t.Fatalf("CreateRoom returned nil error, want 6003")
@@ -564,7 +600,7 @@ func TestRoomService_CreateRoom_RoomMemberCreateRoomUserDuplicate_Returns6003(t 
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: 1001})
 	if err == nil {
 		t.Fatalf("CreateRoom returned nil error, want 6003")
@@ -607,7 +643,7 @@ func TestRoomService_CreateRoom_UpdateCurrentRoomIDFails_RollsBack(t *testing.T)
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: 1001})
 	if err == nil {
 		t.Fatalf("CreateRoom returned nil error, want 1009")
@@ -656,7 +692,7 @@ func TestRoomService_CreateRoom_FindByIDFails_Returns1009(t *testing.T) {
 		},
 	}
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: 1001})
 	if err == nil {
 		t.Fatalf("CreateRoom returned nil error")
@@ -746,7 +782,7 @@ func TestRoomService_JoinRoom_Happy_5StepsExecute(t *testing.T) {
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	wg := &sync.WaitGroup{}
 	service.SetPostCommitWaitGroupForTest(svc, wg)
 	out, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
@@ -823,7 +859,7 @@ func TestRoomService_JoinRoom_UserAlreadyInRoom_PrecheckReturns6003(t *testing.T
 		},
 	}
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	out, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
 	if err == nil {
 		t.Fatalf("JoinRoom returned nil error, want 6003")
@@ -872,7 +908,7 @@ func TestRoomService_JoinRoom_UserAlreadyInTargetRoom_PrecheckReturns6003(t *tes
 	memberRepo := &roomTestStubRoomMemberRepo{}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
 	if err == nil {
 		t.Fatalf("JoinRoom returned nil error, want 6003")
@@ -920,7 +956,7 @@ func TestRoomService_JoinRoom_RoomNotFound_Returns6001(t *testing.T) {
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
 	if err == nil {
 		t.Fatalf("JoinRoom returned nil error, want 6001")
@@ -970,7 +1006,7 @@ func TestRoomService_JoinRoom_RoomClosed_Returns6005(t *testing.T) {
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
 	if err == nil {
 		t.Fatalf("JoinRoom returned nil error, want 6005")
@@ -1018,7 +1054,7 @@ func TestRoomService_JoinRoom_RoomFull_Returns6002(t *testing.T) {
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
 	if err == nil {
 		t.Fatalf("JoinRoom returned nil error, want 6002")
@@ -1066,7 +1102,7 @@ func TestRoomService_JoinRoom_DBUniqueUserIDDuplicate_Returns6003(t *testing.T) 
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
 	if err == nil {
 		t.Fatalf("JoinRoom returned nil error, want 6003")
@@ -1113,7 +1149,7 @@ func TestRoomService_JoinRoom_DBUniqueRoomUserDuplicate_Returns6003(t *testing.T
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
 	if err == nil {
 		t.Fatalf("JoinRoom returned nil error, want 6003")
@@ -1159,7 +1195,7 @@ func TestRoomService_JoinRoom_FindByIDForUpdateFailsRawError_Returns1009(t *test
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
 	if err == nil {
 		t.Fatalf("JoinRoom returned nil error, want 1009")
@@ -1205,7 +1241,7 @@ func TestRoomService_JoinRoom_UpdateCurrentRoomIDFails_RollsBack(t *testing.T) {
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
 	if err == nil {
 		t.Fatalf("JoinRoom returned nil error, want 1009")
@@ -1247,7 +1283,7 @@ func TestRoomService_JoinRoom_FindByIDFails_Returns1009(t *testing.T) {
 		},
 	}
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
 	if err == nil {
 		t.Fatalf("JoinRoom returned nil error")
@@ -1323,7 +1359,7 @@ func TestRoomService_LeaveRoom_Happy_NotLastMember(t *testing.T) {
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	wg := &sync.WaitGroup{}
 	service.SetPostCommitWaitGroupForTest(svc, wg)
 	out, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: 1001, RoomID: targetRoomID})
@@ -1406,7 +1442,7 @@ func TestRoomService_LeaveRoom_Happy_LastMember_RoomClosed(t *testing.T) {
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	wg := &sync.WaitGroup{}
 	service.SetPostCommitWaitGroupForTest(svc, wg)
 	out, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: 1001, RoomID: targetRoomID})
@@ -1466,7 +1502,7 @@ func TestRoomService_LeaveRoom_UserCurrentRoomIDNil_PrecheckReturns6004(t *testi
 		},
 	}
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: 1001, RoomID: 3001})
 	if err == nil {
 		t.Fatalf("LeaveRoom returned nil error, want 6004")
@@ -1506,7 +1542,7 @@ func TestRoomService_LeaveRoom_UserCurrentRoomIDDifferent_PrecheckReturns6004(t 
 	memberRepo := &roomTestStubRoomMemberRepo{}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: 1001, RoomID: 3001})
 	if err == nil {
 		t.Fatalf("LeaveRoom returned nil error, want 6004")
@@ -1557,7 +1593,7 @@ func TestRoomService_LeaveRoom_DeleteRowsAffected0_TxRolledBack_Returns6004(t *t
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: 1001, RoomID: targetRoomID})
 	if err == nil {
 		t.Fatalf("LeaveRoom returned nil error, want 6004 (DELETE 兜底)")
@@ -1605,7 +1641,7 @@ func TestRoomService_LeaveRoom_FindByIDForUpdateRoomNotFound_Returns1009(t *test
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: 1001, RoomID: targetRoomID})
 	if err == nil {
 		t.Fatalf("LeaveRoom returned nil error, want 1009")
@@ -1654,7 +1690,7 @@ func TestRoomService_LeaveRoom_DeleteFails_Returns1009(t *testing.T) {
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: 1001, RoomID: targetRoomID})
 	if err == nil {
 		t.Fatalf("LeaveRoom returned nil error, want 1009")
@@ -1706,7 +1742,7 @@ func TestRoomService_LeaveRoom_UpdateCurrentRoomIDFails_RollsBack_Returns1009(t 
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: 1001, RoomID: targetRoomID})
 	if err == nil {
 		t.Fatalf("LeaveRoom returned nil error, want 1009")
@@ -1757,7 +1793,7 @@ func TestRoomService_LeaveRoom_CountByRoomIDFails_Returns1009(t *testing.T) {
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: 1001, RoomID: targetRoomID})
 	if err == nil {
 		t.Fatalf("LeaveRoom returned nil error, want 1009")
@@ -1807,7 +1843,7 @@ func TestRoomService_LeaveRoom_UpdateStatusFails_Returns1009_LastMemberPath(t *t
 	}
 	txMgr := roomTestDefaultStubTxMgr()
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: 1001, RoomID: targetRoomID})
 	if err == nil {
 		t.Fatalf("LeaveRoom returned nil error, want 1009")
@@ -1849,7 +1885,7 @@ func TestRoomService_LeaveRoom_FindByIDFails_Returns1009(t *testing.T) {
 		},
 	}
 
-	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: 1001, RoomID: 3001})
 	if err == nil {
 		t.Fatalf("LeaveRoom returned nil error")
@@ -1889,7 +1925,7 @@ func TestRoomService_GetCurrentRoom_Happy_UserInRoom(t *testing.T) {
 	roomRepo := &roomTestStubRoomRepo{}
 	memberRepo := &roomTestStubRoomMemberRepo{}
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	out, err := svc.GetCurrentRoom(context.Background(), service.GetCurrentRoomInput{UserID: 1001})
 	if err != nil {
 		t.Fatalf("GetCurrentRoom: %v", err)
@@ -1913,7 +1949,7 @@ func TestRoomService_GetCurrentRoom_Happy_UserNotInAnyRoom(t *testing.T) {
 	roomRepo := &roomTestStubRoomRepo{}
 	memberRepo := &roomTestStubRoomMemberRepo{}
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	out, err := svc.GetCurrentRoom(context.Background(), service.GetCurrentRoomInput{UserID: 1001})
 	if err != nil {
 		t.Fatalf("GetCurrentRoom: %v", err)
@@ -1935,7 +1971,7 @@ func TestRoomService_GetCurrentRoom_FindByIDFails_Returns1009(t *testing.T) {
 	roomRepo := &roomTestStubRoomRepo{}
 	memberRepo := &roomTestStubRoomMemberRepo{}
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.GetCurrentRoom(context.Background(), service.GetCurrentRoomInput{UserID: 1001})
 	if err == nil {
 		t.Fatalf("GetCurrentRoom returned nil error, want 1009")
@@ -1983,7 +2019,7 @@ func TestRoomService_GetRoomDetail_Happy_3Members_With1PetLess(t *testing.T) {
 		},
 	}
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	out, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: roomID})
 	if err != nil {
 		t.Fatalf("GetRoomDetail: %v", err)
@@ -2032,7 +2068,7 @@ func TestRoomService_GetRoomDetail_Step1aPrecheck_CurrentRoomIDDifferent_Returns
 	roomRepo := &roomTestStubRoomRepo{}
 	memberRepo := &roomTestStubRoomMemberRepo{}
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: 3001})
 	if err == nil {
 		t.Fatalf("GetRoomDetail returned nil error, want 6004")
@@ -2057,7 +2093,7 @@ func TestRoomService_GetRoomDetail_Step1aPrecheck_CurrentRoomIDNil_Returns6004(t
 	roomRepo := &roomTestStubRoomRepo{}
 	memberRepo := &roomTestStubRoomMemberRepo{}
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: 3001})
 	if err == nil {
 		t.Fatalf("GetRoomDetail returned nil error, want 6004")
@@ -2087,7 +2123,7 @@ func TestRoomService_GetRoomDetail_Step1bExistsForShare_Returns0Rows_Returns6004
 		},
 	}
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: roomID})
 	if err == nil {
 		t.Fatalf("GetRoomDetail returned nil error, want 6004")
@@ -2121,7 +2157,7 @@ func TestRoomService_GetRoomDetail_Step2FindByID_NotFound_Returns6001(t *testing
 		},
 	}
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: roomID})
 	if err == nil {
 		t.Fatalf("GetRoomDetail returned nil error, want 6001")
@@ -2159,7 +2195,7 @@ func TestRoomService_GetRoomDetail_Step3ListRoster_DBError_Returns1009(t *testin
 		},
 	}
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: roomID})
 	if err == nil {
 		t.Fatalf("GetRoomDetail returned nil error, want 1009")
@@ -2185,7 +2221,7 @@ func TestRoomService_GetRoomDetail_Step1aFindByID_DBError_Returns1009(t *testing
 	roomRepo := &roomTestStubRoomRepo{}
 	memberRepo := &roomTestStubRoomMemberRepo{}
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: 3001})
 	if err == nil {
 		t.Fatalf("GetRoomDetail returned nil error, want 1009")
@@ -2216,7 +2252,7 @@ func TestRoomService_GetRoomDetail_Step1bExistsForShare_DBError_Returns1009(t *t
 		},
 	}
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: roomID})
 	if err == nil {
 		t.Fatalf("GetRoomDetail returned nil error, want 1009")
@@ -2244,7 +2280,7 @@ func TestRoomService_GetRoomDetail_6004DualPath_MessagesEquivalent(t *testing.T)
 	}
 	roomRepo1 := &roomTestStubRoomRepo{}
 	memberRepo1 := &roomTestStubRoomMemberRepo{}
-	svc1 := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo1, roomRepo1, memberRepo1, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc1 := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo1, roomRepo1, memberRepo1, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err1 := svc1.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: roomID})
 	ae1, _ := apperror.As(err1)
 
@@ -2259,7 +2295,7 @@ func TestRoomService_GetRoomDetail_6004DualPath_MessagesEquivalent(t *testing.T)
 			return false, nil
 		},
 	}
-	svc2 := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo2, roomRepo2, memberRepo2, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	svc2 := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo2, roomRepo2, memberRepo2, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err2 := svc2.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: roomID})
 	ae2, _ := apperror.As(err2)
 
@@ -2324,10 +2360,10 @@ func TestRoomService_JoinRoom_Happy_BroadcastMemberJoinedCalled(t *testing.T) {
 			return &mysql.Pet{ID: petID, UserID: uid, IsDefault: 1, CurrentState: 1}, nil
 		},
 	}
-	bcast, seqGen, fn := newRoomTestStubBroadcastFnWithSeq()
+	bcast, seqGen, fn, exceptFn := newRoomTestStubBroadcastFnWithSeq()
 	sessionMgr := &roomTestStubSessionMgr{}
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, sessionMgr, fn)
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, sessionMgr, fn, exceptFn)
 	wg := &sync.WaitGroup{}
 	service.SetPostCommitWaitGroupForTest(svc, wg)
 	out, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userID, RoomID: roomID})
@@ -2340,13 +2376,21 @@ func TestRoomService_JoinRoom_Happy_BroadcastMemberJoinedCalled(t *testing.T) {
 		t.Errorf("out.Joined = false, want true")
 	}
 
+	_ = exceptFn
 	_ = seqGen
 	if got := bcast.callCount(); got != 1 {
-		t.Fatalf("broadcastFn call count = %d, want 1", got)
+		t.Fatalf("broadcastExceptFn call count = %d, want 1", got)
 	}
 	call := bcast.calls[0]
 	if call.roomID != roomID {
-		t.Errorf("broadcastFn roomID = %d, want %d", call.roomID, roomID)
+		t.Errorf("broadcastExceptFn roomID = %d, want %d", call.roomID, roomID)
+	}
+	// r3 [P1] fix 断言：member.joined 必须经 BroadcastExceptFn 路径调用，且
+	// excludeUserID == joinerUserID（V1 §12.3 行 2063 钦定 + 防御 race）
+	if call.excludeUserID == nil {
+		t.Errorf("broadcast call should be via BroadcastExceptFn (excludeUserID set), got nil")
+	} else if *call.excludeUserID != userID {
+		t.Errorf("broadcast excludeUserID = %d, want %d (joiner self)", *call.excludeUserID, userID)
 	}
 
 	var env story118EnvelopeForTest
@@ -2421,9 +2465,9 @@ func TestRoomService_JoinRoom_Happy_PetLess_BroadcastWithNullPet(t *testing.T) {
 			return nil, mysql.ErrPetNotFound // pet-less
 		},
 	}
-	bcast, _, fn := newRoomTestStubBroadcastFnWithSeq()
+	bcast, _, fn, exceptFn := newRoomTestStubBroadcastFnWithSeq()
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, &roomTestStubSessionMgr{}, fn)
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, &roomTestStubSessionMgr{}, fn, exceptFn)
 	wg := &sync.WaitGroup{}
 	service.SetPostCommitWaitGroupForTest(svc, wg)
 	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userID, RoomID: roomID}); err != nil {
@@ -2473,9 +2517,9 @@ func TestRoomService_JoinRoom_TxRollback_BroadcastNotCalled(t *testing.T) {
 			return nil, mysql.ErrPetNotFound
 		},
 	}
-	bcast, _, fn := newRoomTestStubBroadcastFnWithSeq()
+	bcast, _, fn, exceptFn := newRoomTestStubBroadcastFnWithSeq()
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, &roomTestStubSessionMgr{}, fn)
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, &roomTestStubSessionMgr{}, fn, exceptFn)
 	wg := &sync.WaitGroup{}
 	service.SetPostCommitWaitGroupForTest(svc, wg)
 	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userID, RoomID: roomID}); err == nil {
@@ -2518,26 +2562,28 @@ func TestRoomService_JoinRoom_BroadcastFails_DoesNotAffectReturn(t *testing.T) {
 			return nil, mysql.ErrPetNotFound
 		},
 	}
+	// **r3 fix**：r3 起 broadcastMemberJoined 切到 BroadcastExceptFn 路径；模拟
+	// network failure 必须注入 returnExceptFn（而非旧 returnFn）。
 	bcast := &roomTestStubBroadcastFn{
-		returnFn: func(ctx context.Context, rid uint64, msg []byte) (int, error) {
+		returnExceptFn: func(ctx context.Context, rid, excludeUserID uint64, msg []byte) (int, error) {
 			return 0, stderrors.New("simulated broadcast network failure")
 		},
 	}
 	seqGen := &atomic.Int64{}
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, &roomTestStubSessionMgr{}, bcast.fn(seqGen))
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, &roomTestStubSessionMgr{}, bcast.fn(seqGen), bcast.exceptFn(seqGen))
 	wg := &sync.WaitGroup{}
 	service.SetPostCommitWaitGroupForTest(svc, wg)
 	out, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userID, RoomID: roomID})
 	if err != nil {
-		t.Fatalf("JoinRoom should succeed even when broadcastFn errors (fire-and-forget): %v", err)
+		t.Fatalf("JoinRoom should succeed even when broadcastExceptFn errors (fire-and-forget): %v", err)
 	}
 	wg.Wait()
 	if !out.Joined {
 		t.Errorf("out.Joined = false, want true")
 	}
 	if got := bcast.callCount(); got != 1 {
-		t.Errorf("broadcastFn should still be called once even though it returns error; got %d", got)
+		t.Errorf("broadcastExceptFn should still be called once even though it returns error; got %d", got)
 	}
 }
 
@@ -2565,13 +2611,13 @@ func TestRoomService_LeaveRoom_Happy_NoLeaverSession_StillBroadcasts(t *testing.
 		deleteByRoomAndUserFn: func(ctx context.Context, rid, uid uint64) (int64, error) { return 1, nil },
 		countByRoomIDFn:       func(ctx context.Context, rid uint64) (int, error) { return 1, nil }, // 离开后还剩 1 人
 	}
-	bcast, _, fn := newRoomTestStubBroadcastFnWithSeq()
+	bcast, _, fn, exceptFn := newRoomTestStubBroadcastFnWithSeq()
 	sessionMgr := &roomTestStubSessionMgr{
 		// 返 nil 列表 → leaver 未持 WS / 已断开（合法场景，no-op + log info）
 		listSessionsByRoomIDFn: func(ctx context.Context, rid uint64) []*wsapp.Session { return nil },
 	}
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, sessionMgr, fn)
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, sessionMgr, fn, exceptFn)
 	wg := &sync.WaitGroup{}
 	service.SetPostCommitWaitGroupForTest(svc, wg)
 	out, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userID, RoomID: roomID})
@@ -2591,13 +2637,20 @@ func TestRoomService_LeaveRoom_Happy_NoLeaverSession_StillBroadcasts(t *testing.
 	}
 	sessionMgr.mu.Unlock()
 
-	// broadcastFn 仍被调用 1 次（即使 leaver 未持 WS，broadcast 仍触发让其他成员收 member.left）
+	// broadcastExceptFn 仍被调用 1 次（即使 leaver 未持 WS，broadcast 仍触发让其他成员收 member.left）
 	if got := bcast.callCount(); got != 1 {
-		t.Fatalf("broadcastFn call count = %d, want 1", got)
+		t.Fatalf("broadcastExceptFn call count = %d, want 1", got)
 	}
 	call := bcast.calls[0]
 	if call.roomID != roomID {
-		t.Errorf("broadcastFn roomID = %d, want %d", call.roomID, roomID)
+		t.Errorf("broadcastExceptFn roomID = %d, want %d", call.roomID, roomID)
+	}
+	// r3 [P1] fix 断言：member.left 必须经 BroadcastExceptFn 路径调用，且
+	// excludeUserID == leaverUserID（双保险，即使 leaver 仍在列表也排除）
+	if call.excludeUserID == nil {
+		t.Errorf("broadcast call should be via BroadcastExceptFn (excludeUserID set), got nil")
+	} else if *call.excludeUserID != userID {
+		t.Errorf("broadcast excludeUserID = %d, want %d (leaver self)", *call.excludeUserID, userID)
 	}
 
 	var env story118EnvelopeForTest
@@ -2644,7 +2697,7 @@ func TestRoomService_LeaveRoom_TxRollback_BroadcastNotCalled(t *testing.T) {
 			return 0, nil // RowsAffected=0 → 6004 兜底
 		},
 	}
-	bcast, _, fn := newRoomTestStubBroadcastFnWithSeq()
+	bcast, _, fn, exceptFn := newRoomTestStubBroadcastFnWithSeq()
 	sessionMgr := &roomTestStubSessionMgr{
 		listSessionsByRoomIDFn: func(ctx context.Context, rid uint64) []*wsapp.Session {
 			t.Errorf("ListSessionsByRoomID 不应被调用（事务回滚路径）")
@@ -2652,7 +2705,7 @@ func TestRoomService_LeaveRoom_TxRollback_BroadcastNotCalled(t *testing.T) {
 		},
 	}
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, sessionMgr, fn)
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, sessionMgr, fn, exceptFn)
 	wg := &sync.WaitGroup{}
 	service.SetPostCommitWaitGroupForTest(svc, wg)
 	if _, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userID, RoomID: roomID}); err == nil {
@@ -2682,7 +2735,7 @@ func TestRoomService_LeaveRoom_PrecheckFail_BroadcastNotCalled(t *testing.T) {
 			return &mysql.User{ID: userID, CurrentRoomID: nil}, nil
 		},
 	}
-	bcast, _, fn := newRoomTestStubBroadcastFnWithSeq()
+	bcast, _, fn, exceptFn := newRoomTestStubBroadcastFnWithSeq()
 	sessionMgr := &roomTestStubSessionMgr{
 		listSessionsByRoomIDFn: func(ctx context.Context, rid uint64) []*wsapp.Session {
 			t.Errorf("ListSessionsByRoomID 不应被调用（预检失败路径）")
@@ -2690,7 +2743,7 @@ func TestRoomService_LeaveRoom_PrecheckFail_BroadcastNotCalled(t *testing.T) {
 		},
 	}
 
-	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, &roomTestStubRoomRepo{}, &roomTestStubRoomMemberRepo{}, &roomTestStubPetRepo{}, sessionMgr, fn)
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, &roomTestStubRoomRepo{}, &roomTestStubRoomMemberRepo{}, &roomTestStubPetRepo{}, sessionMgr, fn, exceptFn)
 	wg := &sync.WaitGroup{}
 	service.SetPostCommitWaitGroupForTest(svc, wg)
 	_, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userID, RoomID: roomID})
