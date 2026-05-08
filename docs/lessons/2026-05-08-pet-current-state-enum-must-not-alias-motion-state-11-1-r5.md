@@ -2,7 +2,7 @@
 date: 2026-05-08
 source_review: file:/tmp/epic-loop-review-11-1-r5.md (codex review round 5)
 story: 11-1-接口契约最终化
-commit: <pending>
+commit: bfe843b
 lesson_count: 1
 ---
 

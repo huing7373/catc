@@ -2,7 +2,7 @@
 date: 2026-05-08
 source_review: codex review round 13 of Story 11.1（接口契约最终化）
 story: 11-1-接口契约最终化
-commit: <pending>
+commit: f35c9e5
 lesson_count: 1
 ---
 
