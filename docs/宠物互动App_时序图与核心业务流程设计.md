@@ -536,22 +536,27 @@ sequenceDiagram
     WSGateway-->>Client: 推送 room.snapshot
 ```
 
-> **业务消息延后锚定**：上图节点 4 阶段（Epic 10 ~ 13）服务端 → 客户端**只**会主动发送 `room.snapshot` / `pong` / `error` 三种消息，**不**在握手完成时广播 `member.joined` 给房间其他在线成员（与 `docs/宠物互动App_V1接口设计.md` §12.1.3 + §12.3 末尾"业务消息延后锚定"块、§1 节点 4 协议骨架冻结声明一致）。各业务广播消息的字段层契约与"是否在握手时广播"的语义由后续 epic 锚定：`member.joined` / `member.left` → Story 11.1（Epic 11 房间业务契约，节点 4 中段）；`emoji.received` → Story 17.1（Epic 17 表情广播契约，节点 6）。本时序图已与节点 4 协议骨架冻结对齐，删除了原"推送 member.joined"步骤；`member.joined` 广播的真实时序在 Story 11.1 实装期重绘。
+> **业务消息触发点说明（自 Story 11.1 起更新）**：上图刻画的是 **WS 握手 + 初始 snapshot** 流程 —— 握手成功后 server 仅推 `room.snapshot` 给**新连接**的 client 自己，**不**在握手时广播 `member.joined` 给房间其他在线成员。原因：握手等价于"已是房间成员的 client 重连 WS"，并非"新成员加入房间"事件 —— `member.joined` 触发点钦定为 **HTTP `POST /rooms/{roomId}/join` 事务成功提交后**（详见 `docs/宠物互动App_V1接口设计.md` §12.3 `### 成员加入`），与 WS 握手是两个独立事件：用户先调 HTTP join（此时 server 广播 `member.joined` 给已在房间的其他成员）→ HTTP 200 后 client 再发起 WS 握手（此时 server 仅给该 client 自己推 `room.snapshot`）；二者的协议角色不重复 —— 握手期 snapshot 让自己初始化 roster，HTTP join 期 broadcast 让别人 enrich roster。各业务广播消息的字段层契约与"完整触发条件 + 触发点"的语义由对应 epic 锚定：`member.joined` / `member.left` → **Story 11.1**（Epic 11 房间业务契约，节点 4 中段，**已锚定**）；`pet.state.changed` → Story 14.1（Epic 14 宠物状态同步契约，节点 5）；`emoji.received` → Story 17.1（Epic 17 表情广播契约，节点 6）。本时序图保留"握手期不广播 member.joined"语义（事件分工本就如此），但**不再**等价表述为"节点 4 阶段 server 不广播 `member.joined` / `member.left`" —— 该等价表述是 Story 10.1 协议骨架冻结期 active message set 边界声明，已由 Story 11.1 升级（Epic 11 起 server → client active message set 加入 `member.joined` / `member.left`，详见 `docs/宠物互动App_V1接口设计.md` §1 第 37 行"server / client active message set 升级"声明）。
 
 ### 13.3 断连处理
 
-当连接断开时：
+当连接断开时（**主动断开** / **client TCP 异常断开**两类，**不含**心跳超时被动清理）：
 
 - 从 Redis 清除连接映射
 - 从房间在线集合移除当前用户
-- （业务消息延后锚定，节点 4 阶段**不**广播 `member.left`；详见本节末"业务消息延后锚定"注解；字段层契约由 Story 11.1 锚定）
+- **不**广播 `member.left` —— WebSocket 断开不等于用户退出房间；用户的 `room_members` 行 + `users.current_room_id` 仍在；本路径仅清理 ephemeral 连接态，业务侧 roster 不变
+
+**心跳超时被动断线**（Story 10.4 心跳框架触发，与上述主动断开路径不同）：
+
+- 走"被动 leave"完整路径：删除 `room_members` 行 + 更新 `users.current_room_id = NULL` + 触发 `member.left` 广播给房间其他在线成员（payload 字段表见 `docs/宠物互动App_V1接口设计.md` §12.3 `### 成员离开`）
+- 该路径与 HTTP `POST /rooms/{roomId}/leave` 共用同一 service 层函数（详见 `docs/宠物互动App_V1接口设计.md` §10.5 末尾"心跳超时被动断线场景"块）
 
 注意：
 
 - WebSocket 断开不等于用户退出房间
-- 退出房间必须显式调用 HTTP `leave` 接口
+- 退出房间必须显式调用 HTTP `leave` 接口（或被心跳超时清理钩子被动触发）
 
-> **业务消息延后锚定**：上述断连处理中"广播 `member.left` 给其他在线成员"一步原属节点 4 之前的协议草稿，**不**在节点 4 / Epic 10 范围内 —— 与 §13.2 末尾"业务消息延后锚定"块、`docs/宠物互动App_V1接口设计.md` §12.1.3 + §12.3 末尾"业务消息延后锚定"块、§1 节点 4 协议骨架冻结声明一致：节点 4 阶段（Epic 10 ~ 13）服务端 → 客户端**只**会主动发送 `room.snapshot` / `pong` / `error` 三种消息，**不**在断连时广播 `member.left`。`member.left` 的字段层契约与"是否在断连时广播"的语义由 **Story 11.1**（Epic 11 房间业务契约，节点 4 中段）锚定；本时序图已与节点 4 协议骨架冻结对齐，删除了原"广播 member.left"步骤；`member.left` 广播的真实时序在 Story 11.1 实装期重绘。
+> **业务消息触发点说明（自 Story 11.1 起更新）**：`member.left` 触发点钦定为 **(a) HTTP `POST /rooms/{roomId}/leave` 事务成功提交后** + **(b) 心跳超时被动清理路径**，详见 `docs/宠物互动App_V1接口设计.md` §10.5 + §12.3 `### 成员离开`。**WebSocket 主动断开 / TCP 异常断开**（非心跳超时）**不**触发 `member.left` —— 这是协议角色分工：WS 断开仅清理 ephemeral 连接态；房间成员关系（`room_members` 表 + `users.current_room_id`）只能由 HTTP leave 或心跳超时被动清理改变。`member.left` 字段层契约 + 触发条件由 **Story 11.1**（Epic 11 房间业务契约，节点 4 中段，**已锚定**）锚定；自 Story 11.1 起 server → client active message set 加入 `member.left`（详见 `docs/宠物互动App_V1接口设计.md` §1 第 37 行"server / client active message set 升级"声明，覆盖 Story 10.1 协议骨架冻结期 active message set 边界声明）。
 
 ---
 

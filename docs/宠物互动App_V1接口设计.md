@@ -1501,11 +1501,12 @@ JSON 示例（请求体）：
 4. 查 `room_members WHERE room_id = ?` 剩余数量；若 `== 0`（最后一人离开）→ 更新 `rooms.status = 2 closed`
 5. 提交事务
 6. **事务成功提交后**触发 WS 广播 `member.left`（payload 见 §12.3 `### 成员离开`，由 Story 11.8 实装；广播失败 fire-and-forget 仅 log，不影响 HTTP 200 响应）；**特例**：若步骤 4 触发了 closed 转换（房间已无在线广播对象）—— 广播路径仍调用 `BroadcastToRoom`，但 fanout 时房间内已无其他在线 Session，广播自然 no-op（详见 Story 10.5 BroadcastToRoom primitive 实装：空房间走 fast path 直接返回）
-7. 返回 `data.{roomId, left: true}`
+7. **关闭 leaver 自己的 WS Session**（若 leaver 仍持有该 `roomId` 的 WS 连接）：从 SessionManager 撤销 (unregister) leaver 在该 `roomId` 的 Session + close underlying WebSocket（close code = `4007`，reason = `"left room via HTTP"`，详见 §12.1 close code 表 4007 行；client 解析层按 4xxx 业务级终态语义处理，**不**自动重连）；该步骤**必须**发生在步骤 6 广播之后 —— 顺序由"广播 fanout 时排除 leaver 自己 Session"语义钦定（§12.3 `### 成员离开` 关键约束），但 leaver 的 Session 撤销不能拖到心跳超时（默认 60s）才触发，否则在 close 前的窗口内 leaver 仍会收到该 roomId 的 `member.joined` / `member.left` / 后续 epic 广播消息（如 Story 14.x `pet.state.changed` / Story 17.x `emoji.received`），违反"HTTP leave 后立即与房间 WS 解耦"语义。Session 撤销失败（leaver 未持 WS 连接 / 已断开）→ no-op，不影响 HTTP 200 响应（fire-and-forget）
+8. 返回 `data.{roomId, left: true}`
 
-**事务边界规则**：步骤 2 ~ 4 必须在同一 MySQL 事务中（参见数据库设计 §8.6 房间事务边界）；步骤 6 在事务**外**触发（fire-and-forget）。
+**事务边界规则**：步骤 2 ~ 4 必须在同一 MySQL 事务中（参见数据库设计 §8.6 房间事务边界）；步骤 6 在事务**外**触发（fire-and-forget）；步骤 7 同样在事务**外**触发（fire-and-forget），且**必须**在步骤 6 广播之后（顺序保证 leaver 不会在自己 Session 被关闭后再收到由本次 leave 触发的 `member.left` —— fanout 已经物理上跳过 leaver Session，二者顺序仅影响清理副作用语义）。
 
-**心跳超时被动断线场景**：Story 10.4 心跳超时清理钩子也会触发"删除 `room_members` + 更新 `users.current_room_id` + 触发 `member.left` 广播"路径（详见 epics.md §Story 11.8 + Story 10.4 r6 lesson）；该路径**不**经过本 HTTP 接口，但事务步骤 + 广播语义与本接口一致 —— 即 server 实装层应将"主动 leave"和"心跳超时被动 leave"用同一套 service 层函数处理，避免代码重复。
+**心跳超时被动断线场景**：Story 10.4 心跳超时清理钩子也会触发"删除 `room_members` + 更新 `users.current_room_id` + 触发 `member.left` 广播 + 撤销 Session"路径（详见 epics.md §Story 11.8 + Story 10.4 r6 lesson）；该路径**不**经过本 HTTP 接口，但事务步骤 + 广播语义与本接口一致 —— 即 server 实装层应将"主动 leave"和"心跳超时被动 leave"用同一套 service 层函数处理，避免代码重复。**Session 撤销语义差异**：心跳超时路径下 leaver Session 已经因心跳超时被 SessionManager 自然撤销（Story 10.4 钩子触发前置条件即"Session 已被判定离线"），无需额外 close —— 即"主动 leave"路径的步骤 7 在被动断线场景下退化为 no-op（leaver 已无活跃 Session 可关），但 service 层调用语义保持一致。
 
 #### 响应体
 
@@ -1661,18 +1662,19 @@ GET /ws/rooms/{roomId}?token=xxx
 | 1000 | server 或 client 任一方主动 close | 服务端 / 客户端正常关闭 | 否 | 客户端主动 close 不重连；服务端主动 close（如 graceful shutdown）客户端可选重连 |
 | 1001 | server 或 client 任一方主动 close | going away（服务端重启 / 客户端切后台） | 否 | 服务端重启 → 客户端**应**自动重连（指数退避，参考 iOS Story 12.5）；客户端切后台 → 客户端自身决定 |
 | 4006 | server 主动 close | 客户端违反协议策略 —— 节点 4 阶段唯一触发条件：单条消息 frame 超过 `ws.max_message_size_bytes`（默认 16 KB） | 是（reason = `"message too large"`） | **不**自动重连（视为客户端实装 bug，重连仍会被 close）；记 log error 后回退 |
+| 4007 | server 主动 close | leaver 通过 HTTP `POST /rooms/{roomId}/leave` 主动离开房间，且该 leaver 仍持有同一 `roomId` 的 WS 连接 —— server 在 leave 事务成功提交 + `member.left` 广播之后立即触发本 close；详见 §10.5 服务端逻辑步骤 7 | 是（reason = `"left room via HTTP"`） | **不**自动重连（业务级拒绝，leaver 已主动离开房间，重连会因 §12.1 校验顺序步骤 5"用户房间归属校验"失败被 close 4003）；client 收到本 close code **应**视为"自己的 HTTP leave 已被 server 端确认完成"的协议层信号 —— 用于触发本地 RoomView 退出 / RoomViewModel 清理等 UX 路径，client 实装层细节由 iOS Story 12.7 LeaveRoomUseCase 锚定 |
 | 1011 | server 主动 close | 服务端内部错误（panic / 不可恢复异常）；**含**握手完成后 SnapshotBuilder 构建初始 `room.snapshot` 失败的场景（reason = `"snapshot build failed"`） —— 因为 §12.1 钦定 `room.snapshot` 是握手成功后必发的第一条消息，构建失败若不 close 而仅推 `error`，client 会永远等待一个永不到达的 snapshot，房间页无法初始化 | 是（reason 应包含简短错误提示但**不**泄漏 stack trace） | 客户端**应**自动重连（指数退避，但限制最大重试次数避免雪崩） |
 
 **关键约束**：
 
-- 4001 / 4002 / 4003 / 4004 / 4006 是**业务级**拒绝（4xxx 段是应用自定义；WebSocket RFC 6455 规定 4000-4999 为应用保留段），重试无意义，客户端**不**应自动重连；客户端应展示明确 UX 提示并回退（4006 = 客户端实装 bug，记 log error 后回退）
+- 4001 / 4002 / 4003 / 4004 / 4006 / 4007 是**业务级**拒绝（4xxx 段是应用自定义；WebSocket RFC 6455 规定 4000-4999 为应用保留段），重试无意义，客户端**不**应自动重连；客户端应展示明确 UX 提示并回退（4006 = 客户端实装 bug，记 log error 后回退；4007 = 自身 HTTP leave 完成的协议层确认，触发 RoomView 退出 UX，不需提示错误）
 - **4005 是 4xxx 段中的例外**：虽然位于 4xxx 应用自定义段，但语义是 transient network failure（心跳超时多半是网络抖动 / 客户端切后台），不是业务级拒绝；客户端**应**自动重连，与 1006 / 1011 同等对待（指数退避 + 最大重试次数限制）
 - 1000 / 1001 / 1011 是**协议 / 网络**级断开（1xxx 段是 RFC 标准段，可由服务端主动 emit），客户端**应**自动重连（除 1000 主动关闭外）
 - **不使用 RFC close code 1006 / 1008 / 1009**（**不**出现在上方 close code 表内，**也不**由服务端主动 emit，原因分两类）：
   - **1006**：RFC 6455 §7.1.5 reserved status code —— **MUST NOT** be set as a status code in a Close control frame。1006 仅由客户端 WebSocket runtime 在底层 TCP 异常断开 / 网络抖动且未收到 close frame 时**本地合成**通知上层；服务端实装层（Story 10.3 / 12.5）**禁止**写 1006 到 close frame。客户端收到 1006 时按 transient network failure 处理 —— 与 1011 / 4005 同等对待（指数退避 + 最大重试次数限制自动重连）。1006 不进入 close code 表的另一个理由：§3 全局错误码表已将 `1006`（状态不允许当前操作）用作应用层错误码（在 §12.3 `error.payload.code` 中出现），与其它"1xxx 段被 §3 占用"的 code 同类，避免数字空间冲突
   - **1008 / 1009**：RFC 6455 §7.4.1 分别定义 1008 (Policy Violation) / 1009 (Message Too Big) 为标准 close code，但本协议**禁止**这两个 1xxx 段值用于 close frame，原因是 §3 全局错误码表已将 `1008`（幂等冲突）/ `1009`（服务繁忙）用作应用层错误码（在 §12.3 `error.payload.code` 中出现）。"消息超大"场景统一改用 **4006**（4xxx 应用自定义段，与 4001-4005 同段位，数字空间不与 §3 重叠）；其他 policy violation 场景同样走 4xxx 段
-  - **共同根因**：同一数值同时出现在 close frame 和 application error frame 会让客户端、日志、监控无法仅凭数字区分 transport-level fatal 与 application-level transient/retryable（前者要 close + 不重连或固定重连分类，后者要忽略 + 保连接）。因此 §3 已占用的 1xxx 段值（含 1006 / 1008 / 1009）一律**禁止**作为 close code；服务端主动 emit 的 close code 限定在 1000 / 1001 / 1011 + 4001 / 4002 / 4003 / 4004 / 4005 / 4006 这 9 个值内
-- 4001 触发时 server **不**写 log error（这是常态，token 过期是正常业务），写 log info；4003 / 4004 写 log warn（疑似客户端实装 bug 或数据不一致）；4005 写 log info（这是常态，心跳超时多半是网络抖动 / 切后台；写 warn 会让正常网络抖动场景下日志噪声暴涨）；4006 写 log error（必排查，疑似客户端 bug 或恶意流量）；1011 写 log error（必排查）
+  - **共同根因**：同一数值同时出现在 close frame 和 application error frame 会让客户端、日志、监控无法仅凭数字区分 transport-level fatal 与 application-level transient/retryable（前者要 close + 不重连或固定重连分类，后者要忽略 + 保连接）。因此 §3 已占用的 1xxx 段值（含 1006 / 1008 / 1009）一律**禁止**作为 close code；服务端主动 emit 的 close code 限定在 1000 / 1001 / 1011 + 4001 / 4002 / 4003 / 4004 / 4005 / 4006 / 4007 这 10 个值内
+- 4001 触发时 server **不**写 log error（这是常态，token 过期是正常业务），写 log info；4003 / 4004 写 log warn（疑似客户端实装 bug 或数据不一致）；4005 写 log info（这是常态，心跳超时多半是网络抖动 / 切后台；写 warn 会让正常网络抖动场景下日志噪声暴涨）；4006 写 log error（必排查，疑似客户端 bug 或恶意流量）；4007 写 log info（这是常态，用户主动 leave 的协议确认）；1011 写 log error（必排查）
 
 #### 服务端校验顺序
 
@@ -1923,7 +1925,7 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 
 **触发**：
 
-- `POST /api/v1/rooms/{roomId}/join` 加入房间事务**成功提交后**，server 调用 `BroadcastToRoom(roomID, {type: "member.joined", payload: {userId, nickname}})` 广播给该房间内所有**其他**在线成员（不发给加入者自己 —— 加入者自己应收 HTTP 响应即知自己已加入，且即将收到 `room.snapshot` 含自己）
+- `POST /api/v1/rooms/{roomId}/join` 加入房间事务**成功提交后**，server 调用 `BroadcastToRoom(roomID, {type: "member.joined", payload: {userId, nickname, avatarUrl, pet: {petId, currentState}}})` 广播给该房间内所有**其他**在线成员（不发给加入者自己 —— 加入者自己应收 HTTP 响应即知自己已加入，且加入者后续如建立 WS 连接，握手时 server 会下发含自己的 `room.snapshot`，与已连接成员通过 `member.joined` enrich roster 的路径互补）；payload **必须**含 `avatarUrl` + `pet.{petId, currentState}`，不能简化为仅 `userId + nickname` —— 已连接成员仅在握手时收一次 `room.snapshot`（§12.1.3 钦定），后续无新 snapshot 触发，**唯一**enrich 新成员展示字段（头像、宠物 ID、宠物状态）的路径就是 `member.joined` 自身 payload；若 trigger 实装层简化为仅下发 `userId + nickname`，已连接成员将永远看不到新成员的头像 / 宠物，违反"`member.joined` 必须自包含展示所需全部字段"语义（详见下方"字段"表 + Story 11.8 实装锚定）
 - WS 心跳超时清理钩子（Story 10.4）触发的"被动 leave"路径**不**触发 `member.joined`（仅触发 `member.left`）—— 节点 4 阶段无"被动 join"路径
 - 节点 4 阶段**仅** Story 11.8 一处触发；后续 epic 不在本路径加新触发条件（如 Story 14.x 状态广播走独立 `pet.state.changed`）
 
