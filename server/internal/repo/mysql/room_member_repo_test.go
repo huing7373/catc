@@ -370,3 +370,66 @@ func TestRoomMemberRepo_CountByRoomID_DBError_Propagates(t *testing.T) {
 		t.Errorf("err = %v, want wantErr", err)
 	}
 }
+
+// ============================================================
+// Story 11.5 新增：RoomMemberRepo.DeleteByRoomAndUser 路径覆盖
+// ============================================================
+
+// TestRoomMemberRepo_DeleteByRoomAndUser_Happy_RowsAffected1:
+// DELETE FROM room_members WHERE room_id = ? AND user_id = ? → 1 行 → repo 返 (1, nil)。
+func TestRoomMemberRepo_DeleteByRoomAndUser_Happy_RowsAffected1(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM `room_members` WHERE room_id = ? AND user_id = ?")).
+		WithArgs(uint64(3001), uint64(1001)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	got, err := repo.DeleteByRoomAndUser(context.Background(), 3001, 1001)
+	if err != nil {
+		t.Fatalf("DeleteByRoomAndUser: %v", err)
+	}
+	if got != 1 {
+		t.Errorf("rowsAffected = %d, want 1", got)
+	}
+}
+
+// TestRoomMemberRepo_DeleteByRoomAndUser_RowsAffected0_NoError:
+// 行不存在（同 user 并发两次 leave 输家场景）→ repo 返 (0, nil)。**不**视为异常 ——
+// rows-affected 0 是合法业务场景，由 service 层翻译为 6004。
+func TestRoomMemberRepo_DeleteByRoomAndUser_RowsAffected0_NoError(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM `room_members` WHERE room_id = ? AND user_id = ?")).
+		WithArgs(uint64(3001), uint64(1001)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	got, err := repo.DeleteByRoomAndUser(context.Background(), 3001, 1001)
+	if err != nil {
+		t.Fatalf("DeleteByRoomAndUser unexpected err: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("rowsAffected = %d, want 0", got)
+	}
+}
+
+// TestRoomMemberRepo_DeleteByRoomAndUser_DBError_Propagates:
+// 任意 DB error → repo 返 (0, error) 透传给 service（service 包成 1009）。
+func TestRoomMemberRepo_DeleteByRoomAndUser_DBError_Propagates(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	wantErr := stderrors.New("synthetic db connection error during DELETE")
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM `room_members` WHERE room_id = ? AND user_id = ?")).
+		WithArgs(uint64(3001), uint64(1001)).
+		WillReturnError(wantErr)
+
+	got, err := repo.DeleteByRoomAndUser(context.Background(), 3001, 1001)
+	if got != 0 {
+		t.Errorf("rowsAffected = %d, want 0 on error", got)
+	}
+	if !stderrors.Is(err, wantErr) {
+		t.Errorf("err = %v, want wantErr", err)
+	}
+}

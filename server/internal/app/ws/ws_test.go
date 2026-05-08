@@ -74,6 +74,13 @@ func (s *stubRoomMemberRepo) CountByRoomID(ctx context.Context, roomID uint64) (
 	return 0, nil
 }
 
+// DeleteByRoomAndUser 兜底（Story 11.5 给 RoomMemberRepo interface 加
+// DeleteByRoomAndUser 方法后编译需要；ws 路径 stub 测试不调本方法 —— ws gateway
+// 只读 room 状态，删除由 HTTP service 层负责）。
+func (s *stubRoomMemberRepo) DeleteByRoomAndUser(ctx context.Context, roomID, userID uint64) (int64, error) {
+	return 0, nil
+}
+
 // newSigner 构造测试用 signer（与 middleware/auth_test 同模式）。
 func newSigner(t *testing.T) *auth.Signer {
 	t.Helper()

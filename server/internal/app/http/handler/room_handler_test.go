@@ -19,10 +19,11 @@ import (
 )
 
 // stubRoomService 是 service.RoomService 的测试 stub；
-// 通过 createRoomFn / joinRoomFn 字段让每个 case 自定义返回。
+// 通过 createRoomFn / joinRoomFn / leaveRoomFn 字段让每个 case 自定义返回。
 type stubRoomService struct {
 	createRoomFn func(ctx context.Context, in service.CreateRoomInput) (*service.CreateRoomOutput, error)
 	joinRoomFn   func(ctx context.Context, in service.JoinRoomInput) (*service.JoinRoomOutput, error)
+	leaveRoomFn  func(ctx context.Context, in service.LeaveRoomInput) (*service.LeaveRoomOutput, error)
 }
 
 func (s *stubRoomService) CreateRoom(ctx context.Context, in service.CreateRoomInput) (*service.CreateRoomOutput, error) {
@@ -37,6 +38,13 @@ func (s *stubRoomService) JoinRoom(ctx context.Context, in service.JoinRoomInput
 		panic("stubRoomService.JoinRoom not configured")
 	}
 	return s.joinRoomFn(ctx, in)
+}
+
+func (s *stubRoomService) LeaveRoom(ctx context.Context, in service.LeaveRoomInput) (*service.LeaveRoomOutput, error) {
+	if s.leaveRoomFn == nil {
+		panic("stubRoomService.LeaveRoom not configured")
+	}
+	return s.leaveRoomFn(ctx, in)
 }
 
 // newRoomHandlerRouter 构造一个挂上 ErrorMappingMiddleware + RoomHandler 的 router。
@@ -61,6 +69,8 @@ func newRoomHandlerRouter(svc service.RoomService, userID uint64) *gin.Engine {
 	r.POST("/api/v1/rooms", roomHandler.CreateRoom)
 	// Story 11.4 加：POST /api/v1/rooms/:roomId/join
 	r.POST("/api/v1/rooms/:roomId/join", roomHandler.JoinRoom)
+	// Story 11.5 加：POST /api/v1/rooms/:roomId/leave
+	r.POST("/api/v1/rooms/:roomId/leave", roomHandler.LeaveRoom)
 	return r
 }
 
@@ -484,6 +494,210 @@ func TestRoomHandler_JoinRoom_NoUserIDInContext_Returns1009(t *testing.T) {
 	r := newRoomHandlerRouter(svc, 0)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/3001/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrServiceBusy {
+		t.Errorf("envelope.code = %d, want %d", env.Code, apperror.ErrServiceBusy)
+	}
+}
+
+// ============================================================
+// Story 11.5 单测 case：LeaveRoom handler（≥6 case）
+// ============================================================
+
+// TestRoomHandler_LeaveRoom_Success_Returns0WithLeft:
+// stub service 返 LeaveRoomOutput → handler 翻译为 V1 §10.5 钦定 wire DTO。
+//
+// **关键 assert**：
+//   - HTTP status = 200
+//   - envelope.code = 0
+//   - data.roomId 是 string（V1 §2.5 BIGINT 字符串化）
+//   - data.left 是 bool 且为 true
+func TestRoomHandler_LeaveRoom_Success_Returns0WithLeft(t *testing.T) {
+	svc := &stubRoomService{
+		leaveRoomFn: func(ctx context.Context, in service.LeaveRoomInput) (*service.LeaveRoomOutput, error) {
+			if in.UserID != 1001 {
+				t.Errorf("svc.UserID = %d, want 1001", in.UserID)
+			}
+			if in.RoomID != 3001 {
+				t.Errorf("svc.RoomID = %d, want 3001", in.RoomID)
+			}
+			return &service.LeaveRoomOutput{RoomID: 3001, Left: true}, nil
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1001)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/3001/leave", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != 0 {
+		t.Errorf("envelope.code = %d, want 0", env.Code)
+	}
+	data, ok := env.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("envelope.data not object: %T", env.Data)
+	}
+	if data["roomId"] != "3001" {
+		t.Errorf("data.roomId = %v, want \"3001\" (string)", data["roomId"])
+	}
+	left, ok := data["left"].(bool)
+	if !ok {
+		t.Errorf("data.left not bool: %T", data["left"])
+	}
+	if !left {
+		t.Errorf("data.left = false, want true")
+	}
+}
+
+// TestRoomHandler_LeaveRoom_UserNotInRoom_Returns6004:
+// service 返 *AppError{Code:6004} → handler 透传 → envelope.code=6004。
+func TestRoomHandler_LeaveRoom_UserNotInRoom_Returns6004(t *testing.T) {
+	svc := &stubRoomService{
+		leaveRoomFn: func(ctx context.Context, in service.LeaveRoomInput) (*service.LeaveRoomOutput, error) {
+			return nil, apperror.New(apperror.ErrUserNotInRoom, apperror.DefaultMessages[apperror.ErrUserNotInRoom])
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1001)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/3001/leave", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 6004; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrUserNotInRoom {
+		t.Errorf("envelope.code = %d, want %d (ErrUserNotInRoom 6004)", env.Code, apperror.ErrUserNotInRoom)
+	}
+}
+
+// TestRoomHandler_LeaveRoom_ServiceBusy_Returns1009:
+// service 返 *AppError{Code:1009} → envelope.code=1009 + HTTP 500。
+func TestRoomHandler_LeaveRoom_ServiceBusy_Returns1009(t *testing.T) {
+	wantCause := stderrors.New("simulated DB outage")
+	svc := &stubRoomService{
+		leaveRoomFn: func(ctx context.Context, in service.LeaveRoomInput) (*service.LeaveRoomOutput, error) {
+			return nil, apperror.Wrap(wantCause, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1001)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/3001/leave", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 for 1009; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrServiceBusy {
+		t.Errorf("envelope.code = %d, want %d", env.Code, apperror.ErrServiceBusy)
+	}
+}
+
+// TestRoomHandler_LeaveRoom_InvalidRoomIDPath_Returns1002:
+// path 含非数字 roomId → handler ParseUint 失败 → envelope.code=1002 + service 未调。
+func TestRoomHandler_LeaveRoom_InvalidRoomIDPath_Returns1002(t *testing.T) {
+	svc := &stubRoomService{
+		leaveRoomFn: func(ctx context.Context, in service.LeaveRoomInput) (*service.LeaveRoomOutput, error) {
+			t.Errorf("svc.LeaveRoom 不应被调用（path 校验已失败）")
+			return nil, nil
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1001)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/abc/leave", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 1002; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrInvalidParam {
+		t.Errorf("envelope.code = %d, want %d (ErrInvalidParam 1002)", env.Code, apperror.ErrInvalidParam)
+	}
+}
+
+// TestRoomHandler_LeaveRoom_RoomIDTooLong_Returns1002:
+// path 长度 > 20 → handler length 校验失败 → envelope.code=1002。
+func TestRoomHandler_LeaveRoom_RoomIDTooLong_Returns1002(t *testing.T) {
+	svc := &stubRoomService{
+		leaveRoomFn: func(ctx context.Context, in service.LeaveRoomInput) (*service.LeaveRoomOutput, error) {
+			t.Errorf("svc.LeaveRoom 不应被调用（length 校验已失败）")
+			return nil, nil
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1001)
+
+	// 21 位数字
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/123456789012345678901/leave", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 1002; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrInvalidParam {
+		t.Errorf("envelope.code = %d, want %d (ErrInvalidParam 1002)", env.Code, apperror.ErrInvalidParam)
+	}
+}
+
+// TestRoomHandler_LeaveRoom_RoomIDZero_Returns1002:
+// path = "0" → ParseUint 成功但 roomID == 0 → 防御性返 1002（业务上 ID 必为正）。
+func TestRoomHandler_LeaveRoom_RoomIDZero_Returns1002(t *testing.T) {
+	svc := &stubRoomService{
+		leaveRoomFn: func(ctx context.Context, in service.LeaveRoomInput) (*service.LeaveRoomOutput, error) {
+			t.Errorf("svc.LeaveRoom 不应被调用（roomID > 0 校验已失败）")
+			return nil, nil
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1001)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/0/leave", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 1002; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrInvalidParam {
+		t.Errorf("envelope.code = %d, want %d", env.Code, apperror.ErrInvalidParam)
+	}
+}
+
+// TestRoomHandler_LeaveRoom_NoUserIDInContext_Returns1009:
+// 模拟 c.Keys 缺 userID → envelope.code=1009。
+func TestRoomHandler_LeaveRoom_NoUserIDInContext_Returns1009(t *testing.T) {
+	svc := &stubRoomService{
+		leaveRoomFn: func(ctx context.Context, in service.LeaveRoomInput) (*service.LeaveRoomOutput, error) {
+			t.Errorf("svc.LeaveRoom 不应被调用（c.Keys 缺 userID 已被 handler 兜底拦截）")
+			return nil, nil
+		},
+	}
+	r := newRoomHandlerRouter(svc, 0)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/3001/leave", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)

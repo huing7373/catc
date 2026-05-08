@@ -17,8 +17,11 @@ import (
 // room_service_constants.go）。
 const (
 	// roomStatusActive: rooms.status 1=active（数据库设计 §6.12 钦定枚举）。
-	// Story 11.5 leave 时如房间空 → status=2 closed（不在本 story 落地）。
 	roomStatusActive = 1
+	// roomStatusClosed: rooms.status 2=closed（数据库设计 §6.12 钦定枚举；Story 11.5 引入）。
+	// V1 §10.5 钦定"最后一人离开 → status=2 closed"路径写入；rooms.status 严格单调
+	// （1 → 2，无回退路径），节点 4 阶段无"重启房间"接口。
+	roomStatusClosed = 2
 	// roomMaxMembersDef: rooms.max_members 节点 4 阶段固定 4（数据库设计 §5.13 +
 	// V1 §10.1 钦定；TINYINT UNSIGNED）。Future 节点 8 / 9 / 10 阶段如需动态扩容，
 	// 改为从 config 读取再下推 service。
@@ -38,6 +41,11 @@ const (
 var (
 	errRoomInvalidStateInternal = stderrors.New("room_service: room invalid state (status != active)")
 	errRoomFullInternal         = stderrors.New("room_service: room full (count >= max_members)")
+	// errLeaverNotInRoomInternal Story 11.5 引入：让 fn 内部把"步骤 2b DELETE
+	// RowsAffected==0"与"DB 异常"分流，外层 errors.Is 翻译为 6004 ErrUserNotInRoom。
+	// 与 errRoomInvalidStateInternal / errRoomFullInternal 同模式 —— 用未导出哨兵
+	// 让 service 包内部翻译，避免外层包 errors.Is 误用。
+	errLeaverNotInRoomInternal = stderrors.New("room_service: leaver not in room (DELETE rows_affected == 0)")
 )
 
 // CreateRoomInput 是 RoomService.CreateRoom 的输入 DTO（service 层 DTO，**不**是
@@ -75,6 +83,26 @@ type JoinRoomInput struct {
 type JoinRoomOutput struct {
 	RoomID uint64 // 同 input.RoomID（V1 §10.4 钦定回带方便 client 校验）
 	Joined bool   // 必为 true（V1 §10.4 钦定固定值，失败路径返业务码而非 joined: false）
+}
+
+// LeaveRoomInput 是 RoomService.LeaveRoom 的输入 DTO（Story 11.5 引入）。
+// caller 身份由 handler 从 auth middleware 注入的 c.Keys 取 userID 后填入；
+// RoomID 由 handler 从 path 参数 ":roomId" 解析（V1 §10.5 钦定 BIGINT 字符串化 +
+// 1 ≤ length ≤ 20 字符；handler 层失败时返 1002，不会调到 service）。
+type LeaveRoomInput struct {
+	UserID uint64 // 当前 caller user.id
+	RoomID uint64 // 目标 room.id（来自 path ":roomId"）
+}
+
+// LeaveRoomOutput 是 RoomService.LeaveRoom 的输出 DTO（Story 11.5 引入）；handler
+// 翻译成 V1 §10.5 钦定的 wire DTO（roomId BIGINT 字符串化 + left 固定 true）。
+//
+// **响应中不暴露 "房间是否已 closed" 字段**（V1 §10.5 行 1587 钦定）—— client 不直接
+// 感知房间状态变化，仅 left=true 表示当前 user 已离开；房间状态变化是 server 内部
+// 副作用，**不**对外暴露（避免 client 围绕"我是否是最后一人"做特殊 UX 分支）。
+type LeaveRoomOutput struct {
+	RoomID uint64 // 同 input.RoomID（V1 §10.5 钦定回带方便 client 校验）
+	Left   bool   // 必为 true（V1 §10.5 钦定固定值，失败路径返业务码而非 left: false）
 }
 
 // RoomService 是 /api/v1/rooms 系列 handler 的依赖 interface（便于 handler 单测 mock）。
@@ -127,6 +155,44 @@ type RoomService interface {
 	// **broadcast member.joined 由 Story 11.8 实装**：本 story 事务 commit 成功后
 	// 直接返回；11.8 在 commit 与 return 之间插入 BroadcastToRoom 调用。
 	JoinRoom(ctx context.Context, in JoinRoomInput) (*JoinRoomOutput, error)
+
+	// LeaveRoom: 退出当前房间（事务；Story 11.5 引入）。
+	//
+	// 流程（详见 V1 §10.5 服务端逻辑 + 数据库设计 §8.7 钦定）：
+	//   1. 预检 user.current_room_id：与 input.RoomID 不一致（含 nil）→ 立即返回 6004，
+	//      不开事务
+	//   2. 开事务（txMgr.WithTx）：
+	//      a. SELECT rooms WHERE id = ? FOR UPDATE → 找不到 → 1009（数据不一致兜底，
+	//         不对外暴露 6001 —— V1 §10.5 行 1597 钦定）
+	//      b. DELETE room_members WHERE room_id = ? AND user_id = ?；rowsAffected == 0
+	//         → 回滚 + 6004（同一 user 并发两次 leave 输家兜底）
+	//      c. UPDATE users.current_room_id = NULL（首次启用 nil 入参路径）
+	//      d. SELECT COUNT(*) FROM room_members WHERE room_id = ? → 剩余 0 → 步骤 e；
+	//         否则跳过步骤 e
+	//      e. UPDATE rooms.status = 2 closed（仅最后一人离开路径执行）
+	//   3. commit + 返回 LeaveRoomOutput{RoomID, Left: true}
+	//
+	// 错误码触发顺序（V1 §10.5 钦定）：
+	//   - 步骤 1 → 6004（预检：current_room_id != roomId 含 nil）
+	//   - 步骤 2a → 1009（数据不一致兜底；**不**对外暴露 6001）
+	//   - 步骤 2b → 6004（DELETE RowsAffected == 0 兜底；与预检 6004 message / errorCode 完全等价）
+	//   - 任何 DB 异常 → 1009
+	//
+	// **6004 双路径必须等价**（V1 §10.5 行 1601 钦定）：预检路径（步骤 1）+ DB 兜底
+	// 路径（步骤 2b）都返 apperror.New(ErrUserNotInRoom, ...)，handler 端响应 envelope
+	// 完全一致 —— client **不**应区分这三个子场景（含"用户不在任何房间" + "用户在
+	// 其他房间" + "并发两次 leave 输家"，client 不区分）。
+	//
+	// **broadcast member.left + close 4007 unregister leaver Session 由 Story 11.8 实装**：
+	// 本 story 实装层 commit 成功后**直接 return**，**不**调任何 WS broadcast / 不动
+	// SessionManager；Story 11.8 review 时在 return 前按 V1 §10.5 步骤 7-8 顺序（r13
+	// 锁定）插入：
+	//   1. close 4007 + unregister leaver Session（V1 §10.5 步骤 7）
+	//   2. BroadcastToRoom(roomID, member.left)（V1 §10.5 步骤 8）
+	//
+	// 顺序由 V1 §10.5 r13 钦定 —— BroadcastToRoom primitive 不带 excludeUserID 参数，
+	// 先 close + unregister 后 broadcast 让 fanout 列表自然不含 leaver。
+	LeaveRoom(ctx context.Context, in LeaveRoomInput) (*LeaveRoomOutput, error)
 }
 
 // roomServiceImpl 是 RoomService 的默认实装。
@@ -349,5 +415,150 @@ func (s *roomServiceImpl) JoinRoom(ctx context.Context, in JoinRoomInput) (*Join
 	return &JoinRoomOutput{
 		RoomID: in.RoomID,
 		Joined: true,
+	}, nil
+}
+
+// LeaveRoom 实装严格按 V1 §10.5 + 数据库设计 §8.7 钦定的事务边界（Story 11.5 引入）：
+//
+//	步骤 1（事务外）：FindByID + 检查 user.CurrentRoomID == &input.RoomID → 否则预检 6004
+//	步骤 2（事务内 5 步）：
+//	  2a. roomRepo.FindByIDForUpdate（SELECT ... FOR UPDATE）→ 找不到 → 1009
+//	  2b. roomMemberRepo.DeleteByRoomAndUser → rowsAffected == 0 → 回滚 + 6004 兜底
+//	  2c. userRepo.UpdateCurrentRoomID(userID, nil)（set NULL）
+//	  2d. roomMemberRepo.CountByRoomID → remaining
+//	  2e. if remaining == 0 → roomRepo.UpdateStatus(roomID, 2 closed)
+//	步骤 3（事务后）：commit / rollback；commit 成功 → 返回 LeaveRoomOutput；
+//	  rollback 后按 err 类型分流 6004 / 1009
+//
+// **错误码触发顺序锁定**（V1 §10.5 钦定）：步骤 1 → 6004（预检）；2a → 1009；
+// 2b → 6004（DELETE RowsAffected == 0 兜底）；任何 DB 异常 → 1009。**不**对外
+// 暴露 6001 / 6002 / 6003 / 6005（V1 §10.5 行 1599 钦定）。
+//
+// **6004 双路径必须等价**（V1 §10.5 行 1601 钦定）：预检路径（步骤 1）+ DB 兜底路径
+// （步骤 2b）都返 apperror.New(ErrUserNotInRoom, ...)，handler 端响应 envelope
+// 完全一致。
+//
+// **ctx 用法**（ADR-0007 §2.4）：fn 内全部 5 个 repo 调用必须用 txCtx 而非外层
+// ctx —— 用错 ctx 会绕过 tx 走 db pool 新连接，FOR UPDATE 锁立即释放，并发保护
+// 失效，r9 cross-tx race 重新出现。
+//
+// **SECURITY-DEFER (Story 11.8 钦定范围)**：broadcast `member.left` + close 4007
+// unregister leaver Session 由 **Story 11.8 实装**，本 story 严守范围红线**不**调
+// 任何 WS primitive（不动 SessionManager / BroadcastToRoom）。post-commit 钩子的
+// 详细 trade-off + 当前 11.5↔11.8 窗口的影响范围（leaver Session 仍 registered →
+// SessionManager.ListSessionsByRoomID / BroadcastToRoom / presence 仍把 leaver 当
+// active member 直到心跳超时被动清理）见**函数末尾 (4) 段 SECURITY-DEFER 警告块**
+// 与 lesson `docs/lessons/2026-05-09-leave-room-ws-session-cleanup-defer-to-11-8-11-5-r1.md`。
+// codex review r1 (2026-05-08) 把这条 flag 为 [P1]；review 工程上 correct，但
+// 跨 story scope，按 spec 钦定 defer 至 11.8。
+func (s *roomServiceImpl) LeaveRoom(ctx context.Context, in LeaveRoomInput) (*LeaveRoomOutput, error) {
+	// (1) 预检 user.current_room_id（事务外，普通连接池查询）
+	user, err := s.userRepo.FindByID(ctx, in.UserID)
+	if err != nil {
+		return nil, apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+	}
+	// 与 input.RoomID 不一致（含 user.CurrentRoomID == nil）→ 6004 预检路径
+	if user.CurrentRoomID == nil || *user.CurrentRoomID != in.RoomID {
+		return nil, apperror.New(apperror.ErrUserNotInRoom, apperror.DefaultMessages[apperror.ErrUserNotInRoom])
+	}
+
+	// (2) 开事务（数据库设计 §8.7 + V1 §10.5 钦定）
+	err = s.txMgr.WithTx(ctx, func(txCtx context.Context) error {
+		// (2a) SELECT rooms WHERE id = ? FOR UPDATE → 找不到 → 1009 数据不一致兜底
+		if _, err := s.roomRepo.FindByIDForUpdate(txCtx, in.RoomID); err != nil {
+			return err // 含 ErrRoomNotFound 哨兵 / DB raw error；service 层兜底翻译为 1009
+		}
+
+		// (2b) DELETE room_members WHERE room_id = ? AND user_id = ?；rowsAffected == 0 → 6004 兜底
+		rowsAffected, err := s.roomMemberRepo.DeleteByRoomAndUser(txCtx, in.RoomID, in.UserID)
+		if err != nil {
+			return err
+		}
+		if rowsAffected == 0 {
+			return errLeaverNotInRoomInternal
+		}
+
+		// (2c) UPDATE users.current_room_id = NULL（**首次启用 nil 入参路径**）
+		if err := s.userRepo.UpdateCurrentRoomID(txCtx, in.UserID, nil); err != nil {
+			return err
+		}
+
+		// (2d) SELECT COUNT(*) FROM room_members WHERE room_id = ? → remaining
+		remaining, err := s.roomMemberRepo.CountByRoomID(txCtx, in.RoomID)
+		if err != nil {
+			return err
+		}
+
+		// (2e) 最后一人离开 → UPDATE rooms.status = 2 closed
+		if remaining == 0 {
+			if err := s.roomRepo.UpdateStatus(txCtx, in.RoomID, roomStatusClosed); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		// (3) 业务码分流（**errors.Is 顺序关键**：6004 必须先于 generic 1009 判定）。
+		if stderrors.Is(err, errLeaverNotInRoomInternal) {
+			return nil, apperror.New(apperror.ErrUserNotInRoom, apperror.DefaultMessages[apperror.ErrUserNotInRoom])
+		}
+		// **关键**：mysql.ErrRoomNotFound（步骤 2a SELECT FOR UPDATE 找不到 rooms 行）
+		// 走 **1009** 路径而**不是** 6001 —— V1 §10.5 行 1597 / 行 1599 钦定 leave
+		// 接口**不**对外暴露 6001（理论不会发生，因为步骤 1 已通过意味着 caller 在该
+		// 房间，rooms 行必存在；race 兜底按 DB 异常处理走 1009）。直接走 generic
+		// ErrServiceBusy 兜底分支（不需要单独识别 mysql.ErrRoomNotFound）。
+		return nil, apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+	}
+
+	// (4) 事务 commit 成功 → 返回。
+	//
+	// ============================================================================
+	// SECURITY-DEFER (Story 11.8 钦定范围 — 11.5 严守范围红线，刻意不实装)
+	// ============================================================================
+	//
+	// **当前现状**（本 story 11.5 done 后到 11.8 done 之前的窗口）：
+	//   LeaveRoom 事务 commit 后**直接 return**，**不**触碰 SessionManager。
+	//   若 leaver 此刻仍持有 `/ws/rooms/:roomId` WS 连接（典型场景：iOS 端 client
+	//   先发 HTTP leave 再自行 close WS，但中间存在 ms 级窗口；或 client 实装层
+	//   依赖 server close 4007 才退订），其 Session 仍 registered 在 SessionManager
+	//   的 room → sessions 索引里。
+	//
+	// **影响范围**（11.8 实装前）：
+	//   - SessionManager.ListSessionsByRoomID(roomID) 在 leave 事务 commit 后仍把
+	//     leaver Session 算作该房间的 active member；
+	//   - BroadcastToRoom(roomID, ...)（Story 10.5 primitive）fanout 列表仍含 leaver，
+	//     leaver 在 close 4007 / 心跳超时（默认 60s）窗口内会继续收到本 roomId 的
+	//     `member.joined` / 后续 epic 广播（如 14.x `pet.state.changed` /
+	//     17.x `emoji.received`），违反 V1 §10.5 行 1544 "HTTP leave 后立即与房间
+	//     WS 解耦" 语义；
+	//   - presence renewal（如 Story 11.x heartbeat tick）仍把 leaver 当作该房间在
+	//     线成员处理，直到 socket 自然断开 / 心跳超时框架被动清理。
+	//
+	// **11.8 必装内容（V1 §10.5 钦定）**：
+	//   (a) 步骤 7：close 4007 + unregister leaver Session —— 从 SessionManager
+	//       撤销 leaver 在该 roomID 的 Session + close underlying WebSocket
+	//       (close code = 4007, reason = "left room via HTTP")；
+	//   (b) 步骤 8：BroadcastToRoom(roomID, {type: "member.left", ...}) —— payload
+	//       字段表见 §12.3 `### 成员离开`；
+	//   (c) 顺序由 V1 §10.5 r13 钦定：**先 close + unregister，后 broadcast**，
+	//       让 fanout 时 ListSessionsByRoomID 返回列表自然不含 leaver Session
+	//       —— 无需 BroadcastToRoom primitive 加 excludeUserID 参数。
+	//
+	// **11.5 与 11.8 之间窗口的暴露面**：节点 4 demo 验收（epic 13）触发 epic 11
+	// 全 done 才会出现该窗口在 prod 出现的可能；epic 11 中间不存在 prod release
+	// 节奏暴露此问题（11.6 / 11.7 / 11.8 仍在同一节点内连续推进）。
+	//
+	// **codex review r1 (2026-05-08) flag 此问题为 [P1] 状态不一致** —— review 工程
+	// 上 correct，但跨 story scope，本 story spec
+	// (`_bmad-output/implementation-artifacts/11-5-退出房间事务.md` 行 53-54 / 251-259 /
+	// 740 / 767 / 777) 严守 "本 story 不调任何 WS primitive" 红线 ——
+	// 转 **defer-to-11.8**。详细 trade-off / cross-story traceability 见 lesson
+	// `docs/lessons/2026-05-09-leave-room-ws-session-cleanup-defer-to-11-8-11-5-r1.md`。
+	// ============================================================================
+	return &LeaveRoomOutput{
+		RoomID: in.RoomID,
+		Left:   true,
 	}, nil
 }

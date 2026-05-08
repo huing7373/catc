@@ -138,7 +138,8 @@ func roomIntegrationTestRouter(roomSvc service.RoomService, signer *auth.Signer)
 	api := r.Group("/api/v1")
 	authedGroup := api.Group("", middleware.Auth(signer))
 	authedGroup.POST("/rooms", roomHandler.CreateRoom)
-	authedGroup.POST("/rooms/:roomId/join", roomHandler.JoinRoom) // Story 11.4 加
+	authedGroup.POST("/rooms/:roomId/join", roomHandler.JoinRoom)   // Story 11.4 加
+	authedGroup.POST("/rooms/:roomId/leave", roomHandler.LeaveRoom) // Story 11.5 加
 	return r
 }
 
@@ -518,6 +519,147 @@ func TestRoomHandlerIntegration_JoinRoom_InvalidRoomIDPath_Returns1002(t *testin
 	tokenB := roomIntegrationTestSignToken(t, signer, userB)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/abc/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tokenB)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 1002; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrInvalidParam {
+		t.Errorf("envelope.code = %d, want %d (ErrInvalidParam 1002)", env.Code, apperror.ErrInvalidParam)
+	}
+}
+
+// ============================================================
+// Story 11.5 端到端集成测试 case
+// ============================================================
+
+// AC12.9: HappyPath — A 创建房间 → A leave → envelope code=0 + DB 校验
+// status=2 closed + current_room_id=NULL（A 是最后一人）
+func TestRoomHandlerIntegration_LeaveRoom_HappyPath(t *testing.T) {
+	router, sqlDB, signer, cleanup := buildRoomHandlerIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	roomIntegrationTestInsertUser(t, sqlDB, userA, "uid-leave-a", "A")
+	tokenA := roomIntegrationTestSignToken(t, signer, userA)
+
+	// 先创建房间
+	reqCreate := httptest.NewRequest(http.MethodPost, "/api/v1/rooms", strings.NewReader(`{}`))
+	reqCreate.Header.Set("Content-Type", "application/json")
+	reqCreate.Header.Set("Authorization", "Bearer "+tokenA)
+	wCreate := httptest.NewRecorder()
+	router.ServeHTTP(wCreate, reqCreate)
+	if wCreate.Code != http.StatusOK {
+		t.Fatalf("create status = %d, want 200; body=%s", wCreate.Code, wCreate.Body.String())
+	}
+	envCreate := decodeRoomIntegrationEnvelope(t, wCreate.Body.Bytes())
+	createData := envCreate.Data.(map[string]any)
+	roomData := createData["room"].(map[string]any)
+	roomIDStr := roomData["id"].(string)
+
+	// A leave
+	reqLeave := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+roomIDStr+"/leave", strings.NewReader(`{}`))
+	reqLeave.Header.Set("Content-Type", "application/json")
+	reqLeave.Header.Set("Authorization", "Bearer "+tokenA)
+	wLeave := httptest.NewRecorder()
+	router.ServeHTTP(wLeave, reqLeave)
+
+	if wLeave.Code != http.StatusOK {
+		t.Fatalf("leave status = %d, want 200; body=%s", wLeave.Code, wLeave.Body.String())
+	}
+	envLeave := decodeRoomIntegrationEnvelope(t, wLeave.Body.Bytes())
+	if envLeave.Code != 0 {
+		t.Errorf("envelope.code = %d, want 0", envLeave.Code)
+	}
+	leaveData, ok := envLeave.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("envelope.data not object: %T", envLeave.Data)
+	}
+	if leaveData["roomId"] != roomIDStr {
+		t.Errorf("data.roomId = %v, want %q", leaveData["roomId"], roomIDStr)
+	}
+	left, ok := leaveData["left"].(bool)
+	if !ok {
+		t.Errorf("data.left not bool: %T", leaveData["left"])
+	}
+	if !left {
+		t.Errorf("data.left = false, want true")
+	}
+
+	// DB 校验：rooms.status=2 closed（A 是最后一人）+ users.current_room_id=NULL
+	var roomStatus int8
+	if err := sqlDB.QueryRow("SELECT status FROM rooms WHERE id = ?", roomIDStr).Scan(&roomStatus); err != nil {
+		t.Fatalf("query rooms.status: %v", err)
+	}
+	if roomStatus != 2 {
+		t.Errorf("rooms.status = %d, want 2 (closed)", roomStatus)
+	}
+	var currentRoomID sql.NullInt64
+	if err := sqlDB.QueryRow("SELECT current_room_id FROM users WHERE id = ?", userA).Scan(&currentRoomID); err != nil {
+		t.Fatalf("query users.current_room_id: %v", err)
+	}
+	if currentRoomID.Valid {
+		t.Errorf("users.current_room_id = %d, want NULL", currentRoomID.Int64)
+	}
+}
+
+// AC12.10: 无 Authorization header → auth middleware 兜底 1001
+func TestRoomHandlerIntegration_LeaveRoom_NoToken_Returns1001(t *testing.T) {
+	router, _, _, cleanup := buildRoomHandlerIntegration(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/3001/leave", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 1001; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrUnauthorized {
+		t.Errorf("envelope.code = %d, want %d (ErrUnauthorized 1001)", env.Code, apperror.ErrUnauthorized)
+	}
+}
+
+// AC12.11: B（不在任何房间）调 POST /api/v1/rooms/3001/leave → envelope.code=6004
+func TestRoomHandlerIntegration_LeaveRoom_UserNotInRoom_Returns6004(t *testing.T) {
+	router, sqlDB, signer, cleanup := buildRoomHandlerIntegration(t)
+	defer cleanup()
+
+	const userB = uint64(1002)
+	roomIntegrationTestInsertUser(t, sqlDB, userB, "uid-leave-b", "B")
+	tokenB := roomIntegrationTestSignToken(t, signer, userB)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/3001/leave", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tokenB)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 6004; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrUserNotInRoom {
+		t.Errorf("envelope.code = %d, want %d (ErrUserNotInRoom 6004)", env.Code, apperror.ErrUserNotInRoom)
+	}
+}
+
+// AC12.12: path = "abc" → handler ParseUint 失败 → envelope.code=1002
+func TestRoomHandlerIntegration_LeaveRoom_InvalidRoomIDPath_Returns1002(t *testing.T) {
+	router, sqlDB, signer, cleanup := buildRoomHandlerIntegration(t)
+	defer cleanup()
+
+	const userB = uint64(1002)
+	roomIntegrationTestInsertUser(t, sqlDB, userB, "uid-leave-bb", "B")
+	tokenB := roomIntegrationTestSignToken(t, signer, userB)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/abc/leave", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+tokenB)
 	w := httptest.NewRecorder()

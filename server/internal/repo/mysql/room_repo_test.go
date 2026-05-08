@@ -137,3 +137,53 @@ func TestRoomRepo_FindByIDForUpdate_DBError_Propagates(t *testing.T) {
 		t.Errorf("err = %v, want wantErr (raw DB error 应原样透传)", err)
 	}
 }
+
+// ============================================================
+// Story 11.5 新增：RoomRepo.UpdateStatus 路径覆盖
+// ============================================================
+
+// TestRoomRepo_UpdateStatus_Happy_RowsAffected1:
+// UPDATE rooms SET status = ? WHERE id = ? → sqlmock 返 RowsAffected=1 → repo 返 nil。
+func TestRoomRepo_UpdateStatus_Happy_RowsAffected1(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomRepo(gormDB)
+
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE `rooms` SET `status`")).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := repo.UpdateStatus(context.Background(), 3001, 2); err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
+	}
+}
+
+// TestRoomRepo_UpdateStatus_DBError_Propagates:
+// 任意 DB error → repo 透传 raw error（service 包成 1009）。
+func TestRoomRepo_UpdateStatus_DBError_Propagates(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomRepo(gormDB)
+
+	wantErr := stderrors.New("synthetic db connection error during UpdateStatus")
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE `rooms` SET `status`")).
+		WillReturnError(wantErr)
+
+	err := repo.UpdateStatus(context.Background(), 3001, 2)
+	if !stderrors.Is(err, wantErr) {
+		t.Errorf("err = %v, want wantErr", err)
+	}
+}
+
+// TestRoomRepo_UpdateStatus_RowsAffected0_NoError:
+// 0 行受影响（理论不会，因为调用方先 SELECT FOR UPDATE 已确认行存在）→ repo 返 nil。
+// **不**视为异常 —— UPDATE 无业务可识别失败模式，rows-affected 兜底由 service 层判定
+// （与 user_repo.UpdateNickname 同模式）。
+func TestRoomRepo_UpdateStatus_RowsAffected0_NoError(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomRepo(gormDB)
+
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE `rooms` SET `status`")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if err := repo.UpdateStatus(context.Background(), 3001, 2); err != nil {
+		t.Errorf("UpdateStatus = %v, want nil (RowsAffected=0 不视为异常)", err)
+	}
+}

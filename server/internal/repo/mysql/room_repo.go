@@ -60,6 +60,20 @@ type RoomRepo interface {
 	// 握手期校验，需要排除 closed 房间）：本方法是 join 事务步骤 2a，需要先取行
 	// 再判 status，让 step 2b 能产出明确的 6005 而非笼统的 6001。
 	FindByIDForUpdate(ctx context.Context, roomID uint64) (*Room, error)
+
+	// UpdateStatus 更新 rooms.status 字段（Story 11.5 引入；用于 V1 §10.5 步骤 5
+	// "最后一人离开 → status=2 closed"路径）。
+	//
+	// **必须在事务内调用**（与同事务 SELECT rooms ... FOR UPDATE 步骤一起执行）；
+	// 事务外调用违反 V1 §10.5 步骤 2-5 钦定的串行化路径。
+	//
+	// **不**做 status 转换合法性校验：那是 service 层业务规则（V1 §10.5 钦定 status
+	// 严格单调 1→2 无回退路径；future 若新增 1→1 / 2→1 路径由 service 层判定）。本方法
+	// 是 raw UPDATE，对任何 status int8 输入都执行 SQL —— 滥用风险由 service 层封装
+	// （只有 RoomService.LeaveRoom 步骤 5 调用本方法，调用点单一，review 阶段易守）。
+	//
+	// query 失败 → 返 raw error 透传（service 包成 1009）。
+	UpdateStatus(ctx context.Context, roomID uint64, status int8) error
 }
 
 // roomRepo 是 RoomRepo 的默认实装。
@@ -115,4 +129,30 @@ func (r *roomRepo) FindByIDForUpdate(ctx context.Context, roomID uint64) (*Room,
 		return nil, err
 	}
 	return &room, nil
+}
+
+// UpdateStatus 更新 rooms.status 字段（Story 11.5 引入；用于 V1 §10.5 步骤 5
+// "最后一人离开 → status=2 closed"路径）。
+//
+// **必须在事务内调用**（与同事务 SELECT rooms ... FOR UPDATE 步骤一起执行）；
+// 事务外调用违反 V1 §10.5 步骤 2-5 钦定的串行化路径。
+//
+// **不**做 status 转换合法性校验：那是 service 层业务规则（V1 §10.5 钦定 status
+// 严格单调 1→2 无回退路径；future 若新增 1→1 / 2→1 路径由 service 层判定）。本方法
+// 是 raw UPDATE，对任何 status int8 输入都执行 SQL —— 滥用风险由 service 层封装。
+//
+// GORM autoUpdateTime tag 让 updated_at 自动写当前时间（与 §3.2 ON UPDATE
+// CURRENT_TIMESTAMP(3) 语义一致）。
+//
+// 用 GORM Model(&Room{}).Where(...).Update("status", v) 路径；与
+// user_repo.UpdateNickname 同模式（status 是 int8 永远非 nil，不存在 nil-skip 陷阱，
+// 不需要 map 路径）。
+//
+// query 失败 → 返 raw error 透传（service 包成 1009）。
+func (r *roomRepo) UpdateStatus(ctx context.Context, roomID uint64, status int8) error {
+	db := tx.FromContext(ctx, r.db)
+	return db.WithContext(ctx).
+		Model(&Room{}).
+		Where("id = ?", roomID).
+		Update("status", status).Error
 }

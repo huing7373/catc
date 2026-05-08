@@ -159,6 +159,21 @@ type RoomMemberRepo interface {
 	//
 	// query 失败 → 返 raw error 透传（service 包 1009）。
 	CountByRoomID(ctx context.Context, roomID uint64) (int, error)
+
+	// DeleteByRoomAndUser 按 (room_id, user_id) 双键定位删除单行 room_members
+	// （Story 11.5 引入；用于 V1 §10.5 步骤 3 leave 事务删除 leaver 自己的成员行）。
+	//
+	// **必须在事务内调用**（与同事务 SELECT rooms ... FOR UPDATE 步骤一起执行）；
+	// 事务外调用违反 V1 §10.5 步骤 2-3 钦定的串行化路径 —— FOR UPDATE 锁立即释放，
+	// 跨事务 leave-vs-join race 重新出现。
+	//
+	// 返回 RowsAffected 让 service 层做 6004 兜底分流：
+	//   - == 1：删除成功（happy path）
+	//   - == 0：同一 user 并发两次 leave 输家场景（赢家已先删该行）→ service 层翻译为 6004
+	//   - >  1：理论不可能（room_members 有 UNIQUE(room_id, user_id)，最多 1 行匹配）
+	//
+	// query 失败 → 返 (0, raw error) 透传给 service（service 包成 1009）。
+	DeleteByRoomAndUser(ctx context.Context, roomID, userID uint64) (int64, error)
 }
 
 // roomMemberRepo 是 RoomMemberRepo 的默认实装。
@@ -293,4 +308,34 @@ func (r *roomMemberRepo) CountByRoomID(ctx context.Context, roomID uint64) (int,
 		return 0, err
 	}
 	return int(count), nil
+}
+
+// DeleteByRoomAndUser 按 (room_id, user_id) 双键定位删除单行 room_members（Story 11.5
+// 引入；用于 V1 §10.5 步骤 3 leave 事务删除 leaver 自己的成员行）。
+//
+// **必须在事务内调用**（与同事务 SELECT rooms ... FOR UPDATE 步骤一起执行）；事务外
+// 调用违反 V1 §10.5 步骤 2-3 钦定的串行化路径 —— FOR UPDATE 锁立即释放，跨事务
+// leave-vs-join race 重新出现。
+//
+// 返回 RowsAffected 让 service 层做 6004 兜底分流：
+//   - == 1：删除成功（happy path）
+//   - == 0：同一 user 并发两次 leave 输家场景（赢家已先删该行）→ service 层翻译为 6004
+//   - >  1：理论不可能（room_members 有 UNIQUE(room_id, user_id)，最多 1 行匹配）；
+//     若发生属严重数据脏 —— **service 层兜底视为成功路径**（rowsAffected != 0 即 commit
+//     继续走步骤 4 ~ 6；多删的副作用由 schema UNIQUE 约束兜底，不会发生）
+//
+// 用 GORM Where(...).Delete(&RoomMember{}) 路径生成 DELETE FROM room_members WHERE
+// room_id = ? AND user_id = ?；走 idx_room_id 索引 + uk_room_user 唯一约束高效定位。
+// 不支持软删除（room_members 无 deleted_at 字段）。
+//
+// query 失败 → 返 (0, raw error) 透传给 service（service 包成 1009）。
+func (r *roomMemberRepo) DeleteByRoomAndUser(ctx context.Context, roomID, userID uint64) (int64, error) {
+	db := tx.FromContext(ctx, r.db)
+	result := db.WithContext(ctx).
+		Where("room_id = ? AND user_id = ?", roomID, userID).
+		Delete(&RoomMember{})
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
 }

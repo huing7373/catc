@@ -381,3 +381,10 @@ func (*nilRoomMemberRepo) Create(_ context.Context, _ *mysql.RoomMember) error {
 func (*nilRoomMemberRepo) CountByRoomID(_ context.Context, _ uint64) (int, error) {
 	return 0, nil
 }
+
+// DeleteByRoomAndUser 兜底（Story 11.5 给 RoomMemberRepo interface 加
+// DeleteByRoomAndUser 方法后编译需要；nil-pattern struct 不应被 ws 路径调用 ——
+// gateway 只读 room 状态，写入 / 删除由 Epic 11 HTTP service 层负责）。
+func (*nilRoomMemberRepo) DeleteByRoomAndUser(_ context.Context, _ uint64, _ uint64) (int64, error) {
+	return 0, nil
+}

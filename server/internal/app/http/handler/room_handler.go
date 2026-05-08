@@ -233,3 +233,107 @@ func joinRoomResponseDTO(out *service.JoinRoomOutput) JoinRoomResponseData {
 		Joined: out.Joined,
 	}
 }
+
+// LeaveRoomResponseData 是 V1 §10.5 钦定的 wire DTO（Story 11.5 引入）。
+//
+// **关键**（V1 §2.5 BIGINT 字符串化全局约定）：
+//   - roomId 是 BIGINT → 字符串化（避免 JS Number.MAX_SAFE_INTEGER 精度丢失）
+//   - left 是 bool 字段 → 保 bool（必为 true，V1 §10.5 钦定固定值）
+type LeaveRoomResponseData struct {
+	RoomID string `json:"roomId"` // BIGINT 字符串化
+	Left   bool   `json:"left"`   // 必为 true
+}
+
+// LeaveRoom 处理 POST /api/v1/rooms/:roomId/leave（Story 11.5 引入）。
+//
+// # 流程
+//
+//  1. 解析 path 参数 :roomId（V1 §10.5 钦定 BIGINT 字符串化 + 1 ≤ length ≤ 20）
+//     - length 校验失败 → 1002
+//     - strconv.ParseUint 失败 → 1002（非数字）
+//     - roomID == 0 → 1002（防御性 —— "0" 字面值能 parse 但业务无效）
+//  2. 取 caller userID（auth 中间件已注入到 c.Keys）—— 缺失走 1009 unreachable 兜底
+//  3. **不**做 ShouldBindJSON（V1 §10.5 钦定请求体为空对象 {}）
+//  4. 调 svc.LeaveRoom(ctx, LeaveRoomInput{UserID, RoomID}) —— ctx = c.Request.Context()
+//  5. 成功 → response.Success(c, dto, "ok") + 业务事件 log "room.left"
+//  6. 失败 → c.Error(err) + return（让 ErrorMappingMiddleware 写 envelope）
+//
+// # 错误码
+//
+//   - 1002 (path 参数错误)：handler 直接产出
+//   - 1009 (服务繁忙)：unreachable userID 兜底 + service 层 DB 异常
+//   - 6004 (用户不在房间)：service 层 ErrUserNotInRoom（双路径都走这里：预检 + DELETE 兜底）
+//
+// # ADR-0006 单一 envelope 生产者
+//
+// 本 handler **不**直接调 response.Error 写 envelope —— 一律走 c.Error +
+// return，由 ErrorMappingMiddleware 兜底翻译成 envelope。
+//
+// # 反模式（已避免）
+//
+//   - **不**消费 idempotencyKey header / 字段（V1 §10.5 钦定本接口非幂等）
+//   - **不**触发 WS 广播 / close 4007（V1 §10.5 步骤 7-8 钦定 close + broadcast 由
+//     Story 11.8 实装；本 story handler 严格不调 SessionManager / BroadcastToRoom 等
+//     WS primitive）
+func (h *RoomHandler) LeaveRoom(c *gin.Context) {
+	// 1. 解析 path 参数 :roomId
+	roomIDStr := c.Param("roomId")
+	if l := len(roomIDStr); l < 1 || l > 20 {
+		// V1 §10.5 钦定 1 ≤ length ≤ 20（BIGINT UNSIGNED max = 20 位十进制）
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "roomId 长度非法"))
+		return
+	}
+	roomID, err := strconv.ParseUint(roomIDStr, 10, 64)
+	if err != nil {
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "roomId 非法"))
+		return
+	}
+	if roomID == 0 {
+		// 防御性：路径已限 1 ≤ length 但 "0" 字面值仍能 parse；业务上 roomID 必为正整数
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "roomId 非法"))
+		return
+	}
+
+	// 2. 从 auth 中间件取 userID（与 CreateRoom / JoinRoom 同模式）
+	v, ok := c.Get(middleware.UserIDKey)
+	if !ok {
+		// unreachable: Auth 中间件挂在前；保险兜底走 1009
+		_ = c.Error(apperror.New(apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy]))
+		return
+	}
+	userID, ok := v.(uint64)
+	if !ok {
+		// unreachable: Auth 中间件 c.Set(UserIDKey, claims.UserID) 永远是 uint64
+		_ = c.Error(apperror.New(apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy]))
+		return
+	}
+
+	ctx := c.Request.Context()
+	out, err := h.svc.LeaveRoom(ctx, service.LeaveRoomInput{UserID: userID, RoomID: roomID})
+	if err != nil {
+		_ = c.Error(err) // service 已 wrap *AppError；ErrorMappingMiddleware 写 envelope
+		return
+	}
+
+	// 业务事件 log（与 11.3 room.created / 11.4 room.joined 同模式；msg "room.left" 是
+	// 稳定 audit anchor，让运维聚合 `count(msg=room.left)` 监控房间退出活跃度；
+	// future 11.8 演进时新增的 `member.left.broadcast` 业务事件命名延续此模式）。
+	slog.InfoContext(ctx, "room.left",
+		slog.Uint64("user_id", userID),
+		slog.Uint64("room_id", out.RoomID),
+	)
+
+	response.Success(c, leaveRoomResponseDTO(out), "ok")
+}
+
+// leaveRoomResponseDTO 把 service 输出转成 V1 §10.5 钦定的 wire 格式。
+//
+// 字段映射（与 V1 §10.5 钦定字段表 1:1 对齐）：
+//   - data.roomId = strconv.FormatUint(out.RoomID, 10) // BIGINT → string (§2.5)
+//   - data.left   = out.Left                           // bool (必为 true)
+func leaveRoomResponseDTO(out *service.LeaveRoomOutput) LeaveRoomResponseData {
+	return LeaveRoomResponseData{
+		RoomID: strconv.FormatUint(out.RoomID, 10),
+		Left:   out.Left,
+	}
+}

@@ -117,6 +117,16 @@ func fetchRoomMemberCount(t *testing.T, sqlDB *sql.DB) int64 {
 	return n
 }
 
+// fetchRoomStatus 返指定 room.id 的 status 值；行不存在时 t.Fatalf。
+func fetchRoomStatus(t *testing.T, sqlDB *sql.DB, roomID uint64) int8 {
+	t.Helper()
+	var s int8
+	if err := sqlDB.QueryRow("SELECT status FROM rooms WHERE id = ?", roomID).Scan(&s); err != nil {
+		t.Fatalf("fetchRoomStatus: %v", err)
+	}
+	return s
+}
+
 // ============================================================
 // AC11.1: happy 路径 → 真实 INSERT 3 行（rooms / room_members / users.current_room_id）
 // ============================================================
@@ -608,6 +618,214 @@ func TestRoomServiceIntegration_CreateRoom_RollsBackOnRoomMemberInsertFail(t *te
 	got := fetchUserCurrentRoomID(t, sqlDB, userID)
 	if got != nil {
 		t.Errorf("users.current_room_id = %d, want NULL (事务回滚后应保持 NULL)", *got)
+	}
+}
+
+// ============================================================
+// Story 11.5 集成测试 case：LeaveRoom 真实事务路径（dockertest）
+// ============================================================
+
+// AC11.5-1: A + B 在房间 → A leave → DB room_members 剩 B 一行 + rooms.status 仍 = 1 +
+// A.current_room_id = NULL（epics.md §11.5 钦定 case 1）。
+func TestRoomServiceIntegration_LeaveRoom_NotLastMember_RoomActive(t *testing.T) {
+	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	insertUser(t, sqlDB, userA, "uid-leave-a", "A", "")
+	insertUser(t, sqlDB, userB, "uid-leave-b", "B", "")
+
+	// fixture: A 创建 + B join
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+	roomID := createOut.RoomID
+	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userB, RoomID: roomID}); err != nil {
+		t.Fatalf("JoinRoom (B): %v", err)
+	}
+
+	// A leave
+	out, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userA, RoomID: roomID})
+	if err != nil {
+		t.Fatalf("LeaveRoom (A): %v", err)
+	}
+	if out.RoomID != roomID || !out.Left {
+		t.Errorf("out = %+v, want {RoomID:%d, Left:true}", out, roomID)
+	}
+
+	// DB 校验：room_members 1 行（仅 B）
+	assertCount(t, sqlDB, "room_members WHERE room_id=?",
+		[]any{roomID}, 1, "room_members (only B remains)")
+	assertCount(t, sqlDB, "room_members WHERE room_id=? AND user_id=?",
+		[]any{roomID, userB}, 1, "room_members (B's row)")
+	// rooms.status 仍 1
+	if got := fetchRoomStatus(t, sqlDB, roomID); got != 1 {
+		t.Errorf("rooms.status = %d, want 1 (active 仍剩 B)", got)
+	}
+	// A.current_room_id = NULL
+	if got := fetchUserCurrentRoomID(t, sqlDB, userA); got != nil {
+		t.Errorf("users.current_room_id (A) = %d, want NULL", *got)
+	}
+	// B.current_room_id 仍 = roomID
+	if got := fetchUserCurrentRoomID(t, sqlDB, userB); got == nil || *got != roomID {
+		t.Errorf("users.current_room_id (B) changed; want %d", roomID)
+	}
+}
+
+// AC11.5-2: 最后一人 leave → DB room_members 0 行 + rooms.status = 2 closed +
+// user.current_room_id = NULL（epics.md §11.5 钦定 case 2）。
+func TestRoomServiceIntegration_LeaveRoom_LastMember_RoomClosed(t *testing.T) {
+	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	insertUser(t, sqlDB, userA, "uid-leave-last", "A", "")
+
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+	roomID := createOut.RoomID
+
+	// A leave（最后一人）
+	out, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userA, RoomID: roomID})
+	if err != nil {
+		t.Fatalf("LeaveRoom: %v", err)
+	}
+	if !out.Left {
+		t.Errorf("out.Left = false, want true")
+	}
+
+	// DB 校验
+	assertCount(t, sqlDB, "room_members WHERE room_id=?",
+		[]any{roomID}, 0, "room_members (0 rows after last leaver)")
+	if got := fetchRoomStatus(t, sqlDB, roomID); got != 2 {
+		t.Errorf("rooms.status = %d, want 2 (closed)", got)
+	}
+	if got := fetchUserCurrentRoomID(t, sqlDB, userA); got != nil {
+		t.Errorf("users.current_room_id (A) = %d, want NULL", *got)
+	}
+}
+
+// AC11.5-3: user 不在房间 → 6004 + DB 无变化（含 nil 与不一致两个子场景）。
+func TestRoomServiceIntegration_LeaveRoom_UserNotInRoom_Returns6004(t *testing.T) {
+	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	insertUser(t, sqlDB, userA, "uid-leave-nil", "A", "")
+
+	// 子场景 (a): A 不在任何房间（CurrentRoomID nil）→ 6004
+	_, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userA, RoomID: 99999})
+	if err == nil {
+		t.Fatalf("LeaveRoom returned nil error, want 6004")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrUserNotInRoom {
+		t.Errorf("AppError.Code = %d, want %d (ErrUserNotInRoom 6004)", ae.Code, apperror.ErrUserNotInRoom)
+	}
+
+	// DB 校验：rooms / room_members 无变化
+	assertCount(t, sqlDB, "rooms", nil, 0, "rooms (unchanged)")
+	assertCount(t, sqlDB, "room_members", nil, 0, "room_members (unchanged)")
+}
+
+// AC11.5-4: 重复 leave 同一房间 → 第二次返 6004（V1 §10.5 行 1601 钦定）。
+func TestRoomServiceIntegration_LeaveRoom_DoubleLeave_SecondReturns6004(t *testing.T) {
+	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	insertUser(t, sqlDB, userA, "uid-leave-dup", "A", "")
+
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+	roomID := createOut.RoomID
+
+	// 第一次 leave 成功
+	if _, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userA, RoomID: roomID}); err != nil {
+		t.Fatalf("first LeaveRoom: %v", err)
+	}
+
+	// 第二次 leave → 6004（current_room_id 已 NULL，预检 fail）
+	_, err = svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userA, RoomID: roomID})
+	if err == nil {
+		t.Fatalf("second LeaveRoom returned nil error, want 6004")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrUserNotInRoom {
+		t.Errorf("AppError.Code = %d, want %d (ErrUserNotInRoom 6004 重复 leave)", ae.Code, apperror.ErrUserNotInRoom)
+	}
+}
+
+// AC11.5-5（强烈建议; r9 P1#2 cross-tx race 验证 leave 侧）:
+// fixture：A 在 room R（A 通过 11.3 创建）。
+// 用 goroutine 同时执行：A leave + 另一新 user C join 同 room R。
+// FOR UPDATE 锁串行化 → 最终结果只有两种合法状态：
+//
+//	(a) A leave 先 commit（rooms.status=2 closed）→ C join step 2b 看到 status=2 → 6005
+//	(b) C join 先 commit（room_members 多 1 行）→ A leave 后续：A 不是最后一人 → status=1
+//
+// **不变量**：status=2 必须配 member_count=0；status=1 必须 member_count >= 1。
+func TestRoomServiceIntegration_LeaveRoom_CrossTxJoinSerialized(t *testing.T) {
+	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userC = uint64(1003)
+	insertUser(t, sqlDB, userA, "uid-cross-a", "A", "")
+	insertUser(t, sqlDB, userC, "uid-cross-c", "C", "")
+
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+	roomID := createOut.RoomID
+
+	done := make(chan error, 2)
+
+	// goroutine 1: A leave（走 svc.LeaveRoom 真实事务）
+	go func() {
+		_, e := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userA, RoomID: roomID})
+		done <- e
+	}()
+
+	// goroutine 2: C join（走 svc.JoinRoom 真实事务）
+	go func() {
+		_, e := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userC, RoomID: roomID})
+		done <- e
+	}()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-done:
+			// 两个 goroutine 任一返非 nil error 都接受（leave 不应失败；C 在 (a) 路径下 6005）
+		case <-time.After(15 * time.Second):
+			t.Fatalf("cross-tx race test timeout")
+		}
+	}
+
+	// 核心断言：rooms.status 与 room_members 一致性
+	finalStatus := fetchRoomStatus(t, sqlDB, roomID)
+	var memberCount int64
+	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM room_members WHERE room_id = ?", roomID).Scan(&memberCount); err != nil {
+		t.Fatalf("query room_members count: %v", err)
+	}
+	if finalStatus == 2 && memberCount > 0 {
+		t.Errorf("r9 P1#2 race detected: status=2 but room_members has %d rows", memberCount)
+	}
+	if finalStatus == 1 && memberCount == 0 {
+		t.Errorf("r9 P1#2 race detected: status=1 but room_members is empty")
 	}
 }
 
