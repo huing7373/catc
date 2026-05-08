@@ -213,3 +213,4 @@
 | 2026-05-08 | [`pet` 字段必须随 §5.1 GET /home 全协议 nullable / WS close 4007 是 best-effort cleanup 而非 leave 完成的 authoritative confirmation（11-1 r10 收官）](2026-05-08-pet-nullable-and-cross-channel-ack-best-effort-11-1-r10.md) | 2 | architecture, docs, protocol | `<pending>` |
 | 2026-05-08 | [给已有错误码新增接口用法时，必须反向扫描所有"该错误码仅用于 X"陈述（11-1 r11）](2026-05-08-stale-error-code-exclusivity-notes-when-adding-new-usage-11-1-r11.md) | 1 | docs | `<pending>` |
 | 2026-05-08 | [ACL FOR SHARE 锁的精确边界 = 事务持续期非 HTTP 响应发出时 / mermaid inline payload 必须随字段 nullable 改动同步（11-1 r12）](2026-05-08-acl-lock-precision-and-mermaid-pet-nullable-sync-11-1-r12.md) | 2 | docs | `<pending>` |
+| 2026-05-08 | [协议契约的步骤顺序必须可被现有 primitive 实装；step 顺序设计要校验 primitive capabilities（11-1 r13）](2026-05-08-protocol-step-order-must-match-primitive-capabilities-11-1-r13.md) | 1 | architecture | `<pending>` |
