@@ -390,6 +390,52 @@ type roomServiceImpl struct {
 	// （room closed 不触发 worker 退出，让残留事件能完成）。如未来引入 dynamic
 	// room reuse 或活跃 room 爆炸 → 加 LRU eviction 或定时 GC。
 	roomQueues sync.Map
+
+	// roomCommitLocks **per-room commit serialization mutex pool**（Story 11.8
+	// codex review r6 [P1] 修复引入）：保证同一 roomID 的 (业务事务 commit + 事件
+	// enqueue) **作为一个原子段**串行化，让 caller commit 顺序严格 == enqueue 顺序
+	// == worker 消费顺序 == client 感知顺序。
+	//
+	// **r6 [P1] 背景**（review r6 两条 finding 同根因）：r5 用 channel FIFO 队列保
+	// caller-commit-order，前提**必须**是 "commit 后立刻 enqueue，期间无其他同步
+	// 操作可被 concurrent 路径夹塞"。但 r5 LeaveRoom 实装在 commit 后插入了同步段
+	// `unregisterLeaverSessionSync`，再 enqueue —— 该 gap 内：
+	//
+	//   (a) leaver 仍在 SessionManager；concurrent JoinRoom 同时 commit + enqueue
+	//       member.joined → fanout 列表包含 leaver → leaver 收到 stale event。
+	//   (b) concurrent JoinRoom 的 enqueue 可抢先 LeaveRoom 的 enqueue → client
+	//       收到 member.joined 早于 member.left → 违反 commit-order = causal-order。
+	//
+	// **修法**（commit-time per-room serialization）：JoinRoom / LeaveRoom 在事务
+	// 之前 acquire per-roomID mutex，事务 commit + enqueueRoomEvent 都在 lock 内
+	// 完成，再 unlock。这样：
+	//
+	//   1. **同 room 事务串行 commit**：两个 same-room 事务不能 interleave commit
+	//      → commit 顺序确定 → enqueue 顺序确定（lock 内紧接 commit）。
+	//   2. **unregister 移进 worker 闭包**：LeaveRoom 的 unregisterLeaverSessionSync
+	//      不再夹在 caller 同步段，而是作为 enqueue 的 fn 内首步在 worker 串行
+	//      段内执行 —— 后续 enqueue 的 broadcast fn 看到的 SessionManager 状态
+	//      已反映前面所有 commit 的 unregister。
+	//   3. **close goroutine 仍 fire-and-forget**：runCloseLeaverAsync 启动是
+	//      instant op，可以在 worker fn 内启动；CloseWithCode drain 慢路径仍
+	//      跑在独立 goroutine，不阻塞 worker。
+	//
+	// **trade-off**：same-room 事务 commit 串行化（不同 room 仍并行）。节点 4 阶段
+	// 单 room ≤4 人，并发极低，可接受（设计 §10.4 / §10.5 join/leave QPS 极小）。
+	// 未来如有"高并发 same-room"场景，需要重新评估（用户协议层 sequence number 或
+	// 客户端排序兜底）。
+	//
+	// **lock 内只允许 instant op**：DB commit + channel send（buffered 默认非阻塞）+
+	// goroutine 启动。**不允许**做 IO / wait / sleep / 远程调用。CloseWithCode drain
+	// 这种慢路径必须留在 lock 之外的独立 goroutine（`runCloseLeaverAsync`）。
+	//
+	// **defer Unlock 兜底**：JoinRoom / LeaveRoom 内拿 lock 后立即 `defer mu.Unlock()`
+	// 兜底（panic / err 路径也保证 unlock）。defer 触发在 return 计算后、HTTP 响应
+	// 写出前 —— lock 内只有 instant op，HTTP 延迟增加 < 1ms，client 无感。
+	//
+	// **生命周期同 roomQueues**：LoadOrStore 模式，节点 4 阶段不主动清理；如未来
+	// 引入 dynamic room reuse → 同步加 LRU eviction。
+	roomCommitLocks sync.Map
 }
 
 // roomQueue 是单 roomID 的 post-commit FIFO 通道（Story 11.8 r5 [P1] 修复引入）。
@@ -423,6 +469,31 @@ func SetPostCommitWaitGroupForTest(svc RoomService, wg *sync.WaitGroup) {
 	if impl, ok := svc.(*roomServiceImpl); ok {
 		impl.postCommitWG = wg
 	}
+}
+
+// acquireCommitLock 取得 roomID 对应的 *sync.Mutex 并返回（Story 11.8 codex
+// review r6 [P1] 修复引入）。caller 拿到 mutex 后**自行**调用 Lock —— 本函数
+// 只负责 LoadOrStore 拿同一 *sync.Mutex 实例，不锁定。
+//
+// **使用模式**（JoinRoom / LeaveRoom 同模式）：
+//
+//	mu := s.acquireCommitLock(in.RoomID)
+//	mu.Lock()
+//	defer mu.Unlock()
+//	// 事务 commit + enqueueRoomEvent 都在 lock 内
+//
+// **为什么 Lock / Unlock 显式调用而不在 acquire 内做**：caller 需要 defer
+// mu.Unlock() 兜底 panic / 早返回路径；在 acquire 内 Lock 会让 caller 漏掉
+// defer 导致 lock 永远不释放。显式 Lock + 显式 defer Unlock 是 Go 标准模式。
+//
+// **不同 roomID 不共享 mutex**：sync.Map LoadOrStore 保证同一 roomID 拿到同一
+// *sync.Mutex；不同 roomID 拿到不同实例，互不阻塞。
+//
+// **生命周期**：LoadOrStore 模式不主动清理（与 roomQueues 同策略，节点 4 阶段
+// 活跃 room 数有界）。
+func (s *roomServiceImpl) acquireCommitLock(roomID uint64) *sync.Mutex {
+	muIface, _ := s.roomCommitLocks.LoadOrStore(roomID, &sync.Mutex{})
+	return muIface.(*sync.Mutex)
 }
 
 // enqueueRoomEvent 把 post-commit fn 入队到 roomID 对应的 FIFO channel，由 worker
@@ -698,7 +769,19 @@ func (s *roomServiceImpl) JoinRoom(ctx context.Context, in JoinRoomInput) (*Join
 		return nil, apperror.New(apperror.ErrUserAlreadyInRoom, apperror.DefaultMessages[apperror.ErrUserAlreadyInRoom])
 	}
 
-	// (2) 开事务（数据库设计 §8.6 + V1 §10.4 钦定）
+	// (2) acquire per-room commit lock + 开事务（数据库设计 §8.6 + V1 §10.4 钦定）
+	//
+	// **r6 [P1] 修复关键**：lock 必须在 txMgr.WithTx **之前**取得，且包住整个
+	// commit + enqueueRoomEvent 段。这样 same-room 的 JoinRoom / LeaveRoom 不能
+	// interleave commit —— commit 顺序 = enqueue 顺序 = client 感知顺序。
+	//
+	// **defer Unlock**：兜底 panic / 业务 err 早返回路径；defer 在 return 后触发，
+	// 单次 HTTP 路径 lock 内只有 instant op（commit + channel send）→ HTTP 延迟
+	// 增加 < 1ms。
+	mu := s.acquireCommitLock(in.RoomID)
+	mu.Lock()
+	defer mu.Unlock()
+
 	err = s.txMgr.WithTx(ctx, func(txCtx context.Context) error {
 		// (2a) SELECT rooms WHERE id = ? FOR UPDATE → 找不到 → 6001
 		room, err := s.roomRepo.FindByIDForUpdate(txCtx, in.RoomID)
@@ -780,6 +863,13 @@ func (s *roomServiceImpl) JoinRoom(ctx context.Context, in JoinRoomInput) (*Join
 	// goroutine 启动阶段仍受 scheduler race 影响（commit 顺序 join → leave 但 leave
 	// goroutine 可能抢先 Lock 抢跑 broadcast）。channel queue 方案在 caller 同步
 	// 段就完成 enqueue，scheduler 不能重排 enqueue 顺序，causal ordering 严格保留。
+	//
+	// **r6 修复**（codex review r6 [P1]）：r5 通过 channel FIFO 保 enqueue 顺序，
+	// 但要求 "commit 后立刻 enqueue 期间无任何同步 op 可被 concurrent 路径夹塞"。
+	// LeaveRoom r5 实装在 commit 后插入了同步段 unregisterLeaverSessionSync，再
+	// enqueue —— gap 内 concurrent JoinRoom 可 commit + enqueue 抢先，破坏 commit
+	// = enqueue order。修法：commit-time per-room mutex 把 (commit + enqueue)
+	// 包成原子段；JoinRoom / LeaveRoom 同模式。详见 acquireCommitLock 注释。
 	s.enqueueRoomEvent(ctx, in.RoomID, func(detachedCtx context.Context) {
 		s.broadcastMemberJoined(detachedCtx, in.RoomID, in.UserID)
 	})
@@ -837,7 +927,15 @@ func (s *roomServiceImpl) LeaveRoom(ctx context.Context, in LeaveRoomInput) (*Le
 		return nil, apperror.New(apperror.ErrUserNotInRoom, apperror.DefaultMessages[apperror.ErrUserNotInRoom])
 	}
 
-	// (2) 开事务（数据库设计 §8.7 + V1 §10.5 钦定）
+	// (2) acquire per-room commit lock + 开事务（数据库设计 §8.7 + V1 §10.5 钦定）
+	//
+	// **r6 [P1] 修复关键**：lock 必须在 txMgr.WithTx **之前**取得，且包住 commit +
+	// enqueueRoomEvent 段（含 unregister 移进 worker 闭包后的状态）。同 JoinRoom，
+	// 详见 acquireCommitLock 注释。
+	mu := s.acquireCommitLock(in.RoomID)
+	mu.Lock()
+	defer mu.Unlock()
+
 	err = s.txMgr.WithTx(ctx, func(txCtx context.Context) error {
 		// (2a) SELECT rooms WHERE id = ? FOR UPDATE → 找不到 → 1009 数据不一致兜底
 		if _, err := s.roomRepo.FindByIDForUpdate(txCtx, in.RoomID); err != nil {
@@ -889,66 +987,76 @@ func (s *roomServiceImpl) LeaveRoom(ctx context.Context, in LeaveRoomInput) (*Le
 
 	// (4) 事务 commit 成功 → 按 V1 §10.5 r13 钦定顺序处理 post-commit。
 	//
-	// **r3 [P1] fix（hybrid sync/async 切分）**：
+	// **r6 [P1] fix（commit-time serialization + unregister 进 worker 闭包）**：
 	//
-	//   - **同步段**：unregisterLeaverSessionSync —— ListSessionsByRoomID + Unregister
-	//     是 map 操作 O(1) 瞬时完成（不涉及 IO），同步执行不影响 HTTP 响应延迟。
-	//     **关键收益**：HTTP 200 返回前 leaver Session 已从 SessionManager 索引消失
-	//     → 后续任何 broadcast（如另一 user 在 leave 完成瞬间 join）调
-	//     ListSessionsByRoomID 都不会再返 leaver Session → 修复 r2 引入的
-	//     "HTTP leave 200 → leaver 仍在 SessionManager → stale broadcast" regression
-	//     （违反 V1 §10.5 步骤 7 "HTTP leave immediately detaches WS"）。
+	// r3 ~ r5 演进留下根本性问题：commit 与 enqueue 之间存在同步段
+	// `unregisterLeaverSessionSync`，concurrent JoinRoom 可在 gap 内 commit +
+	// enqueue 抢先 → 破坏 commit-order = causal-order，且 leaver 仍在
+	// SessionManager 期间 concurrent join 的 member.joined 会 fanout 给 leaver。
 	//
-	//   - **异步段**：closeLeaverSessionAsync + broadcastMemberLeft —— 走 detached
-	//     ctx + 10s timeout 兜底；CloseWithCode 内部 drain write loop ~5s 慢路径
-	//     不阻塞 HTTP 200，broadcast 走 detached ctx 不被 request ctx cancel 误中断。
-	//     CloseWithCode → notifyClosed → Unregister 二次调用 idempotent no-op
-	//     （sync 段已先 Unregister）。
+	// **r6 修法**（commit-time per-room mutex 包住 commit + enqueue）：
 	//
-	// **r3 [P1] fix（broadcastMemberLeft 用 BroadcastToRoomExcept）**：
-	//   - sync Unregister 已让 leaver 从 ListSessionsByRoomID 列表消失 → 此处 broadcast
-	//     fanout 自然跳过 leaver；但 broadcastMemberLeft 内部仍调 BroadcastToRoomExcept
-	//     显式 exclude leaver UserID 提供 belt-and-suspenders 防护（任何潜在 race
-	//     让 leaver 短暂回到列表也能拦截）。
+	//   1. caller 同步段 acquire per-roomID mutex（acquireCommitLock）；
+	//   2. mutex 内执行 txMgr.WithTx commit + enqueueRoomEvent；
+	//   3. mutex 解锁（defer 兜底）；HTTP 200 返回。
 	//
-	// **r2 → r3 演进**：r2 把整个 closeLeaverSession 异步化引入两条 P1 regression
-	// （R1 joiner self-fanout / R2 leaver stale subscription），r3 用 hybrid 切分
-	// 修复 R2，用 BroadcastToRoomExcept 修复 R1（broadcastMemberJoined / Left 都改）。
+	// **关键变化 vs r5**：unregisterLeaverSessionSync **不再** 在 caller 同步段
+	// 执行；而是**作为 enqueue 的 fn 第一步**在 worker 串行段内执行。这样：
 	//
-	// **r4 修复**（codex review r4 [P1]）：runPostCommitAsync → runPostCommitAsyncPerRoom
-	// 加 roomID 参数走 per-room mutex 串行化，保留 join → leave 的 causal ordering。
+	//   - JoinRoom / LeaveRoom 的 (commit + enqueue) 互斥串行 → enqueue 顺序 =
+	//     commit 顺序 = client 感知顺序。
+	//   - LeaveRoom 的 broadcast fn 在 worker 内首先 unregister leaver →
+	//     紧接着 broadcastMemberLeft 看到 SessionManager 已不含 leaver；后续
+	//     enqueue 的 same-room broadcast（含 concurrent join 的 member.joined）
+	//     都在 unregister 之后执行 → 不会 fanout 给已离开的 leaver。
+	//   - close goroutine 仍 fire-and-forget（runCloseLeaverAsync），启动是
+	//     instant op 可在 worker 内启动，CloseWithCode drain 慢路径跑在独立
+	//     goroutine，不阻塞 worker。
 	//
-	// **r5 修复**（codex review r5 [P1] / [P2]）：
-	//   - [P1]：runPostCommitAsyncPerRoom → enqueueRoomEvent（caller 同步段 channel
-	//     send 替代 goroutine 内 mutex Lock，参见 JoinRoom 同名注释）。
-	//   - [P2]：closeLeaverSessionAsync **不再** 进 per-room queue；改走**独立**
-	//     fire-and-forget goroutine。原因：CloseWithCode 内部 drain WS write loop
-	//     最坏 ~5s（甚至更慢，stuck WS）；如果它跑在 per-room queue 里，会**堵塞
-	//     该 room 后续所有 broadcast**（如另一 user 的 join），让其他成员看到
-	//     stale roster 持续数秒。把 close 拆出来独立 goroutine 后：broadcast 入
-	//     queue 顺序消费快速完成；slow close 在独立 goroutine 慢慢走，不影响
-	//     queue 吞吐 / 不影响其他事件 broadcast 顺序。
+	// **HTTP 延迟**：lock 内只有 instant op（DB commit + channel send + defer
+	// goroutine 启动）；< 1ms 增量 client 无感。详见 acquireCommitLock 注释。
 	//
-	// **三段 post-commit 工作分流**：
-	//   1. unregisterLeaverSessionSync —— **同步段**（caller goroutine 内）：HTTP
-	//      200 前从 SessionManager 索引清除 leaver Session，让后续 broadcast 不
-	//      fanout 给 leaver。O(1) map 操作，不阻塞。
+	// **三段 post-commit 工作分流（r6 修订）**：
+	//   1. unregisterLeaverSessionSync —— **worker 内首步**（per-room queue 串行
+	//      段）：保证后续 same-room broadcast 看到的 SessionManager 已无 leaver。
+	//      仍是 O(1) map op，worker 单 goroutine 顺序消费不引入额外阻塞。
 	//   2. broadcastMemberLeft —— **per-room queue**（保序段）：与 JoinRoom 的
-	//      broadcastMemberJoined 走同一 roomID 的 FIFO channel，保留 causal
-	//      ordering（join → leave 顺序严格保留）。
-	//   3. closeLeaverSessionAsync —— **独立 goroutine**（fire-and-forget 段）：
-	//      CloseWithCode 慢路径不阻塞 queue，不阻塞 caller，不阻塞其他 broadcast。
-	target, _ := s.unregisterLeaverSessionSync(ctx, in.RoomID, in.UserID)
+	//      broadcastMemberJoined 走同一 roomID 的 FIFO channel；commit-time lock
+	//      额外保 enqueue 顺序与 commit 顺序一致。
+	//   3. runCloseLeaverAsync —— **独立 goroutine**（fire-and-forget 段）：仍在
+	//      worker fn 内启动（go func 是 instant op），但 CloseWithCode 慢路径
+	//      跑在独立 goroutine，不阻塞 worker queue。
+	//
+	// **r2 / r3 / r4 / r5 演进追溯**（保留供未来 review 追源）：
+	//   - r2: 整体异步化 → 引入 R1/R2 regression
+	//   - r3: hybrid sync/async + BroadcastToRoomExcept 修 R1/R2
+	//   - r4: per-room mutex 试图保 causal ordering（goroutine 内 Lock）
+	//   - r5: per-room channel queue（caller 同步段 enqueue），但 LeaveRoom 同
+	//        步段 unregister 仍夹在 commit 与 enqueue 之间 → r6 finding
+	//   - r6: commit-time mutex 包 (commit + enqueue)；unregister 进 worker 闭包
 
-	// (a) broadcast 入 per-room queue（保序）
+	// (a) post-commit 全部 work 进 per-room queue（同 worker 串行执行）：
+	//     首先 unregister leaver Session（让后续 same-room broadcast 看到的
+	//     SessionManager 已不含 leaver），然后启动 close goroutine（fire-and-
+	//     forget；CloseWithCode drain 慢路径在独立 goroutine 跑），最后
+	//     broadcast member.left。closure 捕获 caller ctx 用于继承 trace 等
+	//     values；enqueueRoomEvent 内部已用 context.WithoutCancel + 10s timeout
+	//     包装。
 	s.enqueueRoomEvent(ctx, in.RoomID, func(detachedCtx context.Context) {
+		// (a.1) unregister leaver Session（O(1) map op；let 紧接的 broadcast +
+		//       后续同 room 事件看到的 SessionManager 已无 leaver）
+		target, _ := s.unregisterLeaverSessionSync(detachedCtx, in.RoomID, in.UserID)
+
+		// (a.2) close 独立 goroutine（启动是 instant op；CloseWithCode drain
+		//       ~5s 慢路径跑在独立 goroutine，不阻塞 worker 处理后续事件）
+		if target != nil {
+			s.runCloseLeaverAsync(detachedCtx, in.RoomID, in.UserID, target)
+		}
+
+		// (a.3) broadcast member.left（同 worker 串行段；fanout 时 leaver
+		//       已 Unregister，不会收到自己的 leave 事件）
 		s.broadcastMemberLeft(detachedCtx, in.RoomID, in.UserID)
 	})
-
-	// (b) close 独立 goroutine（fire-and-forget；不阻塞 broadcast queue）
-	if target != nil {
-		s.runCloseLeaverAsync(ctx, in.RoomID, in.UserID, target)
-	}
 
 	return &LeaveRoomOutput{
 		RoomID: in.RoomID,

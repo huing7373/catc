@@ -3108,3 +3108,150 @@ func TestRoomService_PostCommit_LeaveCloseDoesNotBlockBroadcast(t *testing.T) {
 		t.Errorf("broadcast call count = %d, want 1 (member.left)", got)
 	}
 }
+
+// TestRoomService_PostCommit_CommitTimeLockSerializesConcurrentJoinLeave
+// （Story 11.8 codex review r6 [P1] regression test）：
+//
+// **r6 [P1] 背景**：r5 channel FIFO queue 保 enqueue 顺序，前提是 "commit 后立刻
+// enqueue 期间无任何同步 op 可被 concurrent 路径夹塞"。LeaveRoom 在 r5 实装把
+// unregisterLeaverSessionSync 留在 commit 后、enqueue 前的同步段 —— gap 内
+// concurrent JoinRoom 可 commit + enqueue 抢先，破坏 commit-order = causal-order。
+//
+// **r6 修法**：commit-time per-room mutex 包住 (commit + enqueueRoomEvent) →
+// same-room 的两个事务不能 interleave commit；caller commit 顺序 = enqueue 顺序
+// = client 感知顺序。unregisterLeaverSessionSync 移进 worker 闭包，与
+// broadcast / close 同 worker 串行执行。
+//
+// **测试策略**（暴露 r6 race）：两个 goroutine A=Join、B=Leave 在同 roomID 并发
+// 调用，A 的 txMgr commit fn 内引入 sleep 模拟 "A commit 慢一点"；B 的 commit
+// 立即返回。**没有 commit-time lock**：B 可抢在 A enqueue 前完成 commit + enqueue
+// → broadcast 顺序变成 [member.left, member.joined] 倒置。**有 commit-time
+// lock**：B 必须等 A 完成 unlock 才能进入临界区 → broadcast 顺序 == 调用 lock
+// 的顺序 = [member.joined, member.left]。
+//
+// **同步同步**：用 channel 显式控制：A 进 commit fn 后通知主 goroutine 启动 B；
+// B 启动后 sleep 短暂窗口让 A 内的 sleep 仍在持有 lock，然后 B 尝试取 lock。
+// 没 lock → B 越过 A；有 lock → B 等 A。
+func TestRoomService_PostCommit_CommitTimeLockSerializesConcurrentJoinLeave(t *testing.T) {
+	const userIDA = uint64(1002) // joiner
+	const userIDB = uint64(1003) // leaver
+	const roomID = uint64(3001)
+	const petID = uint64(7001)
+
+	// userRepo 区分两个 user：A 预检 CurrentRoomID==nil（join 走通），B 预检
+	// CurrentRoomID==&roomID（leave 走通）；UpdateCurrentRoomID no-op。
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			switch id {
+			case userIDA:
+				// joiner enrichment 也走这条；CurrentRoomID 在 join enrichment 路径不被读
+				return &mysql.User{ID: userIDA, Nickname: "A", AvatarURL: "https://avatar/A", CurrentRoomID: nil}, nil
+			case userIDB:
+				rid := roomID
+				return &mysql.User{ID: userIDB, Nickname: "B", CurrentRoomID: &rid}, nil
+			default:
+				t.Fatalf("unexpected FindByID id=%d", id)
+				return nil, nil
+			}
+		},
+		updateCurrentRoomIDFn: func(ctx context.Context, uid uint64, rid *uint64) error { return nil },
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDForUpdateFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
+		},
+		updateStatusFn: func(ctx context.Context, rid uint64, status int8) error { return nil },
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		countByRoomIDFn:       func(ctx context.Context, rid uint64) (int, error) { return 1, nil },
+		createFn:              func(ctx context.Context, m *mysql.RoomMember) error { return nil },
+		deleteByRoomAndUserFn: func(ctx context.Context, rid, uid uint64) (int64, error) { return 1, nil },
+	}
+	petRepo := &roomTestStubPetRepo{
+		findDefaultByUserIDFn: func(ctx context.Context, uid uint64) (*mysql.Pet, error) {
+			return &mysql.Pet{ID: petID, UserID: uid, IsDefault: 1, CurrentState: 1}, nil
+		},
+	}
+	bcast, _, fn, exceptFn := newRoomTestStubBroadcastFnWithSeq()
+	sessionMgr := &roomTestStubSessionMgr{}
+
+	// txMgr 让 A 的 commit fn 内 sleep ~30ms（模拟 A commit 慢路径，留窗口让 B 抢）；
+	// B 立即返回。通过 ctx value 区分 caller —— A 走 join 路径会查 user 1002；B
+	// 走 leave 路径会查 user 1003。简化：用一个 atomic 标记区分 "首个进入 fn 的是
+	// joiner"（按调用顺序，因为 A 是第一个 goroutine 启动）。
+	var joinEnteredFn atomic.Bool
+	var bStartCh = make(chan struct{}, 1)
+	stubTxMgr := &roomTestStubTxMgr{
+		withTxFn: func(ctx context.Context, fn func(txCtx context.Context) error) error {
+			// 第一个进入的 caller 是 A（join）；通知主 goroutine 启动 B，然后 sleep
+			// 模拟 commit 慢路径。如果**没有** commit-time lock，B 进入此 fn 时不会
+			// 等 A，立即跑完并 enqueue → broadcast 顺序倒置。
+			if joinEnteredFn.CompareAndSwap(false, true) {
+				bStartCh <- struct{}{}
+				time.Sleep(30 * time.Millisecond) // A commit 内停留
+			}
+			return fn(ctx)
+		},
+	}
+
+	svc := service.NewRoomService(stubTxMgr, userRepo, roomRepo, memberRepo, petRepo, sessionMgr, fn, exceptFn)
+	wg := &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
+
+	// 启动 A=Join goroutine
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userIDA, RoomID: roomID})
+		doneA <- err
+	}()
+
+	// 等 A 已经进入 commit fn 并准备 sleep
+	select {
+	case <-bStartCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting for A to enter commit fn")
+	}
+
+	// 启动 B=Leave goroutine（A 仍在 lock 内 sleep；如果 commit-time lock 工作，
+	// B 必须等 A unlock 才能 commit + enqueue）
+	doneB := make(chan error, 1)
+	go func() {
+		_, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userIDB, RoomID: roomID})
+		doneB <- err
+	}()
+
+	// 等两路都返回
+	if err := <-doneA; err != nil {
+		t.Fatalf("JoinRoom (A): %v", err)
+	}
+	if err := <-doneB; err != nil {
+		t.Fatalf("LeaveRoom (B): %v", err)
+	}
+
+	// 等 post-commit worker 跑完
+	wg.Wait()
+
+	// 断言：broadcast 顺序必为 [member.joined (A), member.left (B)]。
+	// 没有 commit-time lock → B 的 enqueue 抢先 A → 顺序倒置。
+	bcast.mu.Lock()
+	defer bcast.mu.Unlock()
+	if len(bcast.calls) != 2 {
+		t.Fatalf("broadcast call count = %d, want 2 (1 join + 1 leave)", len(bcast.calls))
+	}
+	var env0, env1 story118EnvelopeForTest
+	if err := json.Unmarshal(bcast.calls[0].msg, &env0); err != nil {
+		t.Fatalf("unmarshal call[0]: %v", err)
+	}
+	if err := json.Unmarshal(bcast.calls[1].msg, &env1); err != nil {
+		t.Fatalf("unmarshal call[1]: %v", err)
+	}
+	if env0.Type != "member.joined" {
+		t.Errorf("call[0].type = %q, want \"member.joined\" (commit-time lock failed: B raced past A)", env0.Type)
+	}
+	if env1.Type != "member.left" {
+		t.Errorf("call[1].type = %q, want \"member.left\"", env1.Type)
+	}
+	if bcast.calls[0].seq >= bcast.calls[1].seq {
+		t.Errorf("seq order: call[0].seq=%d should be < call[1].seq=%d", bcast.calls[0].seq, bcast.calls[1].seq)
+	}
+}
