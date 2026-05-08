@@ -201,3 +201,4 @@
 | 2026-05-07 | [fire-and-forget hooks 同 user 串行化 + scanner reconcile guard 升级 + AddOnline SADD/EXPIRE 原子化（10-6 r8）](2026-05-07-fire-and-forget-hooks-need-per-user-mutex-10-6-r8.md) | 3 | architecture, error-handling | `3329f33` |
 | 2026-05-07 | [presence hook 必须改成同步调用 + 与 scanner reconcile 共享 per-user mutex 消除跨 goroutine 树 ordering race（10-6 r9）](2026-05-07-presence-hooks-must-be-synchronous-shared-mutex-10-6-r9.md) | 1 | architecture | `adcb1d3` |
 | 2026-05-07 | [AddOnline 自动 SREM 旧 room stale member（cross-room reconnect 自愈）+ Register 替换路径必须先 onRegister(NEW) 再 replaced.Close() 消除 reconnect false offline window（10-6 r10）](2026-05-07-presence-add-online-cross-room-stale-srem-and-register-hook-order-10-6-r10.md) | 2 | architecture | `29d21fe` |
+| 2026-05-08 | [房间 roster 契约自洽 / member.joined 必须自包含丰富字段（11-1 r1）](2026-05-08-room-roster-contract-self-consistency-11-1-r1.md) | 2 | architecture | `<pending>` |
