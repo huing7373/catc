@@ -33,10 +33,15 @@ func init() {
 
 // stubRoomMemberRepo 是 RoomMemberRepo 的可配置 stub（手写而非 testify/mock，
 // 与项目既有 stubAuthService 同模式）。
+//
+// listRosterByRoomIDFn (Story 11.7 加)：让 realSnapshotBuilder 单测用既有 stub
+// 模式控 ListRosterByRoomID 行为；既有 ws gateway 测试不消费本字段（默认返
+// nil, nil 让 ListRosterByRoomID 兜底兼容）。
 type stubRoomMemberRepo struct {
-	roomExistsFn   func(ctx context.Context, roomID uint64) (bool, error)
-	isUserInRoomFn func(ctx context.Context, userID, roomID uint64) (bool, error)
-	listMembersFn  func(ctx context.Context, roomID uint64) ([]uint64, error)
+	roomExistsFn          func(ctx context.Context, roomID uint64) (bool, error)
+	isUserInRoomFn        func(ctx context.Context, userID, roomID uint64) (bool, error)
+	listMembersFn         func(ctx context.Context, roomID uint64) ([]uint64, error)
+	listRosterByRoomIDFn  func(ctx context.Context, roomID uint64) ([]mysql.RosterRow, error)
 }
 
 func (s *stubRoomMemberRepo) RoomExists(ctx context.Context, roomID uint64) (bool, error) {
@@ -88,10 +93,13 @@ func (s *stubRoomMemberRepo) ExistsForShareByRoomAndUser(ctx context.Context, ro
 	return false, nil
 }
 
-// ListRosterByRoomID 兜底（Story 11.6 给 RoomMemberRepo interface 加
-// ListRosterByRoomID 方法后编译需要；ws 路径 stub 测试不调本方法 ——
-// Story 11.7 真实 SnapshotBuilder 落地时再扩展）。
+// ListRosterByRoomID 走 listRosterByRoomIDFn 字段（Story 11.6 加 method；Story 11.7
+// 加 fn 字段供 realSnapshotBuilder 单测 case 配置）；不配置时返 (nil, nil)
+// 让既有 gateway / placeholder 路径单测无回归（gateway 路径不消费 ListRosterByRoomID）。
 func (s *stubRoomMemberRepo) ListRosterByRoomID(ctx context.Context, roomID uint64) ([]mysql.RosterRow, error) {
+	if s.listRosterByRoomIDFn != nil {
+		return s.listRosterByRoomIDFn(ctx, roomID)
+	}
 	return nil, nil
 }
 

@@ -417,10 +417,13 @@ func NewRouter(deps Deps) *gin.Engine {
 			// Story 11.3 修：roomMemberRepo 实例上移到 if deps.GormDB ... 块的开头
 			// （与其他 repo 平级），ws / room 两路由块共享同一个实例；避免双实例
 			// 引入隐性 race / 测试 mock 不一致（review r4 同源风险）。
-			// Story 10.7 加：构造 SnapshotBuilder（节点 4 阶段 placeholder 实装；
-			// Story 11.7 真实实装时把本行替换为 NewRealSnapshotBuilder，gateway
-			// 层不感知）。
-			snapshotBuilder := wsapp.NewPlaceholderSnapshotBuilder(roomMemberRepo)
+			// Story 10.7 加 + Story 11.7 改：构造 SnapshotBuilder（节点 4 阶段真实实装；
+			// Story 10.7 placeholder 已被 Story 11.7 真实实装替换，gateway 层完全不
+			// 感知）。行为差异：placeholder 走 ListMembers 单表查询 + 字段降级；real
+			// 走 ListRosterByRoomID INNER JOIN users + LEFT JOIN pets 聚合 + nickname /
+			// petId 真实回填 + pet-less 下发 null（V1 §12.3 行 1878 + 行 1976 r14
+			// going-forward 契约）。placeholder builder 仅由测试路径保留作便捷 stub。
+			snapshotBuilder := wsapp.NewRealSnapshotBuilder(roomMemberRepo)
 			gateway := wsapp.NewGateway(
 				deps.Signer,
 				deps.SessionMgr,

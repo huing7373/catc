@@ -1,13 +1,18 @@
-// Package ws 内 snapshot.go：room.snapshot 构造与下发框架（Story 10.7 引入）。
+// Package ws 内 snapshot.go：room.snapshot 构造与下发框架（Story 10.7 引入；
+// Story 11.7 加 realSnapshotBuilder 替换 prod 路径）。
 //
 // 角色：
 //   - SnapshotBuilder 接口：抽象 BuildSnapshot(ctx, roomID) (Snapshot, error)，
-//     让 placeholder（本 story）/ real（Story 11.7）实装可替换
-//   - placeholderSnapshotBuilder：本 story 的默认实装；走 RoomMemberRepo.ListMembers
+//     让 placeholder（Story 10.7）/ real（Story 11.7）实装可替换
+//   - placeholderSnapshotBuilder：Story 10.7 默认实装；走 RoomMemberRepo.ListMembers
 //     单表查询（不 JOIN users / pets）；丰富字段（nickname / pet.petId）降级空字符串、
-//     pet.currentState 固定 1
+//     pet.currentState 固定 1；Story 11.7 后仅测试路径保留作便捷 stub
+//   - realSnapshotBuilder：Story 11.7 真实实装；走 RoomMemberRepo.ListRosterByRoomID
+//     多表 JOIN 聚合（INNER JOIN users + LEFT JOIN pets + ORDER BY joined_at ASC，
+//     复用 Story 11.6 已落地路径），nickname / petId 真实回填，pet-less 下发 null
 //   - Snapshot struct：room.snapshot payload 的 Go 表示；与 V1 §12.3 字段表
-//     placeholder 行严格 1:1 对齐
+//     going-forward 行严格 1:1 对齐（SnapshotMember.Pet 改 *SnapshotPet pointer 让
+//     pet-less 序列化为 JSON null —— Story 11.7 r1 P1 关键决策）
 //   - SendRoomSnapshot 函数：封装 build → marshal → conn 同步写入 + close 1011
 //     失败处理路径；gateway.Handle 单点调用
 //
@@ -46,9 +51,11 @@ import (
 //
 // 不变量（V1 §12.3 末"不变量"小节钦定）：MemberCount == len(Members)
 //
-// 节点 4 阶段 placeholder（Story 10.7）/ Story 11.7 真实实装下发的 wire 格式严格
-// 一致 —— 仅丰富字段值不同（placeholder 阶段 Nickname/PetID 空字符串 + CurrentState=1；
-// 真实阶段由 users.nickname / pets.id / pets.currentState 真实回填）。
+// 节点 4 阶段 placeholder（Story 10.7）/ Story 11.7 真实实装下发的 wire envelope 一致
+// —— 字段值差异：placeholder 阶段 Nickname/PetID 空字符串 + Pet pointer 始终非 nil
+// + CurrentState=1；真实阶段（Story 11.7）由 users.nickname / pets.id 真实回填 +
+// pet-less 时 Pet pointer 为 nil → wire 下发 `"pet": null` + CurrentState 仍硬编码 1
+// （Epic 14 真实驱动）。
 //
 // 注意：本 struct 直接作为 serverEnvelope.Payload 的具体类型 —— **不**额外引入
 // "内部 domain model + 外部 DTO 转换"层，YAGNI（与既有 inline 实装的 snapshotPayload
@@ -72,12 +79,43 @@ type SnapshotRoom struct {
 //
 // 字段：
 //   - UserID: BIGINT 字符串化（与 V1 §2.5 全局 BIGINT 字符串化约定一致）
-//   - Nickname: placeholder 阶段空字符串 ""（V1 §12.3 字段表 placeholder 行钦定）
-//   - Pet: 嵌套 SnapshotPet（不展平 —— 与 V1 §12.3 字段表 pet.* 嵌套结构一致）
+//   - Nickname: placeholder 阶段空字符串 ""；真实阶段（Story 11.7）by users.nickname
+//   - Pet: 嵌套 *SnapshotPet（pointer 让 nil → JSON null —— V1 §12.3 行 1881 钦定
+//     LEFT JOIN pets pet-less 下发 `pet: null`；不展平字段，与 V1 §12.3 字段表
+//     pet.* 嵌套结构一致）
+//
+// **关键变更**（Story 11.7 引入 / r1 P1 关键决策）：Pet 字段类型从值类型 SnapshotPet
+// 改为 pointer 类型 *SnapshotPet —— 让 LEFT JOIN pets pet-less 时 GORM Scan
+// RosterRow.PetID 为 nil → realSnapshotBuilder.BuildSnapshot 内构造 m.Pet 保持
+// nil → JSON 序列化为 `"pet": null`（与 V1 §12.3 行 1881 r14 锁定的 going-forward
+// 契约 + §10.3 五阶段过渡表 pet 整体行 placeholder / 真实两列同值"pet-less → null"
+// 严格对齐）。
+//
+// **Story 10.7 落地的 placeholder 兼容形态**：placeholderSnapshotBuilder.BuildSnapshot
+// 在所有 member 行均下发 `&SnapshotPet{PetID: "", CurrentState: 1}`（即 pointer
+// 始终非 nil，PetID 空字符串）—— 与 V1 §12.3 行 1978 r14 锁定的"Story 10.7 落地
+// 实装与 going-forward 契约的差异"段一致；client 按 client merge contract 空字符串
+// 路径保留已有 petId，**不**清空真实值。本 story 不回工 placeholder 路径，仅切
+// bootstrap prod 路径走 real builder。
+//
+// **Wire 兼容性影响**（本 story 引入 r1 P1 关键决策）：
+//   - placeholder 阶段（Story 10.7）所有 member 下发 `pet ≠ null + petId: ""`，
+//     即 wire 上 `"pet": {"petId": "", "currentState": 1}` —— 改 Pet 为 pointer
+//     后 placeholder 调用方（NewPlaceholderSnapshotBuilder）必须同步改实装为
+//     `m.Pet = &SnapshotPet{...}` pointer 构造（已同步）
+//   - 真实阶段（本 story 引入）pet-less 下发 `"pet": null`、否则下发
+//     `"pet": {"petId": "<id>", "currentState": 1}` —— 与 V1 §12.3 going-forward
+//     契约严格对齐
+//   - client 解析层（Story 12.3 落地）按 `Optional<MemberPetDTO>` 处理（iOS Codable
+//     decodeIfPresent / Go json.Unmarshal *SnapshotPet 自然 nullable）—— 无需改
+//     iOS / Go decoder 即可同时正确处理两个阶段
+//
+// **不**给 SnapshotMember 加 omitempty tag：V1 §12.3 行 1881 钦定"`payload.members[].pet`
+// 必填（nullable）"—— pet-less 时 wire 显式下发 `"pet": null`，**不**省略 key。
 type SnapshotMember struct {
-	UserID   string      `json:"userId"`
-	Nickname string      `json:"nickname"`
-	Pet      SnapshotPet `json:"pet"`
+	UserID   string       `json:"userId"`
+	Nickname string       `json:"nickname"`
+	Pet      *SnapshotPet `json:"pet"` // pointer：nil → JSON null（pet-less，real 阶段路径）
 }
 
 // SnapshotPet 是 room.snapshot.payload.members[i].pet 的 Go 表示。
@@ -94,10 +132,12 @@ type SnapshotPet struct {
 // SnapshotBuilder 抽象 room.snapshot 构造路径。
 //
 // 节点 4 placeholder 实装：placeholderSnapshotBuilder（本文件
-// NewPlaceholderSnapshotBuilder 构造）—— 走 RoomMemberRepo.ListMembers 单表查询。
+// NewPlaceholderSnapshotBuilder 构造）—— 走 RoomMemberRepo.ListMembers 单表查询；
+// Story 11.7 后仅由测试路径保留作便捷 stub（prod 路径切到 real builder）。
 //
-// Story 11.7 真实实装：realSnapshotBuilder（在 Story 11.7 落地，本 story 不实装）
-// —— 走 room_members JOIN users JOIN pets 聚合丰富字段；接口签名不变。
+// Story 11.7 真实实装：realSnapshotBuilder（本文件 NewRealSnapshotBuilder 构造）
+// —— 走 room_members INNER JOIN users + LEFT JOIN pets 聚合丰富字段（复用 Story
+// 11.6 ListRosterByRoomID 单 SQL 路径）；接口签名不变（10.7 r10 P1 钦定形态冻结）。
 //
 // 接口边界：BuildSnapshot 仅参与 server → client 推送路径；**不**参与 REST GET
 // /rooms/{roomId}（REST handler 走 service 层 + 自己的 DTO，与 ws snapshot 字段
@@ -141,9 +181,19 @@ func NewPlaceholderSnapshotBuilder(roomMember mysql.RoomMemberRepo) SnapshotBuil
 //   - 调 roomMember.ListMembers(ctx, roomID) 拿全部 user_id（**禁止**只取当前握手
 //     用户 —— 房间已有 ≥2 成员时漏返其他成员会让 client 把 snapshot 当
 //     authoritative state 错误清空已加载的 roster）
-//   - 对每行构造 SnapshotMember{UserID: 字符串化, Nickname: "", Pet: {PetID: "",
+//   - 对每行构造 SnapshotMember{UserID: 字符串化, Nickname: "", Pet: &{PetID: "",
 //     CurrentState: 1}}
 //   - room.id 字符串化、room.maxMembers=4、room.memberCount=len(members)
+//
+// **r14 锁定的 placeholder 兼容形态**：所有 member 行下发 `pet ≠ null + petId: ""`
+// （即 pointer 始终非 nil，PetID 空字符串），与 V1 §12.3 行 1978 r14 锁定的
+// "Story 10.7 落地实装与 going-forward 契约的差异"段一致；Story 11.7 r1 P1 关键
+// 决策把 SnapshotMember.Pet 改为 pointer 类型让 real 阶段 pet-less 下发 null，
+// placeholder 实装层同步为 pointer 构造但语义不变（pointer 始终非 nil + petId 空字符串）。
+//
+// **测试便利保留**：bootstrap/router.go 在 Story 11.7 后切到 NewRealSnapshotBuilder，
+// placeholder 仅由测试路径（ws_test.go / snapshot_test.go / ws_integration_test.go）
+// 保留作便捷 stub，让既有 case 字段降级语义不需要 fixture 变动。
 type placeholderSnapshotBuilder struct {
 	roomMember mysql.RoomMemberRepo
 }
@@ -166,11 +216,110 @@ func (b *placeholderSnapshotBuilder) BuildSnapshot(ctx context.Context, roomID u
 		out.Members = append(out.Members, SnapshotMember{
 			UserID:   strconv.FormatUint(uid, 10),
 			Nickname: "",
-			Pet: SnapshotPet{
+			Pet: &SnapshotPet{ // pointer：与 V1 §12.3 行 1978 r14 锁定的 Story 10.7 落地形态一致：所有 member 下发 `pet ≠ null + petId: ""`
 				PetID:        "",
 				CurrentState: 1,
 			},
 		})
+	}
+	return out, nil
+}
+
+// NewRealSnapshotBuilder 构造节点 4 阶段真实 SnapshotBuilder 实装（Story 11.7 引入）。
+//
+// 与 NewPlaceholderSnapshotBuilder 的差异（V1 §12.3 行 1878 + 行 1976 + 行 1978
+// r14 锁定的 going-forward 契约）：
+//   - placeholder（Story 10.7 落地）：走 ListMembers 单表查询（不 JOIN users / pets），
+//     所有 member 一律下发 `pet ≠ null + petId: ""` + nickname 空字符串 ""
+//   - real（本 story 落地，going-forward 契约）：走 ListRosterByRoomID 多表 JOIN
+//     聚合（INNER JOIN users + LEFT JOIN pets ON pets.is_default=1 + ORDER BY
+//     joined_at ASC，复用 Story 11.6 已落地路径），nickname / petId 真实回填，
+//     pet-less 下发 `pet: null`，pet.currentState 节点 4 阶段仍硬编码 1（rest）
+//
+// 参数：
+//   - roomMember: RoomMemberRepo（已在 main.go bootstrap 期 wire；与 gateway / placeholder
+//     共享同一实例，避免重复构造；与 Story 10.7 placeholder 同模式）
+//
+// 调用方：bootstrap/router.go 把构造产物注入 wsapp.NewGateway(... , builder)；
+// 与 NewPlaceholderSnapshotBuilder 调用模式一致，仅替换构造函数名。
+//
+// 测试便利保留：placeholderSnapshotBuilder / NewPlaceholderSnapshotBuilder 在
+// 本 story 不删除（既有 ws_test.go / snapshot_test.go / ws_integration_test.go
+// 大量调用点保留作便捷 stub —— 本 story 仅切 prod 路径走 real builder）。
+func NewRealSnapshotBuilder(roomMember mysql.RoomMemberRepo) SnapshotBuilder {
+	return &realSnapshotBuilder{roomMember: roomMember}
+}
+
+// realSnapshotBuilder 是节点 4 阶段 SnapshotBuilder 的真实实装（Story 11.7 引入）。
+//
+// 唯一依赖：RoomMemberRepo.ListRosterByRoomID —— Story 11.6 已落地的多表 JOIN
+// 聚合方法（INNER JOIN users + LEFT JOIN pets + ORDER BY joined_at ASC，单 SQL）。
+//
+// 行为（V1 §12.3 字段表 going-forward 行 + §10.3 五阶段过渡表节点 4 真实列钦定）：
+//   - 调 roomMember.ListRosterByRoomID(ctx, roomID) 拿 []mysql.RosterRow 全 roster
+//     （ORDER BY joined_at ASC 稳定排序；0 行 → []）
+//   - 对每行 RosterRow 构造 SnapshotMember{
+//       UserID:   strconv.FormatUint(r.UserID, 10),  // BIGINT 字符串化（V1 §2.5）
+//       Nickname: r.Nickname,                          // 真实值（INNER JOIN users.nickname）
+//       Pet:      <如下分流>,
+//     }
+//     - r.PetID == nil（pet-less，LEFT JOIN pets 行 NULL）→ m.Pet 保持 nil →
+//       JSON 序列化为 `"pet": null`
+//     - r.PetID != nil → SnapshotMember.Pet = &SnapshotPet{
+//         PetID:        strconv.FormatUint(*r.PetID, 10), // BIGINT 字符串化
+//         CurrentState: 1, // 节点 4 阶段固定 1 (rest)；Epic 14 / Story 14.3 真实驱动
+//       }
+//   - room.id 字符串化（与 placeholder 一致）
+//   - room.maxMembers 固定 4（V1 §12.3 钦定，与 placeholder 一致）
+//   - room.memberCount = len(Members)（不变量：== Members[]，与 placeholder 一致）
+//
+// **不**消费 PresenceRepo / 不下发 isOnline 字段（V1 §12.3 going-forward 契约不区分
+// 在线 / 离线，roster = room_members 全行 view）；与 epics.md 行 1964 旧描述存在
+// drift，本 story 严格按 V1 §12.3 r14 锁定的 going-forward 契约。
+//
+// **不**下发 avatarUrl 字段（本 story 范围红线 + r1 关键决策；client merge contract
+// "未出现字段保留 client 已有值"路径已锁定，§15.6 推荐流程要求 client 先 GET
+// /rooms/{roomId} 拿真实 avatarUrl）；future 如需扩展 SnapshotMember 字段集合再单开 story。
+//
+// **不**下发 pet.equips 字段（节点 4 阶段固定 []，本 story 范围红线 + V1 §12.3
+// 行 1889 钦定 Epic 26 / Story 26.6 落地后再扩展）。
+//
+// ctx：透传给底层 ListRosterByRoomID 调用；ctx cancel 时返 ctx.Err 包装的 error。
+//
+// 错误：query 失败 → 返 (Snapshot{}, err 包装)；caller（SendRoomSnapshot）走
+// close 1011 reason "snapshot build failed"（与 placeholder 错误处理路径一致）。
+type realSnapshotBuilder struct {
+	roomMember mysql.RoomMemberRepo
+}
+
+// BuildSnapshot 实装 SnapshotBuilder.BuildSnapshot 接口（real 路径）。
+func (b *realSnapshotBuilder) BuildSnapshot(ctx context.Context, roomID uint64) (Snapshot, error) {
+	roster, err := b.roomMember.ListRosterByRoomID(ctx, roomID)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("ws snapshot: list roster for room %d: %w", roomID, err)
+	}
+	out := Snapshot{
+		Room: SnapshotRoom{
+			ID:          strconv.FormatUint(roomID, 10),
+			MaxMembers:  4,
+			MemberCount: len(roster),
+		},
+		Members: make([]SnapshotMember, 0, len(roster)),
+	}
+	for _, r := range roster {
+		m := SnapshotMember{
+			UserID:   strconv.FormatUint(r.UserID, 10),
+			Nickname: r.Nickname,
+			// Pet 字段填充见下：pet-less → nil；非 pet-less → &SnapshotPet{...}
+		}
+		if r.PetID != nil {
+			m.Pet = &SnapshotPet{
+				PetID:        strconv.FormatUint(*r.PetID, 10),
+				CurrentState: 1, // V1 §12.3 节点 4 阶段固定 1 (rest)；Epic 14 真实驱动
+			}
+		}
+		// r.PetID == nil → m.Pet 保持 nil → JSON 序列化为 `"pet": null`
+		out.Members = append(out.Members, m)
 	}
 	return out, nil
 }

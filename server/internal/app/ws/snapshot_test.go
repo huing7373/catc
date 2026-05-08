@@ -32,7 +32,12 @@ import (
 	"github.com/gorilla/websocket"
 
 	wsapp "github.com/huing/cat/server/internal/app/ws"
+	"github.com/huing/cat/server/internal/repo/mysql"
 )
+
+// wsappRosterRow 本地别名让 Story 11.7 realSnapshotBuilder 单测的 stub 配置行
+// 简洁；与 mysql.RosterRow 等价（type alias）。
+type wsappRosterRow = mysql.RosterRow
 
 // ---------- 测试 helper ----------
 
@@ -128,8 +133,8 @@ func TestSendRoomSnapshot_Happy_TwoMembers(t *testing.T) {
 		snap: wsapp.Snapshot{
 			Room: wsapp.SnapshotRoom{ID: "100", MaxMembers: 4, MemberCount: 2},
 			Members: []wsapp.SnapshotMember{
-				{UserID: "1001", Nickname: "", Pet: wsapp.SnapshotPet{PetID: "", CurrentState: 1}},
-				{UserID: "1002", Nickname: "", Pet: wsapp.SnapshotPet{PetID: "", CurrentState: 1}},
+				{UserID: "1001", Nickname: "", Pet: &wsapp.SnapshotPet{PetID: "", CurrentState: 1}},
+				{UserID: "1002", Nickname: "", Pet: &wsapp.SnapshotPet{PetID: "", CurrentState: 1}},
 			},
 		},
 	}
@@ -180,6 +185,9 @@ func TestSendRoomSnapshot_Happy_TwoMembers(t *testing.T) {
 	}
 	if snap.Members[0].Nickname != "" {
 		t.Errorf("members[0].nickname = %q, want empty (placeholder)", snap.Members[0].Nickname)
+	}
+	if snap.Members[0].Pet == nil {
+		t.Fatal("members[0].pet = nil, want non-nil (placeholder pointer always non-nil)")
 	}
 	if snap.Members[0].Pet.PetID != "" {
 		t.Errorf("members[0].pet.petId = %q, want empty (placeholder)", snap.Members[0].Pet.PetID)
@@ -264,6 +272,9 @@ func TestPlaceholderSnapshotBuilder_BuildSnapshot_FullRoster(t *testing.T) {
 		if m.Nickname != "" {
 			t.Errorf("members[%d].nickname = %q, want empty (placeholder)", i, m.Nickname)
 		}
+		if m.Pet == nil {
+			t.Fatalf("members[%d].pet = nil, want non-nil (placeholder pointer always non-nil)", i)
+		}
 		if m.Pet.PetID != "" {
 			t.Errorf("members[%d].pet.petId = %q, want empty (placeholder)", i, m.Pet.PetID)
 		}
@@ -338,5 +349,223 @@ func TestPlaceholderSnapshotBuilder_BuildSnapshot_CtxCancel(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("error chain should contain context.Canceled; got %v", err)
+	}
+}
+
+// ---------- Story 11.7: realSnapshotBuilder.BuildSnapshot 单测 ----------
+//
+// 测试策略：复用既有 stubRoomMemberRepo（ws_test.go 加 listRosterByRoomIDFn 字段）
+// 配置 ListRosterByRoomID 行为 → 调 wsapp.NewRealSnapshotBuilder + BuildSnapshot
+// → assert Snapshot 字段语义对齐 V1 §12.3 going-forward 契约（nickname 真实值 /
+// pet pointer pet-less → nil / pet 非 pet-less → 非 nil + petId 真实值 / currentState=1 /
+// memberCount === len(Members) 不变量）。
+//
+// 不依赖网络 / 真实 MySQL，纯 unit；dockertest 集成测试由 snapshot_integration_test.go
+// 覆盖（Story 11.7 AC6）。
+
+// uint64Ptr 是 *uint64 字面值便利 helper（避免每个 case 写 var x uint64 = N; &x）。
+func uint64Ptr(v uint64) *uint64 { return &v }
+
+// TestRealSnapshotBuilder_BuildSnapshot_Happy_3Members_With1PetLess:
+// stub 返 3 行 RosterRow（前 2 行 PetID 非 nil + 第 3 行 PetID nil 模拟 pet-less）→
+// Snapshot.Members 长度 3 + Members[0/1].Pet ≠ nil + Members[0].Pet.PetID 真实
+// 字符串化值 + Members[0].Pet.CurrentState == 1 + Members[2].Pet == nil（pet-less）+
+// Members[0/1/2].Nickname 为 RosterRow.Nickname 真实值 + Snapshot.Room.MemberCount
+// == 3 == len(Members) 不变量保持 + Snapshot.Room.MaxMembers == 4 + Snapshot.Room.ID
+// 字符串化 + Members 顺序与 stub 入参顺序一致（ListRosterByRoomID 已 ORDER BY
+// joined_at ASC，stub 直接控顺序）。
+func TestRealSnapshotBuilder_BuildSnapshot_Happy_3Members_With1PetLess(t *testing.T) {
+	repo := &stubRoomMemberRepo{
+		listRosterByRoomIDFn: func(_ context.Context, _ uint64) ([]wsappRosterRow, error) {
+			return []wsappRosterRow{
+				{UserID: 1001, Nickname: "Alice", AvatarURL: "https://cdn.example.com/a.png", PetID: uint64Ptr(8001)},
+				{UserID: 1002, Nickname: "Bob", AvatarURL: "https://cdn.example.com/b.png", PetID: uint64Ptr(8002)},
+				{UserID: 1003, Nickname: "Charlie", AvatarURL: "https://cdn.example.com/c.png", PetID: nil}, // pet-less
+			}, nil
+		},
+	}
+	builder := wsapp.NewRealSnapshotBuilder(repo)
+
+	snap, err := builder.BuildSnapshot(context.Background(), 3001)
+	if err != nil {
+		t.Fatalf("BuildSnapshot: %v", err)
+	}
+
+	if snap.Room.ID != "3001" {
+		t.Errorf("room.id = %q, want 3001 (BIGINT 字符串化)", snap.Room.ID)
+	}
+	if snap.Room.MaxMembers != 4 {
+		t.Errorf("room.maxMembers = %d, want 4", snap.Room.MaxMembers)
+	}
+	if snap.Room.MemberCount != 3 {
+		t.Errorf("room.memberCount = %d, want 3", snap.Room.MemberCount)
+	}
+	if len(snap.Members) != 3 {
+		t.Fatalf("len(members) = %d, want 3", len(snap.Members))
+	}
+	if snap.Room.MemberCount != len(snap.Members) {
+		t.Errorf("invariant violated: MemberCount=%d != len(Members)=%d", snap.Room.MemberCount, len(snap.Members))
+	}
+
+	// 顺序断言（ListRosterByRoomID ORDER BY joined_at ASC，stub 直接控顺序）
+	wantUserIDs := []string{"1001", "1002", "1003"}
+	wantNicknames := []string{"Alice", "Bob", "Charlie"}
+	for i, want := range wantUserIDs {
+		if snap.Members[i].UserID != want {
+			t.Errorf("members[%d].userId = %q, want %s", i, snap.Members[i].UserID, want)
+		}
+		if snap.Members[i].Nickname != wantNicknames[i] {
+			t.Errorf("members[%d].nickname = %q, want %s (真实值，going-forward)", i, snap.Members[i].Nickname, wantNicknames[i])
+		}
+	}
+
+	// Members[0/1].Pet 非 nil + petId 真实字符串化 + currentState 硬编码 1
+	if snap.Members[0].Pet == nil {
+		t.Fatal("members[0].pet = nil, want non-nil")
+	}
+	if snap.Members[0].Pet.PetID != "8001" {
+		t.Errorf("members[0].pet.petId = %q, want 8001 (真实值字符串化)", snap.Members[0].Pet.PetID)
+	}
+	if snap.Members[0].Pet.CurrentState != 1 {
+		t.Errorf("members[0].pet.currentState = %d, want 1 (节点 4 阶段固定)", snap.Members[0].Pet.CurrentState)
+	}
+	if snap.Members[1].Pet == nil {
+		t.Fatal("members[1].pet = nil, want non-nil")
+	}
+	if snap.Members[1].Pet.PetID != "8002" {
+		t.Errorf("members[1].pet.petId = %q, want 8002", snap.Members[1].Pet.PetID)
+	}
+
+	// Members[2].Pet == nil（pet-less，LEFT JOIN pets 行 NULL → wire `pet: null`）
+	if snap.Members[2].Pet != nil {
+		t.Errorf("members[2].pet = %+v, want nil (pet-less)", snap.Members[2].Pet)
+	}
+
+	// JSON 序列化必须含 `"pet":null`（pet-less）+ `"pet":{...}`（非 pet-less）
+	bytes, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	jsonStr := string(bytes)
+	if !strings.Contains(jsonStr, `"pet":null`) {
+		t.Errorf("snapshot JSON must contain `\"pet\":null` for pet-less member (got %s)", jsonStr)
+	}
+	if !strings.Contains(jsonStr, `"petId":"8001"`) {
+		t.Errorf("snapshot JSON must contain `\"petId\":\"8001\"` (got %s)", jsonStr)
+	}
+
+	// 范围红线：JSON 必须不含 avatarUrl / equips / isOnline 字段（V1 §12.3
+	// going-forward 契约 + 本 story 范围红线）
+	if strings.Contains(jsonStr, "avatarUrl") {
+		t.Errorf("snapshot JSON must NOT contain avatarUrl (range-red-line; got %s)", jsonStr)
+	}
+	if strings.Contains(jsonStr, "equips") {
+		t.Errorf("snapshot JSON must NOT contain equips (range-red-line; got %s)", jsonStr)
+	}
+	if strings.Contains(jsonStr, "isOnline") {
+		t.Errorf("snapshot JSON must NOT contain isOnline (range-red-line; going-forward 不下发; got %s)", jsonStr)
+	}
+}
+
+// TestRealSnapshotBuilder_BuildSnapshot_PetLess_SingleMember:
+// stub 返 1 行 RosterRow（PetID nil 模拟单成员 pet-less 房间）→ Snapshot.Members
+// 长度 1 + Members[0].Pet == nil + Members[0].Nickname 真实值 + MemberCount == 1.
+func TestRealSnapshotBuilder_BuildSnapshot_PetLess_SingleMember(t *testing.T) {
+	repo := &stubRoomMemberRepo{
+		listRosterByRoomIDFn: func(_ context.Context, _ uint64) ([]wsappRosterRow, error) {
+			return []wsappRosterRow{
+				{UserID: 1001, Nickname: "Solo", AvatarURL: "", PetID: nil}, // pet-less 单成员
+			}, nil
+		},
+	}
+	builder := wsapp.NewRealSnapshotBuilder(repo)
+
+	snap, err := builder.BuildSnapshot(context.Background(), 3001)
+	if err != nil {
+		t.Fatalf("BuildSnapshot: %v", err)
+	}
+	if snap.Room.MemberCount != 1 {
+		t.Errorf("room.memberCount = %d, want 1", snap.Room.MemberCount)
+	}
+	if len(snap.Members) != 1 {
+		t.Fatalf("len(members) = %d, want 1", len(snap.Members))
+	}
+	if snap.Members[0].UserID != "1001" {
+		t.Errorf("members[0].userId = %q, want 1001", snap.Members[0].UserID)
+	}
+	if snap.Members[0].Nickname != "Solo" {
+		t.Errorf("members[0].nickname = %q, want Solo", snap.Members[0].Nickname)
+	}
+	if snap.Members[0].Pet != nil {
+		t.Errorf("members[0].pet = %+v, want nil (pet-less)", snap.Members[0].Pet)
+	}
+
+	bytes, _ := json.Marshal(snap)
+	if !strings.Contains(string(bytes), `"pet":null`) {
+		t.Errorf("snapshot JSON must contain `\"pet\":null` for pet-less single member (got %s)", string(bytes))
+	}
+}
+
+// TestRealSnapshotBuilder_BuildSnapshot_DBError_Propagates:
+// stub 返 raw DB error → BuildSnapshot 返 (Snapshot{}, err 包装)；assert err 内含
+// "ws snapshot: list roster" 子串 + raw error 通过 errors.Is / errors.Unwrap 可访问
+// （与 placeholder 错误处理路径一致）。
+func TestRealSnapshotBuilder_BuildSnapshot_DBError_Propagates(t *testing.T) {
+	rawErr := errors.New("simulated DB connection lost")
+	repo := &stubRoomMemberRepo{
+		listRosterByRoomIDFn: func(_ context.Context, _ uint64) ([]wsappRosterRow, error) {
+			return nil, rawErr
+		},
+	}
+	builder := wsapp.NewRealSnapshotBuilder(repo)
+
+	snap, err := builder.BuildSnapshot(context.Background(), 3001)
+	if err == nil {
+		t.Fatal("BuildSnapshot should return error when ListRosterByRoomID fails")
+	}
+	if !strings.Contains(err.Error(), "ws snapshot: list roster") {
+		t.Errorf("error %q should contain `ws snapshot: list roster` prefix", err.Error())
+	}
+	if !errors.Is(err, rawErr) {
+		t.Errorf("error chain should wrap raw error; got %v", err)
+	}
+	// 关键不变量：error 时返 zero-value Snapshot（不是 partial fill）
+	if snap.Room.MemberCount != 0 || len(snap.Members) != 0 {
+		t.Errorf("BuildSnapshot on error should return zero-value Snapshot; got %+v", snap)
+	}
+}
+
+// TestRealSnapshotBuilder_BuildSnapshot_EmptyRoom_Returns0Members:
+// stub 返 []RosterRow{} 空数组 → Snapshot.Members 长度 0 + Snapshot.Members 不为 nil
+// （应为空 slice，序列化为 `"members": []` 不是 `null`，与 V1 §12.3 不变量一致）+
+// MemberCount == 0.
+func TestRealSnapshotBuilder_BuildSnapshot_EmptyRoom_Returns0Members(t *testing.T) {
+	repo := &stubRoomMemberRepo{
+		listRosterByRoomIDFn: func(_ context.Context, _ uint64) ([]wsappRosterRow, error) {
+			return []wsappRosterRow{}, nil
+		},
+	}
+	builder := wsapp.NewRealSnapshotBuilder(repo)
+
+	snap, err := builder.BuildSnapshot(context.Background(), 3001)
+	if err != nil {
+		t.Fatalf("BuildSnapshot: %v", err)
+	}
+	if snap.Room.MemberCount != 0 {
+		t.Errorf("room.memberCount = %d, want 0", snap.Room.MemberCount)
+	}
+	if snap.Members == nil {
+		t.Fatal("Members must be non-nil empty slice (not nil) so JSON serializes as `[]` not `null`")
+	}
+	if len(snap.Members) != 0 {
+		t.Errorf("len(members) = %d, want 0", len(snap.Members))
+	}
+
+	bytes, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if !strings.Contains(string(bytes), `"members":[]`) {
+		t.Errorf("snapshot JSON must contain `\"members\":[]` for empty room (got %s)", string(bytes))
 	}
 }
