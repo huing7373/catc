@@ -1252,7 +1252,7 @@ JSON 示例（用户当前不在任何房间）：
 | `data.room.maxMembers` | number (int) | 必填 | 房间容量上限（节点 4 阶段固定 `4`） |
 | `data.room.memberCount` | number (int) | 必填 | 当前成员总数；**必须严格等于** `data.members[]` 数组长度（不变量，详见本节末"不变量"小节） |
 | `data.room.status` | number (int) | 必填 | 房间状态枚举：`1 = active` / `2 = closed` |
-| `data.members` | array | 必填 | 房间全成员列表 = `room_members WHERE room_id = ?` 全部行 + JOIN `users` / `pets` 聚合；**不做"WS 此刻是否连接"层的过滤**（即 service 实装层**禁止**只返回 SessionManager 当前在线的 user）—— roster 反映的是 server 端"仍在房间"的状态（详见本节末"roster 语义与被动断线交互"小节）；节点 4 阶段**不**下发"online / offline"区分字段，client 不感知具体连接态 |
+| `data.members` | array | 必填 | 房间全成员列表 = `room_members WHERE room_id = ?` 全部行 + JOIN `users` / `pets` 聚合；**不做"WS 此刻是否连接"层的过滤**（即 service 实装层**禁止**只返回 SessionManager 当前在线的 user）—— roster 反映的是 server 端"仍在房间"的状态（详见本节末"roster 语义与 WS 断线交互"小节）；节点 4 阶段**不**下发"online / offline"区分字段，client 不感知具体连接态 |
 | `data.members[].userId` | string | 必填 | 成员 user 主键（BIGINT 字符串化） |
 | `data.members[].nickname` | string | 必填 | 成员昵称；来自 `users.nickname`（节点 2 阶段首次创建时 server 写入 `"用户{id}"`，可被未来"修改昵称"功能覆盖） |
 | `data.members[].avatarUrl` | string | 必填 | 成员头像 URL；首次创建为空字符串 `""`（不为 null）；空字符串语义 = "暂无头像"，client 渲染时降级为占位头像 |
@@ -1346,7 +1346,7 @@ JSON 示例（节点 4 阶段，3 成员房间）：
 #### 不变量（response 内部一致性）
 
 - `data.room.memberCount` **必须严格等于** `data.members[]` 数组长度
-- `data.members[]` 必须包含**全部** `room_members WHERE room_id = ?` 行；service 实装层**禁止**在 query 后做"WS 此刻是否连接"层的过滤（与 §12.3 `room.snapshot` 不变量一致：snapshot / GET /rooms 都返回当前 `room_members` 全行 —— full roster view，不是 online-only view）。**注**：roster 反映的是 server 端"仍在房间"状态，不区分"WS 当前在线 / 已断开但 row 还在"；被动断线（心跳超时 / TCP 异常）触发的"被动 leave"路径由 Story 10.4 onUnregister 钩子**真正**从 `room_members` 移除该行 + 触发 `member.left` 广播，移除后该 user 自然不再出现在后续的 `data.members[]` 中（详见本节末"roster 语义与被动断线交互"小节）
+- `data.members[]` 必须包含**全部** `room_members WHERE room_id = ?` 行；service 实装层**禁止**在 query 后做"WS 此刻是否连接"层的过滤（与 §12.3 `room.snapshot` 不变量一致：snapshot / GET /rooms 都返回当前 `room_members` 全行 —— full roster view，不是 online-only view）。**注**：roster 反映的是 server 端"仍在房间"状态，不区分"WS 当前在线 / 已断开但 row 还在"；任何 WS 断开（含心跳超时 / 客户端主动 close / TCP 1006 / app 关闭）**只**清 ephemeral 层（SessionManager + Redis presence），**不**触动 `room_members` 行 —— 只有 HTTP `POST /rooms/{roomId}/leave` 才删 row + 触发 `member.left` 广播；详见本节末"roster 语义与 WS 断线交互"小节
 - `data.members[]` 顺序由 server 决定（建议按 `room_members.joined_at ASC` 稳定排序，便于 client 渲染顺序稳定）；client 解析层**不**应假设特定顺序（除"稳定"外的语义）
 - `data.room.status` 与 `data.members[]` 的关系：`status = 2 closed` 时 `members[]` 必为 `[]`（因为退出房间事务在最后一人离开时同时删除最后一行 `room_members` + 更新 `rooms.status = 2`，详见 §10.5 服务端逻辑）；`status = 1 active` 时 `members[]` 必非空（房间至少有 1 个成员，否则按业务规则 status 应已变 closed）
 
@@ -1357,17 +1357,27 @@ JSON 示例（节点 4 阶段，3 成员房间）：
 - `data.members[].pet.equips` 节点 4 阶段必须为 `[]`（空数组，**不**省略 key、**不**为 null）；client 解析层按 `[<EquipDTO>]` 解析，节点 4 阶段数组永远为空，节点 9 由 Epic 26 真实回填非空数组
 - 节点 4 阶段**不**下发 `members[].pet.equips[].renderConfig`（Future Fields，节点 10 由 Epic 29 / Story 29.6 加；本字段表**不**列入）
 
-#### roster 语义与被动断线交互
+#### roster 语义与 WS 断线交互
 
-节点 4 阶段 `data.members[]` 的"成员"定义 = "**server 端仍认为在房间**的成员"（即 `room_members WHERE room_id = ?` 当前存在的行）；**不**在字段层引入"online / offline"区分。被动断线（WS 心跳超时 / TCP 异常）的处理路径由 Story 10.4 onUnregister 钩子统一负责：
+节点 4 阶段 `data.members[]` 的"成员"定义 = "**server 端仍认为在房间**的成员"（即 `room_members WHERE room_id = ?` 当前存在的行）；**不**在字段层引入"online / offline"区分。
 
-- **WS 当前连接但暂时停留**（如 client 网络抖动、TCP 重传中）：心跳尚未超时，`room_members` 行仍在，user 仍在 roster 中 —— 这是 r1 review 中"transient WS disconnect 应保留 offline member"语义，本设计**等价**地通过"心跳超时 60s 才走清理钩子"提供 60s 的容错窗口（一次 ping 周期）；窗口内 reconnect 由 §15.6 / §10.4 r6 lesson 钦定的"成功握手 = 心跳超时窗口重置"语义保护
-- **WS 心跳超时清理钩子触发**（默认 60s 无 pong → onUnregister）：Story 10.4 r6 lesson 钦定路径 = 删除 `room_members WHERE room_id = ? AND user_id = ?` 行 + 更新 `users.current_room_id = NULL` + 触发 `member.left` 广播；此后该 user **不再**出现在 roster 中 —— 这是有意设计：节点 4 阶段无"客户端可重连接回旧房间但保留座位"的产品语义，断线超时 = 离开房间，下次 reconnect 走"主界面 → 重新 POST /rooms 或 POST /rooms/{roomId}/join"路径
-- **client 主动 close**（app 关闭 / 前台切后台超过保活窗口 / 用户手动断网）：与心跳超时同路径（onUnregister 钩子）；**不**保留 row
+**核心钦定（持久层 vs ephemeral 层职责分离）**：
 
-**memberCount 与 reconnect 语义的 self-consistency**：`memberCount = members[].length = 当前 room_members 行数`；心跳超时清理后 `memberCount` 立即递减、`member.left` 广播给其他在线成员、其他成员 client 按 §12.3 client merge contract 集合层规则**移除** roster entry —— 三者同步，无 drift。client 重连 / 重新进入房间走标准 join 流程（不携带"我之前在该房间"假设；§15.6 推荐先 `GET /api/v1/rooms/current` 校验是否仍在房间）。
+- **持久层 = `room_members` 行 + `users.current_room_id`**：**唯一**变更路径是 HTTP `POST /api/v1/rooms/{roomId}/join`（添加行）和 HTTP `POST /api/v1/rooms/{roomId}/leave`（删除行）—— 详见 §10.4 / §10.5 服务端逻辑。任何 WS 层事件（含心跳超时、TCP 1006、客户端主动 close、app 关闭 / 切后台）**禁止**修改持久层
+- **ephemeral 层 = SessionManager 内存映射 + Redis presence**：由 WS 连接生命周期管理（onRegister / onUnregister 钩子）；任何 WS 断开（含主动 close / 心跳超时 / TCP 异常）**只**清理 ephemeral 层（撤销 Session、清 presence），**不**触动持久层
 
-> **设计 rationale**：r1 review 指出"transient WS disconnect 不应整人踢出房间，否则 `含离线成员` 契约自相矛盾"。本契约的最终定位是：**没有"含离线成员"概念**（roster 不区分在线 / 离线，仅反映 `room_members` 行）；transient（≤60s 心跳窗口内）容错由心跳超时阈值实现，**不**由"离线 member 占座"实现。这条定位与 Story 10.4 r6 lesson "心跳超时 = 真离开房间"的实装路径自洽。
+→ "WS 断开 = 离开房间" **不**成立；只有 HTTP leave（或被 server 通过 close 4007 通知 client 协议层确认完成的同一路径）才是真正的"离开房间"。这条钦定是 §10.5 / §12.1 4005 retryable 语义 / §12.3 `### 成员离开` 触发条件三处协同的契约基础。
+
+**各类 WS 断开场景的语义**：
+
+- **WS 当前连接但暂时停留**（如 client 网络抖动、TCP 重传中）：心跳尚未超时，Session 仍活跃，`room_members` 行仍在；roster 不变
+- **WS 心跳超时**（默认 60s 无 pong → server close 4005，reason = `"heartbeat timeout"`）：server 撤销 Session（onUnregister 清 ephemeral），**不**改 `room_members` / `users.current_room_id`，**不**广播 `member.left`；client 按 §12.1 close code 表 4005 行钦定 transient 语义自动重连，重连握手时 §12.1 校验顺序步骤 5（`room_members` 表查询）**通过**（行仍在），4005 reconnect 设计**有意义且自洽**
+- **client 主动 close / app 关闭 / 前台切后台超过保活窗口 / TCP 异常断开（1006）**：与心跳超时同路径 —— 仅清 ephemeral 层，**不**改 `room_members` / `users.current_room_id`，**不**广播 `member.left`；用户后续若重新打开 app 或 reconnect，`room_members` 行仍在，可直接 WS 握手回到原房间
+- **HTTP leave**（用户主动通过 `POST /rooms/{roomId}/leave` 请求离开）：删 `room_members` 行 + `users.current_room_id = NULL` + 广播 `member.left` + close leaver 自己的 WS Session（close code 4007）—— 详见 §10.5 服务端逻辑
+
+**memberCount 与 reconnect 语义的 self-consistency**：`memberCount = members[].length = 当前 room_members 行数`；只有 HTTP leave 会让 `memberCount` 递减并广播 `member.left`；任何 WS 断开（含心跳超时）**不**改变 `memberCount`，roster 在 client 端保持稳定，重连后 server 推送的 `room.snapshot` 与 reconnect 前一致 —— 三层（持久层、ephemeral 层、广播事件）语义对齐，无 drift。
+
+> **设计 rationale**：r1 review 指出"transient WS disconnect 不应整人踢出房间，否则 `含离线成员` 契约自相矛盾"；r2 修复尝试通过"心跳超时 = 删行 + 广播 member.left"路径让 roster 不区分在线 / 离线但仍正确清理僵尸用户。但 r3 review 指出该方案与 §12.1 4005 retryable 语义内在冲突 —— client 按钦定 transient 语义重连，握手时 §12.1 步骤 5 立即 fail 4003（行已删），reconnect 形同虚设。本契约最终定位（r3 锁定）：**WS 断开仅清 ephemeral，房间归属只能由 HTTP leave 改变**；transient 容错（含心跳超时窗口）由 ephemeral 层独立处理，行不删 → 4005 reconnect 自洽 → 跨文档（V1接口设计.md / 时序图设计.md）只有一种 disconnect 语义可遵循。"含离线成员"概念依然不引入（roster 字段层不区分），但保留 row 的实现机制变成"WS 断开不删 row"而非"心跳超时阈值"。
 
 ---
 
@@ -1506,7 +1516,7 @@ JSON 示例（请求体）：
 
 **事务边界规则**：步骤 2 ~ 4 必须在同一 MySQL 事务中（参见数据库设计 §8.6 房间事务边界）；步骤 6 在事务**外**触发（fire-and-forget）；步骤 7 同样在事务**外**触发（fire-and-forget），且**必须**在步骤 6 广播之后（顺序保证 leaver 不会在自己 Session 被关闭后再收到由本次 leave 触发的 `member.left` —— fanout 已经物理上跳过 leaver Session，二者顺序仅影响清理副作用语义）。
 
-**心跳超时被动断线场景**：Story 10.4 心跳超时清理钩子也会触发"删除 `room_members` + 更新 `users.current_room_id` + 触发 `member.left` 广播 + 撤销 Session"路径（详见 epics.md §Story 11.8 + Story 10.4 r6 lesson）；该路径**不**经过本 HTTP 接口，但事务步骤 + 广播语义与本接口一致 —— 即 server 实装层应将"主动 leave"和"心跳超时被动 leave"用同一套 service 层函数处理，避免代码重复。**Session 撤销语义差异**：心跳超时路径下 leaver Session 已经因心跳超时被 SessionManager 自然撤销（Story 10.4 钩子触发前置条件即"Session 已被判定离线"），无需额外 close —— 即"主动 leave"路径的步骤 7 在被动断线场景下退化为 no-op（leaver 已无活跃 Session 可关），但 service 层调用语义保持一致。
+**WS 断线场景与本接口的关系**（r3 锁定语义）：心跳超时（→ close 4005）、client 主动 close、app 关闭 / 切后台、TCP 1006 异常断开等任何 WS 层断开**都不**走本接口的事务路径（不删 `room_members` 行、不改 `users.current_room_id`、不广播 `member.left`）—— 它们仅清理 ephemeral 层（SessionManager 撤销 Session + Redis presence 清理），由 Story 10.4 onUnregister 钩子统一负责；详见 §10.3 "roster 语义与 WS 断线交互" 小节。换言之，**只有本接口（HTTP leave）+ 步骤 7 的 close 4007** 是真正的"离开房间"路径。WS 断线后 `room_members` 行仍在，user 仍在 roster 中；用户通过 reconnect / 重新打开 app 即可回到原房间，无需重新 join —— 这是 §12.1 4005 retryable 语义的契约基础。
 
 #### 响应体
 
@@ -1658,7 +1668,7 @@ GET /ws/rooms/{roomId}?token=xxx
 | 4003 | server 主动 close | token 合法但 user 不在该 roomId 的 `room_members` 表中 | 是（reason = `"user not in room"`） | **不**自动重连（业务级拒绝，重试无意义）；UX 提示用户"未加入该房间"，回退到主界面 |
 | 4002 | server 主动 close | roomId 路径参数格式错（非数字 / 缺失） | 是（reason = `"invalid roomId"`） | **不**自动重连；视为客户端实装 bug，记 log 后回退 |
 | 4004 | server 主动 close | room 不存在（`rooms` 表无该 ID 或已 archived） | 是（reason = `"room not found"`） | **不**自动重连；UX 提示"房间不存在"，回退到主界面 |
-| 4005 | server 主动 close | 心跳超时（60 秒未收到任何 client 消息含 ping，由 Story 10.4 心跳框架触发；详见 §12.2 `ping` 小节） | 是（reason = `"heartbeat timeout"`） | **应**自动重连（指数退避；视为 transient network failure，与 1006 / 1011 同等对待 —— 不视为业务级拒绝，因为底层多半是网络抖动 / 客户端切后台超时） |
+| 4005 | server 主动 close | 心跳超时（60 秒未收到任何 client 消息含 ping，由 Story 10.4 心跳框架触发；详见 §12.2 `ping` 小节） | 是（reason = `"heartbeat timeout"`） | **应**自动重连（指数退避；视为 transient network failure，与 1006 / 1011 同等对待 —— 不视为业务级拒绝，因为底层多半是网络抖动 / 客户端切后台超时）；reconnect 自洽性 by §10.3 "roster 语义与 WS 断线交互" + §10.5 "WS 断线场景与本接口的关系"：心跳超时**不**删 `room_members` 行 / **不**广播 `member.left`，仅清 ephemeral 层 → reconnect 握手时 §12.1 校验顺序步骤 5（`room_members` 表查询）通过，用户保留原房间座位 |
 | 1000 | server 或 client 任一方主动 close | 服务端 / 客户端正常关闭 | 否 | 客户端主动 close 不重连；服务端主动 close（如 graceful shutdown）客户端可选重连 |
 | 1001 | server 或 client 任一方主动 close | going away（服务端重启 / 客户端切后台） | 否 | 服务端重启 → 客户端**应**自动重连（指数退避，参考 iOS Story 12.5）；客户端切后台 → 客户端自身决定 |
 | 4006 | server 主动 close | 客户端违反协议策略 —— 节点 4 阶段唯一触发条件：单条消息 frame 超过 `ws.max_message_size_bytes`（默认 16 KB） | 是（reason = `"message too large"`） | **不**自动重连（视为客户端实装 bug，重连仍会被 close）；记 log error 后回退 |
@@ -1668,7 +1678,7 @@ GET /ws/rooms/{roomId}?token=xxx
 **关键约束**：
 
 - 4001 / 4002 / 4003 / 4004 / 4006 / 4007 是**业务级**拒绝（4xxx 段是应用自定义；WebSocket RFC 6455 规定 4000-4999 为应用保留段），重试无意义，客户端**不**应自动重连；客户端应展示明确 UX 提示并回退（4006 = 客户端实装 bug，记 log error 后回退；4007 = 自身 HTTP leave 完成的协议层确认，触发 RoomView 退出 UX，不需提示错误）
-- **4005 是 4xxx 段中的例外**：虽然位于 4xxx 应用自定义段，但语义是 transient network failure（心跳超时多半是网络抖动 / 客户端切后台），不是业务级拒绝；客户端**应**自动重连，与 1006 / 1011 同等对待（指数退避 + 最大重试次数限制）
+- **4005 是 4xxx 段中的例外**：虽然位于 4xxx 应用自定义段，但语义是 transient network failure（心跳超时多半是网络抖动 / 客户端切后台），不是业务级拒绝；客户端**应**自动重连，与 1006 / 1011 同等对待（指数退避 + 最大重试次数限制）。该 retryable 语义的可行性由 §10.3 / §10.5 / §12.3 钦定共同保证："WS 断开（含心跳超时）仅清 ephemeral 层；持久层 `room_members` / `users.current_room_id` 仅由 HTTP join / leave 改变" —— 因此 4005 reconnect 握手时 `room_members` 行必然仍在，§12.1 校验顺序步骤 5 通过，client 重新进入原房间无需重新 join
 - 1000 / 1001 / 1011 是**协议 / 网络**级断开（1xxx 段是 RFC 标准段，可由服务端主动 emit），客户端**应**自动重连（除 1000 主动关闭外）
 - **不使用 RFC close code 1006 / 1008 / 1009**（**不**出现在上方 close code 表内，**也不**由服务端主动 emit，原因分两类）：
   - **1006**：RFC 6455 §7.1.5 reserved status code —— **MUST NOT** be set as a status code in a Close control frame。1006 仅由客户端 WebSocket runtime 在底层 TCP 异常断开 / 网络抖动且未收到 close frame 时**本地合成**通知上层；服务端实装层（Story 10.3 / 12.5）**禁止**写 1006 到 close frame。客户端收到 1006 时按 transient network failure 处理 —— 与 1011 / 4005 同等对待（指数退避 + 最大重试次数限制自动重连）。1006 不进入 close code 表的另一个理由：§3 全局错误码表已将 `1006`（状态不允许当前操作）用作应用层错误码（在 §12.3 `error.payload.code` 中出现），与其它"1xxx 段被 §3 占用"的 code 同类，避免数字空间冲突
@@ -1820,7 +1830,7 @@ JSON 通用骨架：
 | `payload.room.id` | string | 必填 | 房间 ID（BIGINT 字符串化下发，遵循 §2.5 全局约定） |
 | `payload.room.maxMembers` | number (int) | 必填 | 房间容量上限（节点 4 阶段固定 4，由 Story 11.3 创建房间事务写入；本接口仅返回当前值） |
 | `payload.room.memberCount` | number (int) | 必填 | 房间总成员数 = 当前 `room_members WHERE room_id = ?` 行数；与下文 `payload.members` 数组长度严格相等（见本节末"不变量"小节）；节点 4 阶段 Story 10.7 placeholder 实现 = `SELECT COUNT(*) FROM room_members WHERE roomId=?` 的真实行数（或同一次 query 直接取 `len(members)`，二者必须一致），**禁止**写死为 1；Story 11.7 真实实现 = 同样的 `room_members` 行数，差异仅在于 placeholder 阶段不 JOIN `users` / `pets`（丰富字段降级），**不**在成员数量上与真实实装区分 |
-| `payload.members` | array | 必填 | 房间全成员列表 = 当前 `room_members WHERE room_id = ?` 全部行（**不**做"WS 此刻是否连接"层的过滤，roster 反映 server 端"仍在房间"的成员；与 §10.3 `data.members[]` 同语义，详见 §10.3 "roster 语义与被动断线交互"小节）；节点 4 阶段 Story 10.7 placeholder 实现 = `SELECT * FROM room_members WHERE roomId=?` 的全部行（**禁止**只返回当前握手用户自己 —— 房间已有 ≥2 成员时漏返其他成员会让 client 把 snapshot 当 authoritative state 错误清空已加载的 roster），单表查询不依赖 JOIN，本身已足够简单；丰富字段在 placeholder 阶段降级（`nickname` / `pet.*` 行为见各字段 placeholder 行）；Story 11.7 真实实现按 `room_members` JOIN `users` JOIN `pets` 聚合，**仅丰富字段差异**，成员条目数量与 placeholder 一致 |
+| `payload.members` | array | 必填 | 房间全成员列表 = 当前 `room_members WHERE room_id = ?` 全部行（**不**做"WS 此刻是否连接"层的过滤，roster 反映 server 端"仍在房间"的成员；与 §10.3 `data.members[]` 同语义，详见 §10.3 "roster 语义与 WS 断线交互"小节）；节点 4 阶段 Story 10.7 placeholder 实现 = `SELECT * FROM room_members WHERE roomId=?` 的全部行（**禁止**只返回当前握手用户自己 —— 房间已有 ≥2 成员时漏返其他成员会让 client 把 snapshot 当 authoritative state 错误清空已加载的 roster），单表查询不依赖 JOIN，本身已足够简单；丰富字段在 placeholder 阶段降级（`nickname` / `pet.*` 行为见各字段 placeholder 行）；Story 11.7 真实实现按 `room_members` JOIN `users` JOIN `pets` 聚合，**仅丰富字段差异**，成员条目数量与 placeholder 一致 |
 | `payload.members[].userId` | string | 必填 | 成员用户 ID（BIGINT 字符串化）；node-4 placeholder 阶段直接来自 `room_members.userId`，**所有成员行都返回**（不限于握手用户） |
 | `payload.members[].nickname` | string | 必填 | 成员昵称；node-4 placeholder 阶段（Story 10.7）允许返回**空字符串** `""`（不 JOIN `users` 表，避免 placeholder 过度耦合 Story 11.7 的多表 JOIN）；**空字符串语义 = "我不知道这个值"**，client 按本节末"client merge contract"**保留** client 已有真实昵称（如来自 `GET /api/v1/rooms/{roomId}` 响应），**禁止**用空串覆盖；client 渲染时若本地无真实值，空串可降级为占位文案；Story 11.x（具体由 Story 11.7 真实 SnapshotBuilder 实装）由 `users.nickname` 真实回填 |
 | `payload.members[].pet.petId` | string | 必填 | 成员当前宠物 ID（BIGINT 字符串化）；node-4 placeholder 阶段（Story 10.7）允许返回**空字符串** `""`（不 JOIN `pets` 表）；**空字符串语义 = "我不知道这个值"**，client 按本节末"client merge contract"**保留** client 已有真实 petId（如来自 `GET /api/v1/rooms/{roomId}` 响应），**禁止**用空串覆盖；Story 14.x（pet 真实驱动时由 Story 11.7 同步扩展）回填真实 `pets.id` |
@@ -1868,7 +1878,7 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 }
 ```
 
-> **不变量（snapshot 内部一致性）**：`memberCount` 必须**严格等于** `members[]` 数组长度。两者**统一表示当前 `room_members` 行数**（即 server 端"仍在房间"的全部成员），**不**做"WS 此刻是否连接"层的过滤 —— 即 snapshot 是房间的 full roster view（按 `room_members` 全行），**不是** WS-online-only view。理由：(a) 若 `memberCount` 与 `members[].length` 任一方做"WS 在线过滤"而另一方不做，违反不变量；(b) 节点 4 阶段服务端**不**在握手时广播 `member.joined`（详见 §12.1 末尾 placeholder 注），客户端无法靠后续推送补齐 row 还在但 WS 暂未连上的成员，snapshot 必须自包含 `room_members` 全行；(c) 节点 4 阶段**不**引入"online / offline" 字段层区分 —— 心跳超时清理钩子（Story 10.4 onUnregister）会**真正**从 `room_members` 移除断线超时的 user + 触发 `member.left` 广播，移除后该 user 不再出现在后续 snapshot / GET /rooms 响应中（详见 §10.3 末尾"roster 语义与被动断线交互"小节）。节点 4 阶段 Story 10.7 placeholder 实装时 `members[]` 必须**反映 `room_members` 全部成员行**（最少 1 个，即握手用户自己；房间已有 ≥2 成员时必须返回全部）—— **禁止**写"全零 placeholder"（`memberCount: 0` + `members: []`），也**禁止**写"单成员快照"（仅当前握手用户自己，`memberCount` 写死为 1），因为：(i) §12.1 第 5 步握手成功**充分条件**只校验"当前用户已在 `room_members` 表中"，**不**保证房间只有 1 个成员；房间已有 ≥2 成员时单成员 snapshot 会让 client 把首条 authoritative 消息当成"房间被清空"，错误清空已加载的合法 roster；(ii) 推荐房间进入流程要求 client 先 `GET /api/v1/rooms/{roomId}` 加载房间状态后再开 WS（详见 §11.5 客户端推荐调用顺序），client 已经持有合法 roster 视图，再收到一个比真实成员少的 snapshot 同样会错误覆盖（无论是零成员还是单成员都属于"少返"）；(iii) §12.1.3 钦定 `room.snapshot` 是握手成功后**必发**的第一条 authoritative 消息，client 把它作为权威态采用，placeholder 必须给出**结构上真实**的快照（成员条目齐全），仅在丰富字段（`nickname` / `pet.*`）层面降级为占位默认值，**不**在成员数量上偷工。Story 11.7 真实实装时由**同一次** `room_members` JOIN `users` JOIN `pets` 聚合产出 `members[]`，`memberCount` 取该数组长度（或同一次 query 的 `COUNT(*)`），server 实装层面**禁止**让两者出现 drift；与 Story 10.7 placeholder 的差异**仅在丰富字段**（`nickname` / `pet.*` 真实回填），**不在成员数量**。
+> **不变量（snapshot 内部一致性）**：`memberCount` 必须**严格等于** `members[]` 数组长度。两者**统一表示当前 `room_members` 行数**（即 server 端"仍在房间"的全部成员），**不**做"WS 此刻是否连接"层的过滤 —— 即 snapshot 是房间的 full roster view（按 `room_members` 全行），**不是** WS-online-only view。理由：(a) 若 `memberCount` 与 `members[].length` 任一方做"WS 在线过滤"而另一方不做，违反不变量；(b) 节点 4 阶段服务端**不**在握手时广播 `member.joined`（详见 §12.1 末尾 placeholder 注），客户端无法靠后续推送补齐 row 还在但 WS 暂未连上的成员，snapshot 必须自包含 `room_members` 全行；(c) 节点 4 阶段**不**引入"online / offline" 字段层区分 —— `room_members` 行的删除**唯一**路径是 HTTP `POST /rooms/{roomId}/leave` 事务（删行后触发 `member.left` 广播，该 user 不再出现在后续 snapshot / GET /rooms 响应中）；任何 WS 层断开（含心跳超时 / TCP 1006 / app 关闭）**仅**清 ephemeral 层（SessionManager + Redis presence），**不**触动 `room_members` 行 —— 因此该 user 在断线期间仍出现在后续 snapshot / GET /rooms roster 中，与 §12.1 4005 retryable 语义自洽（详见 §10.3 末尾"roster 语义与 WS 断线交互"小节）。节点 4 阶段 Story 10.7 placeholder 实装时 `members[]` 必须**反映 `room_members` 全部成员行**（最少 1 个，即握手用户自己；房间已有 ≥2 成员时必须返回全部）—— **禁止**写"全零 placeholder"（`memberCount: 0` + `members: []`），也**禁止**写"单成员快照"（仅当前握手用户自己，`memberCount` 写死为 1），因为：(i) §12.1 第 5 步握手成功**充分条件**只校验"当前用户已在 `room_members` 表中"，**不**保证房间只有 1 个成员；房间已有 ≥2 成员时单成员 snapshot 会让 client 把首条 authoritative 消息当成"房间被清空"，错误清空已加载的合法 roster；(ii) 推荐房间进入流程要求 client 先 `GET /api/v1/rooms/{roomId}` 加载房间状态后再开 WS（详见 §11.5 客户端推荐调用顺序），client 已经持有合法 roster 视图，再收到一个比真实成员少的 snapshot 同样会错误覆盖（无论是零成员还是单成员都属于"少返"）；(iii) §12.1.3 钦定 `room.snapshot` 是握手成功后**必发**的第一条 authoritative 消息，client 把它作为权威态采用，placeholder 必须给出**结构上真实**的快照（成员条目齐全），仅在丰富字段（`nickname` / `pet.*`）层面降级为占位默认值，**不**在成员数量上偷工。Story 11.7 真实实装时由**同一次** `room_members` JOIN `users` JOIN `pets` 聚合产出 `members[]`，`memberCount` 取该数组长度（或同一次 query 的 `COUNT(*)`），server 实装层面**禁止**让两者出现 drift；与 Story 10.7 placeholder 的差异**仅在丰富字段**（`nickname` / `pet.*` 真实回填），**不在成员数量**。
 
 **节点 4 阶段 placeholder 示例**（Story 10.7 实装；与上述真实示例的差异**仅在丰富字段**（`nickname` / `pet.petId` 在 placeholder 阶段允许空字符串），`members[]` 必须反映 `room_members` 全部成员行；下例为房间已有 2 成员的场景 —— `userId: "1001"` 为当前握手用户、`userId: "1002"` 为另一已加入仍在 `room_members` 表中（WS 当前是否连接不影响 roster）的成员；`memberCount` = `members[].length` = 2，不变量不破）。**注意**：下例中 `nickname: ""` / `pet.petId: ""` 是"server 不知道"的 placeholder 信号 —— client 按下方 "client merge contract" **保留** 已通过 `GET /api/v1/rooms/{roomId}` 加载的真实值，**禁止**用空串覆盖；若 client 此前未加载真实值（如直接由 `POST /rooms/{roomId}/join` 进入未走 §15.6 流程），则保留空值，渲染时降级为占位文案：
 
@@ -1926,8 +1936,7 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 **触发**：
 
 - `POST /api/v1/rooms/{roomId}/join` 加入房间事务**成功提交后**，server 调用 `BroadcastToRoom(roomID, {type: "member.joined", payload: {userId, nickname, avatarUrl, pet: {petId, currentState}}})` 广播给该房间内所有**其他**在线成员（不发给加入者自己 —— 加入者自己应收 HTTP 响应即知自己已加入，且加入者后续如建立 WS 连接，握手时 server 会下发含自己的 `room.snapshot`，与已连接成员通过 `member.joined` enrich roster 的路径互补）；payload **必须**含 `avatarUrl` + `pet.{petId, currentState}`，不能简化为仅 `userId + nickname` —— 已连接成员仅在握手时收一次 `room.snapshot`（§12.1.3 钦定），后续无新 snapshot 触发，**唯一**enrich 新成员展示字段（头像、宠物 ID、宠物状态）的路径就是 `member.joined` 自身 payload；若 trigger 实装层简化为仅下发 `userId + nickname`，已连接成员将永远看不到新成员的头像 / 宠物，违反"`member.joined` 必须自包含展示所需全部字段"语义（详见下方"字段"表 + Story 11.8 实装锚定）
-- WS 心跳超时清理钩子（Story 10.4）触发的"被动 leave"路径**不**触发 `member.joined`（仅触发 `member.left`）—— 节点 4 阶段无"被动 join"路径
-- 节点 4 阶段**仅** Story 11.8 一处触发；后续 epic 不在本路径加新触发条件（如 Story 14.x 状态广播走独立 `pet.state.changed`）
+- 节点 4 阶段**仅** Story 11.8 一处触发；任何 WS 层事件（含握手、心跳超时、断开重连）**都不**触发 `member.joined` —— `member.joined` 与 `room_members` 行的"新增"语义严格 1:1 对应，而新增持久层行**仅**通过 HTTP join 接口完成（详见 §10.4 服务端逻辑）；后续 epic 不在本路径加新触发条件（如 Story 14.x 状态广播走独立 `pet.state.changed`）
 
 **字段**：
 
@@ -1978,11 +1987,11 @@ JSON 示例：
 
 ### 成员离开（member.left）
 
-**触发**：
+**触发**（r3 锁定）：
 
-- `POST /api/v1/rooms/{roomId}/leave` 退出房间事务**成功提交后**，server 调用 `BroadcastToRoom(roomID, {type: "member.left", payload: {userId}})` 广播给该房间内所有**其他**在线成员（不发给离开者自己 —— 离开者已收 HTTP 响应）
-- WS 心跳超时清理钩子（Story 10.4 实装；详见 epics.md §Story 11.8 第 4 条 AC）触发的"被动 leave"路径**也**触发 `member.left` 广播 —— 这是为了让其他成员能感知到"离线 = 离开"（避免成员列表里僵尸用户）；server 实装上应将"主动 leave"和"被动 leave"走同一 `BroadcastToRoom(member.left)` 路径
-- 客户端发起 close（如 app 关闭） / TCP 异常断开（1006 close code）→ 触发 Story 10.4 onUnregister 钩子 → 走"被动 leave"路径触发 `member.left`
+- `POST /api/v1/rooms/{roomId}/leave` 退出房间事务**成功提交后**，server 调用 `BroadcastToRoom(roomID, {type: "member.left", payload: {userId}})` 广播给该房间内所有**其他**在线成员（不发给离开者自己 —— 离开者已收 HTTP 响应；leaver 自己的 WS Session 由 §10.5 步骤 7 通过 close 4007 协议层确认完成）
+- **唯一触发条件**就是上一条 HTTP leave 路径；任何 WS 层断开（含心跳超时 → close 4005、client 主动 close、app 关闭 / 切后台、TCP 1006 异常断开）**都不**触发 `member.left` —— WS 断开仅清 ephemeral 层（SessionManager + Redis presence），不改 `room_members` / `users.current_room_id`，不广播 `member.left`；详见 §10.3 "roster 语义与 WS 断线交互" 小节 + §10.5 "WS 断线场景与本接口的关系" 注解块
+- 这条钦定与 §12.1 close code 4005 行"client 应自动重连"的 transient 语义自洽：心跳超时不删 row → reconnect 握手时 §12.1 校验顺序步骤 5 通过 → 用户保留座位
 
 **字段**：
 
@@ -1990,7 +1999,7 @@ JSON 示例：
 |---|---|---|---|
 | `type` | string | 必填 | 固定值 `"member.left"` |
 | `requestId` | string | 必填 | 固定 `""`（主动推送类消息，遵循 §12.3 通用信封） |
-| `payload.userId` | string | 必填 | 离开的成员 user 主键（BIGINT 字符串化）；来自退出事务的 user 或心跳超时钩子捕获的 Session.userID |
+| `payload.userId` | string | 必填 | 离开的成员 user 主键（BIGINT 字符串化）；来自 HTTP leave 退出事务的当前 user |
 | `ts` | number (int64) | 必填 | 服务端发送时间戳（ms） |
 
 JSON 示例：
@@ -2009,10 +2018,10 @@ JSON 示例：
 **关键约束**：
 
 - `payload` 字段**精简**为仅 `userId`（与 `member.joined` 含 `nickname` 不同）—— 离开事件 client UX 不需要显示昵称（"X 离开了房间"中的 X 可由 client 从已有 roster 查到 nickname；即使没查到，UX 文案降级为"有人离开"也可接受），减少 server 加载压力
-- 广播范围：**仅**该房间内当前在线的其他 Session（不含离开者自己）；离开者已断开（被动 leave）或已收 HTTP 响应（主动 leave），不需要也无法再收 WS 消息
+- 广播范围：**仅**该房间内当前在线的其他 Session（不含离开者自己）；离开者已收 HTTP 200 响应 + 由 §10.5 步骤 7 close 4007 协议层确认完成，不需要也无法再收 WS `member.left` 消息
 - client 解析层收到 `member.left` 时**应**按 §12.3 client merge contract 集合层规则：从 client roster 中**移除** `payload.userId` 对应 entry（这是 authoritative 的离开信号，与 snapshot 集合层 authoritative 一致）；client **不**应等下一次 `room.snapshot` 才更新 roster
-- 节点 4 阶段离开者**不**主动收到自己的 `member.left`：server 实装上应从 fanout 列表中排除离开者自己的 Session（且离开者 Session 在 onUnregister 钩子触发后已不在 SessionManager 列表中，自然 fanout 不到）；client 解析层防御性走 `payload.userId == 当前 user.id` 的 noop 安全路径
-- 主动 leave 与被动 leave 的**事件不重复**：server 实装层应保证同一 user 在同一 leave 事件中**只触发一次** `member.left` 广播 —— 主动 leave 已删 `room_members` 行，触发 onUnregister 时不应再走"被动 leave"路径（详见 Story 11.8 实装：onUnregister 钩子内查 `room_members` 是否仍有该 user 的行，没有则跳过广播）
+- 节点 4 阶段离开者**不**主动收到自己的 `member.left`：server 实装上应从 fanout 列表中排除离开者自己的 Session（且离开者 Session 在 §10.5 步骤 7 close 4007 后已不在 SessionManager 列表中，自然 fanout 不到）；client 解析层防御性走 `payload.userId == 当前 user.id` 的 noop 安全路径
+- **触发不重复**：server 实装层应保证 `member.left` 广播严格 1:1 对应"`room_members` 行被删除"事件 —— 由于唯一删行路径是 HTTP leave 事务（详见 §10.5 服务端逻辑），同一 user 在同一 leave 事件中**只触发一次** `member.left` 广播；任何 WS 断开（含心跳超时）**禁止**走"被动 leave"路径删 row + 广播 `member.left`（详见 §10.3 / §10.5 + Story 11.8 实装）
 
 ### 收到表情广播
 

@@ -1985,11 +1985,11 @@ So that 客户端可以实时刷新成员列表.
 **Then** Story 11.4 加入房间事务**成功提交后**，调用 `BroadcastToRoom(roomID, {type: "member.joined", payload: {userId, nickname}})`
 **And** Story 11.5 退出房间事务**成功提交后**，调用 `BroadcastToRoom(roomID, {type: "member.left", payload: {userId}})`
 **And** 广播失败不影响事务结果（fire-and-forget，仅 log）
-**And** Story 10.4 心跳超时清理钩子也触发 member.left 广播（被动断线场景）
+**And** Story 10.4 心跳超时清理钩子**仅**清 ephemeral 层（SessionManager / Redis presence），**不**触发 member.left 广播 / **不**改 `room_members` —— 详见 `docs/宠物互动App_V1接口设计.md` §10.3 / §10.5 / §12.3 r3 锁定语义（"WS 断开仅清 ephemeral，房间归属只能由 HTTP leave 改变"）
 **And** **单元测试覆盖**（≥4 case，mocked BroadcastToRoom）:
 - happy: 加入成功 → broadcast 被调用 1 次，msg.type=member.joined
 - happy: 退出成功 → broadcast 被调用 1 次，msg.type=member.left
-- happy: 心跳超时 → broadcast member.left 触发
+- happy: 心跳超时清理钩子触发 → broadcast **不**被调用，`room_members` 行未删，`users.current_room_id` 未改
 - edge: 加入事务 rollback → broadcast 不被调用
 **And** **集成测试覆盖**（dockertest + Redis + 真实 WS）:
 - A 在房间，建立 WS → B 调 join → A 收到 member.joined { userId: B }
@@ -2235,7 +2235,7 @@ So that 节点 4 业务链路对用户完整闭合.
 - 验证场景 5（A 退出）: A leave → DB room_members 3 行 + B/C/D 收到 member.left { userId: A } + A 的 Sheet 关闭回主界面
 - 验证场景 6（全部退出）: B/C/D 依次 leave → DB room_members 0 行 + rooms.status = 2 closed
 - 验证场景 7（WS 重连）: A 在房间，断网 5 秒（wifi off）→ 验证 RoomView 显示"正在重连…" → 恢复网络 → 看到"已连接" + 重新拉 snapshot
-- 验证场景 8（心跳超时）: A 在房间，强制 kill App（不走 leave 接口）→ 等 70 秒 → server 心跳超时清理 → B 收到 member.left { userId: A } + A 用 mysql 查 users.current_room_id 仍为该 room（因为 user 主观还在房间，只是 WS 断了）
+- 验证场景 8（心跳超时）: A 在房间，强制 kill App（不走 leave 接口）→ 等 70 秒 → server 心跳超时清理 ephemeral 层（SessionManager / Redis presence）→ B **不**收到 member.left（"WS 断开 ≠ 离开房间"，详见 V1接口设计.md §10.3 / §13.3 r3 锁定语义）+ mysql 查 users.current_room_id / room_members 行均**未变**；后续 A 重新打开 App 应能直接 reconnect 回到原房间（无需 HTTP join）
 - 验证场景 9（Background 模式）: A 进 App 后台 → WS 主动断开 → 30 秒后回前台 → WS 重新连上 + 收到最新 snapshot
 **And** 文档含截图位
 
@@ -2251,7 +2251,7 @@ So that 节点 4 业务链路对用户完整闭合.
 - [ ] 房间成员可收到加入/离开广播
 - [ ] 用户退出后房间成员列表正确刷新
 - [ ] **新增**: WS 自动重连可用
-- [ ] **新增**: 心跳超时被动清理可用
+- [ ] **新增**: 心跳超时清理 ephemeral 层可用（仅清 SessionManager / Redis presence；`room_members` 行不删，user 重新打开 app 可直接 reconnect 回原房间，无需 HTTP join）
 **And** 输出 demo 录屏到 `_bmad-output/implementation-artifacts/demo/node-4-demo-<date>/`
 **And** 任何未通过项必须登记原因 + 是否后置
 
@@ -2268,7 +2268,7 @@ So that 节点 4 业务链路对用户完整闭合.
 - [ ] `docs/宠物互动App_Go项目结构与模块职责设计.md` §6.8 / §6.10: Room / Realtime 模块结构对齐
 - [ ] `docs/宠物互动App_iOS客户端工程结构与模块职责设计.md` §6.8 / §9: Room / WebSocket 模块结构对齐
 **And** `_bmad-output/implementation-artifacts/tech-debt-log.md` 追加节点 4 tech debt，可能的:
-- 心跳超时清理只触发 member.left 广播，但不修改 users.current_room_id（用户被动断线后重连仍能回到原房间）—— 这是设计选择，不是 bug，但要记录
+- 心跳超时清理**仅**清 ephemeral 层（SessionManager / Redis presence），**不**改 `room_members` / `users.current_room_id`、**不**触发 `member.left` 广播 —— 这是 r3 锁定的设计选择（让 §12.1 4005 retryable 语义自洽：用户被动断线后 reconnect 必然能回到原房间）；后续若需"长期断线清理僵尸成员"产品规则，由独立 epic 引入
 - WS gateway 单实例，多实例部署时 BroadcastToRoom 不能跨实例（节点 11+ 接 Redis pub/sub）
 - iOS 后台 disconnect 在某些 iOS 版本可能延迟，建议监控
 

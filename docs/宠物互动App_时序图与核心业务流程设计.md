@@ -540,23 +540,28 @@ sequenceDiagram
 
 ### 13.3 断连处理
 
-当连接断开时（**主动断开** / **client TCP 异常断开**两类，**不含**心跳超时被动清理）：
+WS 断连分两个职责层（r3 锁定，与 `docs/宠物互动App_V1接口设计.md` §10.3 / §10.5 / §12.1 4005 行钦定一致）：
+
+- **持久层** = `room_members` 表行 + `users.current_room_id` 字段：**唯一**变更路径是 HTTP `POST /api/v1/rooms/{roomId}/join` 与 HTTP `POST /api/v1/rooms/{roomId}/leave`（见 §13.4 加入房间流程 + V1接口设计.md §10.4 / §10.5 服务端逻辑）；任何 WS 层事件**禁止**触动持久层
+- **ephemeral 层** = SessionManager 内存映射 + Redis presence：由 WS 连接生命周期管理；任何 WS 断开**只**清理本层
+
+**当 WS 连接断开**（含 client 主动 close、app 关闭、前后台切换、TCP 1006 异常断开、心跳超时 → close 4005 等所有 WS 层断开场景）：
 
 - 从 Redis 清除连接映射
-- 从房间在线集合移除当前用户
+- 从房间在线集合移除当前用户（presence 层 SREM）
+- 从 SessionManager 撤销 Session
 - **不**广播 `member.left` —— WebSocket 断开不等于用户退出房间；用户的 `room_members` 行 + `users.current_room_id` 仍在；本路径仅清理 ephemeral 连接态，业务侧 roster 不变
-
-**心跳超时被动断线**（Story 10.4 心跳框架触发，与上述主动断开路径不同）：
-
-- 走"被动 leave"完整路径：删除 `room_members` 行 + 更新 `users.current_room_id = NULL` + 触发 `member.left` 广播给房间其他在线成员（payload 字段表见 `docs/宠物互动App_V1接口设计.md` §12.3 `### 成员离开`）
-- 该路径与 HTTP `POST /rooms/{roomId}/leave` 共用同一 service 层函数（详见 `docs/宠物互动App_V1接口设计.md` §10.5 末尾"心跳超时被动断线场景"块）
+- **不**改 `room_members` / **不**改 `users.current_room_id` —— 用户后续重新打开 app / reconnect 时，行仍在，可直接通过 WS 握手回到原房间，无需重新 HTTP join
 
 注意：
 
 - WebSocket 断开不等于用户退出房间
-- 退出房间必须显式调用 HTTP `leave` 接口（或被心跳超时清理钩子被动触发）
+- 退出房间必须显式调用 HTTP `POST /api/v1/rooms/{roomId}/leave` 接口（无被动 leave 路径；唯一例外是 §10.5 步骤 7 的 close 4007 协议确认，但这本身仍由 HTTP leave 事务触发）
+- 心跳超时（→ close 4005）属于 WS 层断开的**子情形**，与 1006 / 主动 close 同等对待 —— 不删 row、不广播 `member.left`，仅清 ephemeral 层；client 按 V1接口设计.md §12.1 close code 表 4005 行钦定 transient 语义自动重连，重连握手时 §12.1 校验顺序步骤 5（`room_members` 表查询）通过（行仍在），用户保留原房间座位
 
-> **业务消息触发点说明（自 Story 11.1 起更新）**：`member.left` 触发点钦定为 **(a) HTTP `POST /rooms/{roomId}/leave` 事务成功提交后** + **(b) 心跳超时被动清理路径**，详见 `docs/宠物互动App_V1接口设计.md` §10.5 + §12.3 `### 成员离开`。**WebSocket 主动断开 / TCP 异常断开**（非心跳超时）**不**触发 `member.left` —— 这是协议角色分工：WS 断开仅清理 ephemeral 连接态；房间成员关系（`room_members` 表 + `users.current_room_id`）只能由 HTTP leave 或心跳超时被动清理改变。`member.left` 字段层契约 + 触发条件由 **Story 11.1**（Epic 11 房间业务契约，节点 4 中段，**已锚定**）锚定；自 Story 11.1 起 server → client active message set 加入 `member.left`（详见 `docs/宠物互动App_V1接口设计.md` §1 第 37 行"server / client active message set 升级"声明，覆盖 Story 10.1 协议骨架冻结期 active message set 边界声明）。
+> **业务消息触发点说明（r3 锁定 / Story 11.1 起更新）**：`member.left` **唯一**触发点 = HTTP `POST /api/v1/rooms/{roomId}/leave` 事务成功提交后；详见 `docs/宠物互动App_V1接口设计.md` §10.5 + §12.3 `### 成员离开`。任何 WS 层断开（含心跳超时 → close 4005、client 主动 close、app 关闭 / 切后台、TCP 1006 异常断开）**都不**触发 `member.left` —— 这是协议角色分工：WS 断开仅清理 ephemeral 连接态；房间成员关系（`room_members` 表 + `users.current_room_id`）**只能**由 HTTP leave 改变。该钦定与 V1接口设计.md §12.1 close code 4005 行 retryable 语义自洽（行不删 → reconnect 握手时 §12.1 步骤 5 通过 → reconnect 实际可用）。`member.left` 字段层契约 + 触发条件由 **Story 11.1**（Epic 11 房间业务契约，节点 4 中段，**已锚定**）锚定；自 Story 11.1 起 server → client active message set 加入 `member.left`（详见 `docs/宠物互动App_V1接口设计.md` §1 第 37 行"server / client active message set 升级"声明，覆盖 Story 10.1 协议骨架冻结期 active message set 边界声明）。
+
+> **r3 锁定背景**：r2 修复曾把"心跳超时 = 走被动 leave 完整路径（删行 + 广播 + 清 ephemeral）"作为本节注解写进时序图设计.md 与 V1接口设计.md，初衷是清理"僵尸"成员；但 r3 codex review 指出该方案与 V1接口设计.md §12.1 close code 表 4005 行的 transient retryable 语义内在冲突 —— client 按钦定自动重连，握手时 §12.1 步骤 5 立即 fail 4003（行已删），reconnect 形同虚设；同时 V1接口设计.md §10.3/§12.3（说 1006 / app close 也走被动 leave）与本时序图（说仅清 ephemeral）跨文档语义矛盾。r3 决议（Path B）：**所有 WS 断开仅清 ephemeral，房间归属只能由 HTTP leave 改变**，跨文档语义合并为一条简单规则。"僵尸成员"由产品规则兜底（节点 4 阶段无长期存在的"已离线但仍占座"风险，因 client 重连后即实际占用座位；超长期断线 / 服务端重启场景由后续 epic 视情况引入清理策略，本协议层面不预先承诺）。
 
 ---
 
