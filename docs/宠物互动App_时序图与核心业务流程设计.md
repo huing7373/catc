@@ -442,6 +442,8 @@ sequenceDiagram
     participant API
     participant Service
     participant MySQL
+    participant WSGateway as WS Gateway
+    participant Others as 房间其他在线成员
 
     Client->>API: POST /api/v1/rooms/{roomId}/join
     API->>Service: joinRoom(userId, roomId)
@@ -456,7 +458,10 @@ sequenceDiagram
     Service->>MySQL: 更新 users.current_room_id
     Service->>MySQL: 提交事务
     Service-->>API: 返回 joined = true
-    API-->>Client: 加入成功
+    API-->>Client: HTTP 200 加入成功
+    Note over Service,WSGateway: 事务提交后（post-commit）触发广播<br/>自 Story 11.1 起锚定
+    Service->>WSGateway: BroadcastToRoom(roomId, member.joined)
+    WSGateway->>Others: WS 推送 member.joined<br/>{userId, nickname, avatarUrl, pet:{petId, currentState}}
 ```
 
 ### 11.3 关键约束
@@ -477,10 +482,12 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant Client
+    participant Client as Client (leaver)
     participant API
     participant Service
     participant MySQL
+    participant WSGateway as WS Gateway
+    participant Others as 房间其他在线成员
 
     Client->>API: POST /api/v1/rooms/{roomId}/leave
     API->>Service: leaveRoom(userId, roomId)
@@ -493,7 +500,12 @@ sequenceDiagram
     end
     Service->>MySQL: 提交事务
     Service-->>API: 返回 left = true
-    API-->>Client: 退出成功
+    API-->>Client: HTTP 200 退出成功
+    Note over Service,WSGateway: 事务提交后（post-commit）触发广播 + 主动关闭<br/>自 Story 11.1 起锚定
+    Service->>WSGateway: BroadcastToRoom(roomId, member.left)
+    WSGateway->>Others: WS 推送 member.left {userId}
+    Service->>WSGateway: CloseLeaverConnection(userId)
+    WSGateway->>Client: WS Close 4007 "left room via HTTP"
 ```
 
 ### 12.3 实现要点

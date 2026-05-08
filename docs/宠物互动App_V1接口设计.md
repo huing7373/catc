@@ -1863,7 +1863,7 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
         "nickname": "A",
         "pet": {
           "petId": "2001",
-          "currentState": 2
+          "currentState": 1
         }
       },
       {
