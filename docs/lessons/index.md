@@ -204,3 +204,4 @@
 | 2026-05-08 | [房间 roster 契约自洽 / member.joined 必须自包含丰富字段（11-1 r1）](2026-05-08-room-roster-contract-self-consistency-11-1-r1.md) | 2 | architecture | `<pending>` |
 | 2026-05-08 | [HTTP leave 必须关闭 WS Session / member.joined trigger 示例必须含全 payload / 跨文档触发点声明对齐（11-1 r2）](2026-05-08-leave-must-close-ws-and-cross-doc-event-trigger-alignment-11-1-r2.md) | 3 | architecture, docs | `<pending>` |
 | 2026-05-08 | [WS 断开仅清 ephemeral，房间归属只能由 HTTP leave 改变 / 跨文档 disconnect 语义必须合并为单条规则（11-1 r3）](2026-05-08-ws-disconnect-only-clears-ephemeral-not-membership-11-1-r3.md) | 2 | architecture | `<pending>` |
+| 2026-05-08 | [房间 create / leave 并发 race 必须落到正确业务码 / 冻结契约引用必须用稳定锚不依赖 commit hash（11-1 r4）](2026-05-08-create-leave-concurrency-races-and-stable-doc-anchors-11-1-r4.md) | 3 | architecture, docs | `<pending>` |

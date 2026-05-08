@@ -1088,12 +1088,12 @@ JSON 示例：
 
 1. 查 `users.current_room_id`，**非 null** → 立即返回 **6003 用户已在房间中**（不开事务）
 2. 插入 `rooms`（`creator_user_id = 当前 user`, `status = 1`, `max_members = 4`），拿到 `room_id`
-3. 插入 `room_members`（`room_id`, `user_id = 当前 user`）
+3. 插入 `room_members`（`room_id`, `user_id = 当前 user`）；如果遇到 DB UNIQUE(`user_id`) 兜底冲突（理论不会，因为步骤 1 已查过 `users.current_room_id`，但同一用户并发两次 `POST /rooms` 时可能发生 —— 两请求都通过步骤 1，赢家先插 `room_members`，输家在步骤 3 撞 UNIQUE）→ 回滚 + 返回 **6003**（与 §10.4 join 接口步骤 5 兜底语义对齐）
 4. 更新 `users.current_room_id = room_id`
 5. 提交事务
 6. 返回 `data.room` 见下文响应体字段表
 
-**事务边界规则**：步骤 2 ~ 4 必须在同一 MySQL 事务中（参见数据库设计 §8.6 房间事务边界），任一步失败 → 全部回滚 → 返回 1009 服务繁忙。
+**事务边界规则**：步骤 2 ~ 4 必须在同一 MySQL 事务中（参见数据库设计 §8.6 房间事务边界）；步骤 3 撞 `room_members.UNIQUE(user_id)` 时回滚并返回 **6003**（不是 1009 —— 该路径是"用户已在某房间"的正常 race，不是服务异常，client 仅识别 6003 即可统一处理）；其他事务失败（DB 异常 / 内部 panic）→ 全部回滚 → 返回 1009 服务繁忙。
 
 **WS 广播**：本接口**不**触发 `member.joined` 广播 —— 房间刚创建、当前用户是房间内**唯一**成员，无其他在线成员需要被通知；`member.joined` 仅在 `POST /rooms/{roomId}/join` 成功后由 Story 11.8 触发（详见 §12.3 `### 成员加入` 触发条件段）。
 
@@ -1134,8 +1134,8 @@ JSON 示例：
 |---|---|---|
 | 1001 | 未登录 / token 无效 | auth 中间件拦截（无 Authorization 头 / token 非法 / token 过期） |
 | 1005 | 操作过于频繁 | rate_limit 中间件拦截（同 IP 每分钟 > 60 次） |
-| 6003 | 用户已在房间中 | 服务端逻辑步骤 1：`users.current_room_id` 非 null |
-| 1009 | 服务繁忙 | 事务回滚 / DB 异常 / 内部 panic（详见 Story 11.3 实装） |
+| 6003 | 用户已在房间中 | 服务端逻辑步骤 1（预检）或步骤 3（DB UNIQUE 兜底）：用户已在任意房间（含并发 race 场景） |
+| 1009 | 服务繁忙 | 事务回滚 / DB 异常 / 内部 panic（**不**含 `room_members.UNIQUE(user_id)` 撞冲突 —— 那条走 6003，详见 Story 11.3 实装） |
 
 > **注**：本接口**不**会触发 6001 / 6002 / 6004 / 6005 —— 房间在事务内才被创建，不存在"找不到 / 已满 / 状态异常"场景；6004（用户不在房间中）仅在 `POST /rooms/{roomId}/leave` 出现。
 
@@ -1143,7 +1143,8 @@ JSON 示例：
 
 - 字段表中所有 BIGINT 主键 / 外键（`id` / `creatorUserId`）严格按 §2.5 全局约定字符串化下发
 - `memberCount` 与 `maxMembers` 类型为 `number (int)`，**不**字符串化（数值字段不受 §2.5 BIGINT 字符串化规则约束 —— `memberCount` ≤ `maxMembers` ≤ 4，远低于 `Number.MAX_SAFE_INTEGER`，client `Int` / Swift `Int` 解析无精度风险）
-- 6003 是**预检错误**（在事务开启前就返回），不消耗事务资源；这与 6001 / 6002 / 6005 在 join 接口里的"事务内校验"语义不同（详见 §10.4）
+- 6003 在两条路径下触发（步骤 1 预检 + 步骤 3 DB UNIQUE 兜底），但 client **不**应区分这两种场景（都是"用户已在某房间"，UX 处理一致）；这与 §10.4 join 接口的双路径 6003 语义对称
+- 6003 预检路径不消耗事务资源；6003 兜底路径（步骤 3 撞 UNIQUE）会回滚已开事务，但**不**降级为 1009 —— race 是正常并发，不是服务异常
 
 ---
 
@@ -1506,7 +1507,7 @@ JSON 示例（请求体）：
 事务内严格按顺序执行（详见 Story 11.5 实装）：
 
 1. 查 `users.current_room_id`，**与请求的 `roomId` 不一致**（含 `current_room_id` 为 null）→ 立即返回 **6004 用户不在房间中**（不开事务）
-2. 开事务；删除 `room_members WHERE room_id = ? AND user_id = ?`（删除当前 user 的成员行）
+2. 开事务；删除 `room_members WHERE room_id = ? AND user_id = ?`（删除当前 user 的成员行）；**检查 `RowsAffected`**：若 `== 0`（同一用户两次并发 leave 都通过步骤 1，赢家已先删该行，输家此处 0 行受影响）→ 回滚 + 返回 **6004 用户不在房间中**（与步骤 1 同语义统一）；该兜底是关键并发护栏，否则输家会继续走完步骤 3 ~ 7 产生重复广播 + 重复 close 4007
 3. 更新 `users.current_room_id = NULL`
 4. 查 `room_members WHERE room_id = ?` 剩余数量；若 `== 0`（最后一人离开）→ 更新 `rooms.status = 2 closed`
 5. 提交事务
@@ -1514,7 +1515,7 @@ JSON 示例（请求体）：
 7. **关闭 leaver 自己的 WS Session**（若 leaver 仍持有该 `roomId` 的 WS 连接）：从 SessionManager 撤销 (unregister) leaver 在该 `roomId` 的 Session + close underlying WebSocket（close code = `4007`，reason = `"left room via HTTP"`，详见 §12.1 close code 表 4007 行；client 解析层按 4xxx 业务级终态语义处理，**不**自动重连）；该步骤**必须**发生在步骤 6 广播之后 —— 顺序由"广播 fanout 时排除 leaver 自己 Session"语义钦定（§12.3 `### 成员离开` 关键约束），但 leaver 的 Session 撤销不能拖到心跳超时（默认 60s）才触发，否则在 close 前的窗口内 leaver 仍会收到该 roomId 的 `member.joined` / `member.left` / 后续 epic 广播消息（如 Story 14.x `pet.state.changed` / Story 17.x `emoji.received`），违反"HTTP leave 后立即与房间 WS 解耦"语义。Session 撤销失败（leaver 未持 WS 连接 / 已断开）→ no-op，不影响 HTTP 200 响应（fire-and-forget）
 8. 返回 `data.{roomId, left: true}`
 
-**事务边界规则**：步骤 2 ~ 4 必须在同一 MySQL 事务中（参见数据库设计 §8.6 房间事务边界）；步骤 6 在事务**外**触发（fire-and-forget）；步骤 7 同样在事务**外**触发（fire-and-forget），且**必须**在步骤 6 广播之后（顺序保证 leaver 不会在自己 Session 被关闭后再收到由本次 leave 触发的 `member.left` —— fanout 已经物理上跳过 leaver Session，二者顺序仅影响清理副作用语义）。
+**事务边界规则**：步骤 2 ~ 4 必须在同一 MySQL 事务中（参见数据库设计 §8.6 房间事务边界）；步骤 2 的 `RowsAffected == 0` 兜底**必须**在事务内回滚（不允许在事务外做 SELECT 校验后再开事务 —— 那种实现仍存在 step1-SELECT 与 DELETE 之间的竞态窗口，无法消除并发 race）；步骤 6 在事务**外**触发（fire-and-forget）；步骤 7 同样在事务**外**触发（fire-and-forget），且**必须**在步骤 6 广播之后（顺序保证 leaver 不会在自己 Session 被关闭后再收到由本次 leave 触发的 `member.left` —— fanout 已经物理上跳过 leaver Session，二者顺序仅影响清理副作用语义）。
 
 **WS 断线场景与本接口的关系**（r3 锁定语义）：心跳超时（→ close 4005）、client 主动 close、app 关闭 / 切后台、TCP 1006 异常断开等任何 WS 层断开**都不**走本接口的事务路径（不删 `room_members` 行、不改 `users.current_room_id`、不广播 `member.left`）—— 它们仅清理 ephemeral 层（SessionManager 撤销 Session + Redis presence 清理），由 Story 10.4 onUnregister 钩子统一负责；详见 §10.3 "roster 语义与 WS 断线交互" 小节。换言之，**只有本接口（HTTP leave）+ 步骤 7 的 close 4007** 是真正的"离开房间"路径。WS 断线后 `room_members` 行仍在，user 仍在 roster 中；用户通过 reconnect / 重新打开 app 即可回到原房间，无需重新 join —— 这是 §12.1 4005 retryable 语义的契约基础。
 
@@ -1550,14 +1551,15 @@ JSON 示例：
 | 1001 | 未登录 / token 无效 | auth 中间件拦截 |
 | 1002 | 参数错误 | `roomId` 路径参数格式错（非数字 / 长度 > 20 字符） |
 | 1005 | 操作过于频繁 | rate_limit 中间件拦截 |
-| 6004 | 用户不在房间中 | 服务端逻辑步骤 1：`users.current_room_id != roomId`（含 null） |
-| 1009 | 服务繁忙 | 事务回滚 / DB 异常 / 内部 panic |
+| 6004 | 用户不在房间中 | 服务端逻辑步骤 1（预检）：`users.current_room_id != roomId`（含 null）；或步骤 2（事务内兜底）：`DELETE room_members ... RowsAffected == 0`（并发 race 输家） |
+| 1009 | 服务繁忙 | 事务回滚 / DB 异常 / 内部 panic（**不**含步骤 2 的 `RowsAffected == 0` —— 那条走 6004） |
 
 > **注**：本接口**不**触发 6001 / 6002 / 6003 / 6005 —— leave 仅校验"用户与房间归属"，不校验房间是否存在（即使 `rooms` 已被某种方式删除，只要 `users.current_room_id` 与 path `roomId` 一致仍允许 leave；6001 不触发因为 leave 不查 `rooms` 表存在性，仅查 `users.current_room_id`）。
 
 **关键约束**：
 
-- 6004 触发条件包含两种场景：(a) `users.current_room_id == NULL`（用户当前不在任何房间）+ (b) `users.current_room_id != path roomId`（用户在其他房间）—— 都返回 6004，client UX 一致处理（无法离开 = 用户没在该房间）
+- 6004 触发条件包含三种场景（client UX 一致处理）：(a) `users.current_room_id == NULL`（步骤 1 预检，用户当前不在任何房间）+ (b) `users.current_room_id != path roomId`（步骤 1 预检，用户在其他房间）+ (c) 同一用户并发两次 leave 同一房间，赢家事务内已删除 `room_members` 行，输家步骤 2 `DELETE` 0 行受影响（事务内兜底回滚）—— 都返回 6004，client 收到 6004 就清本地房间状态、不重试
+- 步骤 2 的 `RowsAffected == 0` 兜底是**必须**项（不是优化）：缺失则两次并发 leave 中输家会继续走完步骤 3 ~ 7 —— 即使步骤 3 把已 NULL 的 `current_room_id` 再次写 NULL（idempotent）、步骤 4 房间剩余数已经被赢家算过、步骤 6 广播会在房间内产生**重复** `member.left` 事件、步骤 7 会试图关闭已不属于该房间的 leaver Session —— 全部是错误副作用。**不**用 `SELECT ... FOR UPDATE` 替代 `RowsAffected == 0` 兜底（虽然两者都能消除 race，但 `RowsAffected == 0` 更轻量、单条 DELETE 即可、不引入额外行锁）
 - "最后一人离开 → 房间 closed"是 server 端**单向**状态变化：closed 房间无法被重新激活（节点 4 阶段无"重启房间"接口）；这条规则确保 `rooms.status` 严格单调（1 → 2，无回退路径），简化 server 状态机
 - `data.left` 固定 `true`：与 §10.4 `data.joined` 设计对称，避免引入"left: false" 模糊语义
 
@@ -2111,7 +2113,7 @@ JSON 示例（与本节字段表对齐，含 `requestId`）：
 >
 > **注（snapshot 构建失败的处理路径）**：握手完成后 Story 10.7 SnapshotBuilder 构建初始 `room.snapshot` 抛 error 时，server **不**走 "推 `error` 消息" 路径 —— 因为 §12.1 钦定 `room.snapshot` 是握手成功后必发的第一条消息，若仅推 `error` 而保持连接，client 会永远等待一个永不到达的 snapshot，房间页无法初始化、auto-reconnect 也不会触发。该场景统一走 close 路径：close **1011**（reason = `"snapshot build failed"`，详见 §12.1 close code 表 1011 行），客户端按 1011 语义自动重连（指数退避 + 最大重试次数限制）。错误码 `6005`（房间状态异常）保留给后续业务 epic 在房间已可用之后的运行时状态错误推送（如 Story 11.x / 14.x 业务流程中），**不**用于初始 snapshot 失败场景。
 
-> **业务消息延后锚定**：上文 `### 成员加入` / `### 成员离开` / `### 收到表情广播` 三个小节中，**前两个**（`member.joined` / `member.left`）已由 **Story 11.1**（Epic 11 房间业务契约，节点 4 中段，commit hash `<TBD-本 story 完成时回填>`）正式锚定字段表 + 触发条件 + 关键约束 —— 自此**接入** Epic 11 / 节点 4 server / client active message set。`### 收到表情广播`（`emoji.received`）保持"草稿示例"状态，待 Story 17.1 锚定。
+> **业务消息延后锚定**：上文 `### 成员加入` / `### 成员离开` / `### 收到表情广播` 三个小节中，**前两个**（`member.joined` / `member.left`）已由 **Story 11.1**（Epic 11 房间业务契约，节点 4 中段；锚定 revision 见 `git log --grep='story-11-1'` 检出的 Story 11.1 收官 commit `chore(story-11-1): ...`，以及 `_bmad-output/implementation-artifacts/sprint-status.yaml` 中 `11-1-接口契约最终化` 状态行）正式锚定字段表 + 触发条件 + 关键约束 —— 自此**接入** Epic 11 / 节点 4 server / client active message set。`### 收到表情广播`（`emoji.received`）保持"草稿示例"状态，待 Story 17.1 锚定。
 >
 > 各消息字段层契约的正式锚定 epic 如下（**已升级状态以粗体标注**）：
 >
