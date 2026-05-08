@@ -221,3 +221,4 @@
 | 2026-05-09 | [post-commit fire-and-forget 必须 detached ctx + 独立 goroutine + timeout 兜底（11-8 r2）](2026-05-09-post-commit-hooks-must-detached-ctx-async-timeout-11-8-r2.md) | 2 | architecture | `<pending>` |
 | 2026-05-09 | [异步化必须保留同步可观察 invariants（11-8 r3：joiner self-fanout / leaver stale subscription）](2026-05-09-async-must-preserve-sync-observable-invariants-11-8-r3.md) | 2 | architecture | `<pending>` |
 | 2026-05-09 | [异步化路径必须按业务 key（roomID）做 serialization 才能保留 caller commit 顺序的 causal ordering（11-8 r4）](2026-05-09-async-causal-ordering-needs-per-room-mutex-11-8-r4.md) | 1 | architecture, concurrency | `<pending>` |
+| 2026-05-09 | [并发顺序保证：lock 必须在 caller 同步段获取；long-running side effect 不应持 serialization lock（11-8 r5）](2026-05-09-async-ordering-must-enqueue-in-caller-sync-section-11-8-r5.md) | 2 | architecture, concurrency | `<pending>` |

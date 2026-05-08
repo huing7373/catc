@@ -351,44 +351,58 @@ type roomServiceImpl struct {
 	broadcastExceptFn ws.BroadcastExceptFn // Story 11.8 r3 P1 fix：member.joined / member.left 必须排除事件主体自己（V1 §12.3 行 2063）
 
 	// postCommitWG **仅供测试同步**（Story 11.8 codex review r2 修复引入）：tests
-	// 注入一个 *sync.WaitGroup 让 runPostCommitAsync 启动 goroutine 时 Add(1)、
-	// goroutine 结束时 Done()，let tests 调 wg.Wait() 后再断言 broadcast / close
-	// 副作用是否符合预期。production 路径不注入 → nil → runPostCommitAsync 直接
-	// fire-and-forget 不做 WG 簿记，与 production 行为完全一致（fire-and-forget
-	// 严格语义不引入额外开销）。
+	// 注入一个 *sync.WaitGroup 让 enqueueRoomEvent enqueue 时 Add(1)、worker 跑完
+	// fn 时 Done()，let tests 调 wg.Wait() 后再断言 broadcast / close 副作用是否
+	// 符合预期。production 路径不注入 → nil → 不做 WG 簿记，与 production 行为
+	// 完全一致（fire-and-forget 严格语义不引入额外开销）。
 	//
 	// 通过 SetPostCommitWaitGroupForTest 注入；不出现在 NewRoomService 签名里
 	// （production caller 永不需要）。
 	postCommitWG *sync.WaitGroup
 
-	// perRoomMu **per-room serialization mutex pool**（Story 11.8 codex review r4
-	// [P1] 修复引入）：保证同一 roomID 的 post-commit hook **串行**执行，
-	// 不同 roomID 仍并行。
+	// roomQueues **per-room FIFO queue pool**（Story 11.8 codex review r5 [P1]
+	// 修复引入；取代 r4 的 perRoomMu 方案）：保证同一 roomID 的 post-commit hook
+	// **严格按 caller commit 顺序**执行，不同 roomID 仍并行。
 	//
-	// **背景**（review r4 [P1]）：r2 引入 fire-and-forget goroutine 后，post-commit
-	// hook 的执行顺序与 transaction commit 顺序解耦。User 在同一 roomID 上快速
-	// JoinRoom → LeaveRoom（或反之）时，两次 transaction commit 顺序确定，但两个
-	// goroutine 谁先调度不可控；最坏情况：第一个 goroutine（broadcast member.joined）
-	// 在第二个 transaction commit 之后才跑，导致 client 收到的事件顺序违反 causal
-	// ordering（如 member.left 先于 member.joined 到达，或 stale member.joined
-	// 在 user 已离开后到达），让 client roster 状态错乱。
+	// **背景**（review r5 [P1]）：r4 用 sync.Map[roomID]*sync.Mutex 试图保留 causal
+	// ordering，但 mutex Lock 在 goroutine **内**才执行 —— 两个 caller 同步 commit
+	// (join → leave) 后分别 `go func(){...}()`，两个 goroutine 启动顺序由 scheduler
+	// 决定，后者可能抢先拿到 mutex 并 broadcast，因果顺序仍然破坏。**根因**：保序
+	// 必须在 caller **同步段**完成（enqueue 时 lock-step 入队），不能等到 goroutine
+	// 调度起来才取序。
 	//
-	// **修法**（path A，per-room serialization）：用 sync.Map[uint64 roomID,
-	// *sync.Mutex] —— 每个 roomID 一把 mutex，post-commit goroutine 启动时按 roomID
-	// LoadOrStore mutex 并 Lock；这样**同一 roomID** 的 hooks 串行（保留 commit
-	// 顺序），**不同 roomID** 的 hooks 仍并行（不损失 fanout 吞吐）。
+	// **修法**（path A，FIFO channel queue + worker goroutine）：每个 roomID 一个
+	// buffered channel + 一个 worker goroutine（sync.Once 保证只启一次）。caller
+	// **同步段** non-blocking 入 channel —— enqueue 顺序就是 commit 顺序。worker
+	// 顺序消费 channel，broadcast 严格按 enqueue 顺序执行。**关键**：enqueue 是
+	// caller 同步段在 LoadOrStore 后立即 channel send，不依赖 goroutine 调度。
 	//
-	// **跨房间场景**（user A 从 room1 leave 立刻 join room2）：两个不同 roomID
-	// 的 mutex 仍可能交错执行 —— 但语义上**无问题**，因为这两次 broadcast 给
-	// **不同房间**的不同 client 集合，不存在因果依赖（room1 client 与 room2
-	// client 不重叠或仅 user A 自己重叠，而 user A 在 r3 修复后两路径都被 exclude）。
+	// **不同 roomID 仍并行**：每个 roomID 独立 channel + worker，互不阻塞，吞吐不损。
 	//
-	// **mutex 不清理**（intentional）：sync.Map 内 mutex 行随 roomID 永久保留；
-	// 节点 4 阶段 V1 §10.5 钦定房间 status 严格单调（active → closed 无回退），
-	// 单进程生命周期内活跃 room 数量有界（同时在线用户上限 / 4 max_members）；
-	// 不会无限增长。如未来引入 dynamic room reuse 或活跃 room 数量爆炸 → 加 LRU
-	// eviction 或定时 GC（节点 8+ 性能压测后再决策）。
-	perRoomMu sync.Map
+	// **queue 满时降级**：channel 容量 256；满了 select default → log warn 不阻塞
+	// caller —— 节点 4 阶段单 room 最多 4 user，post-commit 处理速率 ~10ms 级，
+	// 256 容量远超合理上界（即使 burst 也吃得下）。如真满了说明 worker 卡死，
+	// drop 行为优于阻塞 caller HTTP 路径。
+	//
+	// **queue / worker 不清理**（intentional）：节点 4 阶段 V1 §10.5 钦定房间 status
+	// 严格单调（active → closed 无回退），单进程生命周期内活跃 room 数量有界；不会
+	// 无限增长。worker goroutine 通过 channel close 机制下线；当前实装不主动 close
+	// （room closed 不触发 worker 退出，让残留事件能完成）。如未来引入 dynamic
+	// room reuse 或活跃 room 爆炸 → 加 LRU eviction 或定时 GC。
+	roomQueues sync.Map
+}
+
+// roomQueue 是单 roomID 的 post-commit FIFO 通道（Story 11.8 r5 [P1] 修复引入）。
+//
+// **结构**：
+//   - ch: buffered channel，caller 同步段 send，worker 顺序 receive。channel 自身
+//     即 FIFO 语义（Go runtime 保证）。
+//   - once: 保证 worker goroutine 只启动一次 —— 多个 caller 并发 LoadOrStore 同
+//     一 roomID 时，第一个 winner 把 *roomQueue 存入 sync.Map，后续 caller 读到
+//     同一 *roomQueue 实例；once.Do 让 worker 只在首次 enqueue 时启动。
+type roomQueue struct {
+	ch   chan func()
+	once sync.Once
 }
 
 // SetPostCommitWaitGroupForTest 仅供测试使用：注入一个 *sync.WaitGroup 让测试可以
@@ -411,73 +425,106 @@ func SetPostCommitWaitGroupForTest(svc RoomService, wg *sync.WaitGroup) {
 	}
 }
 
-// runPostCommitAsyncPerRoom 在独立 goroutine 内执行 post-commit fn（Story 11.8 codex
-// review r2 [P1] / [P2] 修复引入；r4 [P1] 改为 per-room serialization）。
+// enqueueRoomEvent 把 post-commit fn 入队到 roomID 对应的 FIFO channel，由 worker
+// goroutine 顺序消费（Story 11.8 codex review r5 [P1] 修复引入；取代 r4 的
+// runPostCommitAsyncPerRoom + sync.Map[*sync.Mutex] 方案）。
 //
 // **fire-and-forget 严格语义**（V1 §10.4 步骤 8 / §10.5 步骤 7-8 钦定）：
 //
-//  1. **不阻塞 caller**：post-commit 工作（broadcast / session close）独立 goroutine
-//     执行，caller（JoinRoom / LeaveRoom）立刻继续返回 HTTP 200，broadcast / close
-//     的耗时（DB lookup ~ms / Session.CloseWithCode 含 ~5s WS write timeout drain）
-//     不计入 HTTP latency。
+//  1. **不阻塞 caller**：caller 同步段做 channel send（buffered + select default 兜底
+//     满 → log warn drop），非阻塞返回；worker goroutine 独立消费 channel 跑 fn。
 //
 //  2. **detached ctx**（context.WithoutCancel）：fn 收到的 ctx 与 request ctx 解耦
-//     cancel 信号但保留 values（trace ID / request ID 等 propagation）。这样
-//     client 断开 / handler deadline cancel request ctx 时，post-commit lookup
-//     不被误中断（否则会出现 user/pet enrichment fail "context canceled" → broadcast
-//     payload 字段空 / 整 broadcast 静默 skip 的 bug）。
+//     cancel 信号但保留 values。client 断开 / handler deadline cancel request
+//     ctx 时，post-commit 不被误中断。
 //
-//  3. **timeout 兜底**（postCommitTimeout）：detached ctx 完全解耦 cancel 信号会
-//     引入 goroutine 泄漏风险（如 DB 死锁 / SessionManager 卡死永不返回）；显式加
-//     10s timeout 让 worst-case goroutine 一定能被回收。
+//  3. **timeout 兜底**（postCommitTimeout）：detached ctx 完全解耦 cancel 信号
+//     会引入 goroutine 泄漏风险；显式加 10s timeout。
 //
-//  4. **per-room serialization**（r4 [P1] 修复）：通过 s.perRoomMu LoadOrStore
-//     拿到该 roomID 的 *sync.Mutex 并 Lock，让**同一 roomID** 的 post-commit
-//     hooks 严格按 caller commit 顺序串行执行（保留 join → leave 的 causal
-//     ordering，避免 member.left 先于 member.joined / stale member.joined 到达
-//     等违反 client roster 正确性的 race）。**不同 roomID** 仍并行（不损失吞吐）。
+//  4. **strict caller-commit-order causal ordering**（r5 [P1] 修复核心）：
+//     **enqueue 必须在 caller 同步段完成** —— 这样 enqueue 顺序就是 caller commit
+//     顺序（Go channel 是 FIFO；同一 roomID 的所有事件走同一 channel；同一 channel
+//     send 在 receive 前严格保序）。worker goroutine receive 顺序 = enqueue 顺序 =
+//     commit 顺序，causal ordering 严格保留。
 //
-//     **WG 簿记顺序**（important）：必须 perRoomMu.LoadOrStore 之后**才**进入
-//     mutex 临界区，但 WG.Add(1) **必须**在 caller 调用 runPostCommitAsyncPerRoom
-//     时同步完成（否则 caller 立即 wg.Wait() 会 race miss Add）；wg.Done()
-//     必须在 mutex Unlock **之后**才允许 Wait 解除（否则 test 在前一个 goroutine
-//     的 fn 跑完前就 unblock）。
+//     **关键差异 vs r4 perRoomMu**：r4 在 goroutine 内 Lock 同一 mu —— 但两个 caller
+//     commit 后各自 `go func()`，goroutine 启动顺序由 Go scheduler 决定，后者
+//     可能抢先 Lock，破坏因果序。本方案 enqueue 走 channel send 是 caller 同步
+//     段动作，scheduler race 完全消除。
 //
-// **测试同步**：若 s.postCommitWG != nil（仅测试注入），同步用 wg.Add(1) / wg.Done()
-// 让测试可以 wg.Wait() 后再断言副作用。production 路径 wg=nil，零开销。
+//  5. **WG 簿记**（测试同步）：caller 同步段 wg.Add(1)；worker 跑完 fn 后 wg.Done()。
+//     test 调 wg.Wait() 时，所有 enqueue 的事件必已 Done（worker 顺序消费 +
+//     wg.Done 在 fn 返回后立即调）。production wg=nil，零开销。
 //
-// **panic safety**：goroutine 内**不**用 defer recover —— post-commit fn 内的
-// panic 走 default Go runtime 行为（abort process）；这与原同步路径行为一致（同步
-// 路径一旦 panic 也会 abort）。Future 如需 panic-safe 隔离 → 加 defer recover +
-// log.Error，但本 r2 修复保持最小变更不引入额外语义。
-func (s *roomServiceImpl) runPostCommitAsyncPerRoom(ctx context.Context, roomID uint64, fn func(detachedCtx context.Context)) {
+// **panic safety**：worker 内**不**用 defer recover —— fn 内 panic 走 default Go
+// runtime 行为（abort process）。与 r2 / r4 行为一致。
+//
+// **queue 启动顺序**（重要）：必须先 LoadOrStore 拿到 *roomQueue → 再 once.Do
+// 启动 worker → 最后 channel send。**不可**先 send 再 once.Do —— 那样 worker 还
+// 没起来事件就到达 channel，会一直留 channel 里等到 once.Do 才被消费（语义
+// 仍正确但增加无谓延迟）。当前顺序：LoadOrStore 后立即 once.Do（启 worker），
+// 再 wg.Add + send，让 worker 已 ready 时事件入队即被消费。
+func (s *roomServiceImpl) enqueueRoomEvent(ctx context.Context, roomID uint64, fn func(detachedCtx context.Context)) {
+	qIface, _ := s.roomQueues.LoadOrStore(roomID, &roomQueue{ch: make(chan func(), 256)})
+	q := qIface.(*roomQueue)
+	q.once.Do(func() {
+		go s.runRoomQueueWorker(q)
+	})
+
+	// **caller 同步段**：构造 wrapped fn（含 detached ctx + timeout）
+	// 之所以放在 enqueue 端而不是 worker 端构造：detached ctx 需要继承 caller ctx
+	// 的 values（trace ID / request ID）；caller ctx 在 caller 同步段是 live 的，
+	// 跨 channel 传递时只传 fn closure 即可。
+	wrapped := func() {
+		detached := context.WithoutCancel(ctx)
+		timedCtx, cancel := context.WithTimeout(detached, postCommitTimeout)
+		defer cancel()
+		fn(timedCtx)
+	}
+
+	// **WG 簿记必须在 send 前完成**（caller 同步段 Add 才能保证后续 wg.Wait
+	// 不 race miss Add）。Done() 在 worker 内 fn 返回后立即调（runRoomQueueWorker
+	// 持有 wg ref；fire-and-forget 路径 wg=nil 时 worker 不动 wg）。
 	if s.postCommitWG != nil {
 		s.postCommitWG.Add(1)
 	}
-	go func() {
-		// per-room serialization：保证同一 roomID 的 hooks 串行执行（causal ordering）
-		muIface, _ := s.perRoomMu.LoadOrStore(roomID, &sync.Mutex{})
-		mu := muIface.(*sync.Mutex)
-		mu.Lock()
-		defer mu.Unlock()
-		// detached ctx：保留 values（trace ID / request ID）但移除 cancel 信号
-		detached := context.WithoutCancel(ctx)
-		// timeout 兜底：避免 goroutine 泄漏
-		timedCtx, cancel := context.WithTimeout(detached, postCommitTimeout)
-		defer cancel()
-		// **WG.Done() 必须在 mu.Unlock() 之前发生**（defer LIFO：先 cancel → 再
-		// Done → 最后 Unlock 反了；正确序：fn 跑完 → defer Done() → defer cancel()
-		// → defer Unlock()）。当前 defer 排列：上面 mu.Unlock 最先 defer，所以
-		// 最后执行 —— 在 fn(timedCtx) 返回 + cancel() + Done() 之后才 Unlock。
-		// **注**：测试 wg.Wait() 解除时下一个同 roomID 的 hook 仍在 mu 排队，
-		// 不会和已 Done 的 hook 并发跑 fn —— 因为同 roomID 的 hooks 在 mu 上
-		// 排队等前一个 Unlock；但**跨 roomID** 的 hooks 互不阻塞，wg.Done() 时
-		// 它们已可独立完成。
+
+	// **non-blocking enqueue**：channel 满（即使 256 容量）→ log warn 不阻塞 caller。
+	// 满代表 worker 卡死或 burst 远超容量 —— production 不应发生；如发生则 drop
+	// 优于阻塞 HTTP 路径（fire-and-forget 严格语义）。
+	select {
+	case q.ch <- wrapped:
+		// 成功入队
+	default:
+		// 队列满：drop 事件 + log warn + 回滚 wg.Add（否则 wg.Wait 永远等不到 Done）
 		if s.postCommitWG != nil {
-			defer s.postCommitWG.Done()
+			s.postCommitWG.Done()
 		}
-		fn(timedCtx)
-	}()
+		slog.Default().Warn("room post-commit queue full; event dropped",
+			slog.String("component", "room-service-postcommit"),
+			slog.Uint64("roomId", roomID),
+			slog.Int("queueCapacity", cap(q.ch)))
+	}
+}
+
+// runRoomQueueWorker 是单 roomID 的 worker goroutine（Story 11.8 r5 [P1] 修复引入）。
+//
+// **职责**：从 q.ch 顺序消费 wrapped fn 并执行；fn 返回后调用 wg.Done() 解除测试
+// wait。channel close 时 worker 退出（当前实装不主动 close —— 节点 4 阶段不需要
+// 显式回收 worker，参见 roomQueues 字段注释）。
+//
+// **顺序保证**：channel receive 严格 FIFO（Go runtime spec），所以 worker 跑 fn
+// 的顺序 = enqueue 顺序 = caller commit 顺序。
+//
+// **panic safety**：fn panic 会 abort process（default Go 行为）；worker goroutine
+// 不加 recover，与 r2 / r4 行为一致。
+func (s *roomServiceImpl) runRoomQueueWorker(q *roomQueue) {
+	for fn := range q.ch {
+		fn()
+		if s.postCommitWG != nil {
+			s.postCommitWG.Done()
+		}
+	}
 }
 
 // NewRoomService 构造 RoomService（Story 11.8 扩展为 8 参数；r3 加 broadcastExceptFn）。
@@ -727,7 +774,13 @@ func (s *roomServiceImpl) JoinRoom(ctx context.Context, in JoinRoomInput) (*Join
 	//
 	// **r4 修复**（codex review r4 [P1]）：runPostCommitAsync → runPostCommitAsyncPerRoom
 	// 加 roomID 参数走 per-room mutex 串行化，保留 join → leave 的 causal ordering。
-	s.runPostCommitAsyncPerRoom(ctx, in.RoomID, func(detachedCtx context.Context) {
+	//
+	// **r5 修复**（codex review r5 [P1]）：runPostCommitAsyncPerRoom → enqueueRoomEvent。
+	// 用 caller 同步段 channel send 替代 goroutine 内 mutex Lock —— mutex 方案在
+	// goroutine 启动阶段仍受 scheduler race 影响（commit 顺序 join → leave 但 leave
+	// goroutine 可能抢先 Lock 抢跑 broadcast）。channel queue 方案在 caller 同步
+	// 段就完成 enqueue，scheduler 不能重排 enqueue 顺序，causal ordering 严格保留。
+	s.enqueueRoomEvent(ctx, in.RoomID, func(detachedCtx context.Context) {
 		s.broadcastMemberJoined(detachedCtx, in.RoomID, in.UserID)
 	})
 	return &JoinRoomOutput{
@@ -864,15 +917,69 @@ func (s *roomServiceImpl) LeaveRoom(ctx context.Context, in LeaveRoomInput) (*Le
 	//
 	// **r4 修复**（codex review r4 [P1]）：runPostCommitAsync → runPostCommitAsyncPerRoom
 	// 加 roomID 参数走 per-room mutex 串行化，保留 join → leave 的 causal ordering。
+	//
+	// **r5 修复**（codex review r5 [P1] / [P2]）：
+	//   - [P1]：runPostCommitAsyncPerRoom → enqueueRoomEvent（caller 同步段 channel
+	//     send 替代 goroutine 内 mutex Lock，参见 JoinRoom 同名注释）。
+	//   - [P2]：closeLeaverSessionAsync **不再** 进 per-room queue；改走**独立**
+	//     fire-and-forget goroutine。原因：CloseWithCode 内部 drain WS write loop
+	//     最坏 ~5s（甚至更慢，stuck WS）；如果它跑在 per-room queue 里，会**堵塞
+	//     该 room 后续所有 broadcast**（如另一 user 的 join），让其他成员看到
+	//     stale roster 持续数秒。把 close 拆出来独立 goroutine 后：broadcast 入
+	//     queue 顺序消费快速完成；slow close 在独立 goroutine 慢慢走，不影响
+	//     queue 吞吐 / 不影响其他事件 broadcast 顺序。
+	//
+	// **三段 post-commit 工作分流**：
+	//   1. unregisterLeaverSessionSync —— **同步段**（caller goroutine 内）：HTTP
+	//      200 前从 SessionManager 索引清除 leaver Session，让后续 broadcast 不
+	//      fanout 给 leaver。O(1) map 操作，不阻塞。
+	//   2. broadcastMemberLeft —— **per-room queue**（保序段）：与 JoinRoom 的
+	//      broadcastMemberJoined 走同一 roomID 的 FIFO channel，保留 causal
+	//      ordering（join → leave 顺序严格保留）。
+	//   3. closeLeaverSessionAsync —— **独立 goroutine**（fire-and-forget 段）：
+	//      CloseWithCode 慢路径不阻塞 queue，不阻塞 caller，不阻塞其他 broadcast。
 	target, _ := s.unregisterLeaverSessionSync(ctx, in.RoomID, in.UserID)
-	s.runPostCommitAsyncPerRoom(ctx, in.RoomID, func(detachedCtx context.Context) {
-		s.closeLeaverSessionAsync(detachedCtx, in.RoomID, in.UserID, target)
+
+	// (a) broadcast 入 per-room queue（保序）
+	s.enqueueRoomEvent(ctx, in.RoomID, func(detachedCtx context.Context) {
 		s.broadcastMemberLeft(detachedCtx, in.RoomID, in.UserID)
 	})
+
+	// (b) close 独立 goroutine（fire-and-forget；不阻塞 broadcast queue）
+	if target != nil {
+		s.runCloseLeaverAsync(ctx, in.RoomID, in.UserID, target)
+	}
+
 	return &LeaveRoomOutput{
 		RoomID: in.RoomID,
 		Left:   true,
 	}, nil
+}
+
+// runCloseLeaverAsync 在独立 goroutine 内调用 closeLeaverSessionAsync，与 per-room
+// queue 解耦（Story 11.8 r5 [P2] 修复引入）。
+//
+// **为什么必须与 per-room queue 解耦**（r5 [P2] 核心）：CloseWithCode 内部 drain
+// WS write loop ~5s（worst-case 更长），如果它跑在 per-room queue worker 里，会
+// 阻塞该 room 后续**所有** broadcast 事件 —— 一个 stuck leaver 拖累整 room 的
+// member.joined / member.left 几秒钟。拆出独立 goroutine 后，slow close 在自己
+// 的 goroutine 慢慢走，queue worker 立刻处理下一条事件，其他成员的 roster 视图
+// 即时更新。
+//
+// **WG 簿记**：本路径**不**走 postCommitWG —— close 是 best-effort cleanup，不影响
+// broadcast 副作用断言；测试只需要 wg.Wait() 确保 broadcast 完成后断言 broadcast
+// 内容。如未来 test 需要等 close 完成（如断言 sessionMgr.unregisterCalls 或 close
+// frame 发出），加独立 closeWG 注入路径，**不**复用 postCommitWG（语义不同）。
+//
+// **fire-and-forget 严格语义**：goroutine 内自带 detached ctx + timeout 兜底；
+// 任何 close 失败 log warn 不返。
+func (s *roomServiceImpl) runCloseLeaverAsync(ctx context.Context, roomID, leaverUserID uint64, target *ws.Session) {
+	go func() {
+		detached := context.WithoutCancel(ctx)
+		timedCtx, cancel := context.WithTimeout(detached, postCommitTimeout)
+		defer cancel()
+		s.closeLeaverSessionAsync(timedCtx, roomID, leaverUserID, target)
+	}()
 }
 
 // GetCurrentRoom 实装 V1 §10.2 钦定服务端逻辑（Story 11.6 引入）。

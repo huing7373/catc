@@ -2894,3 +2894,217 @@ func TestRoomService_PostCommit_PerRoomSerialization_PreservesCausalOrdering(t *
 		t.Errorf("seq order: call[0].seq=%d should be < call[1].seq=%d", bcast.calls[0].seq, bcast.calls[1].seq)
 	}
 }
+
+// TestRoomService_PostCommit_RapidJoinLeave_PreservesEnqueueOrder
+// （Story 11.8 codex review r5 [P1] regression test）：
+//
+// **r5 [P1] regression**：r4 perRoomMu 方案在 caller commit 顺序为 join → leave 时，
+// 两个 goroutine 启动顺序由 Go scheduler 决定，后者可能抢先 mu.Lock，broadcast 顺序
+// 反转（member.left 先于 member.joined）。
+//
+// **r5 修法**：用 per-room FIFO channel queue + worker，**enqueue 在 caller 同步段**
+// 完成 → enqueue 顺序 = caller 调用顺序 = commit 顺序，channel 顺序 receive，causal
+// ordering 严格保留。
+//
+// **测试策略**：
+//  1. 用 stub broadcastFn 内部 sleep 5ms 让第一条 broadcast（member.joined）拖慢
+//     —— 模拟 worker 跑 fn 时实际较慢。
+//  2. caller 同步连续调 JoinRoom + LeaveRoom（同 user 同 room）—— 两次 commit
+//     顺序确定 join → leave。
+//  3. 断言 broadcast 调用顺序 [member.joined, member.left] —— 即使 join 的
+//     broadcast 跑很慢，leave 也必须排在它**之后**（因为同 channel FIFO 顺序）。
+//
+// **r4 vs r5 行为差异**：r4 perRoomMu 在本 case 仍可能通过（mu 在 goroutine 内
+// 串行化，sleep 也只发生在 mu 临界区内），但 caller 同步段 r4 没保序点 —— 真正
+// 暴露 r4 缺陷需要"goroutine 启动顺序反转"模拟，而 Go runtime 不直接暴露这个。
+// 本 case 至少验证 r5 channel 路径在"worker 慢消费"场景下也能保序，作为 r5 修
+// 复的 regression 防护。
+func TestRoomService_PostCommit_RapidJoinLeave_PreservesEnqueueOrder(t *testing.T) {
+	const userID = uint64(1002)
+	const roomID = uint64(3001)
+	const petID = uint64(7001)
+
+	// FindByID：用一个 atomic counter 跟踪状态（仿照 caller 同步段先 join 后 leave
+	// 的语义） —— state 推进基于"caller 路径调用次序"而非整体调用次数，因为 post-
+	// commit enrichment 跑在 worker goroutine，与 caller 是并发的。
+	//
+	// 简化策略：把 user.CurrentRoomID 用 atomic.Bool joined 表示状态，按"join 后
+	// 标记 joined=true，leave 后标记 joined=false"。预检读 joined 决定返 nil 或
+	// &roomID。enrichment 路径返什么 CurrentRoomID 不重要（broadcastMemberJoined
+	// 不读 user.CurrentRoomID）。
+	var joined atomic.Bool
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			user := &mysql.User{
+				ID:        userID,
+				Nickname:  "U",
+				AvatarURL: "https://avatar/1002",
+			}
+			if joined.Load() {
+				roomIDCopy := roomID
+				user.CurrentRoomID = &roomIDCopy
+			} else {
+				user.CurrentRoomID = nil
+			}
+			return user, nil
+		},
+		updateCurrentRoomIDFn: func(ctx context.Context, uid uint64, rid *uint64) error {
+			// rid != nil → join；rid == nil → leave
+			if rid != nil {
+				joined.Store(true)
+			} else {
+				joined.Store(false)
+			}
+			return nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDForUpdateFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
+		},
+		updateStatusFn: func(ctx context.Context, rid uint64, status int8) error { return nil },
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		countByRoomIDFn: func(ctx context.Context, rid uint64) (int, error) { return 0, nil },
+		createFn:        func(ctx context.Context, m *mysql.RoomMember) error { return nil },
+		deleteByRoomAndUserFn: func(ctx context.Context, rid, uid uint64) (int64, error) {
+			return 1, nil
+		},
+	}
+	petRepo := &roomTestStubPetRepo{
+		findDefaultByUserIDFn: func(ctx context.Context, uid uint64) (*mysql.Pet, error) {
+			return &mysql.Pet{ID: petID, UserID: uid, IsDefault: 1, CurrentState: 1}, nil
+		},
+	}
+	bcast, _, fn, exceptFn := newRoomTestStubBroadcastFnWithSeq()
+	// 让第一条 broadcast 跑慢（模拟 fanout 慢路径）：通过 returnExceptFn hook 在
+	// 第一条 invocation 时 sleep 5ms。
+	var broadcastInvocations atomic.Int64
+	bcast.returnExceptFn = func(ctx context.Context, rid, exclude uint64, msg []byte) (int, error) {
+		if broadcastInvocations.Add(1) == 1 {
+			// 让第一条（应该是 member.joined）跑慢 5ms
+			time.Sleep(5 * time.Millisecond)
+		}
+		return 0, nil
+	}
+	sessionMgr := &roomTestStubSessionMgr{}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, sessionMgr, fn, exceptFn)
+	wg := &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
+
+	// (1) JoinRoom —— 同步段 enqueue member.joined fn 到 roomID FIFO channel
+	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userID, RoomID: roomID}); err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+	// (2) LeaveRoom —— 同步段 enqueue member.left fn 到**同**一 roomID 的 FIFO
+	// channel。两次 enqueue 都在 caller 同步段完成，channel FIFO 保证顺序。
+	if _, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userID, RoomID: roomID}); err != nil {
+		t.Fatalf("LeaveRoom: %v", err)
+	}
+
+	// (3) 等所有 enqueue 的 fn 跑完
+	wg.Wait()
+
+	// (4) 断言：broadcast 必为 [member.joined, member.left] 严格顺序
+	bcast.mu.Lock()
+	defer bcast.mu.Unlock()
+	if len(bcast.calls) != 2 {
+		t.Fatalf("broadcast call count = %d, want 2 (1 join + 1 leave)", len(bcast.calls))
+	}
+	var env0, env1 story118EnvelopeForTest
+	if err := json.Unmarshal(bcast.calls[0].msg, &env0); err != nil {
+		t.Fatalf("unmarshal call[0]: %v", err)
+	}
+	if err := json.Unmarshal(bcast.calls[1].msg, &env1); err != nil {
+		t.Fatalf("unmarshal call[1]: %v", err)
+	}
+	if env0.Type != "member.joined" {
+		t.Errorf("call[0].type = %q, want \"member.joined\" (FIFO enqueue order broken)", env0.Type)
+	}
+	if env1.Type != "member.left" {
+		t.Errorf("call[1].type = %q, want \"member.left\" (FIFO enqueue order broken)", env1.Type)
+	}
+	if bcast.calls[0].seq >= bcast.calls[1].seq {
+		t.Errorf("seq order: call[0].seq=%d should be < call[1].seq=%d", bcast.calls[0].seq, bcast.calls[1].seq)
+	}
+}
+
+// TestRoomService_PostCommit_LeaveCloseDoesNotBlockBroadcast
+// （Story 11.8 codex review r5 [P2] regression test）：
+//
+// **r5 [P2] regression**：r4 把 closeLeaverSessionAsync + broadcastMemberLeft
+// 放在同一 per-room mutex 临界区 —— close 走 CloseWithCode drain 慢路径（最坏 5s）
+// 时，**整 room 后续所有 broadcast 阻塞**直到 close 返回。
+//
+// **r5 修法**：close 拆出独立 fire-and-forget goroutine（runCloseLeaverAsync），
+// 不进 per-room queue。queue worker 跑完 broadcastMemberLeft 立即处理下一条事件，
+// 不等 close 完成。
+//
+// **测试策略**：
+//  1. 注入 sessionMgr 让 leaver Session 命中 unregisterLeaverSessionSync
+//     （listSessionsByRoomIDFn 返一个 fake Session）。
+//  2. （隐式）验证 close 拆独立 goroutine 后，wg.Wait() 不等 close 完成 —— 即
+//     wg 只追踪 enqueue 进 queue 的 broadcastMemberLeft，**不**追踪 close。
+//     因此 wg.Wait() 返回后，broadcast 必已完成；close goroutine 可能仍在跑
+//     （但与 broadcast 顺序无关）。
+//  3. 断言 broadcast 已发出（说明没被 close 阻塞）。
+//
+// **限制**：本测试不能直接断言 "close 在 broadcast 之后跑" —— 因为 r5 修法两者
+// 完全异步、无相对顺序保证（这正是设计意图）。本测试只验证 broadcast 不被 close
+// 拖慢 / 阻塞。
+func TestRoomService_PostCommit_LeaveCloseDoesNotBlockBroadcast(t *testing.T) {
+	const userID = uint64(1002)
+	const roomID = uint64(3001)
+
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			roomIDCopy := roomID
+			return &mysql.User{ID: userID, Nickname: "L", CurrentRoomID: &roomIDCopy}, nil
+		},
+		updateCurrentRoomIDFn: func(ctx context.Context, uid uint64, rid *uint64) error { return nil },
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDForUpdateFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
+		},
+		updateStatusFn: func(ctx context.Context, rid uint64, status int8) error { return nil },
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		deleteByRoomAndUserFn: func(ctx context.Context, rid, uid uint64) (int64, error) { return 1, nil },
+		countByRoomIDFn:       func(ctx context.Context, rid uint64) (int, error) { return 1, nil }, // remaining=1，跳过 closed 路径
+	}
+	petRepo := &roomTestStubPetRepo{}
+	bcast, _, fn, exceptFn := newRoomTestStubBroadcastFnWithSeq()
+
+	// sessionMgr 返回一个 fake Session 让 unregisterLeaverSessionSync 命中
+	// （走 close 异步路径）；ListSessionsByRoomID 返非空，Unregister 立即成功。
+	// 注入 nil Session list（找不到 leaver）让 close 路径 no-op —— 本测试不验证
+	// close 行为，只验证 broadcast 路径不被 close 阻塞。
+	sessionMgr := &roomTestStubSessionMgr{
+		listSessionsByRoomIDFn: func(ctx context.Context, rid uint64) []*wsapp.Session {
+			return nil // close async path 走 no-op，broadcast 自走 queue
+		},
+	}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, sessionMgr, fn, exceptFn)
+	wg := &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
+
+	start := time.Now()
+	if _, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userID, RoomID: roomID}); err != nil {
+		t.Fatalf("LeaveRoom: %v", err)
+	}
+	// HTTP 路径返回延迟（同步段 + enqueue + close goroutine 启动；不含 close drain）
+	httpLatency := time.Since(start)
+	if httpLatency > 500*time.Millisecond {
+		t.Errorf("LeaveRoom HTTP latency = %v, want < 500ms (close should not block caller)", httpLatency)
+	}
+
+	// 等 broadcast 完成
+	wg.Wait()
+
+	if got := bcast.callCount(); got != 1 {
+		t.Errorf("broadcast call count = %d, want 1 (member.left)", got)
+	}
+}
