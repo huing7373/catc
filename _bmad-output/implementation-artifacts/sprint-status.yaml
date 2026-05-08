@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-05-07 (story 10-6 done)
+# last_updated: 2026-05-08 (epic-10 retrospective done)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-05-07  # Story 10.7 done
+last_updated: 2026-05-08  # Epic 10 retrospective done
 # Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
 # 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
@@ -141,7 +141,7 @@ development_status:
   10-5-broadcasttoroom-primitive: done
   10-6-redis-presence-repo: done
   10-7-房间快照下发框架: done
-  epic-10-retrospective: optional
+  epic-10-retrospective: done
   epic-11: backlog
   11-1-接口契约最终化: backlog
   11-2-rooms-room_members-migration: backlog
