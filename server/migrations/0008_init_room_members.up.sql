@@ -1,9 +1,20 @@
 -- 对齐 docs/宠物互动App_数据库设计.md §5.14 (行 669-685)
 -- room_members 表：房间当前成员表（仅存"当前成员"，不做历史存档）
 --
--- **本 migration 由 Story 10.3 review r5 [P1] 引入**（同 0007_init_rooms 背景）：
+-- **本 migration 由 Story 10.3 review r5 [P1] 引入；Story 11.2 正式接管 Epic 11 owner**
+-- （含完整 ≥3 case 单测 + dockertest 集成测试覆盖 UNIQUE 约束运行时拒绝行为 +
+-- WS 集成测试 fixture 切到 official migration 路径）（同 0007_init_rooms 背景）：
 --   - 把"表存在"从 Epic 11.2 拆出来移到 Story 10.3，让 Story 10.3 self-contained
 --     可部署；JOIN / LEAVE / member_count 维护等业务事务仍由 Epic 11.4 / 11.5 落地
+--   - Story 11.2（Epic 11 backlog 钦定 owner）正式接管：
+--     注释升级 audit trail（DDL 严格不动）+ 扩展 RoomMember GORM domain struct
+--     为完整字段集合（id / room_id / user_id / joined_at / updated_at，1:1 对齐
+--     本表真实 schema）+ 新增 TestMigrateIntegration_RoomMembers_UniqueUserID_Rejected
+--     dockertest 集成测试（覆盖 UNIQUE(user_id) + UNIQUE(room_id, user_id) 运行时
+--     INSERT 拒绝行为；与 §5.14 设计说明 §7.1 钦定的"一个用户同时只能在一个房间"
+--     语义对齐）+ ws_integration_test.go fixture 从 inline CREATE TABLE（含漂移
+--     的 PRIMARY KEY (room_id, user_id) + member_count 字段）切到 migrate.Up()
+--     official 路径
 --
 -- 字段（与 §5.14 钦定 1:1 对齐）：
 --   - id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT（§3.1）

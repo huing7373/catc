@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -34,39 +35,45 @@ import (
 
 	wsapp "github.com/huing/cat/server/internal/app/ws"
 	"github.com/huing/cat/server/internal/infra/config"
+	"github.com/huing/cat/server/internal/infra/migrate"
 	"github.com/huing/cat/server/internal/pkg/auth"
 	mysqlrepo "github.com/huing/cat/server/internal/repo/mysql"
 )
 
-// startMySQLWithRoomMemberFixture 起一个 mysql:8.0 容器 + 临时建表 + 插入
-// fixture（roomID=3001 内有 userID=1001 / 1002 两个 member）。
+// migrationsPathForWS 返回 server/migrations 的绝对路径。本测试文件位于
+// server/internal/app/ws/，到 server/migrations 是 3 级上跳：
+// .. → server/internal/app/ → .. → server/internal/ → .. → server/ → /migrations。
+// 与 migrate_integration_test.go::migrationsPath 同深度（migrate 包也在
+// server/internal/infra/migrate/，3 级上跳）。
+func migrationsPathForWS(t *testing.T) string {
+	t.Helper()
+	abs, err := filepath.Abs("../../../migrations")
+	if err != nil {
+		t.Fatalf("filepath.Abs: %v", err)
+	}
+	return abs
+}
+
+// startMySQLWithRoomMemberFixture 起一个 mysql:8.0 容器，跑 official migration
+// （migrate.Up() → 0001 ~ 0008 共 8 张表落地），并插入 fixture（roomID=3001 内有
+// userID=1001 / 1002 两个 member）。
 //
-// **临时建表**：本 story 阶段 room_members migration 还没落地（Epic 11.2 才做）；
-// 0007_init_rooms migration 已在 r5 落地（rooms.status 用 TINYINT，1=active /
-// 2=closed，对齐数据库设计.md §6.12）。集成测试用以下 SQL 在 setup 时建临时表
-// （rooms schema 与 0007 migration **保持一致**，让 RoomExists 的
-// `WHERE status = 1` 谓词（review r7 P2 加）在测试与 prod 行为等价）：
+// **Story 11.2 落地后**（关键变化）：彻底移除 inline `CREATE TABLE rooms` /
+// `CREATE TABLE room_members` 临时建表路径，改跑 official migration。背景：
+//   - Story 10.3 阶段为让 ws 集成测试可独立跑，inline 建临时表 rooms / room_members
+//     （PRIMARY KEY (room_id, user_id) + member_count 字段）vs prod 0007 / 0008
+//     真实 schema（id AUTO_INCREMENT PK + UNIQUE(user_id) + UNIQUE(room_id, user_id)）
+//     存在多处漂移；
+//   - 11.2 接管后，Epic 11.x 集成测试统一走 official migration 路径，不再各自
+//     inline DDL（Layer 2 集成测试 11.9 也走这个模板）；
+//   - fixture 行通过 `INSERT INTO rooms (id, creator_user_id, status, max_members)`
+//     + `INSERT INTO room_members (room_id, user_id)` 显式插入；rooms.id=3001 +
+//     creator_user_id=1001 显式赋值（DB 接受显式 id 值，AUTO_INCREMENT 不阻止），
+//     让既有 case 的 roomID=3001 / userID=1001 / 1002 期望保持稳定。
 //
-//	CREATE TABLE rooms (
-//	    id BIGINT UNSIGNED NOT NULL,
-//	    status TINYINT NOT NULL DEFAULT 1,
-//	    max_members INT NOT NULL DEFAULT 4,
-//	    member_count INT NOT NULL DEFAULT 0,
-//	    PRIMARY KEY (id)
-//	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-//
-//	CREATE TABLE room_members (
-//	    room_id BIGINT UNSIGNED NOT NULL,
-//	    user_id BIGINT UNSIGNED NOT NULL,
-//	    joined_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-//	    PRIMARY KEY (room_id, user_id),
-//	    INDEX idx_user_room (user_id, room_id)
-//	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-//
-//	INSERT INTO rooms (id, status, max_members, member_count) VALUES (3001, 1, 4, 2);
-//	INSERT INTO room_members (room_id, user_id) VALUES (3001, 1001), (3001, 1002);
-//
-// **Epic 11.2 落地后**：删除本 helper 的 inline DDL，改为跑 official migration。
+// fixture 状态：
+//   - rooms: 1 行 (id=3001, creator_user_id=1001, status=1=active, max_members=4)
+//   - room_members: 2 行 (3001, 1001) / (3001, 1002)
 func startMySQLWithRoomMemberFixture(t *testing.T) (*gorm.DB, func()) {
 	t.Helper()
 
@@ -120,29 +127,34 @@ func startMySQLWithRoomMemberFixture(t *testing.T) (*gorm.DB, func()) {
 		t.Fatalf("gormDB.DB: %v", err)
 	}
 
-	// 临时建表 + 插 fixture
-	stmts := []string{
-		`CREATE TABLE rooms (
-		    id BIGINT UNSIGNED NOT NULL,
-		    status TINYINT NOT NULL DEFAULT 1,
-		    max_members INT NOT NULL DEFAULT 4,
-		    member_count INT NOT NULL DEFAULT 0,
-		    PRIMARY KEY (id)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`CREATE TABLE room_members (
-		    room_id BIGINT UNSIGNED NOT NULL,
-		    user_id BIGINT UNSIGNED NOT NULL,
-		    joined_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-		    PRIMARY KEY (room_id, user_id),
-		    INDEX idx_user_room (user_id, room_id)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-		`INSERT INTO rooms (id, status, max_members, member_count) VALUES (3001, 1, 4, 2)`,
+	// Story 11.2：跑 official migration（migrate.Up()）拿到 0001 ~ 0008 全部 8
+	// 张表（含 rooms / room_members）；不再 inline CREATE TABLE。
+	mig, err := migrate.New(dsn, migrationsPathForWS(t))
+	if err != nil {
+		_ = rawDB.Close()
+		_ = pool.Purge(resource)
+		t.Fatalf("migrate.New: %v", err)
+	}
+	migCtx, migCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer migCancel()
+	if err := mig.Up(migCtx); err != nil {
+		_ = mig.Close()
+		_ = rawDB.Close()
+		_ = pool.Purge(resource)
+		t.Fatalf("migrate.Up: %v", err)
+	}
+	_ = mig.Close()
+
+	// 插 fixture：1 个 active 房间 + 2 个 member（user_id=1001 / 1002）。
+	// rooms.id=3001 + creator_user_id=1001 显式赋值（让既有 case 的硬编码期望稳定）。
+	fixtureStmts := []string{
+		`INSERT INTO rooms (id, creator_user_id, status, max_members) VALUES (3001, 1001, 1, 4)`,
 		`INSERT INTO room_members (room_id, user_id) VALUES (3001, 1001), (3001, 1002)`,
 	}
-	for _, stmt := range stmts {
+	for _, stmt := range fixtureStmts {
 		if _, err := rawDB.Exec(stmt); err != nil {
 			_ = pool.Purge(resource)
-			t.Fatalf("exec %q: %v", stmt, err)
+			t.Fatalf("exec fixture %q: %v", stmt, err)
 		}
 	}
 
@@ -469,10 +481,9 @@ func TestWSIntegration_BroadcastToRoom_3Clients_AllReceive(t *testing.T) {
 	if _, err := rawDB.Exec(`INSERT INTO room_members (room_id, user_id) VALUES (3001, 1003)`); err != nil {
 		t.Fatalf("insert user 1003: %v", err)
 	}
-	// 同步更新 rooms.member_count = 3
-	if _, err := rawDB.Exec(`UPDATE rooms SET member_count = 3 WHERE id = 3001`); err != nil {
-		t.Fatalf("update member_count: %v", err)
-	}
+	// **Story 11.2 后**：rooms 表无 member_count 列（与 prod 0007 schema 对齐 ——
+	// memberCount 由 placeholderSnapshotBuilder 从 ListMembers 计算 len()）；
+	// 因此此处不再 UPDATE rooms.member_count。
 
 	wsURL, signer, mgr, ts := startGatewayWithRealMySQL(t, gormDB)
 	defer mgr.Close()

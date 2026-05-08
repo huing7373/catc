@@ -1,7 +1,9 @@
 -- 对齐 docs/宠物互动App_数据库设计.md §5.13 (行 636-651)
 -- rooms 表：房间主表
 --
--- **本 migration 由 Story 10.3 review r5 [P1] 引入**：
+-- **本 migration 由 Story 10.3 review r5 [P1] 引入；Story 11.2 正式接管 Epic 11 owner**
+-- （含完整 ≥3 case 单测 + dockertest 集成测试覆盖 UNIQUE 约束运行时拒绝行为 +
+-- WS 集成测试 fixture 切到 official migration 路径）：
 --   - Story 10.3 原计划"不实装 rooms / room_members migration（Epic 11.2 接管）"
 --   - r5 review 指出：当前 prod 部署用 0001-0006 起服务时，wsTablesReady() 永远
 --     false → /ws/rooms/:roomId 永远不挂 → client 拿到 404（不是 documented WS
@@ -9,6 +11,12 @@
 --   - 修法（review 建议）：把"表存在"与"业务 INSERT/UPDATE 逻辑"分开 ——
 --     CREATE TABLE 移到 Story 10.3，让 Story 10.3 self-contained 可部署；JOIN /
 --     LEAVE room 等业务逻辑仍由 Epic 11.4 / 11.5 落地
+--   - Story 11.2（Epic 11 backlog 钦定 owner）正式接管：
+--     注释升级 audit trail（DDL 严格不动）+ 扩展 GORM domain struct（Room +
+--     RoomMember 与 0007 / 0008 真实 schema 1:1 对齐）+ 新增 dockertest 集成测试
+--     覆盖 UNIQUE(user_id) / UNIQUE(room_id, user_id) 运行时 INSERT 拒绝行为 +
+--     ws_integration_test.go fixture 从 inline CREATE TABLE 切到 migrate.Up()
+--     official 路径（解决 inline DDL vs prod schema 漂移）
 --
 -- 字段（与 §5.13 钦定 1:1 对齐）：
 --   - id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT（§3.1 主键约定）

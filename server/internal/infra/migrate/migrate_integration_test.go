@@ -30,6 +30,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -567,5 +568,97 @@ func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	}
 	if dirty {
 		t.Errorf("Status dirty = true, want false")
+	}
+}
+
+// TestMigrateIntegration_RoomMembers_UniqueUserID_Rejected 验证
+// migrations/0008_init_room_members.up.sql 钦定的两个 UNIQUE 约束在运行时被
+// MySQL 真实拒绝重复插入：
+//
+//   - UNIQUE KEY uk_user_id (user_id)：一个用户同一时间只在一个房间
+//     （§5.14 设计说明 + §7.1 钦定）
+//   - UNIQUE KEY uk_room_user (room_id, user_id)：房间内同一用户只能出现一次
+//
+// **背景（Story 11.2 引入）**：Story 10.3 review r5 [P1] 落地的 0008 migration
+// 的 schema 元数据校验已在 TestMigrateIntegration_RoomsAndRoomMembers_Schema 覆盖
+// （uk_user_id / uk_room_user 索引存在），但**运行时 INSERT 拒绝行为**未覆盖 ——
+// epics.md §Story 11.2 钦定的"集成测试覆盖：故意尝试违反 UNIQUE(user_id)（同 user
+// 插两条 room_members）→ 数据库拒绝插入"路径在本 case 落地。
+//
+// **覆盖路径**：
+//  1. migrate up → rooms / room_members 表存在
+//  2. 插入 rooms (id=3001) + (id=3002) 两个房间
+//  3. 插入 room_members (room_id=3001, user_id=2001) → 成功
+//  4. 再次插入 room_members (room_id=3002, user_id=2001) → DB 拒绝
+//     （UNIQUE(user_id) 单列约束兜底；同 user 不能在两个不同房间）
+//  5. 再次插入 room_members (room_id=3001, user_id=2001) → DB 拒绝
+//     （UNIQUE(room_id, user_id) 复合约束兜底；同 (room, user) 不能重复）
+//
+// 错误断言用 substring "Duplicate entry"（MySQL 错误码 1062 = ER_DUP_ENTRY 的
+// 消息前缀；不同 MySQL 版本消息文本可能略有差异，但 "Duplicate entry" 是稳定
+// contract）。
+//
+// 用 database/sql 直跑 raw INSERT（**不**走 GORM）让测试结果**不**依赖 ORM
+// 行为差异。
+func TestMigrateIntegration_RoomMembers_UniqueUserID_Rejected(t *testing.T) {
+	dsn, cleanup := startMySQL(t)
+	defer cleanup()
+
+	mig, err := migrate.New(dsn, migrationsPath(t))
+	if err != nil {
+		t.Fatalf("migrate.New: %v", err)
+	}
+	defer mig.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := mig.Up(ctx); err != nil {
+		t.Fatalf("migrate Up: %v", err)
+	}
+
+	sqlDB, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	// 步骤 2：插入 2 个房间（让 UNIQUE 测试可对照"同 user 跨房间"语义）
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO rooms (id, creator_user_id, status, max_members) VALUES (3001, 2001, 1, 4)`); err != nil {
+		t.Fatalf("insert rooms id=3001: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO rooms (id, creator_user_id, status, max_members) VALUES (3002, 2002, 1, 4)`); err != nil {
+		t.Fatalf("insert rooms id=3002: %v", err)
+	}
+
+	// 步骤 3：首条 room_members (room=3001, user=2001) 必须成功
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO room_members (room_id, user_id) VALUES (3001, 2001)`); err != nil {
+		t.Fatalf("first insert room_members (3001, 2001) should succeed: %v", err)
+	}
+
+	// 步骤 4：UNIQUE(user_id) 单列约束 —— 同 user 插另一房间必须被拒
+	_, err = sqlDB.ExecContext(ctx,
+		`INSERT INTO room_members (room_id, user_id) VALUES (3002, 2001)`)
+	if err == nil {
+		t.Fatalf("expected duplicate-entry error on (room=3002, user=2001) violating UNIQUE(user_id), got nil")
+	}
+	if !strings.Contains(err.Error(), "Duplicate entry") {
+		t.Errorf("UNIQUE(user_id) rejection error message = %q, want substring \"Duplicate entry\"", err.Error())
+	}
+
+	// 步骤 5：UNIQUE(room_id, user_id) 复合约束 —— 同 (room, user) 插重复必须被拒
+	// 注意：步骤 4 已让 (3002, 2001) 失败 → 仅占用 (3001, 2001)；本步骤再插
+	// (3001, 2001) 触发 uk_room_user 兜底（也会触发 uk_user_id；MySQL 报第一个
+	// 命中的 UNIQUE，约束名取决于内部检查顺序，但不影响 "Duplicate entry" 关键字判定）
+	_, err = sqlDB.ExecContext(ctx,
+		`INSERT INTO room_members (room_id, user_id) VALUES (3001, 2001)`)
+	if err == nil {
+		t.Fatalf("expected duplicate-entry error on duplicate (room=3001, user=2001), got nil")
+	}
+	if !strings.Contains(err.Error(), "Duplicate entry") {
+		t.Errorf("UNIQUE(room_id, user_id) rejection error message = %q, want substring \"Duplicate entry\"", err.Error())
 	}
 }

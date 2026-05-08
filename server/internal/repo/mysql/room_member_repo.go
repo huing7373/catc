@@ -3,35 +3,75 @@ package mysql
 import (
 	"context"
 	stderrors "errors"
+	"time"
 
 	"gorm.io/gorm"
 
 	"github.com/huing/cat/server/internal/repo/tx"
 )
 
-// RoomMember 是 room_members 表的最小 GORM domain struct（Story 10.3 引入；
-// Epic 11.2 落地 0007_init_rooms / 0008_init_room_members migration 后扩展为
-// 完整字段集合）。
+// RoomMember 是 room_members 表的完整 GORM domain struct。
 //
-// **关键**：本 story 阶段 migrations 仓库内**没有** rooms / room_members migration
-// （Epic 11.2 才落地）。此处 domain struct 是为 WS 握手期 user-in-room 校验 +
-// placeholder snapshot 全成员查询提供的**最小**结构骨架。集成测试用临时建表
-// （见 ws_integration_test.go startMySQLWithRoomMemberFixture helper）；prod
-// 部署在 Epic 11.2 之前**不应**走 WS 路径（rooms / room_members 表不存在）。
+// **演进**：
+//   - Story 10.3 引入最小骨架（仅 RoomID / UserID + (room_id, user_id) 复合 PK 标注），
+//     当时 0008 migration 还没落地，struct 仅为 WS 握手期 user-in-room 校验 +
+//     placeholder snapshot 全成员查询提供最小字段映射；
+//   - Story 11.2 升级为与 0008 真实 schema 1:1 对齐的完整字段集合
+//     （id / room_id / user_id / joined_at / updated_at），让下游 Story 11.3 / 11.4 /
+//     11.5 / 11.6 的事务 INSERT / DELETE 路径 + ORDER BY joined_at 排序 + RowsAffected
+//     兜底语义都能直接复用本 struct 的 GORM 字段映射。
 //
-// 字段：
-//   - RoomID: BIGINT UNSIGNED NOT NULL（与 users.id 同类型）
-//   - UserID: BIGINT UNSIGNED NOT NULL
+// 字段（与 server/migrations/0008_init_room_members.up.sql 真实 schema 1:1 对齐）：
+//   - ID:        BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT（§5.14 + §3.1 主键约定）
+//   - RoomID:    BIGINT UNSIGNED NOT NULL（归属 rooms.id）
+//   - UserID:    BIGINT UNSIGNED NOT NULL（归属 users.id）
+//   - JoinedAt:  DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+//   - UpdatedAt: DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
 //
-// 表 PK = (room_id, user_id) 复合主键 + INDEX idx_user_room (user_id, room_id)
-// 让 IsUserInRoom 走 secondary 索引 + RoomExists / ListMembers 走主键扫描。
+// 表层 UNIQUE 约束（uk_user_id / uk_room_user）+ 普通索引（idx_room_id）由 SQL DDL
+// 定义，**不**在 struct tag 中重复声明（与 ADR-0003 §3.2 "禁止 GORM AutoMigrate"
+// 同源；GORM struct 仅为 Find / Create 提供字段映射，**不**作为 schema 真相源）。
 type RoomMember struct {
-	RoomID uint64 `gorm:"column:room_id;primaryKey"`
-	UserID uint64 `gorm:"column:user_id;primaryKey"`
+	ID        uint64    `gorm:"column:id;primaryKey;autoIncrement"`
+	RoomID    uint64    `gorm:"column:room_id;not null"`
+	UserID    uint64    `gorm:"column:user_id;not null"`
+	JoinedAt  time.Time `gorm:"column:joined_at;not null;default:CURRENT_TIMESTAMP(3)"`
+	UpdatedAt time.Time `gorm:"column:updated_at;not null;default:CURRENT_TIMESTAMP(3)"`
 }
 
 // TableName 显式声明 "room_members"。
 func (RoomMember) TableName() string { return "room_members" }
+
+// Room 是 rooms 表的完整 GORM domain struct（Story 11.2 引入；
+// 与 server/migrations/0007_init_rooms.up.sql 真实 schema 1:1 对齐）。
+//
+// 字段（与数据库设计.md §5.13 + 0007_init_rooms.up.sql 1:1 对齐）：
+//   - ID:            BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT
+//   - CreatorUserID: BIGINT UNSIGNED NOT NULL（创建者 user.id）
+//   - Status:        TINYINT NOT NULL DEFAULT 1（数据库设计.md §6.12 钦定 1=active / 2=closed）
+//   - MaxMembers:    TINYINT UNSIGNED NOT NULL DEFAULT 4（节点 4 阶段固定 4）
+//   - CreatedAt / UpdatedAt: DATETIME(3)（毫秒精度时间戳）
+//
+// 字段类型选择：
+//   - Status int8（带符号 TINYINT，范围 -128~127；status 枚举 1 / 2 在范围内）
+//   - MaxMembers uint8（无符号 TINYINT UNSIGNED，范围 0~255；房间容量 4 在范围内）
+//
+// **范围红线**（Story 11.2 钦定）：本 struct 仅为下游 Story 11.3（创建房间事务）/
+// 11.6（房间详情查询）提供字段映射；本 story 阶段**不**新建 RoomRepo interface /
+// 实装 Create / Update / FindByID 等方法（YAGNI；Story 11.3 / 11.6 才落地）。
+// 也**不**引入 Pets / Members 等关联字段 / preload tag（Story 11.6 落地 GET
+// /rooms/{roomId} 时再加）。
+type Room struct {
+	ID            uint64    `gorm:"column:id;primaryKey;autoIncrement"`
+	CreatorUserID uint64    `gorm:"column:creator_user_id;not null"`
+	Status        int8      `gorm:"column:status;not null;default:1"`
+	MaxMembers    uint8     `gorm:"column:max_members;not null;default:4"`
+	CreatedAt     time.Time `gorm:"column:created_at;not null;default:CURRENT_TIMESTAMP(3)"`
+	UpdatedAt     time.Time `gorm:"column:updated_at;not null;default:CURRENT_TIMESTAMP(3)"`
+}
+
+// TableName 显式声明 "rooms"。
+func (Room) TableName() string { return "rooms" }
 
 // RoomMemberRepo 是 room_members 表的最小读取接口（Story 10.3 引入）。
 //
