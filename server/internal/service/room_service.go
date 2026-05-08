@@ -105,6 +105,73 @@ type LeaveRoomOutput struct {
 	Left   bool   // 必为 true（V1 §10.5 钦定固定值，失败路径返业务码而非 left: false）
 }
 
+// GetCurrentRoomInput 是 RoomService.GetCurrentRoom 的输入 DTO（Story 11.6 引入）。
+// 仅含 caller userID（V1 §10.2 钦定无请求体；当前用户身份从 c.Keys 取）。
+type GetCurrentRoomInput struct {
+	UserID uint64 // 当前 caller user.id
+}
+
+// GetCurrentRoomOutput 是 RoomService.GetCurrentRoom 的输出 DTO（Story 11.6 引入）；
+// handler 翻译成 V1 §10.2 钦定 wire DTO `{roomId: <string>|null}`。
+//
+// **关键**：用 *uint64 让 nil → JSON `null`（用户不在任何房间是合法场景）。
+// handler 层翻译：roomID == nil → wire `*string` 为 nil → JSON `"roomId": null`；
+// roomID != nil → wire `*string` 指向 strconv.FormatUint(*roomID, 10) → JSON
+// `"roomId": "3001"`（V1 §2.5 BIGINT 字符串化）。
+type GetCurrentRoomOutput struct {
+	RoomID *uint64 // nil = 用户不在任何房间；非 nil = 当前所在房间 id
+}
+
+// GetRoomDetailInput 是 RoomService.GetRoomDetail 的输入 DTO（Story 11.6 引入）。
+// RoomID 由 handler 从 path 参数 ":roomId" 解析（V1 §10.3 钦定 BIGINT 字符串化 +
+// 1 ≤ length ≤ 20 字符；handler 层失败时返 1002，不会调到 service）。
+type GetRoomDetailInput struct {
+	UserID uint64 // 当前 caller user.id（用于 ACL 校验）
+	RoomID uint64 // 目标 room.id（来自 path ":roomId"）
+}
+
+// GetRoomDetailOutput 是 RoomService.GetRoomDetail 的输出 DTO（Story 11.6 引入）；
+// handler 翻译成 V1 §10.3 钦定 wire DTO（嵌套结构 + BIGINT 字符串化 + pet nullable）。
+//
+// 不变量（V1 §10.3 钦定）：
+//   - len(Members) === MemberCount（service 层硬保证）
+//   - Members 已按 room_members.joined_at ASC 排序（repo 层 ORDER BY 保证）
+//   - Members[].Pet == nil 表示该 user 是 pet-less 账号（LEFT JOIN pets 在
+//     该 user 无 is_default=1 的 pet 行时下发 nil）
+type GetRoomDetailOutput struct {
+	RoomID        uint64
+	CreatorUserID uint64
+	MaxMembers    uint8
+	Status        int8
+	MemberCount   int
+	Members       []MemberOutput
+}
+
+// MemberOutput 是 GetRoomDetailOutput.Members 的元素（Story 11.6 引入）。
+type MemberOutput struct {
+	UserID    uint64
+	Nickname  string
+	AvatarURL string
+	Pet       *MemberPetOutput // nil = pet-less（LEFT JOIN pets 行 NULL）
+}
+
+// MemberPetOutput 是 MemberOutput.Pet 的容器（Story 11.6 引入）；仅当 Pet ≠ nil 时存在。
+// CurrentState 节点 4 阶段固定 1 (rest)（V1 §10.3 字段表节点 4 列钦定）；节点 5 由
+// Epic 14 真实驱动 motion_state。
+// Equips 节点 4 阶段固定 []（V1 §10.3 Future Fields 钦定）；节点 9 由 Epic 26 真实
+// 回填非空数组 + 节点 10 由 Epic 29 加 renderConfig 子字段。
+type MemberPetOutput struct {
+	PetID        uint64
+	CurrentState int8          // 固定 1 (rest)
+	Equips       []EquipOutput // 节点 4 阶段固定 []
+}
+
+// EquipOutput 是 MemberPetOutput.Equips 的元素占位（Story 11.6 引入）；
+// 节点 4 阶段空数组占位，**无字段**；节点 9 由 Epic 26 真实回填（cosmeticItemId
+// / slot 等字段）+ 节点 10 由 Epic 29 加 renderConfig。本 story 不为 EquipOutput
+// 添加字段（YAGNI；future epic 落地时一并填充）。
+type EquipOutput struct{}
+
 // RoomService 是 /api/v1/rooms 系列 handler 的依赖 interface（便于 handler 单测 mock）。
 //
 // Epic 11 演进路径：
@@ -193,6 +260,53 @@ type RoomService interface {
 	// 顺序由 V1 §10.5 r13 钦定 —— BroadcastToRoom primitive 不带 excludeUserID 参数，
 	// 先 close + unregister 后 broadcast 让 fanout 列表自然不含 leaver。
 	LeaveRoom(ctx context.Context, in LeaveRoomInput) (*LeaveRoomOutput, error)
+
+	// GetCurrentRoom: 查询当前用户所在房间号（Story 11.6 引入）。
+	//
+	// 流程（V1 §10.2 服务端逻辑钦定）：
+	//   1. userRepo.FindByID(ctx, in.UserID)（**事务外**普通连接池查询；不开事务）
+	//   2. 取 user.CurrentRoomID 字段直接返回 GetCurrentRoomOutput{RoomID: user.CurrentRoomID}
+	//
+	// 错误码（V1 §10.2 钦定）：
+	//   - 1009：DB 异常 / FindByID 返 ErrUserNotFound（理论不应发生 —— caller 通过
+	//     auth middleware 必有 user 行；race 兜底走 1009）/ 内部 panic
+	//   - **不**触发 6001 ~ 6005 —— 用户不在房间是合法场景（返回 RoomID=nil + code=0），
+	//     不视为业务错误
+	//
+	// **注**：本接口与 GET /home.data.room.currentRoomId 字段语义等价（Story 11.10 真实
+	// 实装），但接口路径独立 —— home 是首页聚合（多字段），本接口是单字段轻量查询。
+	// client 在房间页用本接口、在首页加载用 GET /home。
+	GetCurrentRoom(ctx context.Context, in GetCurrentRoomInput) (*GetCurrentRoomOutput, error)
+
+	// GetRoomDetail: 查询房间详情含 roster（Story 11.6 引入）。
+	//
+	// 流程（详见 V1 §10.3 服务端逻辑 + 数据库设计 §8.8 读快照事务（含 ACL 共享锁）钦定）：
+	//   1. 开事务（txMgr.WithTx；REPEATABLE READ 隔离级别 = InnoDB 默认）：
+	//      a. **步骤 1a**：userRepo.FindByID(txCtx, in.UserID) → user.CurrentRoomID
+	//         != &in.RoomID（含 nil）→ 返回 6004
+	//      b. **步骤 1b**：roomMemberRepo.ExistsForShareByRoomAndUser(txCtx, RoomID,
+	//         UserID) → false (FOR SHARE 0 行兜底) → 返回 6004
+	//      c. **步骤 2**：roomRepo.FindByID(txCtx, RoomID) → ErrRoomNotFound → 返回 6001
+	//      d. **步骤 3**：roomMemberRepo.ListRosterByRoomID(txCtx, RoomID) → roster
+	//   2. commit + 拼装 GetRoomDetailOutput
+	//
+	// 错误码触发顺序（V1 §10.3 钦定）：
+	//   - 步骤 1a → 6004（预检 ACL：current_room_id != roomId 含 nil）
+	//   - 步骤 1b → 6004（FOR SHARE 0 行兜底；与预检 6004 message / errorCode 完全等价）
+	//   - 步骤 2 → 6001（rooms 兜底；理论步骤 1a 通过即意味 rooms 行存在；race 兜底）
+	//   - 任何 DB 异常 → 1009
+	//
+	// **不**对外暴露 6002 / 6003 / 6005（V1 §10.3 行 1347 钦定纯查询不涉及 join 路径）。
+	//
+	// **6004 双路径必须等价**（V1 §10.3 行 1258 钦定）：步骤 1a 预检 + 步骤 1b 兜底
+	// 都返 apperror.New(ErrUserNotInRoom, ...)，handler 端响应 envelope 完全一致。
+	//
+	// **ctx 用法**（ADR-0007 §2.4）：fn 内全部 4 个 repo 调用必须用 txCtx 而非外层
+	// ctx —— 用错 ctx 会绕过 tx 走 db pool 新连接，FOR SHARE 锁立即释放，并发保护
+	// 失效，post-leave 数据泄漏 race 重新出现（V1 §10.3 rationale 钦定）。
+	//
+	// **不实装**：close 4007 / WS 广播 / member.* —— 本接口纯查询无副作用。
+	GetRoomDetail(ctx context.Context, in GetRoomDetailInput) (*GetRoomDetailOutput, error)
 }
 
 // roomServiceImpl 是 RoomService 的默认实装。
@@ -561,4 +675,135 @@ func (s *roomServiceImpl) LeaveRoom(ctx context.Context, in LeaveRoomInput) (*Le
 		RoomID: in.RoomID,
 		Left:   true,
 	}, nil
+}
+
+// GetCurrentRoom 实装 V1 §10.2 钦定服务端逻辑（Story 11.6 引入）。
+//
+// 仅 1 步：userRepo.FindByID 取 user.CurrentRoomID 字段；不开事务（单字段查询，
+// 无并发一致性诉求）。
+//
+// **错误处理**：
+//   - userRepo.FindByID 返 ErrUserNotFound（理论 race 兜底）→ 包成 1009
+//   - DB error → 包成 1009
+//   - happy → 直接返 GetCurrentRoomOutput{RoomID: user.CurrentRoomID}（含 nil 路径）
+//
+// **不**触发 6001 ~ 6005（V1 §10.2 钦定），不区分"用户不在任何房间"vs"房间已 closed"。
+func (s *roomServiceImpl) GetCurrentRoom(ctx context.Context, in GetCurrentRoomInput) (*GetCurrentRoomOutput, error) {
+	user, err := s.userRepo.FindByID(ctx, in.UserID)
+	if err != nil {
+		// 任何 err（含 ErrUserNotFound 兜底）都包成 1009 —— 与 11.3 / 11.4 / 11.5
+		// 预检 FindByID 失败路径同模式（auth middleware 已确保 caller 有 user 行；
+		// race 下兜底）
+		return nil, apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+	}
+	return &GetCurrentRoomOutput{RoomID: user.CurrentRoomID}, nil
+}
+
+// GetRoomDetail 实装 V1 §10.3 + 数据库设计 §8.8 钦定的"读快照事务（含 ACL 共享锁）"
+// 4 步事务（Story 11.6 引入）：
+//
+//	步骤 1（事务内 4 步）：
+//	  1a. userRepo.FindByID(txCtx, UserID) → CurrentRoomID 校验 → 不一致 → 6004
+//	  1b. roomMemberRepo.ExistsForShareByRoomAndUser(txCtx, RoomID, UserID) →
+//	      false → 6004 兜底（FOR SHARE 0 行）
+//	  2.  roomRepo.FindByID(txCtx, RoomID) → ErrRoomNotFound → 6001
+//	  3.  roomMemberRepo.ListRosterByRoomID(txCtx, RoomID) → roster
+//	步骤 2（事务后）：commit / rollback；commit 成功 → 拼装 GetRoomDetailOutput
+//	  含 BIGINT 字段 + LEFT JOIN pet-less nullable + 节点 4 固定字段
+//
+// **错误码触发顺序锁定**（V1 §10.3 钦定）：步骤 1a → 6004（预检）；1b → 6004（兜底）；
+// 步骤 2 → 6001；任何 DB 异常 → 1009。**不**对外暴露 6002 / 6003 / 6005。
+//
+// **6004 双路径必须等价**：步骤 1a + 步骤 1b 都返 apperror.New(ErrUserNotInRoom, ...)，
+// handler 端响应 envelope 完全一致。
+//
+// **ctx 用法**：fn 内全部 4 个 repo 调用用 txCtx；用错 ctx 让 FOR SHARE 锁立即释放，
+// post-leave 数据泄漏 race 重新出现。
+//
+// **节点 4 硬编码字段**：MemberPetOutput.CurrentState 固定 1 (rest)；Equips 固定 [];
+// 节点 5 / 9 / 10 由 Epic 14 / 26 / 29 真实驱动时改为 query 结果。
+//
+// **LEFT JOIN pets 行为**：RosterRow.PetID 为 *uint64；nil 表示 pet-less（LEFT JOIN
+// 行 NULL）→ MemberOutput.Pet == nil；非 nil → MemberOutput.Pet = &MemberPetOutput{
+// PetID: *RosterRow.PetID, ...}（节点 4 硬编码 CurrentState / Equips）。
+func (s *roomServiceImpl) GetRoomDetail(ctx context.Context, in GetRoomDetailInput) (*GetRoomDetailOutput, error) {
+	var out *GetRoomDetailOutput
+
+	err := s.txMgr.WithTx(ctx, func(txCtx context.Context) error {
+		// 步骤 1a: ACL 预检（事务内查 users.current_room_id）
+		user, err := s.userRepo.FindByID(txCtx, in.UserID)
+		if err != nil {
+			return err // 含 ErrUserNotFound 哨兵 / DB raw error；外层包成 1009
+		}
+		if user.CurrentRoomID == nil || *user.CurrentRoomID != in.RoomID {
+			return apperror.New(apperror.ErrUserNotInRoom, apperror.DefaultMessages[apperror.ErrUserNotInRoom])
+		}
+
+		// 步骤 1b: ACL FOR SHARE 兜底（race 防御）
+		inRoom, err := s.roomMemberRepo.ExistsForShareByRoomAndUser(txCtx, in.RoomID, in.UserID)
+		if err != nil {
+			return err // DB raw error；外层包成 1009
+		}
+		if !inRoom {
+			// 步骤 1a 通过但步骤 1b 0 行 → 并发 leave 已删该行 → 6004 兜底
+			return apperror.New(apperror.ErrUserNotInRoom, apperror.DefaultMessages[apperror.ErrUserNotInRoom])
+		}
+
+		// 步骤 2: 查 rooms（不带锁普通查询）
+		room, err := s.roomRepo.FindByID(txCtx, in.RoomID)
+		if err != nil {
+			if stderrors.Is(err, mysql.ErrRoomNotFound) {
+				return apperror.New(apperror.ErrRoomNotFound, apperror.DefaultMessages[apperror.ErrRoomNotFound])
+			}
+			return err
+		}
+
+		// 步骤 3: 查 roster（INNER JOIN users + LEFT JOIN pets，ORDER BY joined_at ASC）
+		roster, err := s.roomMemberRepo.ListRosterByRoomID(txCtx, in.RoomID)
+		if err != nil {
+			return err
+		}
+
+		// 拼装 output
+		members := make([]MemberOutput, 0, len(roster))
+		for _, r := range roster {
+			m := MemberOutput{
+				UserID:    r.UserID,
+				Nickname:  r.Nickname,
+				AvatarURL: r.AvatarURL,
+			}
+			if r.PetID != nil {
+				// 非 pet-less：节点 4 阶段硬编码 CurrentState=1 / Equips=[]
+				m.Pet = &MemberPetOutput{
+					PetID:        *r.PetID,
+					CurrentState: 1,                // V1 §10.3 节点 4 阶段固定 1 (rest)
+					Equips:       []EquipOutput{}, // 节点 4 阶段固定 []
+				}
+			}
+			members = append(members, m)
+		}
+
+		out = &GetRoomDetailOutput{
+			RoomID:        room.ID,
+			CreatorUserID: room.CreatorUserID,
+			MaxMembers:    room.MaxMembers,
+			Status:        room.Status,
+			MemberCount:   len(members), // 不变量：== len(Members)
+			Members:       members,
+		}
+		return nil
+	})
+
+	if err != nil {
+		// 业务码分流：apperror 已包装的直接透传（步骤 1a / 1b 6004 + 步骤 2 6001）
+		var ae *apperror.AppError
+		if stderrors.As(err, &ae) {
+			return nil, err
+		}
+		// 所有未识别错误（含 ErrUserNotFound / DB raw / ListRosterByRoomID error
+		// / ExistsForShareByRoomAndUser error）走 generic 1009 兜底
+		return nil, apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+	}
+
+	return out, nil
 }

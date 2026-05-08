@@ -829,3 +829,218 @@ func TestRoomServiceIntegration_LeaveRoom_CrossTxJoinSerialized(t *testing.T) {
 	}
 }
 
+
+
+// ============================================================
+// Story 11.6 集成测试 case：GetCurrentRoom + GetRoomDetail（dockertest）
+// ============================================================
+
+// AC11.6-1: GetCurrentRoom happy 用户在房间 → 返 *uint64 指向 roomID。
+func TestRoomServiceIntegration_GetCurrentRoom_Happy_UserInRoom(t *testing.T) {
+	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	insertUser(t, sqlDB, userA, "uid-curr-a", "A", "")
+
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+
+	out, err := svc.GetCurrentRoom(context.Background(), service.GetCurrentRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("GetCurrentRoom: %v", err)
+	}
+	if out.RoomID == nil {
+		t.Fatalf("out.RoomID = nil, want &%d", createOut.RoomID)
+	}
+	if *out.RoomID != createOut.RoomID {
+		t.Errorf("out.RoomID = %d, want %d", *out.RoomID, createOut.RoomID)
+	}
+}
+
+// AC11.6-2: GetCurrentRoom happy 用户不在任何房间 → 返 nil。
+func TestRoomServiceIntegration_GetCurrentRoom_Happy_UserNotInAnyRoom(t *testing.T) {
+	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	insertUser(t, sqlDB, userA, "uid-curr-none", "A", "")
+
+	out, err := svc.GetCurrentRoom(context.Background(), service.GetCurrentRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("GetCurrentRoom: %v", err)
+	}
+	if out.RoomID != nil {
+		t.Errorf("out.RoomID = %d, want nil (用户不在任何房间)", *out.RoomID)
+	}
+}
+
+// AC11.6-3: GetRoomDetail happy 3 成员含 1 pet-less + memberCount === len(members) 不变量
+// + ORDER BY joined_at ASC 顺序（A 创建 → B → C 按顺序加入）。
+//
+// pet-less 构造：A / B 通过 insertPet 显式 seed 一行 is_default=1 pet；C 不 seed
+// pets 行（LEFT JOIN pets 时 pet_id 列 NULL → service 下发 Pet=nil）。
+func TestRoomServiceIntegration_GetRoomDetail_Happy_3Members_With1PetLess(t *testing.T) {
+	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	const userC = uint64(1003)
+	insertUser(t, sqlDB, userA, "uid-detail-a", "A", "https://avatar/a")
+	insertUser(t, sqlDB, userB, "uid-detail-b", "B", "")
+	insertUser(t, sqlDB, userC, "uid-detail-c", "C", "https://avatar/c")
+	// A / B 有默认 pet
+	insertPet(t, sqlDB, 8001, userA, 1, "PetA", 1, 1)
+	insertPet(t, sqlDB, 8002, userB, 1, "PetB", 1, 1)
+	// C 是 pet-less（不 seed pets 行）
+
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+	roomID := createOut.RoomID
+
+	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userB, RoomID: roomID}); err != nil {
+		t.Fatalf("JoinRoom B: %v", err)
+	}
+	// 加一点小间隔确保 joined_at ORDER 稳定（DATETIME(3) 毫秒精度足够；同毫秒会按 INSERT 顺序排序）
+	time.Sleep(15 * time.Millisecond)
+	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userC, RoomID: roomID}); err != nil {
+		t.Fatalf("JoinRoom C: %v", err)
+	}
+
+	out, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: userA, RoomID: roomID})
+	if err != nil {
+		t.Fatalf("GetRoomDetail: %v", err)
+	}
+	// 不变量
+	if out.MemberCount != 3 {
+		t.Errorf("MemberCount = %d, want 3", out.MemberCount)
+	}
+	if len(out.Members) != 3 {
+		t.Fatalf("len(Members) = %d, want 3", len(out.Members))
+	}
+	if out.MemberCount != len(out.Members) {
+		t.Errorf("invariant violated: MemberCount=%d != len(Members)=%d", out.MemberCount, len(out.Members))
+	}
+	// 顺序按 joined_at ASC：A → B → C
+	if out.Members[0].UserID != userA || out.Members[1].UserID != userB || out.Members[2].UserID != userC {
+		t.Errorf("order = [%d %d %d], want [%d %d %d] (joined_at ASC)",
+			out.Members[0].UserID, out.Members[1].UserID, out.Members[2].UserID, userA, userB, userC)
+	}
+	// A: 真实 nickname / avatarUrl + pet 含 PetID = 8001 + CurrentState 固定 1 + Equips 固定 []
+	if out.Members[0].Nickname != "A" || out.Members[0].AvatarURL != "https://avatar/a" {
+		t.Errorf("Members[0] nick/avatar = %q/%q, want A/https://avatar/a", out.Members[0].Nickname, out.Members[0].AvatarURL)
+	}
+	if out.Members[0].Pet == nil {
+		t.Fatalf("Members[0].Pet = nil, want non-nil")
+	}
+	if out.Members[0].Pet.PetID != 8001 {
+		t.Errorf("Members[0].Pet.PetID = %d, want 8001", out.Members[0].Pet.PetID)
+	}
+	if out.Members[0].Pet.CurrentState != 1 {
+		t.Errorf("Members[0].Pet.CurrentState = %d, want 1 (节点 4 固定)", out.Members[0].Pet.CurrentState)
+	}
+	if out.Members[0].Pet.Equips == nil || len(out.Members[0].Pet.Equips) != 0 {
+		t.Errorf("Members[0].Pet.Equips = %v, want []EquipOutput{} 节点 4 阶段固定空", out.Members[0].Pet.Equips)
+	}
+	// B: avatarUrl 为空字符串（合法）
+	if out.Members[1].AvatarURL != "" {
+		t.Errorf("Members[1].AvatarURL = %q, want empty string", out.Members[1].AvatarURL)
+	}
+	// C: pet-less → Pet == nil
+	if out.Members[2].Pet != nil {
+		t.Errorf("Members[2].Pet = %+v, want nil (pet-less)", out.Members[2].Pet)
+	}
+	// room 字段
+	if out.RoomID != roomID {
+		t.Errorf("RoomID = %d, want %d", out.RoomID, roomID)
+	}
+	if out.CreatorUserID != userA {
+		t.Errorf("CreatorUserID = %d, want %d", out.CreatorUserID, userA)
+	}
+	if out.Status != 1 {
+		t.Errorf("Status = %d, want 1 (active)", out.Status)
+	}
+	if out.MaxMembers != 4 {
+		t.Errorf("MaxMembers = %d, want 4", out.MaxMembers)
+	}
+}
+
+// AC11.6-4: user B 不加入房间 → user B 调 GetRoomDetail(A 的 roomID) → 6004。
+func TestRoomServiceIntegration_GetRoomDetail_UserNotInRoom_Returns6004(t *testing.T) {
+	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	insertUser(t, sqlDB, userA, "uid-acl-a", "A", "")
+	insertUser(t, sqlDB, userB, "uid-acl-b", "B", "")
+
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+	roomID := createOut.RoomID
+
+	// B 不加入房间 → B 调 GetRoomDetail(A 的 roomID) → 6004（步骤 1a 预检 user.current_room_id != roomID）
+	_, err = svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: userB, RoomID: roomID})
+	if err == nil {
+		t.Fatalf("GetRoomDetail returned nil error, want 6004")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrUserNotInRoom {
+		t.Errorf("AppError.Code = %d, want %d (6004)", ae.Code, apperror.ErrUserNotInRoom)
+	}
+}
+
+// AC11.6-5: closed 房间 + caller 已离开 → 6004（V1 §10.3 行 1347 钦定 closed 房间允许
+// 查询但前提是 caller 仍是该房间成员；caller 已离开必返 6004）。
+//
+// fixture：A 创建房间 → A leave（最后一人） → 此时 rooms.status=2 closed +
+// users.current_room_id=NULL。A 调 GetRoomDetail(roomID) → 6004。
+func TestRoomServiceIntegration_GetRoomDetail_ClosedRoom_CallerAlreadyLeft_Returns6004(t *testing.T) {
+	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	insertUser(t, sqlDB, userA, "uid-closed-a", "A", "")
+
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+	roomID := createOut.RoomID
+
+	// A leave（最后一人 → status=2 + current_room_id=NULL）
+	if _, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userA, RoomID: roomID}); err != nil {
+		t.Fatalf("LeaveRoom A: %v", err)
+	}
+
+	// 校验 status=2 + current_room_id=NULL
+	if got := fetchRoomStatus(t, sqlDB, roomID); got != 2 {
+		t.Errorf("rooms.status = %d, want 2 (closed)", got)
+	}
+	if got := fetchUserCurrentRoomID(t, sqlDB, userA); got != nil {
+		t.Errorf("users.current_room_id (A) = %d, want NULL", *got)
+	}
+
+	// A 调 GetRoomDetail(roomID) → 步骤 1a 预检 current_room_id == nil → 6004
+	_, err = svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: userA, RoomID: roomID})
+	if err == nil {
+		t.Fatalf("GetRoomDetail returned nil error, want 6004 (caller 已离开 closed 房间)")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrUserNotInRoom {
+		t.Errorf("AppError.Code = %d, want %d (6004; closed 房间 caller 已离开)", ae.Code, apperror.ErrUserNotInRoom)
+	}
+}

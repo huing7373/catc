@@ -388,3 +388,17 @@ func (*nilRoomMemberRepo) CountByRoomID(_ context.Context, _ uint64) (int, error
 func (*nilRoomMemberRepo) DeleteByRoomAndUser(_ context.Context, _ uint64, _ uint64) (int64, error) {
 	return 0, nil
 }
+
+// ExistsForShareByRoomAndUser 兜底（Story 11.6 给 RoomMemberRepo interface 加
+// ExistsForShareByRoomAndUser 方法后编译需要；nil-pattern struct 不应被 ws 路径
+// 调用 —— gateway 只读 room 状态，ACL 共享锁是 GET /rooms/{roomId} 路径独享）。
+func (*nilRoomMemberRepo) ExistsForShareByRoomAndUser(_ context.Context, _ uint64, _ uint64) (bool, error) {
+	return false, nil
+}
+
+// ListRosterByRoomID 兜底（Story 11.6 给 RoomMemberRepo interface 加
+// ListRosterByRoomID 方法后编译需要；nil-pattern struct 不应被 ws 路径调用 ——
+// gateway snapshot 由 Story 10.7 placeholder / Story 11.7 真实实装提供）。
+func (*nilRoomMemberRepo) ListRosterByRoomID(_ context.Context, _ uint64) ([]mysql.RosterRow, error) {
+	return nil, nil
+}

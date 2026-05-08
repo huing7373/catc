@@ -187,3 +187,88 @@ func TestRoomRepo_UpdateStatus_RowsAffected0_NoError(t *testing.T) {
 		t.Errorf("UpdateStatus = %v, want nil (RowsAffected=0 不视为异常)", err)
 	}
 }
+
+// ============================================================
+// Story 11.6 新增：RoomRepo.FindByID 路径覆盖（不带锁版本）
+// ============================================================
+
+// TestRoomRepo_FindByID_Happy:
+// SELECT ... LIMIT 1（**无** FOR UPDATE / FOR SHARE 子句）→ sqlmock 返 1 行 →
+// repo 返 *Room + nil。
+func TestRoomRepo_FindByID_Happy(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomRepo(gormDB)
+
+	now := time.Now()
+	rows := sqlmock.NewRows([]string{"id", "creator_user_id", "status", "max_members", "created_at", "updated_at"}).
+		AddRow(uint64(3001), uint64(1001), int8(1), uint8(4), now, now)
+	// 普通 SELECT，**无** FOR UPDATE 子句（与 FindByIDForUpdate 区分；review 阶段必查）
+	mock.ExpectQuery(`SELECT \* FROM .rooms. WHERE id = \? ORDER BY .rooms.\..id. LIMIT \?$`).
+		WithArgs(uint64(3001), 1).
+		WillReturnRows(rows)
+
+	room, err := repo.FindByID(context.Background(), 3001)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if room == nil {
+		t.Fatalf("room is nil, want non-nil")
+	}
+	if room.ID != 3001 {
+		t.Errorf("room.ID = %d, want 3001", room.ID)
+	}
+	if room.CreatorUserID != 1001 {
+		t.Errorf("room.CreatorUserID = %d, want 1001", room.CreatorUserID)
+	}
+	if room.Status != 1 {
+		t.Errorf("room.Status = %d, want 1", room.Status)
+	}
+	if room.MaxMembers != 4 {
+		t.Errorf("room.MaxMembers = %d, want 4", room.MaxMembers)
+	}
+}
+
+// TestRoomRepo_FindByID_NotFound_ReturnsErrRoomNotFound:
+// 0 行（GORM First 返 ErrRecordNotFound）→ repo 返 (nil, ErrRoomNotFound) 哨兵。
+// 与 FindByIDForUpdate 共用同一哨兵（mysql.ErrRoomNotFound），让 service 层错误
+// 处理路径一致。
+func TestRoomRepo_FindByID_NotFound_ReturnsErrRoomNotFound(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomRepo(gormDB)
+
+	mock.ExpectQuery(`SELECT \* FROM .rooms. WHERE id = \? ORDER BY .rooms.\..id. LIMIT \?$`).
+		WithArgs(uint64(9999), 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "creator_user_id", "status", "max_members", "created_at", "updated_at"}))
+
+	room, err := repo.FindByID(context.Background(), 9999)
+	if room != nil {
+		t.Errorf("room = %+v, want nil on NotFound", room)
+	}
+	if !stderrors.Is(err, ErrRoomNotFound) {
+		t.Errorf("err = %v, want ErrRoomNotFound 哨兵", err)
+	}
+}
+
+// TestRoomRepo_FindByID_DBError_Propagates:
+// 任意非 ErrRecordNotFound 的 raw DB error → repo 透传给 service（service 包 1009）。
+// `stderrors.Is(err, ErrRoomNotFound)` 必为 false。
+func TestRoomRepo_FindByID_DBError_Propagates(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomRepo(gormDB)
+
+	wantErr := stderrors.New("synthetic db connection error")
+	mock.ExpectQuery(`SELECT \* FROM .rooms. WHERE id = \? ORDER BY .rooms.\..id. LIMIT \?$`).
+		WithArgs(uint64(3001), 1).
+		WillReturnError(wantErr)
+
+	room, err := repo.FindByID(context.Background(), 3001)
+	if room != nil {
+		t.Errorf("room = %+v, want nil on DB error", room)
+	}
+	if !stderrors.Is(err, wantErr) {
+		t.Errorf("err = %v, want wantErr (raw DB error 应原样透传)", err)
+	}
+	if stderrors.Is(err, ErrRoomNotFound) {
+		t.Errorf("err = %v should NOT be ErrRoomNotFound (raw error must stay raw)", err)
+	}
+}

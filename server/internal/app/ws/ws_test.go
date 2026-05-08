@@ -81,6 +81,20 @@ func (s *stubRoomMemberRepo) DeleteByRoomAndUser(ctx context.Context, roomID, us
 	return 0, nil
 }
 
+// ExistsForShareByRoomAndUser 兜底（Story 11.6 给 RoomMemberRepo interface 加
+// ExistsForShareByRoomAndUser 方法后编译需要；ws 路径 stub 测试不调本方法 ——
+// gateway 不消费 GET /rooms/{roomId} 路径，FOR SHARE 锁是 service 层独享）。
+func (s *stubRoomMemberRepo) ExistsForShareByRoomAndUser(ctx context.Context, roomID, userID uint64) (bool, error) {
+	return false, nil
+}
+
+// ListRosterByRoomID 兜底（Story 11.6 给 RoomMemberRepo interface 加
+// ListRosterByRoomID 方法后编译需要；ws 路径 stub 测试不调本方法 ——
+// Story 11.7 真实 SnapshotBuilder 落地时再扩展）。
+func (s *stubRoomMemberRepo) ListRosterByRoomID(ctx context.Context, roomID uint64) ([]mysql.RosterRow, error) {
+	return nil, nil
+}
+
 // newSigner 构造测试用 signer（与 middleware/auth_test 同模式）。
 func newSigner(t *testing.T) *auth.Signer {
 	t.Helper()

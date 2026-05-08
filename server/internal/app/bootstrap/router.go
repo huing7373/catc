@@ -390,6 +390,10 @@ func NewRouter(deps Deps) *gin.Engine {
 		authedGroup.POST("/rooms/:roomId/join", roomHandler.JoinRoom)
 		// Story 11.5 加：POST /api/v1/rooms/:roomId/leave 退出房间
 		authedGroup.POST("/rooms/:roomId/leave", roomHandler.LeaveRoom)
+		// Story 11.6 加：GET /api/v1/rooms/current 查询当前所在房间号
+		authedGroup.GET("/rooms/current", roomHandler.GetCurrentRoom)
+		// Story 11.6 加：GET /api/v1/rooms/:roomId 查询房间详情（含 roster）
+		authedGroup.GET("/rooms/:roomId", roomHandler.GetRoomDetail)
 
 		// Story 10.3 加：WS 网关路由
 		// **不**挂在 /api/v1 前缀下（V1 §12.1 钦定 path 是 /ws/rooms/{roomId}）；

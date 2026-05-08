@@ -433,3 +433,179 @@ func TestRoomMemberRepo_DeleteByRoomAndUser_DBError_Propagates(t *testing.T) {
 		t.Errorf("err = %v, want wantErr", err)
 	}
 }
+
+// ============================================================
+// Story 11.6 新增：RoomMemberRepo.ExistsForShareByRoomAndUser 路径覆盖（FOR SHARE 锁）
+// ============================================================
+
+// TestRoomMemberRepo_ExistsForShareByRoomAndUser_Happy_OneRow:
+// FOR SHARE 命中 1 行 → (true, nil)。SQL 含 "FOR SHARE" 关键字（review 阶段必查）。
+func TestRoomMemberRepo_ExistsForShareByRoomAndUser_Happy_OneRow(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM room_members WHERE room_id = ? AND user_id = ? LIMIT 1 FOR SHARE")).
+		WithArgs(uint64(3001), uint64(1001)).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+
+	got, err := repo.ExistsForShareByRoomAndUser(context.Background(), 3001, 1001)
+	if err != nil {
+		t.Fatalf("ExistsForShareByRoomAndUser: %v", err)
+	}
+	if !got {
+		t.Errorf("got = false, want true (1 行命中)")
+	}
+}
+
+// TestRoomMemberRepo_ExistsForShareByRoomAndUser_ZeroRows:
+// FOR SHARE 0 行（caller 已被并发 leave DELETE）→ (false, nil)，不视为异常。
+func TestRoomMemberRepo_ExistsForShareByRoomAndUser_ZeroRows(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM room_members WHERE room_id = ? AND user_id = ? LIMIT 1 FOR SHARE")).
+		WithArgs(uint64(3001), uint64(1001)).
+		WillReturnRows(sqlmock.NewRows([]string{"1"})) // 0 行
+
+	got, err := repo.ExistsForShareByRoomAndUser(context.Background(), 3001, 1001)
+	if err != nil {
+		t.Fatalf("ExistsForShareByRoomAndUser unexpected err: %v", err)
+	}
+	if got {
+		t.Errorf("got = true, want false (0 行)")
+	}
+}
+
+// TestRoomMemberRepo_ExistsForShareByRoomAndUser_DBError_Propagates:
+// 任意 DB error → repo 返 (false, raw error) 透传给 service（service 包成 1009）。
+func TestRoomMemberRepo_ExistsForShareByRoomAndUser_DBError_Propagates(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	wantErr := stderrors.New("synthetic db connection error during FOR SHARE")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM room_members WHERE room_id = ? AND user_id = ? LIMIT 1 FOR SHARE")).
+		WithArgs(uint64(3001), uint64(1001)).
+		WillReturnError(wantErr)
+
+	got, err := repo.ExistsForShareByRoomAndUser(context.Background(), 3001, 1001)
+	if got {
+		t.Errorf("got = true, want false on DB error")
+	}
+	if !stderrors.Is(err, wantErr) {
+		t.Errorf("err = %v, want wantErr (raw DB error 应原样透传)", err)
+	}
+}
+
+// ============================================================
+// Story 11.6 新增：RoomMemberRepo.ListRosterByRoomID 路径覆盖（INNER JOIN users + LEFT JOIN pets）
+// ============================================================
+
+// TestRoomMemberRepo_ListRosterByRoomID_Happy_3Members_With1PetLess:
+// 3 个 member（前 2 个有 pet，第 3 个 LEFT JOIN pets pet_id 列 NULL → pet-less）。
+// SQL 必须包含 LEFT JOIN pets / INNER JOIN users / ORDER BY room_members.joined_at ASC。
+func TestRoomMemberRepo_ListRosterByRoomID_Happy_3Members_With1PetLess(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	rows := sqlmock.NewRows([]string{"user_id", "nickname", "avatar_url", "pet_id"}).
+		AddRow(uint64(1001), "用户A", "https://a", uint64(8001)).
+		AddRow(uint64(1002), "用户B", "", uint64(8002)).
+		AddRow(uint64(1003), "用户C", "https://c", nil) // pet-less → pet_id 列 NULL
+
+	// SQL 关键字：LEFT JOIN pets + INNER JOIN users + ORDER BY joined_at ASC
+	mock.ExpectQuery(`LEFT JOIN pets.*ORDER BY room_members\.joined_at ASC`).
+		WithArgs(uint64(3001)).
+		WillReturnRows(rows)
+
+	got, err := repo.ListRosterByRoomID(context.Background(), 3001)
+	if err != nil {
+		t.Fatalf("ListRosterByRoomID: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	// member 1: 有 pet
+	if got[0].UserID != 1001 || got[0].Nickname != "用户A" || got[0].AvatarURL != "https://a" {
+		t.Errorf("got[0] = %+v, want {UserID:1001 Nickname:用户A AvatarURL:https://a}", got[0])
+	}
+	if got[0].PetID == nil || *got[0].PetID != 8001 {
+		t.Errorf("got[0].PetID = %v, want &8001", got[0].PetID)
+	}
+	// member 2: avatarUrl 为空字符串（合法）
+	if got[1].AvatarURL != "" {
+		t.Errorf("got[1].AvatarURL = %q, want empty string", got[1].AvatarURL)
+	}
+	// member 3: **pet-less**（PetID 为 nil pointer）
+	if got[2].PetID != nil {
+		t.Errorf("got[2].PetID = %v (deref %d), want nil pointer (pet-less)", got[2].PetID, *got[2].PetID)
+	}
+}
+
+// TestRoomMemberRepo_ListRosterByRoomID_ZeroRows_ReturnsEmptySlice:
+// 0 行（房间存在但无成员，theoretical closed 路径）→ ([]RosterRow{}, nil)，不返 nil。
+func TestRoomMemberRepo_ListRosterByRoomID_ZeroRows_ReturnsEmptySlice(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	mock.ExpectQuery(`LEFT JOIN pets.*ORDER BY room_members\.joined_at ASC`).
+		WithArgs(uint64(9999)).
+		WillReturnRows(sqlmock.NewRows([]string{"user_id", "nickname", "avatar_url", "pet_id"}))
+
+	got, err := repo.ListRosterByRoomID(context.Background(), 9999)
+	if err != nil {
+		t.Fatalf("ListRosterByRoomID: %v", err)
+	}
+	if got == nil {
+		t.Errorf("got = nil, want non-nil empty slice ([]RosterRow{})")
+	}
+	if len(got) != 0 {
+		t.Errorf("len = %d, want 0", len(got))
+	}
+}
+
+// TestRoomMemberRepo_ListRosterByRoomID_DBError_Propagates:
+// 任意 DB error → (nil, raw error) 透传给 service（service 包成 1009）。
+func TestRoomMemberRepo_ListRosterByRoomID_DBError_Propagates(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	wantErr := stderrors.New("synthetic db connection error during ListRoster")
+	mock.ExpectQuery(`LEFT JOIN pets.*ORDER BY room_members\.joined_at ASC`).
+		WithArgs(uint64(3001)).
+		WillReturnError(wantErr)
+
+	got, err := repo.ListRosterByRoomID(context.Background(), 3001)
+	if got != nil {
+		t.Errorf("got = %v, want nil on error", got)
+	}
+	if !stderrors.Is(err, wantErr) {
+		t.Errorf("err = %v, want wantErr (raw DB error 应原样透传)", err)
+	}
+}
+
+// TestRoomMemberRepo_ListRosterByRoomID_SingleMember_StableOrder:
+// 单 member 顺序验证（确保 ORDER BY 子句生效；与 sqlmock 期望的 SQL 含
+// `ORDER BY room_members.joined_at ASC` 子句对齐）。
+func TestRoomMemberRepo_ListRosterByRoomID_SingleMember_StableOrder(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	rows := sqlmock.NewRows([]string{"user_id", "nickname", "avatar_url", "pet_id"}).
+		AddRow(uint64(1001), "Solo", "", uint64(8001))
+
+	// SQL 必含 INNER JOIN users 子句（review 阶段必查 vs LEFT JOIN users 反模式）
+	mock.ExpectQuery(`INNER JOIN users.*LEFT JOIN pets.*ORDER BY room_members\.joined_at ASC`).
+		WithArgs(uint64(3001)).
+		WillReturnRows(rows)
+
+	got, err := repo.ListRosterByRoomID(context.Background(), 3001)
+	if err != nil {
+		t.Fatalf("ListRosterByRoomID: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if got[0].UserID != 1001 || got[0].Nickname != "Solo" {
+		t.Errorf("got[0] = %+v, want UserID=1001 Nickname=Solo", got[0])
+	}
+}

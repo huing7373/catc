@@ -337,3 +337,200 @@ func leaveRoomResponseDTO(out *service.LeaveRoomOutput) LeaveRoomResponseData {
 		Left:   out.Left,
 	}
 }
+
+// GetCurrentRoomResponseData 是 V1 §10.2 钦定的 wire DTO（Story 11.6 引入）。
+//
+// **关键**（V1 §2.5 BIGINT 字符串化全局约定 + V1 §10.2 字段表）：
+//   - roomId 是 BIGINT → 字符串化（避免 JS Number.MAX_SAFE_INTEGER 精度丢失）
+//   - roomId 用 *string 让 nil → JSON `null`（用户不在任何房间是合法场景）；
+//     **不**带 omitempty —— 用户不在房间时 key "roomId" 仍下发 + 值显式为 null
+//     （V1 §10.2 行 1176 钦定"显式 null，不省略 key"）
+type GetCurrentRoomResponseData struct {
+	RoomID *string `json:"roomId"` // BIGINT 字符串化或 null
+}
+
+// GetCurrentRoom 处理 GET /api/v1/rooms/current（Story 11.6 引入）。
+//
+// # 流程
+//
+//  1. **不**做 path 参数解析（V1 §10.2 钦定无 path 参数）
+//  2. 取 caller userID（auth 中间件已注入到 c.Keys）—— 缺失走 1009 unreachable 兜底
+//  3. **不**做 ShouldBindJSON（V1 §10.2 钦定无请求体）
+//  4. 调 svc.GetCurrentRoom(ctx, GetCurrentRoomInput{UserID}) —— ctx = c.Request.Context()
+//  5. 成功 → response.Success(c, dto, "ok")
+//  6. 失败 → c.Error(err) + return（让 ErrorMappingMiddleware 写 envelope）
+//
+// # 错误码
+//
+//   - 1001 (auth 中间件兜底；不直接产出)
+//   - 1009 (服务繁忙)：service 层 DB 异常 + unreachable userID 兜底
+//
+// **不**记业务事件 log（GET 接口高频调用，不挂 audit log；与 11.3 / 11.4 / 11.5
+// 业务事件 log 模式不同 —— 写路径才挂业务事件，读路径走默认 access log 即可）。
+func (h *RoomHandler) GetCurrentRoom(c *gin.Context) {
+	// 1. 取 caller userID
+	v, ok := c.Get(middleware.UserIDKey)
+	if !ok {
+		_ = c.Error(apperror.New(apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy]))
+		return
+	}
+	userID, ok := v.(uint64)
+	if !ok {
+		_ = c.Error(apperror.New(apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy]))
+		return
+	}
+
+	ctx := c.Request.Context()
+	out, err := h.svc.GetCurrentRoom(ctx, service.GetCurrentRoomInput{UserID: userID})
+	if err != nil {
+		_ = c.Error(err)
+		return
+	}
+
+	response.Success(c, getCurrentRoomResponseDTO(out), "ok")
+}
+
+// getCurrentRoomResponseDTO 把 service 输出转成 V1 §10.2 钦定的 wire 格式。
+//
+// 字段映射：
+//   - data.roomId = nil  → JSON `null` (out.RoomID == nil)
+//   - data.roomId = &"3001" → JSON `"3001"` (out.RoomID != nil; BIGINT → string §2.5)
+func getCurrentRoomResponseDTO(out *service.GetCurrentRoomOutput) GetCurrentRoomResponseData {
+	if out.RoomID == nil {
+		return GetCurrentRoomResponseData{RoomID: nil}
+	}
+	s := strconv.FormatUint(*out.RoomID, 10)
+	return GetCurrentRoomResponseData{RoomID: &s}
+}
+
+// GetRoomDetailResponseData 是 V1 §10.3 钦定的 wire DTO（Story 11.6 引入）。
+type GetRoomDetailResponseData struct {
+	Room    GetRoomDetailResponseRoom     `json:"room"`
+	Members []GetRoomDetailResponseMember `json:"members"`
+}
+
+// GetRoomDetailResponseRoom 是 V1 §10.3 钦定的 wire DTO room 子对象（Story 11.6 引入）。
+type GetRoomDetailResponseRoom struct {
+	ID            string `json:"id"`            // BIGINT 字符串化
+	CreatorUserID string `json:"creatorUserId"` // BIGINT 字符串化
+	MaxMembers    uint8  `json:"maxMembers"`    // number (uint8 → JSON number)
+	MemberCount   int    `json:"memberCount"`   // number (== len(Members))
+	Status        int8   `json:"status"`        // 1=active / 2=closed
+}
+
+// GetRoomDetailResponseMember 是 V1 §10.3 钦定的 wire DTO members[] 元素（Story 11.6 引入）。
+type GetRoomDetailResponseMember struct {
+	UserID    string                          `json:"userId"`    // BIGINT 字符串化
+	Nickname  string                          `json:"nickname"`  // 来自 users.nickname
+	AvatarURL string                          `json:"avatarUrl"` // 来自 users.avatar_url（可空字符串 ""，不为 null）
+	Pet       *GetRoomDetailResponseMemberPet `json:"pet"`       // nullable（pet-less → null）
+}
+
+// GetRoomDetailResponseMemberPet 是 V1 §10.3 钦定的 wire DTO members[].pet 子对象
+// （Story 11.6 引入）；仅当 Pet ≠ nil 时存在。
+//
+// **关键**：Equips 是 []GetRoomDetailResponseMemberEquip 不带 omitempty —— 节点 4
+// 阶段必为 `[]`（空数组，不省略 key、不为 null；V1 §10.3 字段表节点 4 列钦定）；
+// client 解析层按 `[<EquipDTO>]` 解析永远非 null。
+type GetRoomDetailResponseMemberPet struct {
+	PetID        string                             `json:"petId"`        // BIGINT 字符串化
+	CurrentState int8                               `json:"currentState"` // 节点 4 阶段固定 1
+	Equips       []GetRoomDetailResponseMemberEquip `json:"equips"`       // 节点 4 阶段固定 []
+}
+
+// GetRoomDetailResponseMemberEquip 是 V1 §10.3 钦定的 wire DTO members[].pet.equips[]
+// 元素占位（Story 11.6 引入）；节点 4 阶段空数组占位，**无字段**；节点 9 由 Epic 26
+// 真实回填字段（cosmeticItemId / slot / placement 等）+ 节点 10 由 Epic 29 加 renderConfig。
+type GetRoomDetailResponseMemberEquip struct{}
+
+// GetRoomDetail 处理 GET /api/v1/rooms/:roomId（Story 11.6 引入）。
+//
+// # 流程
+//
+//  1. 解析 path 参数 :roomId（V1 §10.3 钦定 BIGINT 字符串化 + 1 ≤ length ≤ 20）
+//     - length 校验失败 → 1002
+//     - strconv.ParseUint 失败 → 1002（非数字）
+//     - roomID == 0 → 1002（防御性 —— "0" 字面值能 parse 但业务无效）
+//  2. 取 caller userID（auth 中间件已注入到 c.Keys）—— 缺失走 1009 unreachable 兜底
+//  3. **不**做 ShouldBindJSON（V1 §10.3 钦定无请求体）
+//  4. 调 svc.GetRoomDetail(ctx, GetRoomDetailInput{UserID, RoomID}) —— ctx = c.Request.Context()
+//  5. 成功 → response.Success(c, dto, "ok")
+//  6. 失败 → c.Error(err) + return（让 ErrorMappingMiddleware 写 envelope）
+//
+// # 错误码
+//
+//   - 1002 (path 参数错误)：handler 直接产出
+//   - 1009 (服务繁忙)：unreachable userID 兜底 + service 层 DB 异常
+//   - 6001 (房间不存在)：service 层 ErrRoomNotFound（步骤 2 兜底）
+//   - 6004 (用户不在房间)：service 层 ErrUserNotInRoom（双路径都走这里：步骤 1a 预检 + 步骤 1b 兜底）
+//
+// **不**记业务事件 log（GET 接口高频，与 GetCurrentRoom 同模式）。
+func (h *RoomHandler) GetRoomDetail(c *gin.Context) {
+	// 1. 解析 path 参数 :roomId（与 11.4 / 11.5 同三层校验）
+	roomIDStr := c.Param("roomId")
+	if l := len(roomIDStr); l < 1 || l > 20 {
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "roomId 长度非法"))
+		return
+	}
+	roomID, err := strconv.ParseUint(roomIDStr, 10, 64)
+	if err != nil {
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "roomId 非法"))
+		return
+	}
+	if roomID == 0 {
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "roomId 非法"))
+		return
+	}
+
+	// 2. 取 caller userID
+	v, ok := c.Get(middleware.UserIDKey)
+	if !ok {
+		_ = c.Error(apperror.New(apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy]))
+		return
+	}
+	userID, ok := v.(uint64)
+	if !ok {
+		_ = c.Error(apperror.New(apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy]))
+		return
+	}
+
+	ctx := c.Request.Context()
+	out, err := h.svc.GetRoomDetail(ctx, service.GetRoomDetailInput{UserID: userID, RoomID: roomID})
+	if err != nil {
+		_ = c.Error(err)
+		return
+	}
+
+	response.Success(c, getRoomDetailResponseDTO(out), "ok")
+}
+
+// getRoomDetailResponseDTO 把 service 输出转成 V1 §10.3 钦定的 wire 格式。
+func getRoomDetailResponseDTO(out *service.GetRoomDetailOutput) GetRoomDetailResponseData {
+	members := make([]GetRoomDetailResponseMember, 0, len(out.Members))
+	for _, m := range out.Members {
+		wm := GetRoomDetailResponseMember{
+			UserID:    strconv.FormatUint(m.UserID, 10),
+			Nickname:  m.Nickname,
+			AvatarURL: m.AvatarURL,
+		}
+		if m.Pet != nil {
+			wm.Pet = &GetRoomDetailResponseMemberPet{
+				PetID:        strconv.FormatUint(m.Pet.PetID, 10),
+				CurrentState: m.Pet.CurrentState,
+				Equips:       []GetRoomDetailResponseMemberEquip{}, // 节点 4 阶段固定空数组
+			}
+		}
+		members = append(members, wm)
+	}
+
+	return GetRoomDetailResponseData{
+		Room: GetRoomDetailResponseRoom{
+			ID:            strconv.FormatUint(out.RoomID, 10),
+			CreatorUserID: strconv.FormatUint(out.CreatorUserID, 10),
+			MaxMembers:    out.MaxMembers,
+			MemberCount:   out.MemberCount,
+			Status:        out.Status,
+		},
+		Members: members,
+	}
+}

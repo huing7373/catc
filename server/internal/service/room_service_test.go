@@ -49,6 +49,7 @@ type roomTestStubRoomRepo struct {
 	createFn            func(ctx context.Context, r *mysql.Room) error
 	findByIDForUpdateFn func(ctx context.Context, roomID uint64) (*mysql.Room, error)
 	updateStatusFn      func(ctx context.Context, roomID uint64, status int8) error
+	findByIDFn          func(ctx context.Context, roomID uint64) (*mysql.Room, error)
 }
 
 func (s *roomTestStubRoomRepo) Create(ctx context.Context, r *mysql.Room) error {
@@ -72,13 +73,22 @@ func (s *roomTestStubRoomRepo) UpdateStatus(ctx context.Context, roomID uint64, 
 	panic("roomTestStubRoomRepo.UpdateStatus not configured")
 }
 
+func (s *roomTestStubRoomRepo) FindByID(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+	if s.findByIDFn != nil {
+		return s.findByIDFn(ctx, roomID)
+	}
+	panic("roomTestStubRoomRepo.FindByID not configured")
+}
+
 type roomTestStubRoomMemberRepo struct {
-	roomExistsFn          func(ctx context.Context, roomID uint64) (bool, error)
-	isUserInRoomFn        func(ctx context.Context, userID uint64, roomID uint64) (bool, error)
-	listMembersFn         func(ctx context.Context, roomID uint64) ([]uint64, error)
-	createFn              func(ctx context.Context, m *mysql.RoomMember) error
-	countByRoomIDFn       func(ctx context.Context, roomID uint64) (int, error)
-	deleteByRoomAndUserFn func(ctx context.Context, roomID, userID uint64) (int64, error)
+	roomExistsFn                  func(ctx context.Context, roomID uint64) (bool, error)
+	isUserInRoomFn                func(ctx context.Context, userID uint64, roomID uint64) (bool, error)
+	listMembersFn                 func(ctx context.Context, roomID uint64) ([]uint64, error)
+	createFn                      func(ctx context.Context, m *mysql.RoomMember) error
+	countByRoomIDFn               func(ctx context.Context, roomID uint64) (int, error)
+	deleteByRoomAndUserFn         func(ctx context.Context, roomID, userID uint64) (int64, error)
+	existsForShareByRoomAndUserFn func(ctx context.Context, roomID, userID uint64) (bool, error)
+	listRosterByRoomIDFn          func(ctx context.Context, roomID uint64) ([]mysql.RosterRow, error)
 }
 
 func (s *roomTestStubRoomMemberRepo) RoomExists(ctx context.Context, roomID uint64) (bool, error) {
@@ -121,6 +131,20 @@ func (s *roomTestStubRoomMemberRepo) DeleteByRoomAndUser(ctx context.Context, ro
 		return s.deleteByRoomAndUserFn(ctx, roomID, userID)
 	}
 	panic("roomTestStubRoomMemberRepo.DeleteByRoomAndUser not configured")
+}
+
+func (s *roomTestStubRoomMemberRepo) ExistsForShareByRoomAndUser(ctx context.Context, roomID, userID uint64) (bool, error) {
+	if s.existsForShareByRoomAndUserFn != nil {
+		return s.existsForShareByRoomAndUserFn(ctx, roomID, userID)
+	}
+	panic("roomTestStubRoomMemberRepo.ExistsForShareByRoomAndUser not configured")
+}
+
+func (s *roomTestStubRoomMemberRepo) ListRosterByRoomID(ctx context.Context, roomID uint64) ([]mysql.RosterRow, error) {
+	if s.listRosterByRoomIDFn != nil {
+		return s.listRosterByRoomIDFn(ctx, roomID)
+	}
+	panic("roomTestStubRoomMemberRepo.ListRosterByRoomID not configured")
 }
 
 // roomTestStubTxMgr：直接执行 fn（不真开 tx；业务正确性靠 fn 内 repo 调用顺序断言；
@@ -1698,5 +1722,413 @@ func TestRoomService_LeaveRoom_FindByIDFails_Returns1009(t *testing.T) {
 	}
 	if !stderrors.Is(err, wantCause) {
 		t.Errorf("errors.Is should find wantCause; err=%v", err)
+	}
+}
+
+// ============================================================
+// Story 11.6 单测 case：GetCurrentRoom (≥3 case) + GetRoomDetail (≥7 case)
+// ============================================================
+
+
+// TestRoomService_GetCurrentRoom_Happy_UserInRoom:
+// stub userRepo.FindByID 返 user.CurrentRoomID=&3001 → out.RoomID 指向 3001。
+func TestRoomService_GetCurrentRoom_Happy_UserInRoom(t *testing.T) {
+	roomID := uint64(3001)
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			if id != 1001 {
+				t.Errorf("FindByID id = %d, want 1001", id)
+			}
+			return &mysql.User{ID: 1001, CurrentRoomID: &roomID}, nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{}
+	memberRepo := &roomTestStubRoomMemberRepo{}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo)
+	out, err := svc.GetCurrentRoom(context.Background(), service.GetCurrentRoomInput{UserID: 1001})
+	if err != nil {
+		t.Fatalf("GetCurrentRoom: %v", err)
+	}
+	if out.RoomID == nil {
+		t.Fatalf("out.RoomID = nil, want &3001")
+	}
+	if *out.RoomID != 3001 {
+		t.Errorf("out.RoomID = %d, want 3001", *out.RoomID)
+	}
+}
+
+// TestRoomService_GetCurrentRoom_Happy_UserNotInAnyRoom:
+// stub userRepo.FindByID 返 user.CurrentRoomID=nil → out.RoomID == nil（不视为业务错误）。
+func TestRoomService_GetCurrentRoom_Happy_UserNotInAnyRoom(t *testing.T) {
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1001, CurrentRoomID: nil}, nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{}
+	memberRepo := &roomTestStubRoomMemberRepo{}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo)
+	out, err := svc.GetCurrentRoom(context.Background(), service.GetCurrentRoomInput{UserID: 1001})
+	if err != nil {
+		t.Fatalf("GetCurrentRoom: %v", err)
+	}
+	if out.RoomID != nil {
+		t.Errorf("out.RoomID = %v, want nil (用户不在任何房间是合法场景)", out.RoomID)
+	}
+}
+
+// TestRoomService_GetCurrentRoom_FindByIDFails_Returns1009:
+// stub userRepo.FindByID 返 raw error → service 包成 1009。
+func TestRoomService_GetCurrentRoom_FindByIDFails_Returns1009(t *testing.T) {
+	wantCause := stderrors.New("simulated DB outage")
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return nil, wantCause
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{}
+	memberRepo := &roomTestStubRoomMemberRepo{}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo)
+	_, err := svc.GetCurrentRoom(context.Background(), service.GetCurrentRoomInput{UserID: 1001})
+	if err == nil {
+		t.Fatalf("GetCurrentRoom returned nil error, want 1009")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrServiceBusy {
+		t.Errorf("AppError.Code = %d, want %d (1009)", ae.Code, apperror.ErrServiceBusy)
+	}
+}
+
+// TestRoomService_GetRoomDetail_Happy_3Members_With1PetLess:
+// 3 个 RosterRow（第 3 个 PetID=nil）→ out.Members 含 3 个，第 3 个 Pet == nil；
+// MemberCount == 3；Members[0].Pet.CurrentState == 1；Members[0].Pet.Equips 必为
+// `[]EquipOutput{}` 非 nil（节点 4 阶段硬编码）。
+func TestRoomService_GetRoomDetail_Happy_3Members_With1PetLess(t *testing.T) {
+	roomID := uint64(3001)
+	pet1, pet2 := uint64(8001), uint64(8002)
+
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1001, CurrentRoomID: &roomID}, nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			if rid != roomID {
+				t.Errorf("FindByID rid = %d, want %d", rid, roomID)
+			}
+			return &mysql.Room{ID: roomID, CreatorUserID: 1001, Status: 1, MaxMembers: 4}, nil
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		existsForShareByRoomAndUserFn: func(ctx context.Context, rid, uid uint64) (bool, error) {
+			return true, nil
+		},
+		listRosterByRoomIDFn: func(ctx context.Context, rid uint64) ([]mysql.RosterRow, error) {
+			return []mysql.RosterRow{
+				{UserID: 1001, Nickname: "A", AvatarURL: "https://a", PetID: &pet1},
+				{UserID: 1002, Nickname: "B", AvatarURL: "", PetID: &pet2},
+				{UserID: 1003, Nickname: "C", AvatarURL: "https://c", PetID: nil},
+			}, nil
+		},
+	}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo)
+	out, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: roomID})
+	if err != nil {
+		t.Fatalf("GetRoomDetail: %v", err)
+	}
+	if out.RoomID != roomID {
+		t.Errorf("out.RoomID = %d, want %d", out.RoomID, roomID)
+	}
+	if out.MemberCount != 3 {
+		t.Errorf("out.MemberCount = %d, want 3", out.MemberCount)
+	}
+	if len(out.Members) != 3 {
+		t.Fatalf("len(out.Members) = %d, want 3", len(out.Members))
+	}
+	if out.MemberCount != len(out.Members) {
+		t.Errorf("invariant violated: MemberCount=%d != len(Members)=%d", out.MemberCount, len(out.Members))
+	}
+	if out.Members[0].Pet == nil {
+		t.Fatalf("out.Members[0].Pet = nil, want non-nil")
+	}
+	if out.Members[0].Pet.PetID != 8001 {
+		t.Errorf("out.Members[0].Pet.PetID = %d, want 8001", out.Members[0].Pet.PetID)
+	}
+	if out.Members[0].Pet.CurrentState != 1 {
+		t.Errorf("out.Members[0].Pet.CurrentState = %d, want 1 (节点 4 固定)", out.Members[0].Pet.CurrentState)
+	}
+	if out.Members[0].Pet.Equips == nil {
+		t.Errorf("out.Members[0].Pet.Equips = nil, want []EquipOutput{} 非 nil（节点 4 阶段固定 []）")
+	}
+	if len(out.Members[0].Pet.Equips) != 0 {
+		t.Errorf("len(Equips) = %d, want 0 (节点 4 阶段固定空数组)", len(out.Members[0].Pet.Equips))
+	}
+	if out.Members[2].Pet != nil {
+		t.Errorf("out.Members[2].Pet = %+v, want nil (pet-less)", out.Members[2].Pet)
+	}
+}
+
+// TestRoomService_GetRoomDetail_Step1aPrecheck_CurrentRoomIDDifferent_Returns6004:
+// user.CurrentRoomID=&9999 ≠ in.RoomID=3001 → 6004；步骤 1b/2/3 不被调用（panic 兜底验证）。
+func TestRoomService_GetRoomDetail_Step1aPrecheck_CurrentRoomIDDifferent_Returns6004(t *testing.T) {
+	other := uint64(9999)
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1001, CurrentRoomID: &other}, nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{}
+	memberRepo := &roomTestStubRoomMemberRepo{}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo)
+	_, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: 3001})
+	if err == nil {
+		t.Fatalf("GetRoomDetail returned nil error, want 6004")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrUserNotInRoom {
+		t.Errorf("AppError.Code = %d, want %d (6004)", ae.Code, apperror.ErrUserNotInRoom)
+	}
+}
+
+// TestRoomService_GetRoomDetail_Step1aPrecheck_CurrentRoomIDNil_Returns6004:
+// user.CurrentRoomID=nil → 6004（与 != 子场景同 message / code）。
+func TestRoomService_GetRoomDetail_Step1aPrecheck_CurrentRoomIDNil_Returns6004(t *testing.T) {
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1001, CurrentRoomID: nil}, nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{}
+	memberRepo := &roomTestStubRoomMemberRepo{}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo)
+	_, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: 3001})
+	if err == nil {
+		t.Fatalf("GetRoomDetail returned nil error, want 6004")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrUserNotInRoom {
+		t.Errorf("AppError.Code = %d, want %d (6004 nil 子场景)", ae.Code, apperror.ErrUserNotInRoom)
+	}
+}
+
+// TestRoomService_GetRoomDetail_Step1bExistsForShare_Returns0Rows_Returns6004:
+// 步骤 1a 通过但步骤 1b 返 (false, nil) → 6004 兜底；步骤 2/3 不被调用。
+func TestRoomService_GetRoomDetail_Step1bExistsForShare_Returns0Rows_Returns6004(t *testing.T) {
+	roomID := uint64(3001)
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1001, CurrentRoomID: &roomID}, nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		existsForShareByRoomAndUserFn: func(ctx context.Context, rid, uid uint64) (bool, error) {
+			return false, nil
+		},
+	}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo)
+	_, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: roomID})
+	if err == nil {
+		t.Fatalf("GetRoomDetail returned nil error, want 6004")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrUserNotInRoom {
+		t.Errorf("AppError.Code = %d, want %d (6004 步骤 1b 兜底)", ae.Code, apperror.ErrUserNotInRoom)
+	}
+}
+
+// TestRoomService_GetRoomDetail_Step2FindByID_NotFound_Returns6001:
+// 步骤 1a / 1b 通过但 roomRepo.FindByID 返 ErrRoomNotFound → 6001。
+func TestRoomService_GetRoomDetail_Step2FindByID_NotFound_Returns6001(t *testing.T) {
+	roomID := uint64(3001)
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1001, CurrentRoomID: &roomID}, nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return nil, mysql.ErrRoomNotFound
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		existsForShareByRoomAndUserFn: func(ctx context.Context, rid, uid uint64) (bool, error) {
+			return true, nil
+		},
+	}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo)
+	_, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: roomID})
+	if err == nil {
+		t.Fatalf("GetRoomDetail returned nil error, want 6001")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrRoomNotFound {
+		t.Errorf("AppError.Code = %d, want %d (6001)", ae.Code, apperror.ErrRoomNotFound)
+	}
+}
+
+// TestRoomService_GetRoomDetail_Step3ListRoster_DBError_Returns1009:
+// 步骤 1a / 1b / 2 通过但 ListRosterByRoomID 返 raw error → 1009。
+func TestRoomService_GetRoomDetail_Step3ListRoster_DBError_Returns1009(t *testing.T) {
+	roomID := uint64(3001)
+	wantCause := stderrors.New("simulated DB outage during roster query")
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1001, CurrentRoomID: &roomID}, nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, CreatorUserID: 1001, Status: 1, MaxMembers: 4}, nil
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		existsForShareByRoomAndUserFn: func(ctx context.Context, rid, uid uint64) (bool, error) {
+			return true, nil
+		},
+		listRosterByRoomIDFn: func(ctx context.Context, rid uint64) ([]mysql.RosterRow, error) {
+			return nil, wantCause
+		},
+	}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo)
+	_, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: roomID})
+	if err == nil {
+		t.Fatalf("GetRoomDetail returned nil error, want 1009")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrServiceBusy {
+		t.Errorf("AppError.Code = %d, want %d (1009)", ae.Code, apperror.ErrServiceBusy)
+	}
+}
+
+// TestRoomService_GetRoomDetail_Step1aFindByID_DBError_Returns1009:
+// 步骤 1a userRepo.FindByID 返 raw error → 1009。
+func TestRoomService_GetRoomDetail_Step1aFindByID_DBError_Returns1009(t *testing.T) {
+	wantCause := stderrors.New("simulated DB outage during step 1a")
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return nil, wantCause
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{}
+	memberRepo := &roomTestStubRoomMemberRepo{}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo)
+	_, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: 3001})
+	if err == nil {
+		t.Fatalf("GetRoomDetail returned nil error, want 1009")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrServiceBusy {
+		t.Errorf("AppError.Code = %d, want %d (1009)", ae.Code, apperror.ErrServiceBusy)
+	}
+}
+
+// TestRoomService_GetRoomDetail_Step1bExistsForShare_DBError_Returns1009:
+// 步骤 1a 通过但 ExistsForShareByRoomAndUser 返 (false, raw error) → 1009。
+func TestRoomService_GetRoomDetail_Step1bExistsForShare_DBError_Returns1009(t *testing.T) {
+	roomID := uint64(3001)
+	wantCause := stderrors.New("simulated DB outage during step 1b FOR SHARE")
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1001, CurrentRoomID: &roomID}, nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		existsForShareByRoomAndUserFn: func(ctx context.Context, rid, uid uint64) (bool, error) {
+			return false, wantCause
+		},
+	}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo)
+	_, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: roomID})
+	if err == nil {
+		t.Fatalf("GetRoomDetail returned nil error, want 1009")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrServiceBusy {
+		t.Errorf("AppError.Code = %d, want %d (1009)", ae.Code, apperror.ErrServiceBusy)
+	}
+}
+
+// TestRoomService_GetRoomDetail_6004DualPath_MessagesEquivalent:
+// V1 §10.3 行 1258 钦定 6004 双路径 message + code 完全等价 —— 步骤 1a 预检（!=）
+// + 步骤 1b FOR SHARE 兜底两条路径返同一 apperror（同 message 同 code）。
+func TestRoomService_GetRoomDetail_6004DualPath_MessagesEquivalent(t *testing.T) {
+	roomID := uint64(3001)
+	other := uint64(9999)
+
+	userRepo1 := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1001, CurrentRoomID: &other}, nil
+		},
+	}
+	roomRepo1 := &roomTestStubRoomRepo{}
+	memberRepo1 := &roomTestStubRoomMemberRepo{}
+	svc1 := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo1, roomRepo1, memberRepo1)
+	_, err1 := svc1.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: roomID})
+	ae1, _ := apperror.As(err1)
+
+	userRepo2 := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1001, CurrentRoomID: &roomID}, nil
+		},
+	}
+	roomRepo2 := &roomTestStubRoomRepo{}
+	memberRepo2 := &roomTestStubRoomMemberRepo{
+		existsForShareByRoomAndUserFn: func(ctx context.Context, rid, uid uint64) (bool, error) {
+			return false, nil
+		},
+	}
+	svc2 := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo2, roomRepo2, memberRepo2)
+	_, err2 := svc2.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: roomID})
+	ae2, _ := apperror.As(err2)
+
+	if ae1 == nil || ae2 == nil {
+		t.Fatalf("both errors should be *AppError; ae1=%v ae2=%v", ae1, ae2)
+	}
+	if ae1.Code != ae2.Code {
+		t.Errorf("6004 双路径 code 不等价：path1=%d path2=%d", ae1.Code, ae2.Code)
+	}
+	if ae1.Code != apperror.ErrUserNotInRoom {
+		t.Errorf("path1 Code = %d, want %d (6004)", ae1.Code, apperror.ErrUserNotInRoom)
+	}
+	if ae1.Message != ae2.Message {
+		t.Errorf("6004 双路径 message 不等价：path1=%q path2=%q", ae1.Message, ae2.Message)
 	}
 }

@@ -61,6 +61,32 @@ type RoomRepo interface {
 	// 再判 status，让 step 2b 能产出明确的 6005 而非笼统的 6001。
 	FindByIDForUpdate(ctx context.Context, roomID uint64) (*Room, error)
 
+	// FindByID 取 rooms 行（**不带锁**版本；Story 11.6 引入；用于 V1 §10.3 步骤 2
+	// GET /rooms/{roomId} 房间详情查询事务内）。
+	//
+	// **必须在事务内调用**（与同事务 ExistsForShareByRoomAndUser 步骤 1b +
+	// ListRosterByRoomID 步骤 3 一起执行）；事务外调用违反 V1 §10.3 + 数据库设计
+	// §8.8 钦定的"读快照事务（含 ACL 共享锁）"路径 —— 步骤 1 ~ 3 必须共享同一
+	// REPEATABLE READ snapshot 才能保证内部一致性。
+	//
+	// **与 FindByIDForUpdate 区分**：
+	//   - FindByIDForUpdate（11.4 落地）：FOR UPDATE 排他锁 + 阻塞并发 leave/join 写
+	//     事务；用于 join / leave 写事务步骤 2a。
+	//   - FindByID（本方法）：**普通**查询无锁；用于 GET 读快照事务步骤 2 ——
+	//     snapshot 隔离已提供内部一致性，FOR SHARE 锁挂在 ACL row 上（步骤 1b）
+	//     而非 rooms 行；rooms 行的并发写（如 leave 事务的 UPDATE rooms.status=2）
+	//     由 snapshot 隔离自然 ignore（caller 看到的是事务开始时的 snapshot）。
+	//
+	// **review 阶段必查**：read 路径调本方法，write 路径调 FindByIDForUpdate；
+	// **禁止**混用 —— GET 读路径调 FindByIDForUpdate 会引入不必要的写阻塞，
+	// join/leave 写路径调 FindByID 会丢失并发保护。
+	//
+	// 找不到 → 返 ErrRoomNotFound 哨兵（与 FindByIDForUpdate 共用同一哨兵；
+	// service 层 errors.Is 后翻译为 6001）。
+	//
+	// query 失败 → 返 raw error 透传（service 包成 1009）。
+	FindByID(ctx context.Context, roomID uint64) (*Room, error)
+
 	// UpdateStatus 更新 rooms.status 字段（Story 11.5 引入；用于 V1 §10.5 步骤 5
 	// "最后一人离开 → status=2 closed"路径）。
 	//
@@ -155,4 +181,44 @@ func (r *roomRepo) UpdateStatus(ctx context.Context, roomID uint64, status int8)
 		Model(&Room{}).
 		Where("id = ?", roomID).
 		Update("status", status).Error
+}
+
+// FindByID 取 rooms 行（**不带锁**版本；Story 11.6 引入；用于 V1 §10.3 步骤 2
+// GET /rooms/{roomId} 房间详情查询事务内）。
+//
+// **必须在事务内调用**（与同事务 ExistsForShareByRoomAndUser 步骤 1b +
+// ListRosterByRoomID 步骤 3 一起执行）；事务外调用违反 V1 §10.3 + 数据库设计
+// §8.8 钦定的"读快照事务（含 ACL 共享锁）"路径 —— 步骤 1 ~ 3 必须共享同一
+// REPEATABLE READ snapshot 才能保证内部一致性。
+//
+// **与 FindByIDForUpdate 区分**：
+//   - FindByIDForUpdate（11.4 落地）：FOR UPDATE 排他锁 + 阻塞并发 leave/join 写
+//     事务；用于 join / leave 写事务步骤 2a。
+//   - FindByID（本方法）：**普通**查询无锁；用于 GET 读快照事务步骤 2 ——
+//     snapshot 隔离已提供内部一致性，FOR SHARE 锁挂在 ACL row 上（步骤 1b）
+//     而非 rooms 行；rooms 行的并发写（如 leave 事务的 UPDATE rooms.status=2）
+//     由 snapshot 隔离自然 ignore（caller 看到的是事务开始时的 snapshot）。
+//
+// **review 阶段必查**：read 路径调本方法，write 路径调 FindByIDForUpdate；
+// **禁止**混用 —— GET 读路径调 FindByIDForUpdate 会引入不必要的写阻塞，
+// join/leave 写路径调 FindByID 会丢失并发保护。
+//
+// 找不到 → 返 ErrRoomNotFound（service 层 errors.Is 后翻译为 6001 ErrRoomNotFound）。
+// 与 FindByIDForUpdate 共用同一哨兵（mysql.ErrRoomNotFound），让 service 层
+// 错误处理路径一致。
+//
+// query 失败 → 返 raw error 透传（service 包成 1009）。
+func (r *roomRepo) FindByID(ctx context.Context, roomID uint64) (*Room, error) {
+	db := tx.FromContext(ctx, r.db)
+	var room Room
+	err := db.WithContext(ctx).
+		Where("id = ?", roomID).
+		First(&room).Error
+	if err != nil {
+		if stderrors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrRoomNotFound
+		}
+		return nil, err
+	}
+	return &room, nil
 }

@@ -138,8 +138,10 @@ func roomIntegrationTestRouter(roomSvc service.RoomService, signer *auth.Signer)
 	api := r.Group("/api/v1")
 	authedGroup := api.Group("", middleware.Auth(signer))
 	authedGroup.POST("/rooms", roomHandler.CreateRoom)
-	authedGroup.POST("/rooms/:roomId/join", roomHandler.JoinRoom)   // Story 11.4 加
-	authedGroup.POST("/rooms/:roomId/leave", roomHandler.LeaveRoom) // Story 11.5 加
+	authedGroup.POST("/rooms/:roomId/join", roomHandler.JoinRoom)         // Story 11.4 加
+	authedGroup.POST("/rooms/:roomId/leave", roomHandler.LeaveRoom)       // Story 11.5 加
+	authedGroup.GET("/rooms/current", roomHandler.GetCurrentRoom)         // Story 11.6 加
+	authedGroup.GET("/rooms/:roomId", roomHandler.GetRoomDetail)          // Story 11.6 加
 	return r
 }
 
@@ -674,3 +676,260 @@ func TestRoomHandlerIntegration_LeaveRoom_InvalidRoomIDPath_Returns1002(t *testi
 	}
 }
 
+
+
+// ============================================================
+// Story 11.6 端到端集成测试 case：GetCurrentRoom + GetRoomDetail
+// ============================================================
+
+// roomIntegrationTestInsertPet 直接 INSERT pets 行（pet_type=1, current_state=1, is_default=1）。
+func roomIntegrationTestInsertPet(t *testing.T, sqlDB *sql.DB, id, userID uint64, name string) {
+	t.Helper()
+	_, err := sqlDB.Exec(
+		`INSERT INTO pets (id, user_id, pet_type, name, current_state, is_default) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, userID, 1, name, 1, 1,
+	)
+	if err != nil {
+		t.Fatalf("insert pet: %v", err)
+	}
+}
+
+// AC13.1: GetCurrentRoom happy 用户在房间 → envelope.code=0 + data.roomId=string。
+func TestRoomHandlerIntegration_GetCurrentRoom_HappyPath_UserInRoom(t *testing.T) {
+	router, sqlDB, signer, cleanup := buildRoomHandlerIntegration(t)
+	defer cleanup()
+
+	const userID = uint64(1001)
+	roomIntegrationTestInsertUser(t, sqlDB, userID, "uid-curr-int", "用户1001")
+	token := roomIntegrationTestSignToken(t, signer, userID)
+
+	// 先创建房间
+	reqCreate := httptest.NewRequest(http.MethodPost, "/api/v1/rooms", strings.NewReader(`{}`))
+	reqCreate.Header.Set("Content-Type", "application/json")
+	reqCreate.Header.Set("Authorization", "Bearer "+token)
+	wCreate := httptest.NewRecorder()
+	router.ServeHTTP(wCreate, reqCreate)
+	if wCreate.Code != http.StatusOK {
+		t.Fatalf("create status = %d, want 200; body=%s", wCreate.Code, wCreate.Body.String())
+	}
+	envCreate := decodeRoomIntegrationEnvelope(t, wCreate.Body.Bytes())
+	createData := envCreate.Data.(map[string]any)
+	roomData := createData["room"].(map[string]any)
+	expectedRoomID := roomData["id"].(string)
+
+	// GET /rooms/current
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/rooms/current", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != 0 {
+		t.Errorf("envelope.code = %d, want 0", env.Code)
+	}
+	data, ok := env.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("envelope.data not object: %T", env.Data)
+	}
+	if data["roomId"] != expectedRoomID {
+		t.Errorf("data.roomId = %v, want %q", data["roomId"], expectedRoomID)
+	}
+}
+
+// AC13.2: GetCurrentRoom happy 用户不在任何房间 → envelope.code=0 + data.roomId=null。
+func TestRoomHandlerIntegration_GetCurrentRoom_HappyPath_UserNotInAnyRoom(t *testing.T) {
+	router, sqlDB, signer, cleanup := buildRoomHandlerIntegration(t)
+	defer cleanup()
+
+	const userID = uint64(1001)
+	roomIntegrationTestInsertUser(t, sqlDB, userID, "uid-curr-int-none", "用户1001")
+	token := roomIntegrationTestSignToken(t, signer, userID)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/rooms/current", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"roomId":null`) {
+		t.Errorf("body should contain `\"roomId\":null` (用户不在任何房间显式 null); body=%s", body)
+	}
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != 0 {
+		t.Errorf("envelope.code = %d, want 0", env.Code)
+	}
+	data, ok := env.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("envelope.data not object: %T", env.Data)
+	}
+	v, exists := data["roomId"]
+	if !exists {
+		t.Errorf("data.roomId key missing, want present with null value")
+	}
+	if v != nil {
+		t.Errorf("data.roomId = %v, want nil (JSON null)", v)
+	}
+}
+
+// AC13.3: GetRoomDetail happy 3 成员含 1 pet-less → envelope.code=0 + data.room +
+// data.members 字段值正确（BIGINT 字符串化 + memberCount=3 + pet-less 下发 null）。
+func TestRoomHandlerIntegration_GetRoomDetail_HappyPath(t *testing.T) {
+	router, sqlDB, signer, cleanup := buildRoomHandlerIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	const userC = uint64(1003)
+	roomIntegrationTestInsertUser(t, sqlDB, userA, "uid-det-a", "A")
+	roomIntegrationTestInsertUser(t, sqlDB, userB, "uid-det-b", "B")
+	roomIntegrationTestInsertUser(t, sqlDB, userC, "uid-det-c", "C")
+	roomIntegrationTestInsertPet(t, sqlDB, 8001, userA, "PetA")
+	roomIntegrationTestInsertPet(t, sqlDB, 8002, userB, "PetB")
+	// C 是 pet-less
+
+	tokenA := roomIntegrationTestSignToken(t, signer, userA)
+	tokenB := roomIntegrationTestSignToken(t, signer, userB)
+	tokenC := roomIntegrationTestSignToken(t, signer, userC)
+
+	// A 创建
+	reqCreate := httptest.NewRequest(http.MethodPost, "/api/v1/rooms", strings.NewReader(`{}`))
+	reqCreate.Header.Set("Content-Type", "application/json")
+	reqCreate.Header.Set("Authorization", "Bearer "+tokenA)
+	wCreate := httptest.NewRecorder()
+	router.ServeHTTP(wCreate, reqCreate)
+	if wCreate.Code != http.StatusOK {
+		t.Fatalf("create status = %d, want 200; body=%s", wCreate.Code, wCreate.Body.String())
+	}
+	envCreate := decodeRoomIntegrationEnvelope(t, wCreate.Body.Bytes())
+	createData := envCreate.Data.(map[string]any)
+	roomData := createData["room"].(map[string]any)
+	roomIDStr := roomData["id"].(string)
+
+	// B / C join
+	for _, tok := range []string{tokenB, tokenC} {
+		reqJoin := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+roomIDStr+"/join", strings.NewReader(`{}`))
+		reqJoin.Header.Set("Content-Type", "application/json")
+		reqJoin.Header.Set("Authorization", "Bearer "+tok)
+		wJoin := httptest.NewRecorder()
+		router.ServeHTTP(wJoin, reqJoin)
+		if wJoin.Code != http.StatusOK {
+			t.Fatalf("join status = %d, want 200; body=%s", wJoin.Code, wJoin.Body.String())
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	// GET /rooms/{roomId}（A 的视角）
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/rooms/"+roomIDStr, nil)
+	req.Header.Set("Authorization", "Bearer "+tokenA)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	// pet-less member → "pet":null（与 V1 §10.3 字段表 nullable 钦定）
+	if !strings.Contains(body, `"pet":null`) {
+		t.Errorf("body should contain `\"pet\":null` for pet-less member; body=%s", body)
+	}
+	// equips 必为 [] 不为 null
+	if !strings.Contains(body, `"equips":[]`) {
+		t.Errorf("body should contain `\"equips\":[]` (节点 4 阶段固定空数组); body=%s", body)
+	}
+
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != 0 {
+		t.Errorf("envelope.code = %d, want 0", env.Code)
+	}
+	data, _ := env.Data.(map[string]any)
+	room, _ := data["room"].(map[string]any)
+	if room["id"] != roomIDStr {
+		t.Errorf(`room.id = %v, want %q`, room["id"], roomIDStr)
+	}
+	if room["creatorUserId"] != "1001" {
+		t.Errorf(`room.creatorUserId = %v, want "1001"`, room["creatorUserId"])
+	}
+	if mc, _ := room["memberCount"].(float64); mc != 3 {
+		t.Errorf("room.memberCount = %v, want 3", room["memberCount"])
+	}
+	members, _ := data["members"].([]any)
+	if len(members) != 3 {
+		t.Fatalf("len(members) = %d, want 3", len(members))
+	}
+	// 不变量：memberCount === len(members)
+	mc, _ := room["memberCount"].(float64)
+	if int(mc) != len(members) {
+		t.Errorf("invariant violated: memberCount=%v != len(members)=%d", mc, len(members))
+	}
+	// 顺序按 joined_at ASC：A → B → C
+	m0 := members[0].(map[string]any)
+	m1 := members[1].(map[string]any)
+	m2 := members[2].(map[string]any)
+	if m0["userId"] != "1001" || m1["userId"] != "1002" || m2["userId"] != "1003" {
+		t.Errorf("order = %s/%s/%s, want 1001/1002/1003", m0["userId"], m1["userId"], m2["userId"])
+	}
+	// m0 / m1 都有 pet
+	if m0["pet"] == nil {
+		t.Errorf("members[0].pet should not be nil (A has pet)")
+	}
+	if pet, ok := m0["pet"].(map[string]any); ok {
+		if pet["petId"] != "8001" {
+			t.Errorf(`members[0].pet.petId = %v, want "8001"`, pet["petId"])
+		}
+		if cs, _ := pet["currentState"].(float64); cs != 1 {
+			t.Errorf("members[0].pet.currentState = %v, want 1 (节点 4 固定)", pet["currentState"])
+		}
+	}
+	// m1 avatarUrl 是空字符串（合法）
+	if m1["avatarUrl"] != "" {
+		t.Errorf("members[1].avatarUrl = %v, want empty string", m1["avatarUrl"])
+	}
+	// m2 是 pet-less
+	if v, exists := m2["pet"]; !exists || v != nil {
+		t.Errorf("members[2].pet should be JSON null (pet-less)")
+	}
+}
+
+// AC13.4: GetRoomDetail user B 不加入房间 → 调 user A 的 roomID → envelope.code=6004。
+func TestRoomHandlerIntegration_GetRoomDetail_UserNotInRoom_Returns6004(t *testing.T) {
+	router, sqlDB, signer, cleanup := buildRoomHandlerIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	roomIntegrationTestInsertUser(t, sqlDB, userA, "uid-acl-int-a", "A")
+	roomIntegrationTestInsertUser(t, sqlDB, userB, "uid-acl-int-b", "B")
+	tokenA := roomIntegrationTestSignToken(t, signer, userA)
+	tokenB := roomIntegrationTestSignToken(t, signer, userB)
+
+	// A 创建房间
+	reqCreate := httptest.NewRequest(http.MethodPost, "/api/v1/rooms", strings.NewReader(`{}`))
+	reqCreate.Header.Set("Content-Type", "application/json")
+	reqCreate.Header.Set("Authorization", "Bearer "+tokenA)
+	wCreate := httptest.NewRecorder()
+	router.ServeHTTP(wCreate, reqCreate)
+	envCreate := decodeRoomIntegrationEnvelope(t, wCreate.Body.Bytes())
+	createData := envCreate.Data.(map[string]any)
+	roomData := createData["room"].(map[string]any)
+	roomIDStr := roomData["id"].(string)
+
+	// B（不在该房间）调 GET /rooms/{roomIDStr} → 6004
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/rooms/"+roomIDStr, nil)
+	req.Header.Set("Authorization", "Bearer "+tokenB)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 6004; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrUserNotInRoom {
+		t.Errorf("envelope.code = %d, want %d (6004)", env.Code, apperror.ErrUserNotInRoom)
+	}
+}

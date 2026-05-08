@@ -75,6 +75,35 @@ type Room struct {
 // TableName 显式声明 "rooms"。
 func (Room) TableName() string { return "rooms" }
 
+// RosterRow 是 RoomMemberRepo.ListRosterByRoomID 的返回元素（Story 11.6 引入）。
+//
+// 字段（与 V1 §10.3 钦定 wire DTO `data.members[].{userId, nickname, avatarUrl, pet.petId}` 1:1 对齐）：
+//   - UserID:    BIGINT UNSIGNED → uint64（来自 room_members.user_id）
+//   - Nickname:  VARCHAR(64) → string（来自 users.nickname；INNER JOIN users）
+//   - AvatarURL: VARCHAR(255) → string（来自 users.avatar_url；INNER JOIN users）
+//   - PetID:     BIGINT UNSIGNED NULL → *uint64（来自 pets.id；LEFT JOIN pets，
+//     pet-less 时该列为 NULL，必须用 *uint64 接 NULL）
+//
+// **关键**：用 *uint64 而非 uint64 因 LEFT JOIN pets 在 pet-less 时该列为 NULL，
+// GORM Scan 会把 NULL 映射为 zero-value（0）→ service 层无法区分"pet.id == 0"
+// 与"pet-less"；用 pointer 让 NULL → nil pointer，service 层据此把 wire DTO 的
+// `pet` 整体下发为 `null`（V1 §10.3 字段表 nullable 钦定）。
+//
+// **不**包含 pet.currentState / pet.equips：节点 4 阶段固定 `1` / `[]`（V1 §10.3
+// 字段表节点 4 列钦定），由 service 层硬编码；query 层不查 pets.current_state /
+// user_pet_equips 表（YAGNI，节点 5 / 9 由 Epic 14 / 26 真实驱动时再扩展）。
+//
+// **不**复用 mysql.Pet struct：RosterRow 仅含本 story 需要的 4 个字段，避免
+// 拉过多 pets 字段污染 query payload（pet.created_at / pet_type / name / is_default
+// 等都不需要）。future 若需要扩展更多字段（如 currentState 由 Epic 14 真实驱动），
+// 在本 struct 内加字段而非新建 RosterRowExt。
+type RosterRow struct {
+	UserID    uint64  `gorm:"column:user_id"`
+	Nickname  string  `gorm:"column:nickname"`
+	AvatarURL string  `gorm:"column:avatar_url"`
+	PetID     *uint64 `gorm:"column:pet_id"` // LEFT JOIN pets，pet-less 时为 nil
+}
+
 // RoomMemberRepo 是 room_members 表的最小读取接口（Story 10.3 引入）。
 //
 // 范围边界：
@@ -174,6 +203,68 @@ type RoomMemberRepo interface {
 	//
 	// query 失败 → 返 (0, raw error) 透传给 service（service 包成 1009）。
 	DeleteByRoomAndUser(ctx context.Context, roomID, userID uint64) (int64, error)
+
+	// ExistsForShareByRoomAndUser 取 FOR SHARE 共享锁锁定 (room_id, user_id) 双键
+	// 定位的单行 room_members（Story 11.6 引入；用于 V1 §10.3 步骤 1b ACL 共享锁）。
+	//
+	// **必须在事务内调用**（与同事务 userRepo.FindByID 步骤 1a + roomRepo.FindByID
+	// 步骤 2 + ListRosterByRoomID 步骤 3 一起执行）；事务外调用 FOR SHARE 锁立即
+	// 释放（autocommit 模式下任何 SELECT 完成即 commit），违反 V1 §10.3 + 数据库
+	// 设计 §8.8 钦定的串行化路径 —— 跨事务并发 leave 的 DELETE 不再被阻塞，
+	// post-leave 数据泄漏 race 重新出现。
+	//
+	// FOR SHARE vs FOR UPDATE：
+	//   - FOR SHARE 取共享锁（S 锁），多个读事务可同时持锁，但与排他锁（X 锁，
+	//     leave 事务的 DELETE 取）互斥；本 story 多个 GET /rooms/{roomId} 同时进
+	//     行可彼此并行，仅与并发 leave 事务串行化
+	//   - FOR UPDATE 取排他锁（X 锁），与所有锁互斥，性能更差；本 story 是只读
+	//     接口，用 FOR SHARE 已足够（snapshot 隔离 + FOR SHARE 锁双机制提供
+	//     ACL 边界保护，详见 V1 §10.3 rationale + 数据库设计 §8.8）
+	//
+	// 用 GORM Raw("SELECT 1 FROM room_members WHERE room_id = ? AND user_id = ? LIMIT 1 FOR SHARE") +
+	// Scan(&dummy) 路径生成 SELECT ... FOR SHARE SQL；走 idx_room_id 索引 +
+	// uk_room_user 唯一约束高效定位（最多 1 行匹配）。**MySQL 8.0 钦定 LIMIT 必须在
+	// locking clause 之前**（FOR SHARE LIMIT 1 是 ER_PARSE_ERROR 1064；详见 dev review
+	// r0 sub-loop fix）。
+	//
+	// 返：
+	//   - 命中 1 行 → (true, nil)
+	//   - 0 行 → (false, nil) —— 与 RoomExists / IsUserInRoom 同模式，Raw + Scan
+	//     在 0 行时不返 ErrRecordNotFound 而是保持 dummy zero-value
+	//   - query 失败 → (false, raw error 透传给 service（service 包成 1009）)
+	ExistsForShareByRoomAndUser(ctx context.Context, roomID, userID uint64) (bool, error)
+
+	// ListRosterByRoomID 查 room_members + INNER JOIN users + LEFT JOIN pets 聚合的
+	// roster，按 room_members.joined_at ASC 稳定排序（Story 11.6 引入；用于 V1 §10.3
+	// 步骤 3 GET /rooms/{roomId} 房间详情查询）。
+	//
+	// **必须在事务内调用**（与同事务 ExistsForShareByRoomAndUser 步骤 1b + roomRepo.FindByID
+	// 步骤 2 一起执行）；事务外调用违反 V1 §10.3 + 数据库设计 §8.8 钦定的"读快照事务
+	// （含 ACL 共享锁）"路径 —— 步骤 1 ~ 3 必须共享同一 REPEATABLE READ snapshot 才
+	// 能保证内部一致性（两次 SELECT 看到同一时刻状态）+ FOR SHARE 锁才能阻止并发
+	// leave 的 DELETE 在本读事务期间提交（外部一致性）。
+	//
+	// **LEFT JOIN pets 必须**（不能 INNER JOIN）：pet-less 账号（用户无 is_default=1
+	// 的活跃 pet 行）若用 INNER JOIN 会被静默丢行 → 违反 memberCount === members.length
+	// 不变量；LEFT JOIN 时 pets.* 列为 NULL，GORM Scan 把 NULL 映射为 *uint64 nil
+	// （RosterRow.PetID）让 service 层据此下发 wire DTO `pet: null`。
+	//
+	// INNER JOIN users（不是 LEFT JOIN）：users 行必存在（room_members.user_id
+	// FOREIGN KEY 引用 users.id；orphan 不可能）；INNER JOIN 比 LEFT JOIN 性能略
+	// 好且语义明确"members[].nickname / avatarUrl 必非空 string（可空字符串 ""）"。
+	//
+	// pets.is_default = 1 过滤：每个用户最多一只默认 pet（uk_user_default_pet 唯一
+	// 约束，§5.3）；本接口节点 4 阶段仅返回默认 pet（节点 9 / 10 由 Epic 26 / 29
+	// 扩展多 pet 时再调整 query —— future 工作）。
+	//
+	// ORDER BY room_members.joined_at ASC：稳定排序，便于 client 渲染顺序稳定 +
+	// 集成测试 assert（V1 §10.3 行 1374 钦定 server 决定顺序，建议按 joined_at ASC）。
+	//
+	// 返：
+	//   - 0 行（房间存在但无成员，理论 closed 房间路径） → ([]RosterRow{}, nil)
+	//   - 多行 → ([]RosterRow{...}, nil)
+	//   - DB error → (nil, raw error 透传给 service（service 包成 1009）)
+	ListRosterByRoomID(ctx context.Context, roomID uint64) ([]RosterRow, error)
 }
 
 // roomMemberRepo 是 RoomMemberRepo 的默认实装。
@@ -338,4 +429,91 @@ func (r *roomMemberRepo) DeleteByRoomAndUser(ctx context.Context, roomID, userID
 		return 0, result.Error
 	}
 	return result.RowsAffected, nil
+}
+
+// ExistsForShareByRoomAndUser 取 FOR SHARE 共享锁锁定 (room_id, user_id) 双键定位
+// 的单行 room_members（Story 11.6 引入；用于 V1 §10.3 步骤 1b ACL 共享锁）。
+//
+// **必须在事务内调用**（与同事务 userRepo.FindByID 步骤 1a + roomRepo.FindByID
+// 步骤 2 + ListRosterByRoomID 步骤 3 一起执行）；事务外调用 FOR SHARE 锁立即
+// 释放（autocommit 模式下任何 SELECT 完成即 commit），违反 V1 §10.3 + 数据库
+// 设计 §8.8 钦定的串行化路径 —— 跨事务并发 leave 的 DELETE 不再被阻塞，
+// post-leave 数据泄漏 race 重新出现。
+//
+// 用 GORM Raw + Scan 路径生成 SELECT ... FOR SHARE SQL；走 idx_room_id 索引 +
+// uk_room_user 唯一约束高效定位（最多 1 行匹配）。
+//
+// 返：
+//   - 命中 1 行 → (true, nil)
+//   - 0 行 → (false, nil) —— 与 RoomExists / IsUserInRoom 同模式，Raw + Scan
+//     在 0 行时不返 ErrRecordNotFound 而是保持 dummy zero-value
+//   - query 失败 → (false, raw error 透传给 service（service 包成 1009）)
+func (r *roomMemberRepo) ExistsForShareByRoomAndUser(ctx context.Context, roomID, userID uint64) (bool, error) {
+	db := tx.FromContext(ctx, r.db)
+	var dummy int
+	// MySQL 8.0 SQL syntax: LIMIT 必须在 locking clause（FOR SHARE / FOR UPDATE）**之前**；
+	// `... FOR SHARE LIMIT 1` 在 MySQL 5.7+ 是 ER_PARSE_ERROR (1064)。GORM 不会重写顺序，
+	// raw SQL 必须按 MySQL 钦定顺序写。RoomExists / IsUserInRoom 用普通 SELECT 不带锁
+	// 所以无此约束。
+	err := db.WithContext(ctx).
+		Raw("SELECT 1 FROM room_members WHERE room_id = ? AND user_id = ? LIMIT 1 FOR SHARE", roomID, userID).
+		Scan(&dummy).Error
+	if err != nil {
+		if stderrors.Is(err, gorm.ErrRecordNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return dummy == 1, nil
+}
+
+// ListRosterByRoomID 查 room_members + INNER JOIN users + LEFT JOIN pets 聚合的
+// roster，按 room_members.joined_at ASC 稳定排序（Story 11.6 引入；用于 V1 §10.3
+// 步骤 3 GET /rooms/{roomId} 房间详情查询）。
+//
+// **必须在事务内调用**（与同事务 ExistsForShareByRoomAndUser 步骤 1b + roomRepo.FindByID
+// 步骤 2 一起执行）；事务外调用违反 V1 §10.3 + 数据库设计 §8.8 钦定的"读快照事务
+// （含 ACL 共享锁）"路径 —— 步骤 1 ~ 3 必须共享同一 REPEATABLE READ snapshot 才
+// 能保证内部一致性 + FOR SHARE 锁才能阻止并发 leave 的 DELETE 在本读事务期间提交。
+//
+// **LEFT JOIN pets 必须**（不能 INNER JOIN）：pet-less 账号若用 INNER JOIN 会被
+// 静默丢行 → 违反 memberCount === members.length 不变量；LEFT JOIN 时 pets.* 列
+// 为 NULL，GORM Scan 把 NULL 映射为 *uint64 nil（RosterRow.PetID）让 service 层
+// 据此下发 wire DTO `pet: null`。
+//
+// INNER JOIN users（不是 LEFT JOIN）：users 行必存在（room_members.user_id
+// 引用 users.id；orphan 不可能）。
+//
+// pets.is_default = 1 过滤：每个用户最多一只默认 pet（uk_user_default_pet
+// 唯一约束 §5.3）；本接口节点 4 阶段仅返回默认 pet。
+//
+// ORDER BY room_members.joined_at ASC：稳定排序便于 client 渲染顺序稳定。
+//
+// 用 GORM Raw 路径而非 Joins / Preload —— Raw 让 SQL 显式可读 + Scan 到自定
+// 义 RosterRow struct 避免 GORM Preload 多查（preload 路径会触发额外 1 query
+// 加载 pets，违反"读快照事务步骤 3 单 SQL"钦定）。
+//
+// 返：
+//   - 0 行（房间存在但无成员，理论 closed 房间路径） → ([]RosterRow{}, nil)
+//   - 多行 → ([]RosterRow{...}, nil)
+//   - DB error → (nil, raw error 透传给 service（service 包成 1009）)
+func (r *roomMemberRepo) ListRosterByRoomID(ctx context.Context, roomID uint64) ([]RosterRow, error) {
+	db := tx.FromContext(ctx, r.db)
+	var rows []RosterRow
+	err := db.WithContext(ctx).
+		Raw(`SELECT room_members.user_id AS user_id, users.nickname AS nickname, users.avatar_url AS avatar_url, pets.id AS pet_id
+		     FROM room_members
+		     INNER JOIN users ON room_members.user_id = users.id
+		     LEFT JOIN pets ON pets.user_id = room_members.user_id AND pets.is_default = 1
+		     WHERE room_members.room_id = ?
+		     ORDER BY room_members.joined_at ASC`, roomID).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	if rows == nil {
+		// GORM Scan 在 0 行时可能保持 nil；统一返 [] 让调用方不需要 nil-check
+		return []RosterRow{}, nil
+	}
+	return rows, nil
 }
