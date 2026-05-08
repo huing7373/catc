@@ -747,10 +747,15 @@ func TestRoomService_JoinRoom_Happy_5StepsExecute(t *testing.T) {
 	txMgr := roomTestDefaultStubTxMgr()
 
 	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	wg := &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
 	out, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
 	if err != nil {
 		t.Fatalf("JoinRoom: %v", err)
 	}
+	// Story 11.8 r2 修复后：post-commit hook 异步化，必须等 wg 才能断言 post-commit
+	// userRepo.FindByID enrichment call。
+	wg.Wait()
 
 	// Story 11.8 加：事务 commit 成功后 broadcastMemberJoined 会再调一次 userRepo.FindByID
 	// 拿 nickname / avatarUrl 构造 member.joined payload（fire-and-forget；事务外）。
@@ -1319,10 +1324,14 @@ func TestRoomService_LeaveRoom_Happy_NotLastMember(t *testing.T) {
 	txMgr := roomTestDefaultStubTxMgr()
 
 	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	wg := &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
 	out, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: 1001, RoomID: targetRoomID})
 	if err != nil {
 		t.Fatalf("LeaveRoom: %v", err)
 	}
+	// 等 post-commit goroutine 完成后再读 calls（避免 -race 检测到 slice 并发读写）
+	wg.Wait()
 
 	expected := []string{
 		"userRepo.FindByID",
@@ -1398,10 +1407,14 @@ func TestRoomService_LeaveRoom_Happy_LastMember_RoomClosed(t *testing.T) {
 	txMgr := roomTestDefaultStubTxMgr()
 
 	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}))
+	wg := &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
 	out, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: 1001, RoomID: targetRoomID})
 	if err != nil {
 		t.Fatalf("LeaveRoom: %v", err)
 	}
+	// 等 post-commit goroutine 完成（防 -race 误报 + updateStatusCalled 读写并发）
+	wg.Wait()
 	if !updateStatusCalled {
 		t.Errorf("UpdateStatus 应被调用（最后一人离开 → status=2 closed）")
 	}
@@ -2315,10 +2328,14 @@ func TestRoomService_JoinRoom_Happy_BroadcastMemberJoinedCalled(t *testing.T) {
 	sessionMgr := &roomTestStubSessionMgr{}
 
 	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, sessionMgr, fn)
+	wg := &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
 	out, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userID, RoomID: roomID})
 	if err != nil {
 		t.Fatalf("JoinRoom: %v", err)
 	}
+	// Story 11.8 r2 修复后：post-commit hook 异步化，等 wg 后再断言
+	wg.Wait()
 	if !out.Joined {
 		t.Errorf("out.Joined = false, want true")
 	}
@@ -2407,9 +2424,13 @@ func TestRoomService_JoinRoom_Happy_PetLess_BroadcastWithNullPet(t *testing.T) {
 	bcast, _, fn := newRoomTestStubBroadcastFnWithSeq()
 
 	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, &roomTestStubSessionMgr{}, fn)
+	wg := &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
 	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userID, RoomID: roomID}); err != nil {
 		t.Fatalf("JoinRoom: %v", err)
 	}
+	// Story 11.8 r2 修复后：等 wg 后再断言
+	wg.Wait()
 
 	if got := bcast.callCount(); got != 1 {
 		t.Fatalf("broadcastFn call count = %d, want 1", got)
@@ -2455,9 +2476,13 @@ func TestRoomService_JoinRoom_TxRollback_BroadcastNotCalled(t *testing.T) {
 	bcast, _, fn := newRoomTestStubBroadcastFnWithSeq()
 
 	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, &roomTestStubSessionMgr{}, fn)
+	wg := &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
 	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userID, RoomID: roomID}); err == nil {
 		t.Fatalf("JoinRoom should return error (6003 dup), got nil")
 	}
+	// rollback 路径：runPostCommitAsync 不会被触发；wg.Wait() 立即返回（无 Add）
+	wg.Wait()
 
 	if got := bcast.callCount(); got != 0 {
 		t.Errorf("broadcastFn call count = %d, want 0 (tx rollback path)", got)
@@ -2501,10 +2526,13 @@ func TestRoomService_JoinRoom_BroadcastFails_DoesNotAffectReturn(t *testing.T) {
 	seqGen := &atomic.Int64{}
 
 	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, &roomTestStubSessionMgr{}, bcast.fn(seqGen))
+	wg := &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
 	out, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userID, RoomID: roomID})
 	if err != nil {
 		t.Fatalf("JoinRoom should succeed even when broadcastFn errors (fire-and-forget): %v", err)
 	}
+	wg.Wait()
 	if !out.Joined {
 		t.Errorf("out.Joined = false, want true")
 	}
@@ -2544,10 +2572,14 @@ func TestRoomService_LeaveRoom_Happy_NoLeaverSession_StillBroadcasts(t *testing.
 	}
 
 	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, sessionMgr, fn)
+	wg := &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
 	out, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userID, RoomID: roomID})
 	if err != nil {
 		t.Fatalf("LeaveRoom: %v", err)
 	}
+	// Story 11.8 r2 修复后：post-commit hook 异步化，等 wg 后再断言副作用
+	wg.Wait()
 	if !out.Left {
 		t.Errorf("out.Left = false, want true")
 	}
@@ -2621,9 +2653,13 @@ func TestRoomService_LeaveRoom_TxRollback_BroadcastNotCalled(t *testing.T) {
 	}
 
 	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, sessionMgr, fn)
+	wg := &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
 	if _, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userID, RoomID: roomID}); err == nil {
 		t.Fatalf("LeaveRoom should return 6004 error, got nil")
 	}
+	// rollback 路径：runPostCommitAsync 未触发；wg.Wait() 立即返回
+	wg.Wait()
 
 	if got := bcast.callCount(); got != 0 {
 		t.Errorf("broadcastFn call count = %d, want 0 (tx rollback path)", got)
@@ -2655,10 +2691,14 @@ func TestRoomService_LeaveRoom_PrecheckFail_BroadcastNotCalled(t *testing.T) {
 	}
 
 	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, &roomTestStubRoomRepo{}, &roomTestStubRoomMemberRepo{}, &roomTestStubPetRepo{}, sessionMgr, fn)
+	wg := &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
 	_, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userID, RoomID: roomID})
 	if err == nil {
 		t.Fatalf("LeaveRoom should return 6004 precheck error, got nil")
 	}
+	// 预检失败路径：runPostCommitAsync 未触发；wg.Wait() 立即返回
+	wg.Wait()
 	ae, ok := apperror.As(err)
 	if !ok || ae.Code != apperror.ErrUserNotInRoom {
 		t.Errorf("err = %v, want apperror with code 6004", err)

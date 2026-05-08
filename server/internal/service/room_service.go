@@ -5,12 +5,30 @@ import (
 	stderrors "errors"
 	"log/slog"
 	"strconv"
+	"sync"
+	"time"
 
 	ws "github.com/huing/cat/server/internal/app/ws"
 	apperror "github.com/huing/cat/server/internal/pkg/errors"
 	"github.com/huing/cat/server/internal/repo/mysql"
 	"github.com/huing/cat/server/internal/repo/tx"
 )
+
+// postCommitTimeout 是 post-commit fire-and-forget goroutine 的超时上限（Story 11.8
+// codex review r2 [P1] / [P2] 修复引入）。
+//
+// **为何需要超时**（Story 11.8 review r2 lesson）：post-commit hook 用 detached ctx
+// （context.WithoutCancel）解除 request ctx cancel 信号 —— 这是为了让 broadcast /
+// session close 不被 client 主动断开 / handler deadline 触发的 cancel 误中断（否则
+// member.joined 静默 skip / leaver session 残留）。但完全 detached 会引入 goroutine
+// 泄漏风险（DB 卡死 / SessionManager 死锁 → goroutine 永不返回）。所以**必须**给
+// detached ctx 加独立 timeout 兜底。
+//
+// **10s 选型**：post-commit 全部 work（user/pet lookup + 1 次 marshal + broadcastFn
+// fanout + Session.CloseWithCode 含 ~5s WS write timeout drain）总时间上界 ~6s；
+// 取 10s 留冗余 + 允许 worst-case write loop 排队。Future 节点如有 SessionManager
+// 性能压测可调小到 5s。
+const postCommitTimeout = 10 * time.Second
 
 // 房间业务常量（数据库设计 §5.13 / §6.12 + V1 §10.1 钦定）。在 service 包定义的理由：
 // service 是业务规则归属层（设计文档 §5.2）；handler 不应硬编码业务值（handler 只做
@@ -330,6 +348,81 @@ type roomServiceImpl struct {
 	petRepo        mysql.PetRepo     // Story 11.8 加：member.joined 事件 pet enrichment
 	sessionMgr     ws.SessionManager // Story 11.8 加：close leaver Session（leave 路径）
 	broadcastFn    ws.BroadcastFn    // Story 11.8 加：fire-and-forget broadcast（join / leave 路径）
+
+	// postCommitWG **仅供测试同步**（Story 11.8 codex review r2 修复引入）：tests
+	// 注入一个 *sync.WaitGroup 让 runPostCommitAsync 启动 goroutine 时 Add(1)、
+	// goroutine 结束时 Done()，let tests 调 wg.Wait() 后再断言 broadcast / close
+	// 副作用是否符合预期。production 路径不注入 → nil → runPostCommitAsync 直接
+	// fire-and-forget 不做 WG 簿记，与 production 行为完全一致（fire-and-forget
+	// 严格语义不引入额外开销）。
+	//
+	// 通过 SetPostCommitWaitGroupForTest 注入；不出现在 NewRoomService 签名里
+	// （production caller 永不需要）。
+	postCommitWG *sync.WaitGroup
+}
+
+// SetPostCommitWaitGroupForTest 仅供测试使用：注入一个 *sync.WaitGroup 让测试可以
+// 同步等待 post-commit 异步 goroutine 完成（Story 11.8 codex review r2 修复引入）。
+//
+// **production 严格禁止调用**：post-commit hook 必须 fire-and-forget，加 WaitGroup
+// 等待会破坏 fire-and-forget 语义（让 caller 阻塞等异步 goroutine 完成）。
+//
+// 测试使用模式：
+//
+//	wg := &sync.WaitGroup{}
+//	svc := service.NewRoomService(...)
+//	service.SetPostCommitWaitGroupForTest(svc, wg)
+//	_, _ = svc.JoinRoom(ctx, in)
+//	wg.Wait() // 等 post-commit goroutine 完成
+//	// 此时安全断言 bcast.callCount() / sessionMgr.unregisterCalls 等副作用
+func SetPostCommitWaitGroupForTest(svc RoomService, wg *sync.WaitGroup) {
+	if impl, ok := svc.(*roomServiceImpl); ok {
+		impl.postCommitWG = wg
+	}
+}
+
+// runPostCommitAsync 在独立 goroutine 内执行 post-commit fn（Story 11.8 codex review
+// r2 [P1] / [P2] 修复引入）。
+//
+// **fire-and-forget 严格语义**（V1 §10.4 步骤 8 / §10.5 步骤 7-8 钦定）：
+//
+//  1. **不阻塞 caller**：post-commit 工作（broadcast / session close）独立 goroutine
+//     执行，caller（JoinRoom / LeaveRoom）立刻继续返回 HTTP 200，broadcast / close
+//     的耗时（DB lookup ~ms / Session.CloseWithCode 含 ~5s WS write timeout drain）
+//     不计入 HTTP latency。
+//
+//  2. **detached ctx**（context.WithoutCancel）：fn 收到的 ctx 与 request ctx 解耦
+//     cancel 信号但保留 values（trace ID / request ID 等 propagation）。这样
+//     client 断开 / handler deadline cancel request ctx 时，post-commit lookup
+//     不被误中断（否则会出现 user/pet enrichment fail "context canceled" → broadcast
+//     payload 字段空 / 整 broadcast 静默 skip 的 bug）。
+//
+//  3. **timeout 兜底**（postCommitTimeout）：detached ctx 完全解耦 cancel 信号会
+//     引入 goroutine 泄漏风险（如 DB 死锁 / SessionManager 卡死永不返回）；显式加
+//     10s timeout 让 worst-case goroutine 一定能被回收。
+//
+// **测试同步**：若 s.postCommitWG != nil（仅测试注入），同步用 wg.Add(1) / wg.Done()
+// 让测试可以 wg.Wait() 后再断言副作用。production 路径 wg=nil，零开销。
+//
+// **panic safety**：goroutine 内**不**用 defer recover —— post-commit fn 内的
+// panic 走 default Go runtime 行为（abort process）；这与原同步路径行为一致（同步
+// 路径一旦 panic 也会 abort）。Future 如需 panic-safe 隔离 → 加 defer recover +
+// log.Error，但本 r2 修复保持最小变更不引入额外语义。
+func (s *roomServiceImpl) runPostCommitAsync(ctx context.Context, fn func(detachedCtx context.Context)) {
+	if s.postCommitWG != nil {
+		s.postCommitWG.Add(1)
+	}
+	go func() {
+		// detached ctx：保留 values（trace ID / request ID）但移除 cancel 信号
+		detached := context.WithoutCancel(ctx)
+		// timeout 兜底：避免 goroutine 泄漏
+		timedCtx, cancel := context.WithTimeout(detached, postCommitTimeout)
+		defer cancel()
+		if s.postCommitWG != nil {
+			defer s.postCommitWG.Done()
+		}
+		fn(timedCtx)
+	}()
 }
 
 // NewRoomService 构造 RoomService（Story 11.8 扩展为 7 参数）。
@@ -556,7 +649,15 @@ func (s *roomServiceImpl) JoinRoom(ctx context.Context, in JoinRoomInput) (*Join
 
 	// (4) 事务 commit 成功 → fire-and-forget 触发 member.joined 广播（V1 §10.4
 	// 步骤 8 钦定：事务**外**触发，broadcast 失败不影响 HTTP 200 响应）。
-	s.broadcastMemberJoined(ctx, in.RoomID, in.UserID)
+	//
+	// **r2 修复**（codex review r2 [P2]）：post-commit hook 走独立 goroutine + detached
+	// ctx + 10s timeout —— 让 broadcast 不被 request ctx cancel 误中断（否则
+	// userRepo.FindByID / petRepo.FindDefaultByUserID 会 fail "context canceled"
+	// → broadcast 静默 skip / payload 字段空），且不阻塞 HTTP 200 响应。详见
+	// runPostCommitAsync 注释。
+	s.runPostCommitAsync(ctx, func(detachedCtx context.Context) {
+		s.broadcastMemberJoined(detachedCtx, in.RoomID, in.UserID)
+	})
 	return &JoinRoomOutput{
 		RoomID: in.RoomID,
 		Joined: true,
@@ -660,8 +761,22 @@ func (s *roomServiceImpl) LeaveRoom(ctx context.Context, in LeaveRoomInput) (*Le
 	// 返回列表自然不含 leaver Session，无需 BroadcastToRoom primitive 加 excludeUserID
 	// 参数）；两步均 fire-and-forget（V1 §10.5 步骤 7 / 8 钦定，broadcast 失败不影响
 	// HTTP 200 响应）。
-	s.closeLeaverSession(ctx, in.RoomID, in.UserID)
-	s.broadcastMemberLeft(ctx, in.RoomID, in.UserID)
+	//
+	// **r2 修复**（codex review r2 [P1] + [P2]）：close + broadcast 整体放进单个
+	// post-commit goroutine（顺序保留 r13：close 在 broadcast 之前），用 detached
+	// ctx + 10s timeout 兜底。
+	//
+	// [P1] 修复要点：原同步调用 closeLeaverSession 会等 Session.CloseWithCode → write
+	// loop drain（默认 ~5s WS write timeout），违反 fire-and-forget 语义、延迟 HTTP
+	// 200 响应、延迟 member.left broadcast；整体异步化后 caller 立刻返回。
+	//
+	// [P2] 修复要点：原 broadcastMemberLeft / closeLeaverSession 用 request ctx，
+	// client 断开 / handler deadline cancel 后会触发 SessionManager 调用 fail；改用
+	// detached ctx 解除 cancel 信号传导。
+	s.runPostCommitAsync(ctx, func(detachedCtx context.Context) {
+		s.closeLeaverSession(detachedCtx, in.RoomID, in.UserID)
+		s.broadcastMemberLeft(detachedCtx, in.RoomID, in.UserID)
+	})
 	return &LeaveRoomOutput{
 		RoomID: in.RoomID,
 		Left:   true,

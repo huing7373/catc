@@ -45,7 +45,17 @@ import (
 )
 
 // buildRoomServiceIntegration: 起容器 → migrate → 装配 svc + 返清理 closure。
-func buildRoomServiceIntegration(t *testing.T) (svc service.RoomService, sqlDB *sql.DB, cleanup func()) {
+//
+// **Story 11.8 r2 修复后**：post-commit hook（broadcastMemberJoined / closeLeaverSession
+// / broadcastMemberLeft）异步化（独立 goroutine + detached ctx + 10s timeout）；
+// 集成测试需注入 *sync.WaitGroup 让 cleanup 时 wg.Wait() 等所有 post-commit goroutine
+// 完成后再关 DB / 销毁容器，否则 goroutine 持有 DB 句柄可能在 cleanup 后才返回 →
+// "sql: database is closed" 噪声 / race（虽然 detached ctx 避免了 cancel 误中断，
+// 但 DB 物理 close 仍会让查询失败）。
+//
+// **wg 暴露**：返给 caller 让需要断言 post-commit 副作用的 case 显式调 wg.Wait()
+// 后再做断言；不需要断言副作用的 case 不必显式 wait（cleanup 路径会兜底 Wait）。
+func buildRoomServiceIntegration(t *testing.T) (svc service.RoomService, sqlDB *sql.DB, wg *sync.WaitGroup, cleanup func()) {
 	t.Helper()
 
 	dsn, dockerCleanup := startMySQL(t)
@@ -78,6 +88,8 @@ func buildRoomServiceIntegration(t *testing.T) (svc service.RoomService, sqlDB *
 	noopBroadcastFn := wsapp.BroadcastFn(func(ctx context.Context, roomID uint64, msg []byte) (int, error) { return 0, nil })
 
 	svc = service.NewRoomService(txMgr, userRepo, roomRepo, roomMemberRepo, petRepo, noopSessionMgr, noopBroadcastFn)
+	wg = &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
 
 	rawDB, err := gormDB.DB()
 	if err != nil {
@@ -86,10 +98,13 @@ func buildRoomServiceIntegration(t *testing.T) (svc service.RoomService, sqlDB *
 	}
 
 	cleanup = func() {
+		// 等所有 post-commit goroutine 完成再关 DB —— 避免 goroutine 在 DB 关闭后
+		// 仍试图查 DB 触发 "sql: database is closed" 噪声 / race。
+		wg.Wait()
 		_ = rawDB.Close()
 		dockerCleanup()
 	}
-	return svc, rawDB, cleanup
+	return svc, rawDB, wg, cleanup
 }
 
 // fetchUserCurrentRoomID 直接查 users.current_room_id（NULL → 返 nil）。
@@ -141,7 +156,7 @@ func fetchRoomStatus(t *testing.T, sqlDB *sql.DB, roomID uint64) int8 {
 // AC11.1: happy 路径 → 真实 INSERT 3 行（rooms / room_members / users.current_room_id）
 // ============================================================
 func TestRoomServiceIntegration_CreateRoom_Happy_3RowsInserted(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	const userID = uint64(1001)
@@ -189,7 +204,7 @@ func TestRoomServiceIntegration_CreateRoom_Happy_3RowsInserted(t *testing.T) {
 // AC11.2: 同 user 再次创建 → 预检 6003 + DB 行数不变（事务未开）
 // ============================================================
 func TestRoomServiceIntegration_CreateRoom_AlreadyInRoom_PrecheckReturns6003(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	const userID = uint64(1001)
@@ -250,7 +265,7 @@ func TestRoomServiceIntegration_CreateRoom_AlreadyInRoom_PrecheckReturns6003(t *
 // 调 svc.JoinRoom(B, room_id) → 期望 out.Joined == true + DB 校验 room_members 2 行
 // + users.current_room_id (B) = room_id。
 func TestRoomServiceIntegration_JoinRoom_Happy_2RowsAfterJoin(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	// fixture: 两个 user，A 创建房间，B 待 join
@@ -297,7 +312,7 @@ func TestRoomServiceIntegration_JoinRoom_Happy_2RowsAfterJoin(t *testing.T) {
 
 // AC11.4-2: 房间已满 → 第 5 个用户 join 返回 6002 + room_members 仍 4 行
 func TestRoomServiceIntegration_JoinRoom_RoomFull_Returns6002(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	// fixture: 5 个 user，A 创建房间，B/C/D join，E 在 room_members 已满后试图 join
@@ -355,7 +370,7 @@ func TestRoomServiceIntegration_JoinRoom_RoomFull_Returns6002(t *testing.T) {
 
 // AC11.4-3: 不存在的 roomID → 6001 + DB 表无变化
 func TestRoomServiceIntegration_JoinRoom_RoomNotFound_Returns6001(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	const userA = uint64(1001)
@@ -389,7 +404,7 @@ func TestRoomServiceIntegration_JoinRoom_RoomNotFound_Returns6001(t *testing.T) 
 // fixture：A 创建房间 → 用 raw UPDATE 制造 status=2（leave 事务模拟）→
 // B 试图 join → 期望 6005。
 func TestRoomServiceIntegration_JoinRoom_RoomClosed_Returns6005(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	const userA = uint64(1001)
@@ -449,7 +464,7 @@ func TestRoomServiceIntegration_JoinRoom_RoomClosed_Returns6005(t *testing.T) {
 // **不变量**：rooms.status 与 room_members 必须一致（不能出现 status=2 但 room_members
 // 仍含 C 的行 —— 那是 r9 P1#2 race timeline）。
 func TestRoomServiceIntegration_JoinRoom_CrossTxLeaveSerialized(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	const userA = uint64(1001)
@@ -570,7 +585,7 @@ func TestRoomServiceIntegration_JoinRoom_CrossTxLeaveSerialized(t *testing.T) {
 // 撤销）。
 // ============================================================
 func TestRoomServiceIntegration_CreateRoom_RollsBackOnRoomMemberInsertFail(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	const userID = uint64(2001)
@@ -638,7 +653,7 @@ func TestRoomServiceIntegration_CreateRoom_RollsBackOnRoomMemberInsertFail(t *te
 // AC11.5-1: A + B 在房间 → A leave → DB room_members 剩 B 一行 + rooms.status 仍 = 1 +
 // A.current_room_id = NULL（epics.md §11.5 钦定 case 1）。
 func TestRoomServiceIntegration_LeaveRoom_NotLastMember_RoomActive(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	const userA = uint64(1001)
@@ -687,7 +702,7 @@ func TestRoomServiceIntegration_LeaveRoom_NotLastMember_RoomActive(t *testing.T)
 // AC11.5-2: 最后一人 leave → DB room_members 0 行 + rooms.status = 2 closed +
 // user.current_room_id = NULL（epics.md §11.5 钦定 case 2）。
 func TestRoomServiceIntegration_LeaveRoom_LastMember_RoomClosed(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	const userA = uint64(1001)
@@ -721,7 +736,7 @@ func TestRoomServiceIntegration_LeaveRoom_LastMember_RoomClosed(t *testing.T) {
 
 // AC11.5-3: user 不在房间 → 6004 + DB 无变化（含 nil 与不一致两个子场景）。
 func TestRoomServiceIntegration_LeaveRoom_UserNotInRoom_Returns6004(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	const userA = uint64(1001)
@@ -747,7 +762,7 @@ func TestRoomServiceIntegration_LeaveRoom_UserNotInRoom_Returns6004(t *testing.T
 
 // AC11.5-4: 重复 leave 同一房间 → 第二次返 6004（V1 §10.5 行 1601 钦定）。
 func TestRoomServiceIntegration_LeaveRoom_DoubleLeave_SecondReturns6004(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	const userA = uint64(1001)
@@ -788,7 +803,7 @@ func TestRoomServiceIntegration_LeaveRoom_DoubleLeave_SecondReturns6004(t *testi
 //
 // **不变量**：status=2 必须配 member_count=0；status=1 必须 member_count >= 1。
 func TestRoomServiceIntegration_LeaveRoom_CrossTxJoinSerialized(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	const userA = uint64(1001)
@@ -847,7 +862,7 @@ func TestRoomServiceIntegration_LeaveRoom_CrossTxJoinSerialized(t *testing.T) {
 
 // AC11.6-1: GetCurrentRoom happy 用户在房间 → 返 *uint64 指向 roomID。
 func TestRoomServiceIntegration_GetCurrentRoom_Happy_UserInRoom(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	const userA = uint64(1001)
@@ -872,7 +887,7 @@ func TestRoomServiceIntegration_GetCurrentRoom_Happy_UserInRoom(t *testing.T) {
 
 // AC11.6-2: GetCurrentRoom happy 用户不在任何房间 → 返 nil。
 func TestRoomServiceIntegration_GetCurrentRoom_Happy_UserNotInAnyRoom(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	const userA = uint64(1001)
@@ -893,7 +908,7 @@ func TestRoomServiceIntegration_GetCurrentRoom_Happy_UserNotInAnyRoom(t *testing
 // pet-less 构造：A / B 通过 insertPet 显式 seed 一行 is_default=1 pet；C 不 seed
 // pets 行（LEFT JOIN pets 时 pet_id 列 NULL → service 下发 Pet=nil）。
 func TestRoomServiceIntegration_GetRoomDetail_Happy_3Members_With1PetLess(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	const userA = uint64(1001)
@@ -982,7 +997,7 @@ func TestRoomServiceIntegration_GetRoomDetail_Happy_3Members_With1PetLess(t *tes
 
 // AC11.6-4: user B 不加入房间 → user B 调 GetRoomDetail(A 的 roomID) → 6004。
 func TestRoomServiceIntegration_GetRoomDetail_UserNotInRoom_Returns6004(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	const userA = uint64(1001)
@@ -1016,7 +1031,7 @@ func TestRoomServiceIntegration_GetRoomDetail_UserNotInRoom_Returns6004(t *testi
 // fixture：A 创建房间 → A leave（最后一人） → 此时 rooms.status=2 closed +
 // users.current_room_id=NULL。A 调 GetRoomDetail(roomID) → 6004。
 func TestRoomServiceIntegration_GetRoomDetail_ClosedRoom_CallerAlreadyLeft_Returns6004(t *testing.T) {
-	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
 	defer cleanup()
 
 	const userA = uint64(1001)
@@ -1106,6 +1121,7 @@ func buildRoomServiceIntegrationWithCapture(t *testing.T) (
 	sqlDB *sql.DB,
 	sessionMgr wsapp.SessionManager,
 	capture *captureBroadcastFn,
+	wg *sync.WaitGroup,
 	cleanup func(),
 ) {
 	t.Helper()
@@ -1139,6 +1155,8 @@ func buildRoomServiceIntegrationWithCapture(t *testing.T) (
 	capture = newCaptureBroadcastFn(seqGen)
 
 	svc = service.NewRoomService(txMgr, userRepo, roomRepo, roomMemberRepo, petRepo, sessionMgr, capture.fn())
+	wg = &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
 
 	rawDB, err := gormDB.DB()
 	if err != nil {
@@ -1147,11 +1165,14 @@ func buildRoomServiceIntegrationWithCapture(t *testing.T) (
 	}
 
 	cleanup = func() {
+		// 等所有 post-commit goroutine 完成再关 DB / SessionManager —— Story 11.8 r2
+		// 修复后 post-commit hook 异步化，cleanup 必须先 wg.Wait() 才安全 close。
+		wg.Wait()
 		_ = sessionMgr.Close()
 		_ = rawDB.Close()
 		dockerCleanup()
 	}
-	return svc, rawDB, sessionMgr, capture, cleanup
+	return svc, rawDB, sessionMgr, capture, wg, cleanup
 }
 
 // integrationEnvelope 测试本地 wire mirror（与 ws.serverEnvelope 字段集合等价）。
@@ -1166,7 +1187,7 @@ type integrationEnvelope struct {
 // avatarUrl / pet）+ A 在 fixture 已建房；本 case 验证：commit 成功后 fire-and-forget
 // 路径在真实 dockertest 数据库 + 真实 SessionManager 下端到端工作
 func TestRoomServiceIntegration_JoinRoom_Happy_BroadcastFnInvokedOnce(t *testing.T) {
-	svc, sqlDB, _, capture, cleanup := buildRoomServiceIntegrationWithCapture(t)
+	svc, sqlDB, _, capture, wg, cleanup := buildRoomServiceIntegrationWithCapture(t)
 	defer cleanup()
 
 	const userA = uint64(1001)
@@ -1192,6 +1213,8 @@ func TestRoomServiceIntegration_JoinRoom_Happy_BroadcastFnInvokedOnce(t *testing
 	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userB, RoomID: roomID}); err != nil {
 		t.Fatalf("JoinRoom: %v", err)
 	}
+	// **r2 修复后**：post-commit hook 异步化，必须等 wg 才安全断言 capture / sessionMgr 副作用
+	wg.Wait()
 
 	// 校验 capture：broadcastFn 被调 1 次 + roomID 正确 + payload 字段值正确
 	if got := capture.callCount(); got != 1 {
@@ -1245,7 +1268,7 @@ func TestRoomServiceIntegration_JoinRoom_Happy_BroadcastFnInvokedOnce(t *testing
 // case 15: B leave → close 路径走 no-op（B 未持 WS Session，sessionMgr.ListSessionsByRoomID
 // 返 []）+ broadcastFn 被调用 1 次 + payload type=member.left + payload.userId 正确
 func TestRoomServiceIntegration_LeaveRoom_Happy_BroadcastsMemberLeft(t *testing.T) {
-	svc, sqlDB, sessionMgr, capture, cleanup := buildRoomServiceIntegrationWithCapture(t)
+	svc, sqlDB, sessionMgr, capture, wg, cleanup := buildRoomServiceIntegrationWithCapture(t)
 	defer cleanup()
 
 	const userA = uint64(1001)
@@ -1262,6 +1285,9 @@ func TestRoomServiceIntegration_LeaveRoom_Happy_BroadcastsMemberLeft(t *testing.
 	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userB, RoomID: roomID}); err != nil {
 		t.Fatalf("JoinRoom: %v", err)
 	}
+	// 等 B join 的 post-commit goroutine 完成（不然下面 capture.calls = nil 可能在
+	// goroutine append 之前生效，导致后面断言 leaver broadcast 时多 / 少计数）
+	wg.Wait()
 
 	capture.mu.Lock()
 	capture.calls = nil
@@ -1271,6 +1297,8 @@ func TestRoomServiceIntegration_LeaveRoom_Happy_BroadcastsMemberLeft(t *testing.
 	if _, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userB, RoomID: roomID}); err != nil {
 		t.Fatalf("LeaveRoom: %v", err)
 	}
+	// **r2 修复后**：post-commit hook 异步化，必须等 wg 才安全断言 capture / sessionMgr 副作用
+	wg.Wait()
 
 	// 校验 sessionMgr：B 的 Session 不存在过（leave 路径不会创建 Session）
 	if sessions := sessionMgr.ListSessionsByRoomID(context.Background(), roomID); len(sessions) != 0 {
@@ -1308,7 +1336,7 @@ func TestRoomServiceIntegration_LeaveRoom_Happy_BroadcastsMemberLeft(t *testing.
 // 无其他成员收 broadcast，service 层仍 trigger broadcastFn；与 V1 §10.5 步骤 8 钦定
 // 一致）
 func TestRoomServiceIntegration_LeaveRoom_LastMember_StillBroadcasts(t *testing.T) {
-	svc, sqlDB, _, capture, cleanup := buildRoomServiceIntegrationWithCapture(t)
+	svc, sqlDB, _, capture, wg, cleanup := buildRoomServiceIntegrationWithCapture(t)
 	defer cleanup()
 
 	const userA = uint64(1001)
@@ -1328,6 +1356,8 @@ func TestRoomServiceIntegration_LeaveRoom_LastMember_StillBroadcasts(t *testing.
 	if _, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userA, RoomID: roomID}); err != nil {
 		t.Fatalf("LeaveRoom: %v", err)
 	}
+	// **r2 修复后**：post-commit hook 异步化，必须等 wg 才安全断言 capture 副作用
+	wg.Wait()
 
 	// 房间状态变为 closed=2
 	if got := fetchRoomStatus(t, sqlDB, roomID); got != 2 {
