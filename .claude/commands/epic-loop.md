@@ -165,7 +165,7 @@ f) **不一致处理**（步骤 d 的状态-git log 不吻合时）：
   ...
 
 每条 story 都会经过：
-  create (如需) → dev → codex review → fix (最多 5 轮) → story-done
+  create (如需) → dev → codex review → fix (最多 10 轮) → story-done
 ```
 
 **不询问 yes/no**。直接进步骤 3 循环。用户要取消按 Ctrl+C。
@@ -202,7 +202,7 @@ loop:
        → 如果状态没变 → HALT
      
      case 'review':
-       → 输出: "▶ 进入 review/fix 子循环（最多 5 轮 codex review）"
+       → 输出: "▶ 进入 review/fix 子循环（最多 10 轮 codex review）"
        → 进入 review/fix 子循环（详见步骤 4）
        → 每轮 codex review 后输出: "  · review round <r> → <通过|不通过|HALT>"
        → 每次 fix-review sub-agent 后输出: "  · fix_review 完成 (commit <hash>)"
@@ -235,8 +235,8 @@ review_round = 0
 
 loop until break:
   review_round++
-  if review_round > 5:
-    → HALT 报告"5 轮 review 都没通过"
+  if review_round > 10:
+    → HALT 报告"10 轮 review 都没通过"
     → break
   
   # ========== 跑 codex review（命令选择按轮次切换）==========
@@ -554,7 +554,7 @@ epic 全 done 时输出：
   - 完成 story 数: M 条（new: A 条 / 续做: B 条）
   - 总 commit 数: K（feat: X / chore: Y / docs: Z / fix(review): W）
   - codex review 跑了 R 次，第一次通过率 P%
-  - 5 轮 review 才过的 story: <list>（如有）
+  - 10 轮 review 才过的 story: <list>（如有）
   - 创建的 lesson 文档: L 个（路径列出）
 
 epic 状态: in-progress → 仍然 in-progress（**不**自动改 done；用户决定）
@@ -574,7 +574,7 @@ epic 状态: in-progress → 仍然 in-progress（**不**自动改 done；用户
 
 - **当前 epic 已经全 done，再跑本命令**：步骤 3 第一轮就找不到 non-done story → 直接进步骤 7 报"epic 已经完成；建议下一步"
 - **review 状态的 story 实际工作区已经 clean**（用户可能手动 commit 后改了状态）：跑 codex review --uncommitted 会无输出 → 主 agent 判"视为通过 + flag"，直接 story-done。这个行为是 OK 的（用户已经独立完成 review）
-- **codex review 报 API quota error / 网络挂**：HALT 报告 + 不消耗 review_round 计数（让重启循环时不被 5 轮上限错杀）
+- **codex review 报 API quota error / 网络挂**：HALT 报告 + 不消耗 review_round 计数（让重启循环时不被 10 轮上限错杀）
 - **sub-agent 返回时间过长**（如 dev-story 跑了 1 小时）：不主动超时；信任 sub-agent；只在它返回时校验状态。Claude Code 的 Agent tool 没有 default timeout 强制
 - **同一轮循环里 sub-agent 把 sprint-status 改成意料外的状态**（如 dev-story 直接推到 done）：步骤 3 重读时按新状态 dispatch；不报警告（信任流程，sprint-status 是 single source of truth）
 
