@@ -215,4 +215,4 @@
 | 2026-05-08 | [ACL FOR SHARE 锁的精确边界 = 事务持续期非 HTTP 响应发出时 / mermaid inline payload 必须随字段 nullable 改动同步（11-1 r12）](2026-05-08-acl-lock-precision-and-mermaid-pet-nullable-sync-11-1-r12.md) | 2 | docs | `2feff9e` |
 | 2026-05-08 | [协议契约的步骤顺序必须可被现有 primitive 实装；step 顺序设计要校验 primitive capabilities（11-1 r13）](2026-05-08-protocol-step-order-must-match-primitive-capabilities-11-1-r13.md) | 1 | architecture | `f35c9e5` |
 | 2026-05-08 | [跨章节同一 placeholder 阶段必须收敛到单一 going-forward 契约形态；既已落地实装与未来契约的差异要显式标注 backfill 路径，不留两种 shape 让 client parser 分流（11-1 r14）](2026-05-08-cross-section-placeholder-shape-must-converge-on-single-going-forward-contract-11-1-r14.md) | 1 | docs | `46ca85e` |
-| 2026-05-08 | [启动期 fail-fast probe 的 if-guard 必须随依赖该资源的 handler 挂载条件同步前移（11-3 r1）](2026-05-08-schema-fail-fast-probe-must-track-handler-mount-condition-11-3-r1.md) | 1 | architecture, fail-fast | `<pending>` |
+| 2026-05-08 | [启动期 fail-fast probe 的 if-guard 必须随依赖该资源的 handler 挂载条件同步前移（11-3 r1）](2026-05-08-schema-fail-fast-probe-must-track-handler-mount-condition-11-3-r1.md) | 1 | architecture, fail-fast | `4034e46` |

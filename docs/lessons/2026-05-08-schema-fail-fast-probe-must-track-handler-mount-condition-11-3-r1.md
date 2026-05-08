@@ -2,7 +2,7 @@
 date: 2026-05-08
 source_review: codex review round 1 (file: /tmp/epic-loop-review-11-3-r1.md)
 story: 11-3-创建房间事务
-commit: <pending>
+commit: 4034e46
 lesson_count: 1
 ---
 
