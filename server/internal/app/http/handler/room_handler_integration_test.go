@@ -138,6 +138,7 @@ func roomIntegrationTestRouter(roomSvc service.RoomService, signer *auth.Signer)
 	api := r.Group("/api/v1")
 	authedGroup := api.Group("", middleware.Auth(signer))
 	authedGroup.POST("/rooms", roomHandler.CreateRoom)
+	authedGroup.POST("/rooms/:roomId/join", roomHandler.JoinRoom) // Story 11.4 加
 	return r
 }
 
@@ -350,6 +351,184 @@ func TestRoomHandlerIntegration_CreateRoom_AlreadyInRoom_Returns6003(t *testing.
 	env2 := decodeRoomIntegrationEnvelope(t, w2.Body.Bytes())
 	if env2.Code != apperror.ErrUserAlreadyInRoom {
 		t.Errorf("envelope.code = %d, want %d (ErrUserAlreadyInRoom 6003 预检路径)", env2.Code, apperror.ErrUserAlreadyInRoom)
+	}
+}
+
+// ============================================================
+// Story 11.4 端到端集成测试 case
+// ============================================================
+
+// AC12.4: HappyPath — A 创建房间 + B join → envelope code=0 + DB 校验
+func TestRoomHandlerIntegration_JoinRoom_HappyPath(t *testing.T) {
+	router, sqlDB, signer, cleanup := buildRoomHandlerIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	roomIntegrationTestInsertUser(t, sqlDB, userA, "uid-a", "A")
+	roomIntegrationTestInsertUser(t, sqlDB, userB, "uid-b", "B")
+
+	tokenA := roomIntegrationTestSignToken(t, signer, userA)
+	tokenB := roomIntegrationTestSignToken(t, signer, userB)
+
+	// A 创建房间
+	reqCreate := httptest.NewRequest(http.MethodPost, "/api/v1/rooms", strings.NewReader(`{}`))
+	reqCreate.Header.Set("Content-Type", "application/json")
+	reqCreate.Header.Set("Authorization", "Bearer "+tokenA)
+	wCreate := httptest.NewRecorder()
+	router.ServeHTTP(wCreate, reqCreate)
+	if wCreate.Code != http.StatusOK {
+		t.Fatalf("create status = %d, want 200; body=%s", wCreate.Code, wCreate.Body.String())
+	}
+	envCreate := decodeRoomIntegrationEnvelope(t, wCreate.Body.Bytes())
+	createData := envCreate.Data.(map[string]any)
+	roomData := createData["room"].(map[string]any)
+	roomIDStr := roomData["id"].(string)
+
+	// B join
+	reqJoin := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+roomIDStr+"/join", strings.NewReader(`{}`))
+	reqJoin.Header.Set("Content-Type", "application/json")
+	reqJoin.Header.Set("Authorization", "Bearer "+tokenB)
+	wJoin := httptest.NewRecorder()
+	router.ServeHTTP(wJoin, reqJoin)
+
+	if wJoin.Code != http.StatusOK {
+		t.Fatalf("join status = %d, want 200; body=%s", wJoin.Code, wJoin.Body.String())
+	}
+	envJoin := decodeRoomIntegrationEnvelope(t, wJoin.Body.Bytes())
+	if envJoin.Code != 0 {
+		t.Errorf("envelope.code = %d, want 0", envJoin.Code)
+	}
+	joinData, ok := envJoin.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("envelope.data not object: %T", envJoin.Data)
+	}
+	if joinData["roomId"] != roomIDStr {
+		t.Errorf("data.roomId = %v, want %q", joinData["roomId"], roomIDStr)
+	}
+	joined, ok := joinData["joined"].(bool)
+	if !ok {
+		t.Errorf("data.joined not bool: %T", joinData["joined"])
+	}
+	if !joined {
+		t.Errorf("data.joined = false, want true")
+	}
+
+	// DB 校验：room_members 2 行
+	var memberCount int
+	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM room_members WHERE room_id = ?", roomIDStr).Scan(&memberCount); err != nil {
+		t.Fatalf("query members count: %v", err)
+	}
+	if memberCount != 2 {
+		t.Errorf("room_members count = %d, want 2 (A creator + B joiner)", memberCount)
+	}
+}
+
+// AC12.5: 无 Authorization header → auth middleware 兜底 1001
+func TestRoomHandlerIntegration_JoinRoom_NoToken_Returns1001(t *testing.T) {
+	router, _, _, cleanup := buildRoomHandlerIntegration(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/3001/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 1001; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrUnauthorized {
+		t.Errorf("envelope.code = %d, want %d (ErrUnauthorized 1001)", env.Code, apperror.ErrUnauthorized)
+	}
+}
+
+// AC12.6: A 创建房间后再调 POST /rooms/{room_id}/join → envelope.code=6003
+// 端到端验证 service 6003 预检路径正确接到 handler envelope。
+func TestRoomHandlerIntegration_JoinRoom_AlreadyInRoom_Returns6003(t *testing.T) {
+	router, sqlDB, signer, cleanup := buildRoomHandlerIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	roomIntegrationTestInsertUser(t, sqlDB, userA, "uid-a", "A")
+
+	tokenA := roomIntegrationTestSignToken(t, signer, userA)
+
+	// A 创建房间
+	reqCreate := httptest.NewRequest(http.MethodPost, "/api/v1/rooms", strings.NewReader(`{}`))
+	reqCreate.Header.Set("Content-Type", "application/json")
+	reqCreate.Header.Set("Authorization", "Bearer "+tokenA)
+	wCreate := httptest.NewRecorder()
+	router.ServeHTTP(wCreate, reqCreate)
+	if wCreate.Code != http.StatusOK {
+		t.Fatalf("create status = %d, want 200; body=%s", wCreate.Code, wCreate.Body.String())
+	}
+	envCreate := decodeRoomIntegrationEnvelope(t, wCreate.Body.Bytes())
+	createData := envCreate.Data.(map[string]any)
+	roomData := createData["room"].(map[string]any)
+	roomIDStr := roomData["id"].(string)
+
+	// A 试图加入自己刚创建的房间 → 6003（已在房间预检）
+	reqJoin := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+roomIDStr+"/join", strings.NewReader(`{}`))
+	reqJoin.Header.Set("Content-Type", "application/json")
+	reqJoin.Header.Set("Authorization", "Bearer "+tokenA)
+	wJoin := httptest.NewRecorder()
+	router.ServeHTTP(wJoin, reqJoin)
+
+	if wJoin.Code != http.StatusOK {
+		t.Fatalf("join status = %d, want 200 for 6003; body=%s", wJoin.Code, wJoin.Body.String())
+	}
+	envJoin := decodeRoomIntegrationEnvelope(t, wJoin.Body.Bytes())
+	if envJoin.Code != apperror.ErrUserAlreadyInRoom {
+		t.Errorf("envelope.code = %d, want %d (ErrUserAlreadyInRoom 6003)", envJoin.Code, apperror.ErrUserAlreadyInRoom)
+	}
+}
+
+// AC12.7: B 试图 POST /rooms/99999/join（不存在的 roomID）→ envelope.code=6001
+func TestRoomHandlerIntegration_JoinRoom_RoomNotFound_Returns6001(t *testing.T) {
+	router, sqlDB, signer, cleanup := buildRoomHandlerIntegration(t)
+	defer cleanup()
+
+	const userB = uint64(1002)
+	roomIntegrationTestInsertUser(t, sqlDB, userB, "uid-b", "B")
+	tokenB := roomIntegrationTestSignToken(t, signer, userB)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/99999/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tokenB)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 6001; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrRoomNotFound {
+		t.Errorf("envelope.code = %d, want %d (ErrRoomNotFound 6001)", env.Code, apperror.ErrRoomNotFound)
+	}
+}
+
+// AC12.8: path = "abc" → handler ParseUint 失败 → envelope.code=1002
+func TestRoomHandlerIntegration_JoinRoom_InvalidRoomIDPath_Returns1002(t *testing.T) {
+	router, sqlDB, signer, cleanup := buildRoomHandlerIntegration(t)
+	defer cleanup()
+
+	const userB = uint64(1002)
+	roomIntegrationTestInsertUser(t, sqlDB, userB, "uid-b", "B")
+	tokenB := roomIntegrationTestSignToken(t, signer, userB)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/abc/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tokenB)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 1002; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrInvalidParam {
+		t.Errorf("envelope.code = %d, want %d (ErrInvalidParam 1002)", env.Code, apperror.ErrInvalidParam)
 	}
 }
 

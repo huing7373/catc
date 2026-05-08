@@ -386,6 +386,8 @@ func NewRouter(deps Deps) *gin.Engine {
 		authedGroup.POST("/steps/sync", stepsHandler.PostSync)     // Story 7.3 加
 		authedGroup.GET("/steps/account", stepsHandler.GetAccount) // Story 7.4 加
 		authedGroup.POST("/rooms", roomHandler.CreateRoom)         // Story 11.3 加
+		// Story 11.4 加：POST /api/v1/rooms/:roomId/join 加入房间
+		authedGroup.POST("/rooms/:roomId/join", roomHandler.JoinRoom)
 
 		// Story 10.3 加：WS 网关路由
 		// **不**挂在 /api/v1 前缀下（V1 §12.1 钦定 path 是 /ws/rooms/{roomId}）；

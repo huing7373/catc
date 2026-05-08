@@ -2,8 +2,10 @@ package mysql
 
 import (
 	"context"
+	stderrors "errors"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/huing/cat/server/internal/repo/tx"
 )
@@ -32,6 +34,32 @@ type RoomRepo interface {
 	// **理论不会触发**。本实装**不**做特殊翻译，任何 DB error 透传给 service
 	// 层（service 包成 1009）；与 step_account_repo.Create 同模式（无哨兵需求）。
 	Create(ctx context.Context, r *Room) error
+
+	// FindByIDForUpdate 取 rooms 行并对该行加排他锁（FOR UPDATE）。Story 11.4 引入。
+	//
+	// **必须在事务内调用**（caller 传入的 ctx 必须是 txMgr.WithTx 注入的 txCtx）；
+	// 在事务外调用时 FOR UPDATE 锁会被 driver 立即释放（autocommit 模式下任何
+	// SELECT 完成即 commit），等同于普通 SELECT，违反 V1 §10.4 "并发保护" 钦定。
+	// ADR-0007 §2.4 钦定 fn 内全部 repo 调用用 txCtx；本方法是 join / leave 事务的
+	// 第一步，是 ADR-0007 §2.4 的关键 hot path。
+	//
+	// 语义：取 rooms 行并对该行加排他锁，与并发 §10.5 leave 跨事务串行化（数据库
+	// 设计.md §8.6 / §8.7 r9 P1#2 钦定 join + leave 必须都对 rooms 行加 FOR UPDATE）。
+	//
+	// 找不到 → 返 ErrRoomNotFound 哨兵（service 层 errors.Is 后翻译为 6001
+	// apperror.ErrRoomNotFound）；query 失败 → 返 raw error 透传。
+	// **注**：mysql.ErrRoomNotFound 与 apperror.ErrRoomNotFound 是**不同包**的同名
+	// 常量 —— 前者是 repo 层哨兵 error，后者是业务码 6001；命名一致是**故意**的
+	// （让阅读对照容易；review 时确认 import path 不冲突）。
+	//
+	// GORM clause.Locking{Strength: "UPDATE"} 路径生成 SELECT ... FOR UPDATE
+	// SQL；与 raw SQL "SELECT ... FOR UPDATE" 等价但更安全（GORM 处理参数绑定 +
+	// SQL injection；与 ADR-0003 §3.5 钦定一致）。
+	//
+	// **本方法不附加 status 过滤**（与 RoomMemberRepo.RoomExists 不同；后者是 WS
+	// 握手期校验，需要排除 closed 房间）：本方法是 join 事务步骤 2a，需要先取行
+	// 再判 status，让 step 2b 能产出明确的 6005 而非笼统的 6001。
+	FindByIDForUpdate(ctx context.Context, roomID uint64) (*Room, error)
 }
 
 // roomRepo 是 RoomRepo 的默认实装。
@@ -55,4 +83,36 @@ func NewRoomRepo(db *gorm.DB) RoomRepo {
 func (r *roomRepo) Create(ctx context.Context, room *Room) error {
 	db := tx.FromContext(ctx, r.db)
 	return db.WithContext(ctx).Create(room).Error
+}
+
+// FindByIDForUpdate 取 rooms 行并对该行加排他锁（FOR UPDATE）。Story 11.4 引入。
+//
+// **必须在事务内调用**（caller 传入的 ctx 必须是 txMgr.WithTx 注入的 txCtx）；
+// 在事务外调用时 FOR UPDATE 锁会被 driver 立即释放（autocommit 模式下任何
+// SELECT 完成即 commit），等同于普通 SELECT，违反 V1 §10.4 "并发保护" 钦定。
+// ADR-0007 §2.4 钦定 fn 内全部 repo 调用用 txCtx；本方法是 join / leave 事务的
+// 第一步，是 ADR-0007 §2.4 的关键 hot path。
+//
+// 找不到 → 返 ErrRoomNotFound（service 层 errors.Is 后翻译为 6001 ErrRoomNotFound）。
+// **注**：mysql.ErrRoomNotFound 与 apperror.ErrRoomNotFound 是**不同包**的同名常量
+// —— 前者是 repo 层哨兵 error，后者是业务码 6001；service 层用 errors.Is 翻译。
+// 命名一致是**故意**的（让阅读对照容易；review 时确认 import path 不冲突）。
+//
+// GORM clause.Locking{Strength: "UPDATE"} 路径生成 SELECT ... FOR UPDATE
+// SQL；与 raw SQL "SELECT ... FOR UPDATE" 等价但更安全（GORM 处理参数绑定 +
+// SQL injection；与 ADR-0003 §3.5 钦定一致）。
+func (r *roomRepo) FindByIDForUpdate(ctx context.Context, roomID uint64) (*Room, error) {
+	db := tx.FromContext(ctx, r.db)
+	var room Room
+	err := db.WithContext(ctx).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("id = ?", roomID).
+		First(&room).Error
+	if err != nil {
+		if stderrors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrRoomNotFound
+		}
+		return nil, err
+	}
+	return &room, nil
 }

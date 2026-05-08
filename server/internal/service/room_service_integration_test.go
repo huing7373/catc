@@ -220,6 +220,325 @@ func TestRoomServiceIntegration_CreateRoom_AlreadyInRoom_PrecheckReturns6003(t *
 }
 
 // ============================================================
+// Story 11.4 集成测试 case：JoinRoom 真实事务路径（dockertest）
+// ============================================================
+
+// AC11.4-1: A 创建房间 → B join → DB room_members 2 行 + B.current_room_id 更新
+//
+// fixture：A (id=1001) 已通过 11.3 createRoom 创建房间 (room_id=自动分配)；
+//          B (id=1002) 不在任何房间。
+// 调 svc.JoinRoom(B, room_id) → 期望 out.Joined == true + DB 校验 room_members 2 行
+// + users.current_room_id (B) = room_id。
+func TestRoomServiceIntegration_JoinRoom_Happy_2RowsAfterJoin(t *testing.T) {
+	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	// fixture: 两个 user，A 创建房间，B 待 join
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	insertUser(t, sqlDB, userA, "uid-room-a", "用户A", "")
+	insertUser(t, sqlDB, userB, "uid-room-b", "用户B", "")
+
+	// A 创建房间（11.3 路径）
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+	roomID := createOut.RoomID
+
+	// B join
+	joinOut, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userB, RoomID: roomID})
+	if err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+	if joinOut.RoomID != roomID {
+		t.Errorf("out.RoomID = %d, want %d", joinOut.RoomID, roomID)
+	}
+	if !joinOut.Joined {
+		t.Errorf("out.Joined = false, want true")
+	}
+
+	// DB 校验：room_members 表 2 行（A creator + B joiner）
+	assertCount(t, sqlDB, "room_members WHERE room_id=?",
+		[]any{roomID}, 2, "room_members (A + B)")
+	// 验证 B 的成员行存在
+	assertCount(t, sqlDB, "room_members WHERE room_id=? AND user_id=?",
+		[]any{roomID, userB}, 1, "room_members (B joined)")
+
+	// 验证 B.current_room_id 已写
+	got := fetchUserCurrentRoomID(t, sqlDB, userB)
+	if got == nil {
+		t.Fatalf("users.current_room_id (B) = NULL, want %d", roomID)
+	}
+	if *got != roomID {
+		t.Errorf("users.current_room_id (B) = %d, want %d", *got, roomID)
+	}
+}
+
+// AC11.4-2: 房间已满 → 第 5 个用户 join 返回 6002 + room_members 仍 4 行
+func TestRoomServiceIntegration_JoinRoom_RoomFull_Returns6002(t *testing.T) {
+	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	// fixture: 5 个 user，A 创建房间，B/C/D join，E 在 room_members 已满后试图 join
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	const userC = uint64(1003)
+	const userD = uint64(1004)
+	const userE = uint64(1005)
+	insertUser(t, sqlDB, userA, "uid-room-a", "A", "")
+	insertUser(t, sqlDB, userB, "uid-room-b", "B", "")
+	insertUser(t, sqlDB, userC, "uid-room-c", "C", "")
+	insertUser(t, sqlDB, userD, "uid-room-d", "D", "")
+	insertUser(t, sqlDB, userE, "uid-room-e", "E", "")
+
+	// A 创建
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+	roomID := createOut.RoomID
+
+	// B / C / D join
+	for _, u := range []uint64{userB, userC, userD} {
+		if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: u, RoomID: roomID}); err != nil {
+			t.Fatalf("JoinRoom user=%d: %v", u, err)
+		}
+	}
+
+	// 校验现在 4 行
+	assertCount(t, sqlDB, "room_members WHERE room_id=?",
+		[]any{roomID}, 4, "room_members (4 members)")
+
+	// E 试图 join → 6002
+	_, err = svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userE, RoomID: roomID})
+	if err == nil {
+		t.Fatalf("JoinRoom (E) returned nil error, want 6002")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrRoomFull {
+		t.Errorf("AppError.Code = %d, want %d (ErrRoomFull 6002)", ae.Code, apperror.ErrRoomFull)
+	}
+
+	// DB 校验：room_members 仍 4 行（事务回滚）
+	assertCount(t, sqlDB, "room_members WHERE room_id=?",
+		[]any{roomID}, 4, "room_members (still 4 after E rejected)")
+	// E.current_room_id 仍 NULL
+	got := fetchUserCurrentRoomID(t, sqlDB, userE)
+	if got != nil {
+		t.Errorf("users.current_room_id (E) = %d, want NULL (E join 失败 → 应保持 NULL)", *got)
+	}
+}
+
+// AC11.4-3: 不存在的 roomID → 6001 + DB 表无变化
+func TestRoomServiceIntegration_JoinRoom_RoomNotFound_Returns6001(t *testing.T) {
+	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	insertUser(t, sqlDB, userA, "uid-room-a", "A", "")
+
+	// 调 JoinRoom 用一个不存在的 roomID
+	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userA, RoomID: 99999})
+	if err == nil {
+		t.Fatalf("JoinRoom returned nil error, want 6001")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrRoomNotFound {
+		t.Errorf("AppError.Code = %d, want %d (ErrRoomNotFound 6001)", ae.Code, apperror.ErrRoomNotFound)
+	}
+
+	// DB 校验：rooms / room_members 表无新行
+	assertCount(t, sqlDB, "rooms", nil, 0, "rooms (no rows)")
+	assertCount(t, sqlDB, "room_members", nil, 0, "room_members (no rows)")
+	// A.current_room_id 仍 NULL
+	got := fetchUserCurrentRoomID(t, sqlDB, userA)
+	if got != nil {
+		t.Errorf("users.current_room_id (A) = %d, want NULL", *got)
+	}
+}
+
+// AC11.4-4（强烈建议）: room status=2 closed → 6005
+//
+// fixture：A 创建房间 → 用 raw UPDATE 制造 status=2（leave 事务模拟）→
+// B 试图 join → 期望 6005。
+func TestRoomServiceIntegration_JoinRoom_RoomClosed_Returns6005(t *testing.T) {
+	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	insertUser(t, sqlDB, userA, "uid-room-a", "A", "")
+	insertUser(t, sqlDB, userB, "uid-room-b", "B", "")
+
+	// A 创建房间
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+	roomID := createOut.RoomID
+
+	// raw UPDATE 制造 status=2 (closed)
+	_, err = sqlDB.Exec("UPDATE rooms SET status = 2 WHERE id = ?", roomID)
+	if err != nil {
+		t.Fatalf("UPDATE rooms.status: %v", err)
+	}
+
+	// B 试图 join closed 房间 → 6005
+	_, err = svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userB, RoomID: roomID})
+	if err == nil {
+		t.Fatalf("JoinRoom returned nil error, want 6005")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrRoomInvalidState {
+		t.Errorf("AppError.Code = %d, want %d (ErrRoomInvalidState 6005)", ae.Code, apperror.ErrRoomInvalidState)
+	}
+
+	// DB 校验：room_members 不变（B 没加进来；只有 A 创建时的 1 行）
+	assertCount(t, sqlDB, "room_members WHERE room_id=?",
+		[]any{roomID}, 1, "room_members (closed 房间 join 失败 → 仍 1 行 = A creator)")
+	// B.current_room_id 仍 NULL
+	got := fetchUserCurrentRoomID(t, sqlDB, userB)
+	if got != nil {
+		t.Errorf("users.current_room_id (B) = %d, want NULL", *got)
+	}
+}
+
+// AC11.4-5（强烈建议; r9 P1#2 cross-tx race 验证）: leave-then-join FOR UPDATE 串行化
+//
+// fixture：A / B 在 room_id=R（A 通过 11.3 创建，B 通过本 story join）。
+// 用 goroutine 同时执行：
+//   - "leave" 事务（raw SQL 模拟 11.5 leave 事务）：BEGIN → SELECT FOR UPDATE
+//     rooms → DELETE room_members → COUNT==0 → UPDATE rooms.status=2 → COMMIT
+//   - C join 同 room R（走 svc.JoinRoom 真实事务）
+//
+// 因为 FOR UPDATE 锁串行化，最终结果只有两种：
+//
+//	(a) leave 先 commit（rooms.status=2 closed）→ C join step 2b 看到 status=2 → 6005
+//	(b) C join 先 commit（room_members 多 1 行）→ leave 后续走完
+//
+// **不变量**：rooms.status 与 room_members 必须一致（不能出现 status=2 但 room_members
+// 仍含 C 的行 —— 那是 r9 P1#2 race timeline）。
+func TestRoomServiceIntegration_JoinRoom_CrossTxLeaveSerialized(t *testing.T) {
+	svc, sqlDB, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	const userC = uint64(1003)
+	insertUser(t, sqlDB, userA, "uid-room-a", "A", "")
+	insertUser(t, sqlDB, userB, "uid-room-b", "B", "")
+	insertUser(t, sqlDB, userC, "uid-room-c", "C", "")
+
+	// fixture: A 创建房间 + B join → 现在 room_members 有 A / B 2 行
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+	roomID := createOut.RoomID
+
+	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userB, RoomID: roomID}); err != nil {
+		t.Fatalf("JoinRoom (B): %v", err)
+	}
+
+	// 启动两个 goroutine 并行执行 leave (raw) + join (svc)
+	done := make(chan error, 2)
+
+	// goroutine 1: 模拟 11.5 leave 事务 —— A leave + B leave → room 空 → status=2
+	go func() {
+		tx, err := sqlDB.Begin()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer func() { _ = tx.Rollback() }()
+		// 步骤 1: SELECT rooms FOR UPDATE
+		var status int8
+		if err := tx.QueryRow("SELECT status FROM rooms WHERE id = ? FOR UPDATE", roomID).Scan(&status); err != nil {
+			done <- err
+			return
+		}
+		// 步骤 2/3: DELETE A + B 的 room_members + UPDATE users.current_room_id NULL
+		if _, err := tx.Exec("DELETE FROM room_members WHERE room_id = ?", roomID); err != nil {
+			done <- err
+			return
+		}
+		if _, err := tx.Exec("UPDATE users SET current_room_id = NULL WHERE id IN (?, ?)", userA, userB); err != nil {
+			done <- err
+			return
+		}
+		// 步骤 4: COUNT == 0 → 关房间 status=2
+		var cnt int64
+		if err := tx.QueryRow("SELECT COUNT(*) FROM room_members WHERE room_id = ?", roomID).Scan(&cnt); err != nil {
+			done <- err
+			return
+		}
+		if cnt == 0 {
+			if _, err := tx.Exec("UPDATE rooms SET status = 2 WHERE id = ?", roomID); err != nil {
+				done <- err
+				return
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			done <- err
+			return
+		}
+		done <- nil
+	}()
+
+	// goroutine 2: C join 同 room
+	go func() {
+		_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userC, RoomID: roomID})
+		done <- err
+	}()
+
+	// 等两个 goroutine 完成
+	for i := 0; i < 2; i++ {
+		select {
+		case e := <-done:
+			// 两个 goroutine 任一返非 nil error 都接受（leave 不应失败；join 在 (a)
+			// 路径下必返 6005）
+			_ = e
+		case <-time.After(15 * time.Second):
+			t.Fatalf("cross-tx race test timeout")
+		}
+	}
+
+	// **核心断言**：rooms.status 与 room_members 一致性
+	var finalStatus int8
+	if err := sqlDB.QueryRow("SELECT status FROM rooms WHERE id = ?", roomID).Scan(&finalStatus); err != nil {
+		t.Fatalf("query rooms.status: %v", err)
+	}
+	var memberCount int64
+	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM room_members WHERE room_id = ?", roomID).Scan(&memberCount); err != nil {
+		t.Fatalf("query room_members count: %v", err)
+	}
+
+	// 合法状态：
+	//   (a) leave 先 commit：status=2 + room_members 0 行（C join 6005 失败）
+	//   (b) C join 先 commit：room_members 含 C 1 行 + status 取决于 leave 是否仍跑成功
+	//       —— leave 在 SELECT FOR UPDATE 之后才看到 C 的成员行 → DELETE 三行 →
+	//       COUNT==0 → status=2，所以最终 status=2 + member_count=0
+	//       OR leave 因为 C 的并发 join 而看到 3 个成员都 DELETE → COUNT=0 → status=2
+	// 关键不变量：status=2 必须配 member_count=0；status=1 必须 member_count >= 1
+	if finalStatus == 2 && memberCount > 0 {
+		t.Errorf("r9 P1#2 race detected: status=2 (closed) but room_members has %d rows (应该是 0)", memberCount)
+	}
+	if finalStatus == 1 && memberCount == 0 {
+		t.Errorf("r9 P1#2 race detected: status=1 (active) but room_members is empty (应该 closed)")
+	}
+}
+
+// ============================================================
 // AC11.3: room_members UNIQUE(user_id) 真实兜底 → service 6003 + 事务原子性回滚
 //
 // fixture：先用 raw INSERT 给 user 2001 写一条 room_members(room_id=9999, user_id=2001)

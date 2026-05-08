@@ -46,18 +46,30 @@ func (s *roomTestStubUserRepo) UpdateCurrentRoomID(ctx context.Context, userID u
 }
 
 type roomTestStubRoomRepo struct {
-	createFn func(ctx context.Context, r *mysql.Room) error
+	createFn            func(ctx context.Context, r *mysql.Room) error
+	findByIDForUpdateFn func(ctx context.Context, roomID uint64) (*mysql.Room, error)
 }
 
 func (s *roomTestStubRoomRepo) Create(ctx context.Context, r *mysql.Room) error {
-	return s.createFn(ctx, r)
+	if s.createFn != nil {
+		return s.createFn(ctx, r)
+	}
+	panic("roomTestStubRoomRepo.Create not configured")
+}
+
+func (s *roomTestStubRoomRepo) FindByIDForUpdate(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+	if s.findByIDForUpdateFn != nil {
+		return s.findByIDForUpdateFn(ctx, roomID)
+	}
+	panic("roomTestStubRoomRepo.FindByIDForUpdate not configured")
 }
 
 type roomTestStubRoomMemberRepo struct {
-	roomExistsFn   func(ctx context.Context, roomID uint64) (bool, error)
-	isUserInRoomFn func(ctx context.Context, userID uint64, roomID uint64) (bool, error)
-	listMembersFn  func(ctx context.Context, roomID uint64) ([]uint64, error)
-	createFn       func(ctx context.Context, m *mysql.RoomMember) error
+	roomExistsFn    func(ctx context.Context, roomID uint64) (bool, error)
+	isUserInRoomFn  func(ctx context.Context, userID uint64, roomID uint64) (bool, error)
+	listMembersFn   func(ctx context.Context, roomID uint64) ([]uint64, error)
+	createFn        func(ctx context.Context, m *mysql.RoomMember) error
+	countByRoomIDFn func(ctx context.Context, roomID uint64) (int, error)
 }
 
 func (s *roomTestStubRoomMemberRepo) RoomExists(ctx context.Context, roomID uint64) (bool, error) {
@@ -82,7 +94,17 @@ func (s *roomTestStubRoomMemberRepo) ListMembers(ctx context.Context, roomID uin
 }
 
 func (s *roomTestStubRoomMemberRepo) Create(ctx context.Context, m *mysql.RoomMember) error {
-	return s.createFn(ctx, m)
+	if s.createFn != nil {
+		return s.createFn(ctx, m)
+	}
+	panic("roomTestStubRoomMemberRepo.Create not configured")
+}
+
+func (s *roomTestStubRoomMemberRepo) CountByRoomID(ctx context.Context, roomID uint64) (int, error) {
+	if s.countByRoomIDFn != nil {
+		return s.countByRoomIDFn(ctx, roomID)
+	}
+	panic("roomTestStubRoomMemberRepo.CountByRoomID not configured")
 }
 
 // roomTestStubTxMgr：直接执行 fn（不真开 tx；业务正确性靠 fn 内 repo 调用顺序断言；
@@ -470,6 +492,589 @@ func TestRoomService_CreateRoom_FindByIDFails_Returns1009(t *testing.T) {
 	_, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: 1001})
 	if err == nil {
 		t.Fatalf("CreateRoom returned nil error")
+	}
+	if withTxCalled {
+		t.Errorf("WithTx 不应被调用（预检失败 → 不开事务）")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrServiceBusy {
+		t.Errorf("AppError.Code = %d, want %d", ae.Code, apperror.ErrServiceBusy)
+	}
+	if !stderrors.Is(err, wantCause) {
+		t.Errorf("errors.Is should find wantCause; err=%v", err)
+	}
+}
+
+// ============================================================
+// Story 11.4 单测 case（≥6 case，epics.md §Story 11.4 钦定）
+// ============================================================
+
+// TestRoomService_JoinRoom_Happy_5StepsExecute:
+// happy 路径：user.CurrentRoomID == nil → 事务内 5 步全部成功 →
+// service 返 JoinRoomOutput{RoomID:3001, Joined:true}。
+//
+// 断言点：5 个 mock 方法被调用且参数正确（顺序：userRepo.FindByID →
+// roomRepo.FindByIDForUpdate → roomMemberRepo.CountByRoomID →
+// roomMemberRepo.Create → userRepo.UpdateCurrentRoomID）。
+func TestRoomService_JoinRoom_Happy_5StepsExecute(t *testing.T) {
+	var calls []string
+
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			calls = append(calls, "userRepo.FindByID")
+			if id != 1002 {
+				t.Errorf("FindByID id = %d, want 1002", id)
+			}
+			return &mysql.User{ID: 1002, CurrentRoomID: nil}, nil
+		},
+		updateCurrentRoomIDFn: func(ctx context.Context, userID uint64, roomID *uint64) error {
+			calls = append(calls, "userRepo.UpdateCurrentRoomID")
+			if userID != 1002 {
+				t.Errorf("UpdateCurrentRoomID userID = %d, want 1002", userID)
+			}
+			if roomID == nil {
+				t.Errorf("UpdateCurrentRoomID roomID is nil, want &3001")
+			} else if *roomID != 3001 {
+				t.Errorf("UpdateCurrentRoomID *roomID = %d, want 3001", *roomID)
+			}
+			return nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			calls = append(calls, "roomRepo.FindByIDForUpdate")
+			if roomID != 3001 {
+				t.Errorf("FindByIDForUpdate roomID = %d, want 3001", roomID)
+			}
+			return &mysql.Room{
+				ID:            3001,
+				CreatorUserID: 1001,
+				Status:        1,
+				MaxMembers:    4,
+			}, nil
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		countByRoomIDFn: func(ctx context.Context, roomID uint64) (int, error) {
+			calls = append(calls, "roomMemberRepo.CountByRoomID")
+			if roomID != 3001 {
+				t.Errorf("CountByRoomID roomID = %d, want 3001", roomID)
+			}
+			return 1, nil // 房间内已有 1 个成员（创建者），未满
+		},
+		createFn: func(ctx context.Context, m *mysql.RoomMember) error {
+			calls = append(calls, "roomMemberRepo.Create")
+			if m.RoomID != 3001 {
+				t.Errorf("member.RoomID = %d, want 3001", m.RoomID)
+			}
+			if m.UserID != 1002 {
+				t.Errorf("member.UserID = %d, want 1002", m.UserID)
+			}
+			return nil
+		},
+	}
+	txMgr := roomTestDefaultStubTxMgr()
+
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo)
+	out, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
+	if err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+
+	expected := []string{
+		"userRepo.FindByID",
+		"roomRepo.FindByIDForUpdate",
+		"roomMemberRepo.CountByRoomID",
+		"roomMemberRepo.Create",
+		"userRepo.UpdateCurrentRoomID",
+	}
+	if len(calls) != len(expected) {
+		t.Fatalf("call count = %d, want %d; calls=%v", len(calls), len(expected), calls)
+	}
+	for i, c := range calls {
+		if c != expected[i] {
+			t.Errorf("call[%d] = %q, want %q", i, c, expected[i])
+		}
+	}
+
+	if out.RoomID != 3001 {
+		t.Errorf("out.RoomID = %d, want 3001", out.RoomID)
+	}
+	if !out.Joined {
+		t.Errorf("out.Joined = false, want true (V1 §10.4 钦定固定值)")
+	}
+}
+
+// TestRoomService_JoinRoom_UserAlreadyInRoom_PrecheckReturns6003:
+// 预检路径（V1 §10.4 步骤 1 钦定）：user.CurrentRoomID != nil → 立即返 6003，
+// 事务**未**开 + repo 后续方法**未**调用。
+func TestRoomService_JoinRoom_UserAlreadyInRoom_PrecheckReturns6003(t *testing.T) {
+	withTxCalled := false
+	existingRoomID := uint64(9001) // 与目标 3001 不同 → "已在其他房间"子场景
+
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1002, CurrentRoomID: &existingRoomID}, nil
+		},
+		updateCurrentRoomIDFn: func(ctx context.Context, userID uint64, roomID *uint64) error {
+			t.Errorf("UpdateCurrentRoomID 不应被调用（事务未开）")
+			return nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			t.Errorf("FindByIDForUpdate 不应被调用（事务未开）")
+			return nil, nil
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		countByRoomIDFn: func(ctx context.Context, roomID uint64) (int, error) {
+			t.Errorf("CountByRoomID 不应被调用（事务未开）")
+			return 0, nil
+		},
+		createFn: func(ctx context.Context, m *mysql.RoomMember) error {
+			t.Errorf("roomMemberRepo.Create 不应被调用（事务未开）")
+			return nil
+		},
+	}
+	txMgr := &roomTestStubTxMgr{
+		withTxFn: func(ctx context.Context, fn func(txCtx context.Context) error) error {
+			withTxCalled = true
+			return fn(ctx)
+		},
+	}
+
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo)
+	out, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
+	if err == nil {
+		t.Fatalf("JoinRoom returned nil error, want 6003")
+	}
+	if out != nil {
+		t.Errorf("out should be nil on 6003; got %+v", out)
+	}
+	if withTxCalled {
+		t.Errorf("WithTx 不应被调用（预检路径在事务外）")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrUserAlreadyInRoom {
+		t.Errorf("AppError.Code = %d, want %d (ErrUserAlreadyInRoom 6003)", ae.Code, apperror.ErrUserAlreadyInRoom)
+	}
+	// 关键：6003 message 等于 DefaultMessages
+	if ae.Message != apperror.DefaultMessages[apperror.ErrUserAlreadyInRoom] {
+		t.Errorf("AppError.Message = %q, want %q (6003 双路径必须 message 等价)",
+			ae.Message, apperror.DefaultMessages[apperror.ErrUserAlreadyInRoom])
+	}
+}
+
+// TestRoomService_JoinRoom_UserAlreadyInTargetRoom_PrecheckReturns6003:
+// V1 §10.4 行 1441 钦定特例：caller.CurrentRoomID == 当前请求的 roomId → 仍返 6003
+// （client 不区分"已在目标房间" vs "已在其他房间"）。message 与 case 2 完全一致。
+func TestRoomService_JoinRoom_UserAlreadyInTargetRoom_PrecheckReturns6003(t *testing.T) {
+	targetRoomID := uint64(3001)
+
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1002, CurrentRoomID: &targetRoomID}, nil
+		},
+		updateCurrentRoomIDFn: func(ctx context.Context, userID uint64, roomID *uint64) error {
+			t.Errorf("UpdateCurrentRoomID 不应被调用")
+			return nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			t.Errorf("FindByIDForUpdate 不应被调用")
+			return nil, nil
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{}
+	txMgr := roomTestDefaultStubTxMgr()
+
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo)
+	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
+	if err == nil {
+		t.Fatalf("JoinRoom returned nil error, want 6003")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrUserAlreadyInRoom {
+		t.Errorf("AppError.Code = %d, want %d (V1 §10.4 钦定 'client 不区分两子场景')",
+			ae.Code, apperror.ErrUserAlreadyInRoom)
+	}
+	if ae.Message != apperror.DefaultMessages[apperror.ErrUserAlreadyInRoom] {
+		t.Errorf("AppError.Message = %q, want %q", ae.Message, apperror.DefaultMessages[apperror.ErrUserAlreadyInRoom])
+	}
+}
+
+// TestRoomService_JoinRoom_RoomNotFound_Returns6001:
+// 事务内步骤 2a roomRepo.FindByIDForUpdate 返 mysql.ErrRoomNotFound → service 翻译 6001。
+// 后续 CountByRoomID / Create / UpdateCurrentRoomID **未**被调用（事务回滚）。
+func TestRoomService_JoinRoom_RoomNotFound_Returns6001(t *testing.T) {
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1002, CurrentRoomID: nil}, nil
+		},
+		updateCurrentRoomIDFn: func(ctx context.Context, userID uint64, roomID *uint64) error {
+			t.Errorf("UpdateCurrentRoomID 不应被调用（FindByIDForUpdate 已失败）")
+			return nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			return nil, mysql.ErrRoomNotFound
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		countByRoomIDFn: func(ctx context.Context, roomID uint64) (int, error) {
+			t.Errorf("CountByRoomID 不应被调用（FindByIDForUpdate 已失败）")
+			return 0, nil
+		},
+		createFn: func(ctx context.Context, m *mysql.RoomMember) error {
+			t.Errorf("Create 不应被调用（FindByIDForUpdate 已失败）")
+			return nil
+		},
+	}
+	txMgr := roomTestDefaultStubTxMgr()
+
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo)
+	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
+	if err == nil {
+		t.Fatalf("JoinRoom returned nil error, want 6001")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrRoomNotFound {
+		t.Errorf("AppError.Code = %d, want %d (ErrRoomNotFound 6001)", ae.Code, apperror.ErrRoomNotFound)
+	}
+}
+
+// TestRoomService_JoinRoom_RoomClosed_Returns6005:
+// 事务内步骤 2b：FindByIDForUpdate 返 room with Status=2（closed）→ service 翻译 6005。
+// CountByRoomID / Create / UpdateCurrentRoomID **未**被调用。
+func TestRoomService_JoinRoom_RoomClosed_Returns6005(t *testing.T) {
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1002, CurrentRoomID: nil}, nil
+		},
+		updateCurrentRoomIDFn: func(ctx context.Context, userID uint64, roomID *uint64) error {
+			t.Errorf("UpdateCurrentRoomID 不应被调用")
+			return nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			// 模拟 closed 房间
+			return &mysql.Room{
+				ID:            3001,
+				CreatorUserID: 1001,
+				Status:        2, // closed
+				MaxMembers:    4,
+			}, nil
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		countByRoomIDFn: func(ctx context.Context, roomID uint64) (int, error) {
+			t.Errorf("CountByRoomID 不应被调用（status check 已失败）")
+			return 0, nil
+		},
+		createFn: func(ctx context.Context, m *mysql.RoomMember) error {
+			t.Errorf("Create 不应被调用（status check 已失败）")
+			return nil
+		},
+	}
+	txMgr := roomTestDefaultStubTxMgr()
+
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo)
+	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
+	if err == nil {
+		t.Fatalf("JoinRoom returned nil error, want 6005")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrRoomInvalidState {
+		t.Errorf("AppError.Code = %d, want %d (ErrRoomInvalidState 6005)", ae.Code, apperror.ErrRoomInvalidState)
+	}
+}
+
+// TestRoomService_JoinRoom_RoomFull_Returns6002:
+// 事务内步骤 2c：CountByRoomID 返 4（满员）→ service 翻译 6002。
+// Create / UpdateCurrentRoomID **未**被调用。
+func TestRoomService_JoinRoom_RoomFull_Returns6002(t *testing.T) {
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1002, CurrentRoomID: nil}, nil
+		},
+		updateCurrentRoomIDFn: func(ctx context.Context, userID uint64, roomID *uint64) error {
+			t.Errorf("UpdateCurrentRoomID 不应被调用")
+			return nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			return &mysql.Room{
+				ID:            3001,
+				CreatorUserID: 1001,
+				Status:        1, // active
+				MaxMembers:    4,
+			}, nil
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		countByRoomIDFn: func(ctx context.Context, roomID uint64) (int, error) {
+			return 4, nil // 满员
+		},
+		createFn: func(ctx context.Context, m *mysql.RoomMember) error {
+			t.Errorf("Create 不应被调用（满员判定已失败）")
+			return nil
+		},
+	}
+	txMgr := roomTestDefaultStubTxMgr()
+
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo)
+	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
+	if err == nil {
+		t.Fatalf("JoinRoom returned nil error, want 6002")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrRoomFull {
+		t.Errorf("AppError.Code = %d, want %d (ErrRoomFull 6002)", ae.Code, apperror.ErrRoomFull)
+	}
+}
+
+// TestRoomService_JoinRoom_DBUniqueUserIDDuplicate_Returns6003:
+// 事务内步骤 2d：Create 返 ErrRoomMembersUserIDDuplicate（并发 race）→
+// service 兜底 6003（与预检路径完全等价）。
+// UpdateCurrentRoomID **未**被调用（rollback）。
+func TestRoomService_JoinRoom_DBUniqueUserIDDuplicate_Returns6003(t *testing.T) {
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1002, CurrentRoomID: nil}, nil
+		},
+		updateCurrentRoomIDFn: func(ctx context.Context, userID uint64, roomID *uint64) error {
+			t.Errorf("UpdateCurrentRoomID 不应被调用（room_members Create 已失败）")
+			return nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			return &mysql.Room{
+				ID:            3001,
+				CreatorUserID: 1001,
+				Status:        1,
+				MaxMembers:    4,
+			}, nil
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		countByRoomIDFn: func(ctx context.Context, roomID uint64) (int, error) {
+			return 1, nil
+		},
+		createFn: func(ctx context.Context, m *mysql.RoomMember) error {
+			return mysql.ErrRoomMembersUserIDDuplicate
+		},
+	}
+	txMgr := roomTestDefaultStubTxMgr()
+
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo)
+	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
+	if err == nil {
+		t.Fatalf("JoinRoom returned nil error, want 6003")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrUserAlreadyInRoom {
+		t.Errorf("AppError.Code = %d, want %d (uk_user_id 兜底也走 6003，**不**应被 1009 兜底覆盖)",
+			ae.Code, apperror.ErrUserAlreadyInRoom)
+	}
+	// 关键：6003 双路径 message 完全等价
+	if ae.Message != apperror.DefaultMessages[apperror.ErrUserAlreadyInRoom] {
+		t.Errorf("AppError.Message = %q, want %q (6003 双路径必须 message 完全等价)",
+			ae.Message, apperror.DefaultMessages[apperror.ErrUserAlreadyInRoom])
+	}
+}
+
+// TestRoomService_JoinRoom_DBUniqueRoomUserDuplicate_Returns6003:
+// 事务内步骤 2d：Create 返 ErrRoomMembersRoomUserDuplicate（uk_room_user 兜底路径）→
+// service 兜底 6003（与 case 7 等价）。
+func TestRoomService_JoinRoom_DBUniqueRoomUserDuplicate_Returns6003(t *testing.T) {
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1002, CurrentRoomID: nil}, nil
+		},
+		updateCurrentRoomIDFn: func(ctx context.Context, userID uint64, roomID *uint64) error {
+			return nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: 3001, CreatorUserID: 1001, Status: 1, MaxMembers: 4}, nil
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		countByRoomIDFn: func(ctx context.Context, roomID uint64) (int, error) {
+			return 1, nil
+		},
+		createFn: func(ctx context.Context, m *mysql.RoomMember) error {
+			return mysql.ErrRoomMembersRoomUserDuplicate
+		},
+	}
+	txMgr := roomTestDefaultStubTxMgr()
+
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo)
+	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
+	if err == nil {
+		t.Fatalf("JoinRoom returned nil error, want 6003")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrUserAlreadyInRoom {
+		t.Errorf("AppError.Code = %d, want %d (uk_room_user 兜底也走 6003)", ae.Code, apperror.ErrUserAlreadyInRoom)
+	}
+}
+
+// TestRoomService_JoinRoom_FindByIDForUpdateFailsRawError_Returns1009:
+// 事务内步骤 2a：FindByIDForUpdate 返 raw DB error（非 ErrRoomNotFound）→ service 包 1009。
+// 整个事务回滚（后续 repo 方法**未**被调用）。
+func TestRoomService_JoinRoom_FindByIDForUpdateFailsRawError_Returns1009(t *testing.T) {
+	wantCause := stderrors.New("simulated db connection error during FindByIDForUpdate")
+
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1002, CurrentRoomID: nil}, nil
+		},
+		updateCurrentRoomIDFn: func(ctx context.Context, userID uint64, roomID *uint64) error {
+			t.Errorf("UpdateCurrentRoomID 不应被调用")
+			return nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			return nil, wantCause
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		countByRoomIDFn: func(ctx context.Context, roomID uint64) (int, error) {
+			t.Errorf("CountByRoomID 不应被调用")
+			return 0, nil
+		},
+		createFn: func(ctx context.Context, m *mysql.RoomMember) error {
+			t.Errorf("Create 不应被调用")
+			return nil
+		},
+	}
+	txMgr := roomTestDefaultStubTxMgr()
+
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo)
+	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
+	if err == nil {
+		t.Fatalf("JoinRoom returned nil error, want 1009")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrServiceBusy {
+		t.Errorf("AppError.Code = %d, want %d (ErrServiceBusy 1009)", ae.Code, apperror.ErrServiceBusy)
+	}
+	if !stderrors.Is(err, wantCause) {
+		t.Errorf("errors.Is should find wantCause; err=%v", err)
+	}
+}
+
+// TestRoomService_JoinRoom_UpdateCurrentRoomIDFails_RollsBack:
+// 事务内最后一步 step 2e UpdateCurrentRoomID 返 raw error → service 包 1009。
+// 验证整个事务回滚（mock txMgr 验证 fn 返非 nil error）。
+func TestRoomService_JoinRoom_UpdateCurrentRoomIDFails_RollsBack(t *testing.T) {
+	wantCause := stderrors.New("simulated update current_room_id failure")
+
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1002, CurrentRoomID: nil}, nil
+		},
+		updateCurrentRoomIDFn: func(ctx context.Context, userID uint64, roomID *uint64) error {
+			return wantCause
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: 3001, CreatorUserID: 1001, Status: 1, MaxMembers: 4}, nil
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		countByRoomIDFn: func(ctx context.Context, roomID uint64) (int, error) {
+			return 1, nil
+		},
+		createFn: func(ctx context.Context, m *mysql.RoomMember) error {
+			return nil
+		},
+	}
+	txMgr := roomTestDefaultStubTxMgr()
+
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo)
+	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
+	if err == nil {
+		t.Fatalf("JoinRoom returned nil error, want 1009")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrServiceBusy {
+		t.Errorf("AppError.Code = %d, want %d (ErrServiceBusy 1009)", ae.Code, apperror.ErrServiceBusy)
+	}
+	if !stderrors.Is(err, wantCause) {
+		t.Errorf("errors.Is should find wantCause; err=%v", err)
+	}
+}
+
+// TestRoomService_JoinRoom_FindByIDFails_Returns1009:
+// 预检 userRepo.FindByID 直接返 raw DB error → service 包 1009（不开事务）。
+func TestRoomService_JoinRoom_FindByIDFails_Returns1009(t *testing.T) {
+	wantCause := stderrors.New("simulated find user failure")
+	withTxCalled := false
+
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return nil, wantCause
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			t.Errorf("FindByIDForUpdate 不应被调用（FindByID 已失败）")
+			return nil, nil
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{}
+	txMgr := &roomTestStubTxMgr{
+		withTxFn: func(ctx context.Context, fn func(txCtx context.Context) error) error {
+			withTxCalled = true
+			return fn(ctx)
+		},
+	}
+
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo)
+	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
+	if err == nil {
+		t.Fatalf("JoinRoom returned nil error")
 	}
 	if withTxCalled {
 		t.Errorf("WithTx 不应被调用（预检失败 → 不开事务）")

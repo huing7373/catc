@@ -143,6 +143,22 @@ type RoomMemberRepo interface {
 	//
 	// 由 Story 11.3 (POST /rooms) 和 Story 11.4 (POST /rooms/{roomId}/join) 共同消费。
 	Create(ctx context.Context, m *RoomMember) error
+
+	// CountByRoomID 返回 roomID 下当前 room_members 行数（Story 11.4 引入；读方法）。
+	//
+	// 用于 V1 §10.4 步骤 4 容量校验（< 4 → 可加入，>= 4 → 6002 房间已满）。
+	//
+	// **必须在事务内调用**（与同事务 SELECT rooms ... FOR UPDATE 步骤一起执行）；事务外
+	// 调用 race 窗口仍存在 —— 步骤序列必须是：
+	//   1. SELECT rooms FOR UPDATE（锁住 rooms 行）
+	//   2. CountByRoomID（受锁保护，并发 join / leave wait）
+	//   3. INSERT room_members（容量已校验，安全）
+	// 这是 V1 §10.4 服务端逻辑步骤 2-4-5 钦定的串行化路径；缺步骤 1 锁则 step 2 / 3
+	// 之间存在并发 race（5 用户同时 join 满员房间 → 5 个都看到 count == 3 → 5 个
+	// 同时 INSERT，超员 → 4 个被 UNIQUE(user_id) 兜底，但仍多 1 行）。
+	//
+	// query 失败 → 返 raw error 透传（service 包 1009）。
+	CountByRoomID(ctx context.Context, roomID uint64) (int, error)
 }
 
 // roomMemberRepo 是 RoomMemberRepo 的默认实装。
@@ -250,4 +266,31 @@ func (r *roomMemberRepo) Create(ctx context.Context, m *RoomMember) error {
 		return err
 	}
 	return nil
+}
+
+// CountByRoomID 返回 roomID 下 room_members 行数（用于 V1 §10.4 步骤 4 容量校验）。
+//
+// **必须在事务内调用**（与同事务 SELECT rooms ... FOR UPDATE 步骤一起执行）；事务外
+// 调用 race 窗口仍存在 —— 步骤序列必须是：
+//  1. SELECT rooms FOR UPDATE（锁住 rooms 行）
+//  2. CountByRoomID（受锁保护，并发 join / leave wait）
+//  3. INSERT room_members（容量已校验，安全）
+//
+// 这是 V1 §10.4 服务端逻辑步骤 2-4-5 钦定的串行化路径；缺步骤 1 锁则 step 2 / 3
+// 之间存在并发 race（5 用户同时 join 满员房间 → 5 个都看到 count == 3 → 5 个
+// 同时 INSERT，超员 → 4 个被 UNIQUE(user_id) 兜底，但仍多 1 行）。
+//
+// 用 SELECT COUNT(*) FROM room_members WHERE room_id = ?，走 idx_room_id 索引。
+// query 失败 → 返 raw error 透传。
+func (r *roomMemberRepo) CountByRoomID(ctx context.Context, roomID uint64) (int, error) {
+	db := tx.FromContext(ctx, r.db)
+	var count int64
+	err := db.WithContext(ctx).
+		Model(&RoomMember{}).
+		Where("room_id = ?", roomID).
+		Count(&count).Error
+	if err != nil {
+		return 0, err
+	}
+	return int(count), nil
 }

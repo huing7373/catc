@@ -19,13 +19,24 @@ import (
 )
 
 // stubRoomService 是 service.RoomService 的测试 stub；
-// 通过 createRoomFn 字段让每个 case 自定义返回。与 4.5 / 4.6 / 7.3 中间件单测 stub 同模式。
+// 通过 createRoomFn / joinRoomFn 字段让每个 case 自定义返回。
 type stubRoomService struct {
 	createRoomFn func(ctx context.Context, in service.CreateRoomInput) (*service.CreateRoomOutput, error)
+	joinRoomFn   func(ctx context.Context, in service.JoinRoomInput) (*service.JoinRoomOutput, error)
 }
 
 func (s *stubRoomService) CreateRoom(ctx context.Context, in service.CreateRoomInput) (*service.CreateRoomOutput, error) {
+	if s.createRoomFn == nil {
+		panic("stubRoomService.CreateRoom not configured")
+	}
 	return s.createRoomFn(ctx, in)
+}
+
+func (s *stubRoomService) JoinRoom(ctx context.Context, in service.JoinRoomInput) (*service.JoinRoomOutput, error) {
+	if s.joinRoomFn == nil {
+		panic("stubRoomService.JoinRoom not configured")
+	}
+	return s.joinRoomFn(ctx, in)
 }
 
 // newRoomHandlerRouter 构造一个挂上 ErrorMappingMiddleware + RoomHandler 的 router。
@@ -48,6 +59,8 @@ func newRoomHandlerRouter(svc service.RoomService, userID uint64) *gin.Engine {
 	}
 	roomHandler := handler.NewRoomHandler(svc)
 	r.POST("/api/v1/rooms", roomHandler.CreateRoom)
+	// Story 11.4 加：POST /api/v1/rooms/:roomId/join
+	r.POST("/api/v1/rooms/:roomId/join", roomHandler.JoinRoom)
 	return r
 }
 
@@ -202,5 +215,284 @@ func TestRoomHandler_CreateRoom_NoUserIDInContext_Returns1009(t *testing.T) {
 	env := decodeRoomEnvelope(t, w.Body.Bytes())
 	if env.Code != apperror.ErrServiceBusy {
 		t.Errorf("envelope.code = %d, want %d (ErrServiceBusy 1009)", env.Code, apperror.ErrServiceBusy)
+	}
+}
+
+// ============================================================
+// Story 11.4 单测 case：JoinRoom handler（≥6 case）
+// ============================================================
+
+// TestRoomHandler_JoinRoom_Success_Returns0WithJoined:
+// stub service 返 JoinRoomOutput → handler 翻译为 V1 §10.4 钦定 wire DTO。
+//
+// **关键 assert**：
+//   - HTTP status = 200（V1 §2.4 钦定）
+//   - envelope.code = 0
+//   - data.roomId 是 string（V1 §2.5 BIGINT 字符串化）
+//   - data.joined 是 bool 且为 true
+func TestRoomHandler_JoinRoom_Success_Returns0WithJoined(t *testing.T) {
+	svc := &stubRoomService{
+		joinRoomFn: func(ctx context.Context, in service.JoinRoomInput) (*service.JoinRoomOutput, error) {
+			if in.UserID != 1002 {
+				t.Errorf("svc.UserID = %d, want 1002", in.UserID)
+			}
+			if in.RoomID != 3001 {
+				t.Errorf("svc.RoomID = %d, want 3001", in.RoomID)
+			}
+			return &service.JoinRoomOutput{RoomID: 3001, Joined: true}, nil
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1002)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/3001/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != 0 {
+		t.Errorf("envelope.code = %d, want 0", env.Code)
+	}
+	data, ok := env.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("envelope.data not object: %T", env.Data)
+	}
+	// V1 §2.5 BIGINT id 是 string
+	if data["roomId"] != "3001" {
+		t.Errorf("data.roomId = %v, want \"3001\" (string)", data["roomId"])
+	}
+	// joined 是 bool（JSON true → bool true）
+	joined, ok := data["joined"].(bool)
+	if !ok {
+		t.Errorf("data.joined not bool: %T", data["joined"])
+	}
+	if !joined {
+		t.Errorf("data.joined = false, want true")
+	}
+}
+
+// TestRoomHandler_JoinRoom_UserAlreadyInRoom_Returns6003:
+// service 返 *AppError{Code:6003} → handler 透传 → envelope.code=6003。
+func TestRoomHandler_JoinRoom_UserAlreadyInRoom_Returns6003(t *testing.T) {
+	svc := &stubRoomService{
+		joinRoomFn: func(ctx context.Context, in service.JoinRoomInput) (*service.JoinRoomOutput, error) {
+			return nil, apperror.New(apperror.ErrUserAlreadyInRoom, apperror.DefaultMessages[apperror.ErrUserAlreadyInRoom])
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1002)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/3001/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 6003; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrUserAlreadyInRoom {
+		t.Errorf("envelope.code = %d, want %d (ErrUserAlreadyInRoom 6003)", env.Code, apperror.ErrUserAlreadyInRoom)
+	}
+}
+
+// TestRoomHandler_JoinRoom_RoomNotFound_Returns6001:
+// service 返 *AppError{Code:6001} → envelope.code=6001。
+func TestRoomHandler_JoinRoom_RoomNotFound_Returns6001(t *testing.T) {
+	svc := &stubRoomService{
+		joinRoomFn: func(ctx context.Context, in service.JoinRoomInput) (*service.JoinRoomOutput, error) {
+			return nil, apperror.New(apperror.ErrRoomNotFound, apperror.DefaultMessages[apperror.ErrRoomNotFound])
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1002)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/9999/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 6001; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrRoomNotFound {
+		t.Errorf("envelope.code = %d, want %d (ErrRoomNotFound 6001)", env.Code, apperror.ErrRoomNotFound)
+	}
+}
+
+// TestRoomHandler_JoinRoom_RoomFull_Returns6002:
+// service 返 *AppError{Code:6002} → envelope.code=6002。
+func TestRoomHandler_JoinRoom_RoomFull_Returns6002(t *testing.T) {
+	svc := &stubRoomService{
+		joinRoomFn: func(ctx context.Context, in service.JoinRoomInput) (*service.JoinRoomOutput, error) {
+			return nil, apperror.New(apperror.ErrRoomFull, apperror.DefaultMessages[apperror.ErrRoomFull])
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1002)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/3001/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 6002; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrRoomFull {
+		t.Errorf("envelope.code = %d, want %d (ErrRoomFull 6002)", env.Code, apperror.ErrRoomFull)
+	}
+}
+
+// TestRoomHandler_JoinRoom_RoomClosed_Returns6005:
+// service 返 *AppError{Code:6005} → envelope.code=6005。
+func TestRoomHandler_JoinRoom_RoomClosed_Returns6005(t *testing.T) {
+	svc := &stubRoomService{
+		joinRoomFn: func(ctx context.Context, in service.JoinRoomInput) (*service.JoinRoomOutput, error) {
+			return nil, apperror.New(apperror.ErrRoomInvalidState, apperror.DefaultMessages[apperror.ErrRoomInvalidState])
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1002)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/3001/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 6005; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrRoomInvalidState {
+		t.Errorf("envelope.code = %d, want %d (ErrRoomInvalidState 6005)", env.Code, apperror.ErrRoomInvalidState)
+	}
+}
+
+// TestRoomHandler_JoinRoom_ServiceBusy_Returns1009:
+// service 返 *AppError{Code:1009} → envelope.code=1009 + HTTP 500。
+func TestRoomHandler_JoinRoom_ServiceBusy_Returns1009(t *testing.T) {
+	wantCause := stderrors.New("simulated DB outage")
+	svc := &stubRoomService{
+		joinRoomFn: func(ctx context.Context, in service.JoinRoomInput) (*service.JoinRoomOutput, error) {
+			return nil, apperror.Wrap(wantCause, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1002)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/3001/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 for 1009; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrServiceBusy {
+		t.Errorf("envelope.code = %d, want %d", env.Code, apperror.ErrServiceBusy)
+	}
+}
+
+// TestRoomHandler_JoinRoom_InvalidRoomIDPath_Returns1002:
+// path 含非数字 roomId（如 "abc"）→ handler ParseUint 失败 → envelope.code=1002。
+// service.JoinRoom **未**被调用。
+func TestRoomHandler_JoinRoom_InvalidRoomIDPath_Returns1002(t *testing.T) {
+	svc := &stubRoomService{
+		joinRoomFn: func(ctx context.Context, in service.JoinRoomInput) (*service.JoinRoomOutput, error) {
+			t.Errorf("svc.JoinRoom 不应被调用（path 校验已失败）")
+			return nil, nil
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1002)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/abc/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 1002; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrInvalidParam {
+		t.Errorf("envelope.code = %d, want %d (ErrInvalidParam 1002)", env.Code, apperror.ErrInvalidParam)
+	}
+}
+
+// TestRoomHandler_JoinRoom_RoomIDTooLong_Returns1002:
+// path 长度 > 20 → handler length 校验失败 → envelope.code=1002。
+func TestRoomHandler_JoinRoom_RoomIDTooLong_Returns1002(t *testing.T) {
+	svc := &stubRoomService{
+		joinRoomFn: func(ctx context.Context, in service.JoinRoomInput) (*service.JoinRoomOutput, error) {
+			t.Errorf("svc.JoinRoom 不应被调用（length 校验已失败）")
+			return nil, nil
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1002)
+
+	// 21 位数字（V1 §10.4 限 1 ≤ length ≤ 20）
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/123456789012345678901/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 1002; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrInvalidParam {
+		t.Errorf("envelope.code = %d, want %d (ErrInvalidParam 1002)", env.Code, apperror.ErrInvalidParam)
+	}
+}
+
+// TestRoomHandler_JoinRoom_RoomIDZero_Returns1002:
+// path = "0" → ParseUint 成功但 roomID == 0 → 防御性返 1002（业务上 ID 必为正）。
+func TestRoomHandler_JoinRoom_RoomIDZero_Returns1002(t *testing.T) {
+	svc := &stubRoomService{
+		joinRoomFn: func(ctx context.Context, in service.JoinRoomInput) (*service.JoinRoomOutput, error) {
+			t.Errorf("svc.JoinRoom 不应被调用（roomID > 0 校验已失败）")
+			return nil, nil
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1002)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/0/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 1002; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrInvalidParam {
+		t.Errorf("envelope.code = %d, want %d (ErrInvalidParam 1002, roomID > 0 校验)", env.Code, apperror.ErrInvalidParam)
+	}
+}
+
+// TestRoomHandler_JoinRoom_NoUserIDInContext_Returns1009:
+// 模拟 c.Keys 缺 userID（理论 unreachable）→ envelope.code=1009。
+func TestRoomHandler_JoinRoom_NoUserIDInContext_Returns1009(t *testing.T) {
+	svc := &stubRoomService{
+		joinRoomFn: func(ctx context.Context, in service.JoinRoomInput) (*service.JoinRoomOutput, error) {
+			t.Errorf("svc.JoinRoom 不应被调用（c.Keys 缺 userID 已被 handler 兜底拦截）")
+			return nil, nil
+		},
+	}
+	r := newRoomHandlerRouter(svc, 0)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/3001/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrServiceBusy {
+		t.Errorf("envelope.code = %d, want %d", env.Code, apperror.ErrServiceBusy)
 	}
 }

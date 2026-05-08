@@ -289,3 +289,84 @@ func TestRoomMemberRepo_Create_OtherDBError_Propagates(t *testing.T) {
 		t.Errorf("err = %v, want wantErr (非 1062 DB error 应原样透传)", err)
 	}
 }
+
+// ============================================================
+// Story 11.4 新增：RoomMemberRepo.CountByRoomID 路径覆盖
+// ============================================================
+
+// TestRoomMemberRepo_CountByRoomID_Happy_Empty:
+// SELECT COUNT(*) → 0 → repo 返 0, nil。
+func TestRoomMemberRepo_CountByRoomID_Happy_Empty(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT count(*) FROM `room_members` WHERE room_id = ?")).
+		WithArgs(uint64(3001)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+	got, err := repo.CountByRoomID(context.Background(), 3001)
+	if err != nil {
+		t.Fatalf("CountByRoomID: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("got = %d, want 0", got)
+	}
+}
+
+// TestRoomMemberRepo_CountByRoomID_Happy_Single:
+// SELECT COUNT(*) → 1 → repo 返 1, nil（创建房间后初始状态：只有 creator）。
+func TestRoomMemberRepo_CountByRoomID_Happy_Single(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT count(*) FROM `room_members` WHERE room_id = ?")).
+		WithArgs(uint64(3001)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+
+	got, err := repo.CountByRoomID(context.Background(), 3001)
+	if err != nil {
+		t.Fatalf("CountByRoomID: %v", err)
+	}
+	if got != 1 {
+		t.Errorf("got = %d, want 1", got)
+	}
+}
+
+// TestRoomMemberRepo_CountByRoomID_Happy_Full:
+// SELECT COUNT(*) → 4 → repo 返 4, nil（房间已满；service 层会判定 >= 4 并返 6002）。
+func TestRoomMemberRepo_CountByRoomID_Happy_Full(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT count(*) FROM `room_members` WHERE room_id = ?")).
+		WithArgs(uint64(3001)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(4))
+
+	got, err := repo.CountByRoomID(context.Background(), 3001)
+	if err != nil {
+		t.Fatalf("CountByRoomID: %v", err)
+	}
+	if got != 4 {
+		t.Errorf("got = %d, want 4 (满员)", got)
+	}
+}
+
+// TestRoomMemberRepo_CountByRoomID_DBError_Propagates:
+// 任意 DB error → repo 透传 raw error（service 层包成 1009）。
+func TestRoomMemberRepo_CountByRoomID_DBError_Propagates(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	wantErr := stderrors.New("synthetic db connection error")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT count(*) FROM `room_members` WHERE room_id = ?")).
+		WithArgs(uint64(3001)).
+		WillReturnError(wantErr)
+
+	got, err := repo.CountByRoomID(context.Background(), 3001)
+	if got != 0 {
+		t.Errorf("got = %d, want 0 on error", got)
+	}
+	if !stderrors.Is(err, wantErr) {
+		t.Errorf("err = %v, want wantErr", err)
+	}
+}

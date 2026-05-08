@@ -67,6 +67,13 @@ func (s *stubRoomMemberRepo) Create(ctx context.Context, m *mysql.RoomMember) er
 	return nil
 }
 
+// CountByRoomID 兜底（Story 11.4 给 RoomMemberRepo interface 加 CountByRoomID 方法后
+// 编译需要；ws 路径 stub 测试不调本方法 —— ws gateway 只读 room 状态，容量校验
+// 由 HTTP service 层负责）。
+func (s *stubRoomMemberRepo) CountByRoomID(ctx context.Context, roomID uint64) (int, error) {
+	return 0, nil
+}
+
 // newSigner 构造测试用 signer（与 middleware/auth_test 同模式）。
 func newSigner(t *testing.T) *auth.Signer {
 	t.Helper()
@@ -265,6 +272,11 @@ func TestSession_Close_Idempotent(t *testing.T) {
 // ---------- SessionManager 测试 ----------
 
 // TestSessionManager_Register_TriggersHook: Register → onRegister 钩子被调一次。
+//
+// **race 修**：onRegister 钩子在 sessionsByRoom 索引就位**之后**于锁外被调用
+// （session_manager.go Register 内 m.mu.Unlock() 之后，详见该函数 r10 P2 修注释）；
+// useGatewayDial 仅 poll sessionsByRoom 即返回，所以钩子可能还没跑完。轮询等
+// 钩子被调到 1 次或 deadline 超时（与 useGatewayDial 同模式）。
 func TestSessionManager_Register_TriggersHook(t *testing.T) {
 	var registerCount atomic.Int32
 	mgr := wsapp.NewSessionManager(
@@ -279,9 +291,14 @@ func TestSessionManager_Register_TriggersHook(t *testing.T) {
 	defer ts.Close()
 	defer conn.Close()
 
-	if got := registerCount.Load(); got != 1 {
-		t.Errorf("register hook called %d times, want 1", got)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if registerCount.Load() == 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	t.Errorf("register hook called %d times, want 1", registerCount.Load())
 }
 
 // TestSessionManager_Unregister_TriggersHook: 主动 Unregister → onUnregister 钩子被调。

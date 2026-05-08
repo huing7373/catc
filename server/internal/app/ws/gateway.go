@@ -374,3 +374,10 @@ func (*nilRoomMemberRepo) ListMembers(_ context.Context, _ uint64) ([]uint64, er
 func (*nilRoomMemberRepo) Create(_ context.Context, _ *mysql.RoomMember) error {
 	return nil
 }
+
+// CountByRoomID 兜底（Story 11.4 给 RoomMemberRepo interface 加 CountByRoomID 方法
+// 后编译需要；nil-pattern struct 不应被 ws 路径调用 —— gateway 只读 room 状态，
+// 容量校验由 Epic 11 HTTP service 层负责）。
+func (*nilRoomMemberRepo) CountByRoomID(_ context.Context, _ uint64) (int, error) {
+	return 0, nil
+}

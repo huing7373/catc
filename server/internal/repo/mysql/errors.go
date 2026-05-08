@@ -80,4 +80,12 @@ var (
 	// 但分两个独立哨兵让 service 层日志能区分哪个约束被打破，便于审计 / debug）。
 	// service 层同样翻译为 6003 ErrUserAlreadyInRoom（Story 11.3 / 11.4 共同消费）。
 	ErrRoomMembersRoomUserDuplicate = errors.New("mysql: room_members (room_id, user_id) duplicate (uk_room_user conflict)")
+
+	// ErrRoomNotFound: RoomRepo.FindByIDForUpdate / FindByID 查不到 rooms 行。
+	// 语义："房间不存在"（V1接口设计.md §10.4 步骤 2 钦定 6001）。
+	// service 层用 errors.Is 识别后翻译为 6001 apperror.ErrRoomNotFound。
+	// **包路径区分**：mysql.ErrRoomNotFound 是 repo 哨兵；apperror.ErrRoomNotFound
+	// 是业务码 6001；同名不同包是故意的，让阅读对照容易。
+	// 由 Story 11.4 (POST /rooms/{roomId}/join) 引入；Story 11.5 (leave) 也会消费同哨兵。
+	ErrRoomNotFound = errors.New("mysql: room not found")
 )
