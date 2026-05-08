@@ -205,3 +205,4 @@
 | 2026-05-08 | [HTTP leave 必须关闭 WS Session / member.joined trigger 示例必须含全 payload / 跨文档触发点声明对齐（11-1 r2）](2026-05-08-leave-must-close-ws-and-cross-doc-event-trigger-alignment-11-1-r2.md) | 3 | architecture, docs | `<pending>` |
 | 2026-05-08 | [WS 断开仅清 ephemeral，房间归属只能由 HTTP leave 改变 / 跨文档 disconnect 语义必须合并为单条规则（11-1 r3）](2026-05-08-ws-disconnect-only-clears-ephemeral-not-membership-11-1-r3.md) | 2 | architecture | `<pending>` |
 | 2026-05-08 | [房间 create / leave 并发 race 必须落到正确业务码 / 冻结契约引用必须用稳定锚不依赖 commit hash（11-1 r4）](2026-05-08-create-leave-concurrency-races-and-stable-doc-anchors-11-1-r4.md) | 3 | architecture, docs | `<pending>` |
+| 2026-05-08 | [`pet.currentState` 枚举跨章节必须对齐 §6.4 `pets.current_state`（rest/walk/run）而非 §6.5 `motion_state`（stationary_or_unknown/walking/running）—— 同样是 1/2/3 三态不等于同义可复用命名（11-1 r5）](2026-05-08-pet-current-state-enum-must-not-alias-motion-state-11-1-r5.md) | 1 | docs | `<pending>` |

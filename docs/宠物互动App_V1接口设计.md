@@ -1836,7 +1836,7 @@ JSON 通用骨架：
 | `payload.members[].userId` | string | 必填 | 成员用户 ID（BIGINT 字符串化）；node-4 placeholder 阶段直接来自 `room_members.userId`，**所有成员行都返回**（不限于握手用户） |
 | `payload.members[].nickname` | string | 必填 | 成员昵称；node-4 placeholder 阶段（Story 10.7）允许返回**空字符串** `""`（不 JOIN `users` 表，避免 placeholder 过度耦合 Story 11.7 的多表 JOIN）；**空字符串语义 = "我不知道这个值"**，client 按本节末"client merge contract"**保留** client 已有真实昵称（如来自 `GET /api/v1/rooms/{roomId}` 响应），**禁止**用空串覆盖；client 渲染时若本地无真实值，空串可降级为占位文案；Story 11.x（具体由 Story 11.7 真实 SnapshotBuilder 实装）由 `users.nickname` 真实回填 |
 | `payload.members[].pet.petId` | string | 必填 | 成员当前宠物 ID（BIGINT 字符串化）；node-4 placeholder 阶段（Story 10.7）允许返回**空字符串** `""`（不 JOIN `pets` 表）；**空字符串语义 = "我不知道这个值"**，client 按本节末"client merge contract"**保留** client 已有真实 petId（如来自 `GET /api/v1/rooms/{roomId}` 响应），**禁止**用空串覆盖；Story 14.x（pet 真实驱动时由 Story 11.7 同步扩展）回填真实 `pets.id` |
-| `payload.members[].pet.currentState` | number (int) | 必填 | 宠物当前状态枚举：`1 = stationary_or_unknown` / `2 = walking` / `3 = running`（与数据库设计 §6.5 motion_state 同义，复用枚举不另起）；node-4 placeholder 阶段（Story 10.7）固定返回 `1`；Story 11.7 真实实现亦固定返回 `1`（Epic 14 才真实驱动） |
+| `payload.members[].pet.currentState` | number (int) | 必填 | 宠物当前状态枚举：`1 = rest` / `2 = walk` / `3 = run`（与数据库设计 §6.4 `pets.current_state` 同义）；node-4 placeholder 阶段（Story 10.7）固定返回 `1`；Story 11.7 真实实现亦固定返回 `1`（Epic 14 才真实驱动） |
 | `ts` | number (int64) | 必填 | 服务端发送时间戳（ms） |
 
 > **Future Fields（节点 4 阶段为占位 / 节点 5 / 9 落地）**：
@@ -1917,7 +1917,7 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 }
 ```
 
-> **placeholder 字段值来源说明**：上例 `members[]` 直接来自 `SELECT * FROM room_members WHERE roomId=?` 的全部行（**单表查询，不 JOIN `users` / `pets`**）—— `userId` 取 `room_members.userId`；`nickname` 在 placeholder 阶段返回空字符串 `""`（避免 JOIN `users`，由 Story 11.7 真实实装时由 `users.nickname` 回填）；`pet.petId` 在 placeholder 阶段返回空字符串 `""`（避免 JOIN `pets`，由 Story 14.x 真实驱动时由 Story 11.7 同步扩展）；`pet.currentState` 节点 4 阶段固定 `1`（stationary_or_unknown，Epic 14 才真实驱动 motion_state）。Story 10.7 SnapshotBuilder placeholder 实装路径：用单表查询 `SELECT * FROM room_members WHERE roomId=?` 取全部成员行（这是 placeholder 必须做的，**禁止**只取当前握手用户）；JOIN `users` / `pets` 由 Story 11.7 真实实装时再加，**不**在 Story 10.7 范围内 —— 这样 placeholder 反映真实 roster **结构**（成员 ID 全到位），仅丰富字段降级为 placeholder 默认值。
+> **placeholder 字段值来源说明**：上例 `members[]` 直接来自 `SELECT * FROM room_members WHERE roomId=?` 的全部行（**单表查询，不 JOIN `users` / `pets`**）—— `userId` 取 `room_members.userId`；`nickname` 在 placeholder 阶段返回空字符串 `""`（避免 JOIN `users`，由 Story 11.7 真实实装时由 `users.nickname` 回填）；`pet.petId` 在 placeholder 阶段返回空字符串 `""`（避免 JOIN `pets`，由 Story 14.x 真实驱动时由 Story 11.7 同步扩展）；`pet.currentState` 节点 4 阶段固定 `1`（rest，与数据库设计 §6.4 `pets.current_state` 同义；Epic 14 才真实驱动）。Story 10.7 SnapshotBuilder placeholder 实装路径：用单表查询 `SELECT * FROM room_members WHERE roomId=?` 取全部成员行（这是 placeholder 必须做的，**禁止**只取当前握手用户）；JOIN `users` / `pets` 由 Story 11.7 真实实装时再加，**不**在 Story 10.7 范围内 —— 这样 placeholder 反映真实 roster **结构**（成员 ID 全到位），仅丰富字段降级为 placeholder 默认值。
 
 > **Client merge contract（client 解析 `room.snapshot` 时必须遵守）**：snapshot 是握手后**必发**的第一条 authoritative 消息（§12.1 握手成功流程），但其权威性是 **enrich/correct** 而**非** wipe-out。client 在收到 `room.snapshot` 时，**禁止**做 "把 `members[]` 整体替换 client 当前 roster" 的暴力赋值，**必须**对每个 member entry 做**字段级 merge**，规则如下：
 >
@@ -1950,7 +1950,7 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 | `payload.nickname` | string | 必填 | 加入的成员昵称；来自 `users.nickname`；**必非空字符串**（节点 2 阶段首次创建时 server 写入 `"用户{id}"`，必有真实值；不存在 placeholder 阶段空字符串场景） |
 | `payload.avatarUrl` | string | 必填 | 加入的成员头像 URL；来自 `users.avatar_url`；可空字符串 `""`（首次创建用户时 `users.avatar_url` 为空；节点 4 阶段 server 端未做头像上传链路），**不**为 null —— client 解析层按 `String` 处理（与 §10.3 `data.members[].avatarUrl` 一致） |
 | `payload.pet.petId` | string | 必填 | 加入的成员当前宠物 ID（BIGINT 字符串化）；来自加入事务前 server 已查询该 user 的活跃 `pets.id`；**必非空字符串**（节点 2 阶段首次注册时 server 写入默认 pet 行，每个 user 必有活跃 pet） |
-| `payload.pet.currentState` | number (int) | 必填 | 加入时刻宠物当前状态枚举（`1 = stationary_or_unknown` / `2 = walking` / `3 = running`）；节点 4 阶段固定 `1`（与 §10.3 `data.members[].pet.currentState` / §12.3 `room.snapshot` 同语义，Epic 14 才真实驱动） |
+| `payload.pet.currentState` | number (int) | 必填 | 加入时刻宠物当前状态枚举（`1 = rest` / `2 = walk` / `3 = run`，与数据库设计 §6.4 `pets.current_state` 同义）；节点 4 阶段固定 `1`（与 §10.3 `data.members[].pet.currentState` / §12.3 `room.snapshot` 同语义，Epic 14 才真实驱动） |
 | `ts` | number (int64) | 必填 | 服务端发送时间戳（ms） |
 
 > **Future Fields（节点 4 阶段为占位 / 节点 9 / 10 落地）**：
