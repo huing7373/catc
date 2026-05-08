@@ -2,10 +2,12 @@ package mysql
 
 import (
 	"context"
+	stderrors "errors"
 	"regexp"
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	driverMysql "github.com/go-sql-driver/mysql"
 )
 
 // TestRoomMemberRepo_RoomExists_TrueOnActive：rooms 表中存在该 id 且 status=1 → true
@@ -191,5 +193,99 @@ func TestRoomMemberRepo_ListMembers_EmptyRoom(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("len = %d, want 0", len(got))
+	}
+}
+
+// ============================================================
+// Story 11.3 新增：RoomMemberRepo.Create 路径覆盖
+// ============================================================
+
+// TestRoomMemberRepo_Create_AssignsAutoIncrementID:
+// INSERT room_members → sqlmock 返 LastInsertId=5001 → 验证 m.ID 被 GORM 回填。
+func TestRoomMemberRepo_Create_AssignsAutoIncrementID(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO `room_members`")).
+		WillReturnResult(sqlmock.NewResult(5001, 1))
+
+	m := &RoomMember{
+		RoomID: 3001,
+		UserID: 1001,
+	}
+	if err := repo.Create(context.Background(), m); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if m.ID != 5001 {
+		t.Errorf("m.ID = %d, want 5001 (回填的 LastInsertId)", m.ID)
+	}
+}
+
+// TestRoomMemberRepo_Create_UniqueUserIDDuplicate_ReturnsErrRoomMembersUserIDDuplicate:
+// 模拟 ER_DUP_ENTRY 1062 + Message 含 'uk_user_id' → 翻译为 ErrRoomMembersUserIDDuplicate。
+//
+// 这是 Story 11.3 创建房间事务"用户已在房间中"语义的 race 兜底点：service 层用
+// errors.Is 识别后翻译为 6003。
+func TestRoomMemberRepo_Create_UniqueUserIDDuplicate_ReturnsErrRoomMembersUserIDDuplicate(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	dupErr := &driverMysql.MySQLError{
+		Number:  1062,
+		Message: "Duplicate entry '1001' for key 'room_members.uk_user_id'",
+	}
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO `room_members`")).
+		WillReturnError(dupErr)
+
+	err := repo.Create(context.Background(), &RoomMember{
+		RoomID: 3001,
+		UserID: 1001,
+	})
+	if !stderrors.Is(err, ErrRoomMembersUserIDDuplicate) {
+		t.Errorf("err = %v, want ErrRoomMembersUserIDDuplicate (uk_user_id 1062 应被翻译)", err)
+	}
+}
+
+// TestRoomMemberRepo_Create_UniqueRoomUserDuplicate_ReturnsErrRoomMembersRoomUserDuplicate:
+// 模拟 ER_DUP_ENTRY 1062 + Message 含 'uk_room_user' → 翻译为 ErrRoomMembersRoomUserDuplicate。
+//
+// 与 uk_user_id 路径在 service 层语义等价（都翻译为 6003），但分两个独立哨兵让日志
+// 能区分哪个约束被打破。
+func TestRoomMemberRepo_Create_UniqueRoomUserDuplicate_ReturnsErrRoomMembersRoomUserDuplicate(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	dupErr := &driverMysql.MySQLError{
+		Number:  1062,
+		Message: "Duplicate entry '3001-1001' for key 'room_members.uk_room_user'",
+	}
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO `room_members`")).
+		WillReturnError(dupErr)
+
+	err := repo.Create(context.Background(), &RoomMember{
+		RoomID: 3001,
+		UserID: 1001,
+	})
+	if !stderrors.Is(err, ErrRoomMembersRoomUserDuplicate) {
+		t.Errorf("err = %v, want ErrRoomMembersRoomUserDuplicate (uk_room_user 1062 应被翻译)", err)
+	}
+}
+
+// TestRoomMemberRepo_Create_OtherDBError_Propagates:
+// 非 1062 的 DB error → repo 透传 raw error（service 层包成 1009）。
+func TestRoomMemberRepo_Create_OtherDBError_Propagates(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	wantErr := stderrors.New("synthetic db connection error")
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO `room_members`")).
+		WillReturnError(wantErr)
+
+	err := repo.Create(context.Background(), &RoomMember{
+		RoomID: 3001,
+		UserID: 1001,
+	})
+	if !stderrors.Is(err, wantErr) {
+		t.Errorf("err = %v, want wantErr (非 1062 DB error 应原样透传)", err)
 	}
 }

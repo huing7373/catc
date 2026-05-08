@@ -68,4 +68,16 @@ var (
 	// （WHERE version = ? 不匹配 → rows affected = 0）。service 层包成 1009
 	// （节点 3 阶段无 retry；客户端下次主动 sync 时重试）。Story 7.3 引入。
 	ErrStepAccountVersionMismatch = errors.New("mysql: step_account version mismatch (optimistic lock conflict)")
+
+	// ErrRoomMembersUserIDDuplicate: RoomMemberRepo.Create 时 UNIQUE(user_id) `uk_user_id`
+	// 冲突。语义："用户已在某个房间中"（V1接口设计.md §10.1 / §10.4 / 数据库设计.md §7.1）。
+	// service 层用 errors.Is 识别后翻译为 6003 ErrUserAlreadyInRoom。
+	// 由 Story 11.3 (POST /rooms) 和 Story 11.4 (POST /rooms/{roomId}/join) 共同消费。
+	ErrRoomMembersUserIDDuplicate = errors.New("mysql: room_members user_id duplicate (uk_user_id conflict)")
+
+	// ErrRoomMembersRoomUserDuplicate: RoomMemberRepo.Create 时 UNIQUE(room_id, user_id)
+	// `uk_room_user` 冲突。语义："同一用户已在该房间中"（理论与 uk_user_id 兜底等价；
+	// 但分两个独立哨兵让 service 层日志能区分哪个约束被打破，便于审计 / debug）。
+	// service 层同样翻译为 6003 ErrUserAlreadyInRoom（Story 11.3 / 11.4 共同消费）。
+	ErrRoomMembersRoomUserDuplicate = errors.New("mysql: room_members (room_id, user_id) duplicate (uk_room_user conflict)")
 )

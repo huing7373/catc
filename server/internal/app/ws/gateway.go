@@ -367,3 +367,10 @@ func (*nilRoomMemberRepo) IsUserInRoom(_ context.Context, _ uint64, _ uint64) (b
 func (*nilRoomMemberRepo) ListMembers(_ context.Context, _ uint64) ([]uint64, error) {
 	return nil, nil
 }
+
+// Create 兜底（Story 11.3 给 RoomMemberRepo interface 加 Create 方法后编译需要；
+// nil-pattern struct 不应被 ws 路径调用 —— gateway 只读 room 状态，写入由 Epic 11
+// HTTP service 层负责）。
+func (*nilRoomMemberRepo) Create(_ context.Context, _ *mysql.RoomMember) error {
+	return nil
+}

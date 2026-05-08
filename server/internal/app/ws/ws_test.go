@@ -20,6 +20,7 @@ import (
 	wsapp "github.com/huing/cat/server/internal/app/ws"
 	"github.com/huing/cat/server/internal/infra/config"
 	"github.com/huing/cat/server/internal/pkg/auth"
+	"github.com/huing/cat/server/internal/repo/mysql"
 )
 
 // ---------- 共用测试基础设施 ----------
@@ -57,6 +58,13 @@ func (s *stubRoomMemberRepo) ListMembers(ctx context.Context, roomID uint64) ([]
 		return s.listMembersFn(ctx, roomID)
 	}
 	return []uint64{1001, 1002}, nil
+}
+
+// Create 兜底（Story 11.3 给 RoomMemberRepo interface 加 Create 方法后编译需要；
+// ws 路径 stub 测试不调本方法 —— ws gateway 只读 room 状态，写入由 HTTP
+// service 层负责）。
+func (s *stubRoomMemberRepo) Create(ctx context.Context, m *mysql.RoomMember) error {
+	return nil
 }
 
 // newSigner 构造测试用 signer（与 middleware/auth_test 同模式）。

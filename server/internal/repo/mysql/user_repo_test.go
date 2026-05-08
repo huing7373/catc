@@ -113,3 +113,42 @@ func TestUserRepo_FindByID_NotFound_ReturnsErrUserNotFound(t *testing.T) {
 		t.Errorf("err = %v, want ErrUserNotFound", err)
 	}
 }
+
+// ============================================================
+// Story 11.3 新增：UserRepo.UpdateCurrentRoomID 路径覆盖
+// ============================================================
+
+// TestUserRepo_UpdateCurrentRoomID_SetNonNull:
+// roomID 非 nil → UPDATE users SET current_room_id=? WHERE id=? 期望参数 (3001, 1001)
+// → 返 RowsAffected=1。
+func TestUserRepo_UpdateCurrentRoomID_SetNonNull(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserRepo(gormDB)
+
+	roomID := uint64(3001)
+	// GORM Updates(map) 会带 updated_at 自动列；用 sqlmock.AnyArg() 匹配
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE `users` SET")).
+		WithArgs(uint64(3001), sqlmock.AnyArg(), uint64(1001)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := repo.UpdateCurrentRoomID(context.Background(), 1001, &roomID); err != nil {
+		t.Fatalf("UpdateCurrentRoomID: %v", err)
+	}
+}
+
+// TestUserRepo_UpdateCurrentRoomID_SetNull:
+// roomID == nil → UPDATE users SET current_room_id=NULL WHERE id=?（GORM map 路径
+// 强制 SET col=NULL；不能用 Update("current_room_id", v) 因为 v=nil 会被跳过）。
+func TestUserRepo_UpdateCurrentRoomID_SetNull(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserRepo(gormDB)
+
+	// nil 参数会被 GORM 编码为 SQL NULL；sqlmock 匹配 nil interface
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE `users` SET")).
+		WithArgs(nil, sqlmock.AnyArg(), uint64(1001)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := repo.UpdateCurrentRoomID(context.Background(), 1001, nil); err != nil {
+		t.Fatalf("UpdateCurrentRoomID nil: %v", err)
+	}
+}

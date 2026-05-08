@@ -302,13 +302,21 @@ func NewRouter(deps Deps) *gin.Engine {
 	// （登录前路径无 userID）。RateLimit 工厂在 NewRouter 调用期校验 cfg（PerKeyPerMin
 	// <= 0 → panic）；与 4.5 fail-fast 模式一致。
 	if deps.GormDB != nil && deps.TxMgr != nil && deps.Signer != nil {
-		// 6 个 mysql repo（Story 7.3 加 stepSyncLogRepo）
+		// 8 个 mysql repo（Story 7.3 加 stepSyncLogRepo；Story 11.3 加 roomRepo +
+		// 把 roomMemberRepo 实例上移让 ws / room 路由块复用同一实例）
 		userRepo := repomysql.NewUserRepo(deps.GormDB)
 		authBindingRepo := repomysql.NewAuthBindingRepo(deps.GormDB)
 		petRepo := repomysql.NewPetRepo(deps.GormDB)
 		stepAccountRepo := repomysql.NewStepAccountRepo(deps.GormDB)
 		chestRepo := repomysql.NewChestRepo(deps.GormDB)
 		stepSyncLogRepo := repomysql.NewStepSyncLogRepo(deps.GormDB)
+		// Story 11.3 加：roomRepo + 把 roomMemberRepo 实例上移让 ws / room 路由块共享同一
+		// 实例（review r4 同源风险 —— 避免双实例引入隐性 race / 测试 mock 不一致）。
+		// 注意：ws 路由挂载段（下面 if deps.SessionMgr != nil 块）原先在内部再调
+		// `repomysql.NewRoomMemberRepo(deps.GormDB)` 构造一份新的；本 story 移除该重复
+		// 构造，gateway / SnapshotBuilder 复用本处实例。
+		roomRepo := repomysql.NewRoomRepo(deps.GormDB)
+		roomMemberRepo := repomysql.NewRoomMemberRepo(deps.GormDB)
 
 		// auth service：5 repo + txMgr + signer
 		authSvc := service.NewAuthService(
@@ -340,6 +348,27 @@ func NewRouter(deps Deps) *gin.Engine {
 		devStepSvc := service.NewDevStepService(deps.TxMgr, userRepo, stepAccountRepo, stepSyncLogRepo)
 		devStepsHandler = handler.NewDevStepsHandler(devStepSvc)
 
+		// Story 11.3 加：room service + handler（4 步事务：FindByID 预检 → INSERT rooms →
+		// INSERT room_members → UPDATE users.current_room_id）。复用上面构造的 roomRepo /
+		// roomMemberRepo / userRepo / txMgr。
+		//
+		// 防御性 schema sniff：rooms / room_members 必须存在；MySQL 1146（真的缺表） →
+		// 返 false → panic 终止启动；其他错误（权限 / 连接）由 wsTablesReady 内部
+		// log warn 后视为表存在，让后续 request 阶段自然处理。
+		//
+		// **Story 11.3 review r1 [P2] 修**：本 probe 原先只在下方 `deps.SessionMgr != nil`
+		// 块（WS 路由挂载段）内执行；但 11.3 把 `POST /api/v1/rooms` HTTP handler
+		// 挂载提前到了不依赖 SessionMgr 的位置（GormDB / TxMgr / Signer 都有就挂），
+		// 导致 HTTP-only wiring（或 test fixture）下 SessionMgr=nil 时缺 0007/0008
+		// migration 在启动时不被捕获，第一个 POST /api/v1/rooms 请求才会拿 generic 1009
+		// 而非启动期清晰报错。把 probe 提到 GormDB 块顶部（与 handler 挂载条件对齐）：
+		// 任何持有 GormDB 的部署形态（HTTP-only / HTTP+WS）都跑同一份 fail-fast 检查。
+		if !wsTablesReady(deps.GormDB) {
+			panic("ws backing tables missing: rooms / room_members must exist (run migrations 0007 / 0008)")
+		}
+		roomSvc := service.NewRoomService(deps.TxMgr, userRepo, roomRepo, roomMemberRepo)
+		roomHandler := handler.NewRoomHandler(roomSvc)
+
 		api := r.Group("/api/v1")
 
 		// /auth 子组：RateLimitByIP（V1 §4.1 行 218）
@@ -356,6 +385,7 @@ func NewRouter(deps Deps) *gin.Engine {
 		authedGroup.GET("/home", homeHandler.LoadHome)
 		authedGroup.POST("/steps/sync", stepsHandler.PostSync)     // Story 7.3 加
 		authedGroup.GET("/steps/account", stepsHandler.GetAccount) // Story 7.4 加
+		authedGroup.POST("/rooms", roomHandler.CreateRoom)         // Story 11.3 加
 
 		// Story 10.3 加：WS 网关路由
 		// **不**挂在 /api/v1 前缀下（V1 §12.1 钦定 path 是 /ws/rooms/{roomId}）；
@@ -372,17 +402,16 @@ func NewRouter(deps Deps) *gin.Engine {
 		//   - wsTablesReady() 保留为**防御性早期检测**：表缺 → fail-fast panic
 		//     （让 systemd / k8s CrashLoopBackOff 触发运维告警，而不是 server 起
 		//     来后客户端拿 WS close 1011 才间接发现 schema 漂移）
+		//   - **Story 11.3 review r1 [P2]** 后：probe 已上移到本 GormDB 块顶部（room
+		//     handler 挂载之前），HTTP-only / HTTP+WS 两种 wiring 共用同一份 fail-fast
+		//     检查；本块内不再重复 probe（redundant 且会让 sqlmock 测试期望对不上）。
 		if deps.SessionMgr != nil {
-			// 防御性 sniff：rooms / room_members 必须存在；MySQL 1146（真的缺表） →
-			// 返 false → panic 终止启动；其他错误（权限 / 连接）由 wsTablesReady 内部
-			// log warn 后视为表存在，让后续 request 阶段自然处理。
-			if !wsTablesReady(deps.GormDB) {
-				panic("ws backing tables missing: rooms / room_members must exist (run migrations 0007 / 0008)")
-			}
-			roomMemberRepo := repomysql.NewRoomMemberRepo(deps.GormDB)
+			// Story 11.3 修：roomMemberRepo 实例上移到 if deps.GormDB ... 块的开头
+			// （与其他 repo 平级），ws / room 两路由块共享同一个实例；避免双实例
+			// 引入隐性 race / 测试 mock 不一致（review r4 同源风险）。
 			// Story 10.7 加：构造 SnapshotBuilder（节点 4 阶段 placeholder 实装；
 			// Story 11.7 真实实装时把本行替换为 NewRealSnapshotBuilder，gateway
-			// 层不感知）。共享同一个 roomMemberRepo 实例避免重复构造。
+			// 层不感知）。
 			snapshotBuilder := wsapp.NewPlaceholderSnapshotBuilder(roomMemberRepo)
 			gateway := wsapp.NewGateway(
 				deps.Signer,

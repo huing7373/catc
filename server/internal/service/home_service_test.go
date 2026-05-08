@@ -28,6 +28,11 @@ func (s *stubHomeUserRepo) FindByID(ctx context.Context, id uint64) (*mysql.User
 	return s.findByIDFn(ctx, id)
 }
 
+// UpdateCurrentRoomID 兜底（home_service 不调；Story 11.3 加方法后编译需要）。
+func (s *stubHomeUserRepo) UpdateCurrentRoomID(ctx context.Context, userID uint64, roomID *uint64) error {
+	return nil
+}
+
 type stubHomePetRepo struct {
 	findDefaultByUserIDFn func(ctx context.Context, userID uint64) (*mysql.Pet, error)
 }

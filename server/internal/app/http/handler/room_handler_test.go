@@ -1,0 +1,206 @@
+package handler_test
+
+import (
+	"context"
+	"encoding/json"
+	stderrors "errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/huing/cat/server/internal/app/http/handler"
+	"github.com/huing/cat/server/internal/app/http/middleware"
+	apperror "github.com/huing/cat/server/internal/pkg/errors"
+	"github.com/huing/cat/server/internal/pkg/response"
+	"github.com/huing/cat/server/internal/service"
+)
+
+// stubRoomService 是 service.RoomService 的测试 stub；
+// 通过 createRoomFn 字段让每个 case 自定义返回。与 4.5 / 4.6 / 7.3 中间件单测 stub 同模式。
+type stubRoomService struct {
+	createRoomFn func(ctx context.Context, in service.CreateRoomInput) (*service.CreateRoomOutput, error)
+}
+
+func (s *stubRoomService) CreateRoom(ctx context.Context, in service.CreateRoomInput) (*service.CreateRoomOutput, error) {
+	return s.createRoomFn(ctx, in)
+}
+
+// newRoomHandlerRouter 构造一个挂上 ErrorMappingMiddleware + RoomHandler 的 router。
+//
+// **关键**：必须挂 ErrorMappingMiddleware，否则 c.Error(...) 后 body 为空，断不到
+// envelope.code（与 auth_handler_test 同模式）。
+//
+// **不挂真 auth middleware**：单测路径直接用一个内联 middleware 把 userID 注入
+// c.Keys[middleware.UserIDKey] —— 让 handler.CreateRoom 能取到 userID 走业务路径。
+// 真 auth middleware 由 router_test 等其他测试覆盖；本 case 只测 handler 单元行为。
+func newRoomHandlerRouter(svc service.RoomService, userID uint64) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(middleware.ErrorMappingMiddleware())
+	if userID != 0 {
+		r.Use(func(c *gin.Context) {
+			c.Set(middleware.UserIDKey, userID)
+			c.Next()
+		})
+	}
+	roomHandler := handler.NewRoomHandler(svc)
+	r.POST("/api/v1/rooms", roomHandler.CreateRoom)
+	return r
+}
+
+func decodeRoomEnvelope(t *testing.T, body []byte) response.Envelope {
+	t.Helper()
+	var env response.Envelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("invalid JSON envelope: %v; body=%s", err, string(body))
+	}
+	return env
+}
+
+// TestRoomHandler_CreateRoom_Success_ReturnsZeroWithRoomData (AC10 case 1):
+// stub service 返 CreateRoomOutput → handler 翻译为 V1 §10.1 钦定 wire DTO。
+//
+// **关键 assert**：
+//   - HTTP status = 200（V1 §2.4 钦定业务码与 HTTP status 正交，0 走 200）
+//   - envelope.code = 0
+//   - data.room.id / data.room.creatorUserId 都是 string（V1 §2.5 BIGINT 字符串化）
+//   - data.room.maxMembers / memberCount / status 都是 number（数值字段不字符串化）
+func TestRoomHandler_CreateRoom_Success_ReturnsZeroWithRoomData(t *testing.T) {
+	svc := &stubRoomService{
+		createRoomFn: func(ctx context.Context, in service.CreateRoomInput) (*service.CreateRoomOutput, error) {
+			if in.UserID != 1001 {
+				t.Errorf("svc.UserID = %d, want 1001", in.UserID)
+			}
+			return &service.CreateRoomOutput{
+				RoomID:        3001,
+				CreatorUserID: 1001,
+				MaxMembers:    4,
+				MemberCount:   1,
+				Status:        1,
+			}, nil
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1001)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != 0 {
+		t.Errorf("envelope.code = %d, want 0", env.Code)
+	}
+	if env.Message != "ok" {
+		t.Errorf("envelope.message = %q, want ok", env.Message)
+	}
+	data, ok := env.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("envelope.data not object: %T", env.Data)
+	}
+	room, ok := data["room"].(map[string]any)
+	if !ok {
+		t.Fatalf("data.room not object: %T", data["room"])
+	}
+	// V1 §2.5 BIGINT id 是 string
+	if room["id"] != "3001" {
+		t.Errorf("room.id = %v, want \"3001\" (string)", room["id"])
+	}
+	if room["creatorUserId"] != "1001" {
+		t.Errorf("room.creatorUserId = %v, want \"1001\" (string)", room["creatorUserId"])
+	}
+	// JSON number → float64
+	if maxMembers, _ := room["maxMembers"].(float64); maxMembers != 4 {
+		t.Errorf("room.maxMembers = %v, want 4 (number)", room["maxMembers"])
+	}
+	if memberCount, _ := room["memberCount"].(float64); memberCount != 1 {
+		t.Errorf("room.memberCount = %v, want 1 (number)", room["memberCount"])
+	}
+	if status, _ := room["status"].(float64); status != 1 {
+		t.Errorf("room.status = %v, want 1 (number)", room["status"])
+	}
+}
+
+// TestRoomHandler_CreateRoom_UserAlreadyInRoom_Returns6003 (AC10 case 2):
+// service 返 *AppError{Code:6003} → handler 透传 → envelope.code=6003。
+func TestRoomHandler_CreateRoom_UserAlreadyInRoom_Returns6003(t *testing.T) {
+	svc := &stubRoomService{
+		createRoomFn: func(ctx context.Context, in service.CreateRoomInput) (*service.CreateRoomOutput, error) {
+			return nil, apperror.New(apperror.ErrUserAlreadyInRoom, apperror.DefaultMessages[apperror.ErrUserAlreadyInRoom])
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1001)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	// 6003 走 HTTP 200（V1 §2.4 钦定业务码与 HTTP status 正交；6xxx 业务码不映射 5xx）
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for 6003; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrUserAlreadyInRoom {
+		t.Errorf("envelope.code = %d, want %d (ErrUserAlreadyInRoom 6003)", env.Code, apperror.ErrUserAlreadyInRoom)
+	}
+}
+
+// TestRoomHandler_CreateRoom_ServiceError_Returns1009 (AC10 case 3):
+// service 返 *AppError{Code:1009} → envelope.code=1009 + HTTP 500（ErrorMappingMiddleware 钦定）。
+func TestRoomHandler_CreateRoom_ServiceError_Returns1009(t *testing.T) {
+	wantCause := stderrors.New("simulated DB outage")
+	svc := &stubRoomService{
+		createRoomFn: func(ctx context.Context, in service.CreateRoomInput) (*service.CreateRoomOutput, error) {
+			return nil, apperror.Wrap(wantCause, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1001)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	// 1009 走 HTTP 500（ErrorMappingMiddleware 钦定）
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 for 1009; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrServiceBusy {
+		t.Errorf("envelope.code = %d, want %d (ErrServiceBusy 1009)", env.Code, apperror.ErrServiceBusy)
+	}
+}
+
+// TestRoomHandler_CreateRoom_NoUserIDInContext_Returns1009 (AC10 case 4):
+// 模拟 c.Keys 没注入 userID（理论不应发生，因为 auth middleware 已挂在前；本兜底
+// 校验 handler 的"unreachable"防御性分支）→ envelope.code=1009。
+func TestRoomHandler_CreateRoom_NoUserIDInContext_Returns1009(t *testing.T) {
+	svc := &stubRoomService{
+		createRoomFn: func(ctx context.Context, in service.CreateRoomInput) (*service.CreateRoomOutput, error) {
+			t.Errorf("svc.CreateRoom 不应被调用（c.Keys 缺 userID 已被 handler 兜底拦截）")
+			return nil, nil
+		},
+	}
+	// userID == 0 → newRoomHandlerRouter 不挂 userID 注入 middleware
+	r := newRoomHandlerRouter(svc, 0)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	if env.Code != apperror.ErrServiceBusy {
+		t.Errorf("envelope.code = %d, want %d (ErrServiceBusy 1009)", env.Code, apperror.ErrServiceBusy)
+	}
+}

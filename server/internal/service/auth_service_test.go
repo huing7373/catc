@@ -17,9 +17,10 @@ import (
 // ============================================================
 
 type stubUserRepo struct {
-	createFn         func(ctx context.Context, u *mysql.User) error
-	updateNicknameFn func(ctx context.Context, userID uint64, nickname string) error
-	findByIDFn       func(ctx context.Context, id uint64) (*mysql.User, error)
+	createFn              func(ctx context.Context, u *mysql.User) error
+	updateNicknameFn      func(ctx context.Context, userID uint64, nickname string) error
+	findByIDFn            func(ctx context.Context, id uint64) (*mysql.User, error)
+	updateCurrentRoomIDFn func(ctx context.Context, userID uint64, roomID *uint64) error
 }
 
 func (s *stubUserRepo) Create(ctx context.Context, u *mysql.User) error {
@@ -30,6 +31,17 @@ func (s *stubUserRepo) UpdateNickname(ctx context.Context, userID uint64, nickna
 }
 func (s *stubUserRepo) FindByID(ctx context.Context, id uint64) (*mysql.User, error) {
 	return s.findByIDFn(ctx, id)
+}
+
+// UpdateCurrentRoomID 默认 panic（auth_service / dev_step_service / step_service /
+// home_service 都不调本方法；Story 11.3 起 room_service 调用，但 room_service_test 用
+// 独立 roomTestStubUserRepo —— 本 stub 仅给非 room_service 测试用）。
+// 显式 panic 让"误调"立刻可见。
+func (s *stubUserRepo) UpdateCurrentRoomID(ctx context.Context, userID uint64, roomID *uint64) error {
+	if s.updateCurrentRoomIDFn != nil {
+		return s.updateCurrentRoomIDFn(ctx, userID, roomID)
+	}
+	panic("stubUserRepo.UpdateCurrentRoomID not configured (Story 11.3 引入；本 stub 仅给非 room_service 测试用)")
 }
 
 type stubAuthBindingRepo struct {

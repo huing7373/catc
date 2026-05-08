@@ -3,8 +3,10 @@ package mysql
 import (
 	"context"
 	stderrors "errors"
+	"strings"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
 
 	"github.com/huing/cat/server/internal/repo/tx"
@@ -126,6 +128,21 @@ type RoomMemberRepo interface {
 	// 用 SELECT user_id FROM room_members WHERE room_id=? ORDER BY user_id ASC（
 	// 排序让 placeholder snapshot 输出确定，便于集成测试 assert）
 	ListMembers(ctx context.Context, roomID uint64) ([]uint64, error)
+
+	// Create 插入一行 room_members（Story 11.3 引入；写方法）。
+	//
+	// GORM 在成功后回填 m.ID（AUTO_INCREMENT）；必须传 *RoomMember 指针。
+	//
+	// **ER_DUP_ENTRY 1062 双路径翻译**：room_members 表有两个唯一约束（0008 schema）：
+	//   - uk_user_id (user_id)         → ErrRoomMembersUserIDDuplicate
+	//   - uk_room_user (room_id, user_id) → ErrRoomMembersRoomUserDuplicate
+	//
+	// service 层用 errors.Is 识别后翻译为 6003 ErrUserAlreadyInRoom；两个独立哨兵
+	// 让 service 层日志能区分哪个约束被打破（便于审计 / debug），即使从 client 视角
+	// 6003 语义等价。
+	//
+	// 由 Story 11.3 (POST /rooms) 和 Story 11.4 (POST /rooms/{roomId}/join) 共同消费。
+	Create(ctx context.Context, m *RoomMember) error
 }
 
 // roomMemberRepo 是 RoomMemberRepo 的默认实装。
@@ -198,4 +215,39 @@ func (r *roomMemberRepo) ListMembers(ctx context.Context, roomID uint64) ([]uint
 		return []uint64{}, nil
 	}
 	return ids, nil
+}
+
+// Create 插入一行 room_members；GORM 成功后回填 m.ID（AUTO_INCREMENT）。
+//
+// **ER_DUP_ENTRY 1062 双路径翻译**：room_members 表有两个唯一约束（0008 schema）：
+//   - uk_user_id (user_id)         → ErrRoomMembersUserIDDuplicate
+//   - uk_room_user (room_id, user_id) → ErrRoomMembersRoomUserDuplicate
+//
+// 不解析 mysql.MySQLError.Message 字符串的引号 / locale 部分（"Duplicate entry
+// '...' for key '...'"）—— 字符串国际化 / 版本不可靠。用 Message contains
+// "uk_user_id" / "uk_room_user" substring 是稳定 contract（key 名 part 在所有版本
+// + 语言下都是英文 ASCII，与 ER_DUP_ENTRY 1062 错误号配套；与 user_repo / auth_binding_repo
+// 同模式但需要双路径分流，故走 substring 而非简单"任何 1062 → 单一哨兵"）。
+//
+// **fallback 路径**：1062 但 Message 既不含 uk_user_id 也不含 uk_room_user → raw error
+// 透传给 service（service 包成 1009）。节点 4 阶段两个 UNIQUE 约束已穷举，本 fallback
+// 路径理论不触发；future 给 room_members 加新唯一索引时本函数注释要补按 key 名分流。
+func (r *roomMemberRepo) Create(ctx context.Context, m *RoomMember) error {
+	db := tx.FromContext(ctx, r.db)
+	err := db.WithContext(ctx).Create(m).Error
+	if err != nil {
+		var mysqlErr *mysql.MySQLError
+		if stderrors.As(err, &mysqlErr) && mysqlErr.Number == mysqlErrCodeDupEntry {
+			msg := mysqlErr.Message
+			if strings.Contains(msg, "uk_user_id") {
+				return ErrRoomMembersUserIDDuplicate
+			}
+			if strings.Contains(msg, "uk_room_user") {
+				return ErrRoomMembersRoomUserDuplicate
+			}
+			// 极罕见：1062 但既不含 uk_user_id 也不含 uk_room_user → raw 透传
+		}
+		return err
+	}
+	return nil
 }

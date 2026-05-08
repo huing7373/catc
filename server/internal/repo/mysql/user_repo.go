@@ -67,6 +67,17 @@ type UserRepo interface {
 
 	// FindByID 查单行；NotFound → ErrUserNotFound 哨兵；其他 DB 异常透传。
 	FindByID(ctx context.Context, id uint64) (*User, error)
+
+	// UpdateCurrentRoomID 更新 users.current_room_id 字段（Story 11.3 引入）。
+	//
+	// roomID 用 *uint64 既能表达 "set to room id"（Story 11.3 创建房间 / Story 11.4
+	// 加入房间）也能表达 "set to NULL"（Story 11.5 退出房间，nil 入参）—— 一个方法
+	// 两个用途，避免重复方法 SetCurrentRoomID + ClearCurrentRoomID。
+	//
+	// **关键 GORM 陷阱**：实装必须用 Updates(map[string]interface{}{...}) 而非
+	// Update("current_room_id", v) —— 后者在 v 为 nil 时被 GORM 视为 zero value
+	// 而**跳过更新**（不会执行 UPDATE SQL）；map 路径强制 SQL 执行 SET col=NULL。
+	UpdateCurrentRoomID(ctx context.Context, userID uint64, roomID *uint64) error
 }
 
 // userRepo 是 UserRepo 的默认实装；持有 *gorm.DB fallback（事务外用）。
@@ -131,4 +142,31 @@ func (r *userRepo) FindByID(ctx context.Context, id uint64) (*User, error) {
 		return nil, err
 	}
 	return &u, nil
+}
+
+// UpdateCurrentRoomID 更新 users.current_room_id 字段（Story 11.3 引入）。
+//
+// roomID 可为 nil（语义：set to NULL，Story 11.5 退出房间路径用）；非 nil 时设为
+// 指定 room id（Story 11.3 创建房间 / Story 11.4 加入房间路径用）。
+//
+// **关键 GORM 陷阱**：用 Updates(map[string]interface{}) 显式传 nil 而非
+// Update("current_room_id", v) —— 后者在 v 为 nil 时被 GORM 视为 zero value 而
+// 跳过更新（不会执行 UPDATE SQL）；前者用 map 路径强制 SQL 执行 SET col=NULL。
+// 与 users.UpdateNickname 用 Update("nickname", v) 路径不同：nickname 是 string
+// 永远非 nil，不存在 nil-skip 陷阱；current_room_id 是 *uint64，必须用 map 路径。
+//
+// GORM autoUpdateTime tag 让 updated_at 自动写当前时间（与数据库 §3.2 ON UPDATE
+// CURRENT_TIMESTAMP(3) 语义一致）。
+//
+// **ctx 用法**（ADR-0007 §2.4）：本方法在 RoomService.CreateRoom 事务的最后一步
+// 被调用，调用方必须传 txCtx 而非外层 ctx —— tx.FromContext 通过 txCtx 取出 tx
+// handle，让本 UPDATE 进入事务边界。
+func (r *userRepo) UpdateCurrentRoomID(ctx context.Context, userID uint64, roomID *uint64) error {
+	db := tx.FromContext(ctx, r.db)
+	return db.WithContext(ctx).
+		Model(&User{}).
+		Where("id = ?", userID).
+		Updates(map[string]interface{}{
+			"current_room_id": roomID,
+		}).Error
 }

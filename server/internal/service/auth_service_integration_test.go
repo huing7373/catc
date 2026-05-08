@@ -441,6 +441,11 @@ func (f *faultUserRepo) FindByID(ctx context.Context, id uint64) (*mysql.User, e
 	return f.delegate.FindByID(ctx, id)
 }
 
+// UpdateCurrentRoomID 透传（Story 11.3 加方法后编译需要；AC4 fault case 不调本方法）。
+func (f *faultUserRepo) UpdateCurrentRoomID(ctx context.Context, userID uint64, roomID *uint64) error {
+	return f.delegate.UpdateCurrentRoomID(ctx, userID, roomID)
+}
+
 // faultPetRepo 包装真实 PetRepo，让 Create 抛 injectErr，FindDefaultByUserID 透传。
 //
 // 用于 AC2: 回滚 1（pet repo 第 4 步失败 → 整体回滚）。
