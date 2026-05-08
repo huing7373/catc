@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-05-08  # Story 11.1 review — dev-story 完成，待 code review
+last_updated: 2026-05-08  # Story 11.1 done — 收官
 # Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
 # 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
@@ -143,7 +143,7 @@ development_status:
   10-7-房间快照下发框架: done
   epic-10-retrospective: done
   epic-11: in-progress
-  11-1-接口契约最终化: review
+  11-1-接口契约最终化: done
   11-2-rooms-room_members-migration: backlog
   11-3-创建房间事务: backlog
   11-4-加入房间事务: backlog
