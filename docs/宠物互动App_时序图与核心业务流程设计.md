@@ -457,11 +457,11 @@ sequenceDiagram
     Service->>MySQL: 插入 room_members
     Service->>MySQL: 更新 users.current_room_id
     Service->>MySQL: 提交事务
-    Service-->>API: 返回 joined = true
-    API-->>Client: HTTP 200 加入成功
-    Note over Service,WSGateway: 事务提交后（post-commit）触发广播<br/>自 Story 11.1 起锚定
+    Note over Service,WSGateway: 事务提交后（post-commit）触发广播<br/>**顺序**：broadcast → HTTP 200<br/>（与 V1接口设计.md §10.4 步骤 8/9 zip 对齐；fire-and-forget 仅 log，不影响 HTTP 200 响应；自 Story 11.1 r7 锚定）
     Service->>WSGateway: BroadcastToRoom(roomId, member.joined)
     WSGateway->>Others: WS 推送 member.joined<br/>{userId, nickname, avatarUrl, pet:{petId, currentState}}
+    Service-->>API: 返回 joined = true
+    API-->>Client: HTTP 200 加入成功
 ```
 
 ### 11.3 关键约束
@@ -499,13 +499,13 @@ sequenceDiagram
         Service->>MySQL: 更新 rooms.status = closed
     end
     Service->>MySQL: 提交事务
-    Service-->>API: 返回 left = true
-    API-->>Client: HTTP 200 退出成功
-    Note over Service,WSGateway: 事务提交后（post-commit）触发广播 + 主动关闭<br/>自 Story 11.1 起锚定
+    Note over Service,WSGateway: 事务提交后（post-commit）触发广播 + 主动关闭<br/>**严格顺序**：broadcast → close 4007 → HTTP 200<br/>（避免 leaver 在 HTTP 200 后仍持有 WS 收到本次 member.left；自 Story 11.1 r7 锚定，与 V1接口设计.md §10.5 步骤 6/7/8 zip 对齐）
     Service->>WSGateway: BroadcastToRoom(roomId, member.left)
     WSGateway->>Others: WS 推送 member.left {userId}
     Service->>WSGateway: CloseLeaverConnection(userId)
     WSGateway->>Client: WS Close 4007 "left room via HTTP"
+    Service-->>API: 返回 left = true
+    API-->>Client: HTTP 200 退出成功
 ```
 
 ### 12.3 实现要点

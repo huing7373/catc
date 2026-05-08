@@ -1240,7 +1240,18 @@ JSON 示例（用户当前不在任何房间）：
 |---|---|---|---|---|---|
 | Path | `roomId` | string | 必填 | 必须是 BIGINT 数字字符串（如 `"3001"`），1 ≤ length ≤ 20 字符 | 目标房间主键；server 内部转 `uint64` |
 
-> **注**：当前节点 4 阶段**不**强制要求 `roomId` 是当前用户所在房间 —— 用户**可以**查询任意 `roomId` 的房间详情（用于"加入前预览房间"等未来场景）；后续节点若需要"私有房间禁止非成员查看"语义，由对应 epic §X.1 story 加 ACL 校验，不在本 story 范围。
+> **注（ACL — r7 锁定）**：本接口**强制要求** caller 是该房间的当前成员（即 `users.current_room_id == path roomId`），否则返回 **6004 用户不在房间中**（HTTP 200，业务错误码层；含 `current_room_id == NULL` / `current_room_id != path roomId` 两种场景）。**rationale**：响应体 `members[].nickname` / `avatarUrl` / `pet.petId` / `pet.currentState` 是其他用户的隐私字段，且 `rooms.id` 是 BIGINT auto_increment 顺序号（数据库设计.md §6.6），任何认证用户都能查任意 roomId 会形成"枚举 roomId → 抓全站房间成员关系"的隐私 / security 攻击面。本接口的访问控制模型与 §10.5 leave 接口步骤 1 一致（caller 必须是该房间成员），统一"接口默认 deny + 显式 allow（白名单 ACL）"基线。**未来路径**：节点 4 之后若产品需要"加入前预览房间"语义（如分享链接），由对应 epic 单开 story 设计"轻量预览接口"（仅返回 `room.id` / `status` / `memberCount` 不含成员隐私字段）或"高熵 roomId 改造"（rooms.id 从 BIGINT auto_increment 改 nanoid），**不**回退本 ACL。
+
+#### 服务端逻辑
+
+按顺序执行：
+
+1. 查 `users.current_room_id`，**与请求的 `roomId` 不一致**（含 `current_room_id` 为 null）→ 立即返回 **6004 用户不在房间中**（caller 不是该房间成员，禁止查看其他成员隐私字段）
+2. 查 `rooms WHERE id = ?`，**找不到** → 返回 **6001 房间不存在**（理论上步骤 1 已通过意味着 caller 在该房间，rooms 行必存在；本步骤是兜底，避免 step1-step3 之间的极端 race —— 如 caller 在被并发 leave 流程改 row 的窗口内）
+3. 查 `room_members WHERE room_id = ?` + JOIN `users` / `pets` 聚合（按 `room_members.joined_at ASC` 稳定排序）
+4. 返回 `data.{room, members}`
+
+**注**：本接口为只读查询，**不**开 MySQL 事务（步骤 1 + 步骤 3 各自独立 SELECT，允许在两次 SELECT 之间出现 roster 微小漂移；client 解析层按 §10.3 不变量"`memberCount === members[].length`"自洽即可，不要求"强一致快照"语义）。
 
 #### 响应体
 
@@ -1319,10 +1330,11 @@ JSON 示例（节点 4 阶段，3 成员房间）：
 | 1001 | 未登录 / token 无效 | auth 中间件拦截 |
 | 1002 | 参数错误 | `roomId` 路径参数格式错（非数字 / 长度 > 20 字符） |
 | 1005 | 操作过于频繁 | rate_limit 中间件拦截 |
-| 6001 | 房间不存在 | `rooms WHERE id = ?` 查不到记录 |
+| 6001 | 房间不存在 | 服务端逻辑步骤 2：`rooms WHERE id = ?` 查不到记录（兜底场景，详见步骤 2 注释） |
+| 6004 | 用户不在房间中 | 服务端逻辑步骤 1：`users.current_room_id != path roomId`（含 `current_room_id == NULL`）—— caller 不是该房间成员，**禁止**查看 |
 | 1009 | 服务繁忙 | DB 异常 / 内部 panic |
 
-> **注**：本接口**不**触发 6002 / 6003 / 6004 —— 这三个错误码是房间生命周期变更（join / leave）路径上的错误，纯查询不涉及；6005（房间状态异常）在节点 4 阶段**不**用于本接口（即使 `rooms.status = 2 closed` 也允许查询，client 拿到 `status = 2` 后由 UX 决定如何展示，不视为查询失败）。
+> **注**：本接口**不**触发 6002 / 6003 —— 这两个错误码是 join 路径上的"房间已满 / 用户已在房间"语义，纯查询不涉及；6005（房间状态异常）在节点 4 阶段**不**用于本接口（即使 `rooms.status = 2 closed` 也允许查询 —— 但前提是 caller 仍是该房间成员才能走到这步，因为步骤 1 已先校验 ACL）。**6004 触发条件与 §10.5 leave 接口步骤 1 同源**（`users.current_room_id != path roomId`），statement 层语义统一：caller 不是该房间成员 → 6004，不区分"未加入任何房间" vs "加入了其他房间"。
 
 #### `data.members[]` 字段五阶段过渡表
 
