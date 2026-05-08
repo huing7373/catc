@@ -1240,7 +1240,7 @@ JSON 示例（用户当前不在任何房间）：
 |---|---|---|---|---|---|
 | Path | `roomId` | string | 必填 | 必须是 BIGINT 数字字符串（如 `"3001"`），1 ≤ length ≤ 20 字符 | 目标房间主键；server 内部转 `uint64` |
 
-> **注（ACL — r7 锁定）**：本接口**强制要求** caller 是该房间的当前成员（即 `users.current_room_id == path roomId`），否则返回 **6004 用户不在房间中**（HTTP 200，业务错误码层；含 `current_room_id == NULL` / `current_room_id != path roomId` 两种场景）。**rationale**：响应体 `members[].nickname` / `avatarUrl` / `pet.petId` / `pet.currentState` 是其他用户的隐私字段，且 `rooms.id` 是 BIGINT auto_increment 顺序号（数据库设计.md §6.6），任何认证用户都能查任意 roomId 会形成"枚举 roomId → 抓全站房间成员关系"的隐私 / security 攻击面。本接口的访问控制模型与 §10.5 leave 接口步骤 1 一致（caller 必须是该房间成员），统一"接口默认 deny + 显式 allow（白名单 ACL）"基线。**未来路径**：节点 4 之后若产品需要"加入前预览房间"语义（如分享链接），由对应 epic 单开 story 设计"轻量预览接口"（仅返回 `room.id` / `status` / `memberCount` 不含成员隐私字段）或"高熵 roomId 改造"（rooms.id 从 BIGINT auto_increment 改 nanoid），**不**回退本 ACL。
+> **注（ACL — r7 锁定）**：本接口**强制要求** caller 是该房间的当前成员（即 `users.current_room_id == path roomId`），否则返回 **6004 用户不在房间中**（HTTP 200，业务错误码层；含 `current_room_id == NULL` / `current_room_id != path roomId` 两种场景）。**rationale**：响应体 `members[].nickname` / `avatarUrl` / `pet.petId` / `pet.currentState` 是其他用户的隐私字段（注：`pet` 整体可空 nullable，详见字段表 `data.members[].pet` 行；空时不下发 `pet.*` 子字段），且 `rooms.id` 是 BIGINT auto_increment 顺序号（数据库设计.md §6.6），任何认证用户都能查任意 roomId 会形成"枚举 roomId → 抓全站房间成员关系"的隐私 / security 攻击面。本接口的访问控制模型与 §10.5 leave 接口步骤 1 一致（caller 必须是该房间成员），统一"接口默认 deny + 显式 allow（白名单 ACL）"基线。**未来路径**：节点 4 之后若产品需要"加入前预览房间"语义（如分享链接），由对应 epic 单开 story 设计"轻量预览接口"（仅返回 `room.id` / `status` / `memberCount` 不含成员隐私字段）或"高熵 roomId 改造"（rooms.id 从 BIGINT auto_increment 改 nanoid），**不**回退本 ACL。
 
 #### 服务端逻辑
 
@@ -1255,7 +1255,7 @@ JSON 示例（用户当前不在任何房间）：
 
 1. 查 `users.current_room_id`，**与请求的 `roomId` 不一致**（含 `current_room_id` 为 null）→ 立即返回 **6004 用户不在房间中**（caller 不是该房间成员，禁止查看其他成员隐私字段）；**通过后追加** `SELECT 1 FROM room_members WHERE room_id = ? AND user_id = caller FOR SHARE`：取 **共享锁** 锁定 caller 自己的成员行，确保本读事务持续期间该行不会被并发 leave 的 DELETE 提交（DELETE 需要排他锁，与 FOR SHARE 互斥，必须等本读事务 commit 后才能继续）；该 SELECT 命中 0 行 → 视同步骤 1 ACL 失败，返回 **6004**（兜底语义；正常情况下步骤 1 前半段 `users.current_room_id` 已通过即意味着该行存在，本步骤是 race 兜底）
 2. 查 `rooms WHERE id = ?`，**找不到** → 返回 **6001 房间不存在**（理论上步骤 1 已通过意味着 caller 在该房间，rooms 行必存在；本步骤是兜底）
-3. 查 `room_members WHERE room_id = ?` + JOIN `users` / `pets` 聚合（按 `room_members.joined_at ASC` 稳定排序）
+3. 查 `room_members WHERE room_id = ?` + INNER JOIN `users` + **LEFT JOIN `pets`** 聚合（按 `room_members.joined_at ASC` 稳定排序）—— **必须用 LEFT JOIN `pets`**（不能用 INNER JOIN）：pet-less 账号（用户无活跃 pet 行，§5.1 / Story 4.8 已将其作为 contract 内合法 edge case 覆盖）若用 INNER JOIN 会被静默丢行 → 违反 `memberCount === members.length` 不变量；LEFT JOIN 时 `pets.*` 列为 NULL，service 实装层据此把 `data.members[].pet` 整体下发为 `null`（详见字段表 `data.members[].pet` 行 + JSON 示例 `userId: "1003"` 边界案例）
 4. 提交事务并返回 `data.{room, members}`
 
 **注**：虽然本接口只读、不修改任何行，但事务的 snapshot 隔离 + FOR SHARE 行锁双机制对 ACL 边界至关重要 —— 不开事务等于把 ACL race 的风险转嫁给"client 自洽不变量"，而 ACL 是隐私边界、不能由 client 兜底。"`memberCount === members[].length`"等不变量仍然成立（步骤 3 内部一次 SELECT 自然原子），但**跨步骤的 ACL 一致性由 snapshot + FOR SHARE 共同提供**。本读事务在数据库设计 §8.8 中归类为"读快照事务（含 ACL 共享锁）"，与写事务（§8.1 / §8.6 / §8.7）并列。
@@ -1277,11 +1277,12 @@ JSON 示例（用户当前不在任何房间）：
 | `data.members[].userId` | string | 必填 | 成员 user 主键（BIGINT 字符串化） |
 | `data.members[].nickname` | string | 必填 | 成员昵称；来自 `users.nickname`（节点 2 阶段首次创建时 server 写入 `"用户{id}"`，可被未来"修改昵称"功能覆盖） |
 | `data.members[].avatarUrl` | string | 必填 | 成员头像 URL；首次创建为空字符串 `""`（不为 null）；空字符串语义 = "暂无头像"，client 渲染时降级为占位头像 |
-| `data.members[].pet.petId` | string | 必填 | 成员当前宠物主键（BIGINT 字符串化）；来自 `pets.id`（每个 user 节点 2 阶段唯一 1 只默认猫，详见 Story 4.6 首次初始化事务） |
-| `data.members[].pet.currentState` | number (int) | 必填 | 宠物当前状态枚举：`1 = rest` / `2 = walk` / `3 = run`（来源数据库设计 §6.4 `pets.current_state`）；**节点 4 阶段固定返回 `1`**（Epic 14 才真实驱动 motion_state） |
-| `data.members[].pet.equips` | array | 必填 | 成员当前装备数组；**节点 4 阶段固定返回 `[]`**（Future Fields，详见本节末"五阶段过渡表"） |
+| `data.members[].pet` | object \| null | 必填（nullable） | 成员当前宠物容器；与 §5.1 GET /home `data.pet` 同语义，**pet-less 账号**（用户**无活跃 pet**，理论不该发生但 §5.1 / Story 4.8 已将其作为 contract 内合法 edge case 覆盖）时下发 `null`；客户端必须按可空对象解析（iOS `Optional<MemberPetDTO>` / Go `*MemberPetDTO`），不得假设 `pet` 永远非空。下方 `data.members[].pet.*` 子字段**仅当 `pet ≠ null` 时存在**；client 渲染时 `pet == null` 应降级为"无宠物"占位（不渲染 cat sprite），**不**视为契约违反 |
+| `data.members[].pet.petId` | string | 必填（仅当 `pet ≠ null`） | 成员当前宠物主键（BIGINT 字符串化）；来自 `pets.id`（每个 user 节点 2 阶段唯一 1 只默认猫，详见 Story 4.6 首次初始化事务）；当 `pet ≠ null` 时**必非空字符串** |
+| `data.members[].pet.currentState` | number (int) | 必填（仅当 `pet ≠ null`） | 宠物当前状态枚举：`1 = rest` / `2 = walk` / `3 = run`（来源数据库设计 §6.4 `pets.current_state`）；**节点 4 阶段固定返回 `1`**（Epic 14 才真实驱动 motion_state） |
+| `data.members[].pet.equips` | array | 必填（仅当 `pet ≠ null`） | 成员当前装备数组；**节点 4 阶段固定返回 `[]`**（Future Fields，详见本节末"五阶段过渡表"） |
 
-JSON 示例（节点 4 阶段，3 成员房间）：
+JSON 示例（节点 4 阶段，3 成员房间，含 1 个 pet-less 边界案例）：
 
 ```json
 {
@@ -1320,17 +1321,15 @@ JSON 示例（节点 4 阶段，3 成员房间）：
         "userId": "1003",
         "nickname": "用户1003",
         "avatarUrl": "",
-        "pet": {
-          "petId": "2003",
-          "currentState": 1,
-          "equips": []
-        }
+        "pet": null
       }
     ]
   },
   "requestId": "req_xxx"
 }
 ```
+
+> **示例说明**：`userId: "1003"` 是 pet-less 账号（`pet: null`） —— 与 §5.1 GET /home `data.pet = null` 同语义（Story 4.8 edge case：用户无活跃 pet 行）；client 解析层按 `Optional<MemberPetDTO>` 处理，`pet == null` 降级为"无宠物"占位渲染（不渲染 cat sprite），**不**视为响应 malformed。绝大部分用户场景下 `pet ≠ null`（节点 2 首次初始化事务保证默认 pet 行），但 contract 层必须覆盖该 edge case，避免 server 端 JOIN `pets` 时丢行（违反 `memberCount === members.length` 不变量）或 fabricate 假 pet 数据（违反真实性）。
 
 #### 可能的错误码
 
@@ -1354,9 +1353,10 @@ JSON 示例（节点 4 阶段，3 成员房间）：
 | `userId` | `room_members.user_id` 字符串化 | 同 placeholder | 同 placeholder | 同 placeholder | 同 placeholder |
 | `nickname` | `""`（不 JOIN `users`，详见 §12.3 placeholder 说明） | `users.nickname`（GET /rooms/{roomId} 始终走真实路径；WS room.snapshot 由 Story 11.7 SnapshotBuilder 真实实装） | 同节点 4 真实 | 同节点 4 真实 | 同节点 4 真实 |
 | `avatarUrl` | **不下发**（§12.3 字段表 placeholder 不含此字段） | `users.avatar_url`（首次创建为 `""`，本接口始终走真实路径） | 同节点 4 真实 | 同节点 4 真实 | 同节点 4 真实 |
-| `pet.petId` | `""`（不 JOIN `pets`） | `pets.id` 字符串化 | 同节点 4 真实 | 同节点 4 真实 | 同节点 4 真实 |
-| `pet.currentState` | 固定 `1` | 固定 `1` | `pets.current_state`（真实 1/2/3，由 Epic 14 状态机驱动） | 同节点 5 | 同节点 5 |
-| `pet.equips` | **不下发**（§12.3 字段表 placeholder 不含此字段） | `[]`（节点 4 阶段 Story 11.6 GET /rooms/{roomId} 固定返回空数组；WS room.snapshot 同样不下发） | 同节点 4 真实 | `user_pet_equips JOIN cosmetic_items` 聚合（Story 26.6 真实回填，**不**含 `renderConfig` 子字段） | 同节点 9 + 加 `renderConfig` 子字段（Story 29.6 真实回填 `pet.equips[].renderConfig`） |
+| `pet` 整体 | LEFT JOIN `pets`：用户**无活跃 pet 行**时下发 `null`（pet-less edge case，与 §5.1 GET /home `data.pet = null` 同语义） | 同 placeholder | 同 placeholder | 同 placeholder | 同 placeholder |
+| `pet.petId`（仅 `pet ≠ null`） | `""`（不 JOIN `pets`） | `pets.id` 字符串化 | 同节点 4 真实 | 同节点 4 真实 | 同节点 4 真实 |
+| `pet.currentState`（仅 `pet ≠ null`） | 固定 `1` | 固定 `1` | `pets.current_state`（真实 1/2/3，由 Epic 14 状态机驱动） | 同节点 5 | 同节点 5 |
+| `pet.equips`（仅 `pet ≠ null`） | **不下发**（§12.3 字段表 placeholder 不含此字段） | `[]`（节点 4 阶段 Story 11.6 GET /rooms/{roomId} 固定返回空数组；WS room.snapshot 同样不下发） | 同节点 4 真实 | `user_pet_equips JOIN cosmetic_items` 聚合（Story 26.6 真实回填，**不**含 `renderConfig` 子字段） | 同节点 9 + 加 `renderConfig` 子字段（Story 29.6 真实回填 `pet.equips[].renderConfig`） |
 
 **关键解读**：
 
@@ -1376,7 +1376,8 @@ JSON 示例（节点 4 阶段，3 成员房间）：
 
 - 字段表中所有 BIGINT 主键 / 外键（`id` / `creatorUserId` / `userId` / `petId`）严格按 §2.5 全局约定字符串化下发
 - `data.members[].avatarUrl` 必须存在且为 string（可空字符串 `""`，**不**为 null）；与 §4.1 / §4.3 / §5.1 中 `user.avatarUrl` 处理一致
-- `data.members[].pet.equips` 节点 4 阶段必须为 `[]`（空数组，**不**省略 key、**不**为 null）；client 解析层按 `[<EquipDTO>]` 解析，节点 4 阶段数组永远为空，节点 9 由 Epic 26 真实回填非空数组
+- `data.members[].pet` 是 nullable object（`pet-less` 账号下发 `null`，详见字段表 `data.members[].pet` 行）；client 解析层按 `Optional<MemberPetDTO>` 处理；当 `pet ≠ null` 时下方所有 `pet.*` 子字段约束生效，当 `pet == null` 时**整个 pet 子树不下发**（不下发空 object `{}`，避免 client 误判为"有 pet 但字段缺失"）
+- `data.members[].pet.equips`（仅当 `pet ≠ null`）节点 4 阶段必须为 `[]`（空数组，**不**省略 key、**不**为 null）；client 解析层按 `[<EquipDTO>]` 解析，节点 4 阶段数组永远为空，节点 9 由 Epic 26 真实回填非空数组
 - 节点 4 阶段**不**下发 `members[].pet.equips[].renderConfig`（Future Fields，节点 10 由 Epic 29 / Story 29.6 加；本字段表**不**列入）
 
 #### roster 语义与 WS 断线交互
@@ -1388,7 +1389,7 @@ JSON 示例（节点 4 阶段，3 成员房间）：
 - **持久层 = `room_members` 行 + `users.current_room_id`**：**唯一**变更路径是 HTTP `POST /api/v1/rooms/{roomId}/join`（添加行）和 HTTP `POST /api/v1/rooms/{roomId}/leave`（删除行）—— 详见 §10.4 / §10.5 服务端逻辑。任何 WS 层事件（含心跳超时、TCP 1006、客户端主动 close、app 关闭 / 切后台）**禁止**修改持久层
 - **ephemeral 层 = SessionManager 内存映射 + Redis presence**：由 WS 连接生命周期管理（onRegister / onUnregister 钩子）；任何 WS 断开（含主动 close / 心跳超时 / TCP 异常）**只**清理 ephemeral 层（撤销 Session、清 presence），**不**触动持久层
 
-→ "WS 断开 = 离开房间" **不**成立；只有 HTTP leave（或被 server 通过 close 4007 通知 client 协议层确认完成的同一路径）才是真正的"离开房间"。这条钦定是 §10.5 / §12.1 4005 retryable 语义 / §12.3 `### 成员离开` 触发条件三处协同的契约基础。
+→ "WS 断开 = 离开房间" **不**成立；只有 HTTP leave（authoritative signal = HTTP 200 响应，详见 §10.5 步骤 9）才是真正的"离开房间"路径；§10.5 步骤 8 的 close 4007 是 server 端 best-effort cleanup（让 leaver Session 立即与房间 WS 解耦），不构成独立"离开"路径。这条钦定是 §10.5 / §12.1 4005 retryable 语义 / §12.3 `### 成员离开` 触发条件三处协同的契约基础。
 
 **各类 WS 断开场景的语义**：
 
@@ -1539,14 +1540,24 @@ JSON 示例（请求体）：
 5. 查 `room_members WHERE room_id = ?` 剩余数量；若 `== 0`（最后一人离开）→ 更新 `rooms.status = 2 closed`
 6. 提交事务
 7. **事务成功提交后**触发 WS 广播 `member.left`（payload 见 §12.3 `### 成员离开`，由 Story 11.8 实装；广播失败 fire-and-forget 仅 log，不影响 HTTP 200 响应）；**特例**：若步骤 5 触发了 closed 转换（房间已无在线广播对象）—— 广播路径仍调用 `BroadcastToRoom`，但 fanout 时房间内已无其他在线 Session，广播自然 no-op（详见 Story 10.5 BroadcastToRoom primitive 实装：空房间走 fast path 直接返回）
-8. **关闭 leaver 自己的 WS Session**（若 leaver 仍持有该 `roomId` 的 WS 连接）：从 SessionManager 撤销 (unregister) leaver 在该 `roomId` 的 Session + close underlying WebSocket（close code = `4007`，reason = `"left room via HTTP"`，详见 §12.1 close code 表 4007 行；client 解析层按 4xxx 业务级终态语义处理，**不**自动重连）；该步骤**必须**发生在步骤 7 广播之后 —— 顺序由"广播 fanout 时排除 leaver 自己 Session"语义钦定（§12.3 `### 成员离开` 关键约束），但 leaver 的 Session 撤销不能拖到心跳超时（默认 60s）才触发，否则在 close 前的窗口内 leaver 仍会收到该 roomId 的 `member.joined` / `member.left` / 后续 epic 广播消息（如 Story 14.x `pet.state.changed` / Story 17.x `emoji.received`），违反"HTTP leave 后立即与房间 WS 解耦"语义。Session 撤销失败（leaver 未持 WS 连接 / 已断开）→ no-op，不影响 HTTP 200 响应（fire-and-forget）
-9. 返回 `data.{roomId, left: true}`
+8. **关闭 leaver 自己的 WS Session**（若 leaver 仍持有该 `roomId` 的 WS 连接）：从 SessionManager 撤销 (unregister) leaver 在该 `roomId` 的 Session + close underlying WebSocket（close code = `4007`，reason = `"left room via HTTP"`，详见 §12.1 close code 表 4007 行；client 解析层按 4xxx 业务级终态语义处理，**不**自动重连）；该步骤**必须**发生在步骤 7 广播之后 —— 顺序由"广播 fanout 时排除 leaver 自己 Session"语义钦定（§12.3 `### 成员离开` 关键约束），但 leaver 的 Session 撤销不能拖到心跳超时（默认 60s）才触发，否则在 close 前的窗口内 leaver 仍会收到该 roomId 的 `member.joined` / `member.left` / 后续 epic 广播消息（如 Story 14.x `pet.state.changed` / Story 17.x `emoji.received`），违反"HTTP leave 后立即与房间 WS 解耦"语义。Session 撤销失败（leaver 未持 WS 连接 / 已断开）→ no-op，不影响 HTTP 200 响应（fire-and-forget）。**该步骤是 server 端 best-effort cleanup，不是 client 侧 leave 完成的 authoritative confirmation**：leaver 的 client 状态推进**必须**以 HTTP 200 响应（步骤 9）为唯一权威信号 —— close 4007 frame 与 HTTP 200 走两条独立连接，client 可能完全收不到 4007（leaver 的 WS 早已断开 / 4007 比 HTTP 200 晚到 / 中间网络丢包均合法），下方 close 顺序 rationale 段 + §12.1 close code 表 4007 行明确"4007 仅作 best-effort UX 辅助信号"，client **禁止**等 4007 才 tear down 房间状态
+9. 返回 `data.{roomId, left: true}`（**这是 leave 成功的 authoritative 信号**：client 收到 HTTP 200 + `data.left: true` 即应立即清本地房间状态并退出 RoomView，**不**等待 close 4007；4007 是 server 端 fire-and-forget WS cleanup，到达不可保证 —— 详见步骤 8 末尾 + §12.1 close code 4007 行 client 行为指引）
 
 **事务边界规则**：步骤 2 ~ 5 必须在同一 MySQL 事务中（参见数据库设计 §8.7 退出房间事务边界）；步骤 3 的 `RowsAffected == 0` 兜底**必须**在事务内回滚（不允许在事务外做 SELECT 校验后再开事务 —— 那种实现仍存在 step1-SELECT 与 DELETE 之间的竞态窗口，无法消除并发 race）；步骤 7 在事务**外**触发（fire-and-forget）；步骤 8 同样在事务**外**触发（fire-and-forget），且**必须**在步骤 7 广播之后（顺序保证 leaver 不会在自己 Session 被关闭后再收到由本次 leave 触发的 `member.left` —— fanout 已经物理上跳过 leaver Session，二者顺序仅影响清理副作用语义）。
 
+**HTTP 200 vs WS close 4007 — authority 与 best-effort 分工**（r10 锁定）：
+
+- **HTTP 200（步骤 9）**：leave 成功的**唯一 authoritative signal**。client 收到 HTTP 200 + `data.left: true` 即应**立即**清本地房间状态、退出 RoomView、清房间相关订阅 —— **禁止**等待 close 4007 才推进。原因：HTTP 响应与 WS close frame 走两条独立 TCP 连接，无任何协议层 ordering / delivery 保证：
+  - leaver 的 WS 可能早已断开（如 client 离开房间页前主动 close 了 WS）→ server 步骤 8 走"Session 撤销失败 no-op"路径，**不会**有 4007 frame 被发出
+  - 4007 frame 可能比 HTTP 200 晚到（WS 与 HTTP 是不同连接，TCP 层无序保证）→ client 等 4007 会引入不必要的 UX 延迟
+  - 中间网络 / 代理层可能丢 4007 frame（best-effort 投递）
+- **close 4007（步骤 8）**：server 端**best-effort cleanup** + **辅助 UX 信号**。其唯一 server 端职责是"立刻让 leaver 在 close 之前的窗口内不再收到本房间的后续 WS 广播"（避免 leaver Session 拖到心跳超时才被清理时持续收到 `member.joined` / 后续 epic 广播）；其在 client 侧的角色仅是**冗余辅助 UX 信号**：若 client 因极端场景没收到 HTTP 200（如 HTTP 请求超时但 server 已成功处理）但收到了 4007，可作为 fallback 触发 RoomView 退出 UX。**禁止**把 4007 当作 leave 完成的 authoritative confirmation —— client 实装层不应等 4007 才 tear down 房间状态，否则在 4007 不到达的合法场景（leaver WS 已断 / 4007 丢包 / 4007 晚到）会出现 client 卡在 leaving 状态。
+
+> **rationale**：r10 review 指出"HTTP 响应和 WS close frame 是两个独立连接，client 可能根本收不到 4007（WS 已断 / 4007 比 HTTP 200 晚到）；如果 client 把 4007 当作 leave 完成的 authoritative confirmation，等 4007 才 tear down 房间状态 → flaky"。本契约最终定位：HTTP 200 是 protocol-level authoritative success signal，WS close 4007 是 best-effort cleanup（不保证 client 收到，到达即作 fallback UX 辅助）。该 invariant 与 §12.1 close code 表 4007 行 + iOS Story 12.7 LeaveRoomUseCase 实装层一致。
+
 **步骤 2 `SELECT rooms FOR UPDATE` 必要性**（解决 r9 P1#2 race）：若 leave 不锁 `rooms` 行，可与并发 join 产生 timeline："A leave 步骤 3 删 room_members → A 步骤 5 看到 remaining=0 但**未** UPDATE rooms.status → B join 此时锁 rooms（看到 status=1）+ insert 自己的 room_members + commit → A UPDATE rooms.status=2 closed + commit"，结果 `rooms.status=2 closed` 但 `room_members` 有 B 的行 → B 后续 join 行为 / GET roster 全部失败，状态 drift。两类事务在 `rooms` 行 lock 上串行后：A leave 先锁 → B join wait → A 提交（含 status=2）后 B 才进入 → B 步骤 3 看到 `rooms.status=2` → 返回 **6005 房间状态异常**（与 §10.4 join 步骤 3 一致），状态保持一致。**join + leave 必须都对 `rooms` 行加 FOR UPDATE，缺一不可**。
 
-**WS 断线场景与本接口的关系**（r3 锁定语义）：心跳超时（→ close 4005）、client 主动 close、app 关闭 / 切后台、TCP 1006 异常断开等任何 WS 层断开**都不**走本接口的事务路径（不删 `room_members` 行、不改 `users.current_room_id`、不广播 `member.left`）—— 它们仅清理 ephemeral 层（SessionManager 撤销 Session + Redis presence 清理），由 Story 10.4 onUnregister 钩子统一负责；详见 §10.3 "roster 语义与 WS 断线交互" 小节。换言之，**只有本接口（HTTP leave）+ 步骤 8 的 close 4007** 是真正的"离开房间"路径。WS 断线后 `room_members` 行仍在，user 仍在 roster 中；用户通过 reconnect / 重新打开 app 即可回到原房间，无需重新 join —— 这是 §12.1 4005 retryable 语义的契约基础。
+**WS 断线场景与本接口的关系**（r3 锁定语义）：心跳超时（→ close 4005）、client 主动 close、app 关闭 / 切后台、TCP 1006 异常断开等任何 WS 层断开**都不**走本接口的事务路径（不删 `room_members` 行、不改 `users.current_room_id`、不广播 `member.left`）—— 它们仅清理 ephemeral 层（SessionManager 撤销 Session + Redis presence 清理），由 Story 10.4 onUnregister 钩子统一负责；详见 §10.3 "roster 语义与 WS 断线交互" 小节。换言之，**只有本接口（HTTP leave）的事务**是真正的"离开房间"路径（authoritative signal = HTTP 200 步骤 9，详见上方 "HTTP 200 vs WS close 4007 — authority 与 best-effort 分工" 段）；步骤 8 的 close 4007 是 server 端 best-effort cleanup（让 leaver Session 立即解耦房间 WS，避免拖到心跳超时仍收广播），不构成独立的"离开房间"路径。WS 断线后 `room_members` 行仍在，user 仍在 roster 中；用户通过 reconnect / 重新打开 app 即可回到原房间，无需重新 join —— 这是 §12.1 4005 retryable 语义的契约基础。
 
 #### 响应体
 
@@ -1704,12 +1715,12 @@ GET /ws/rooms/{roomId}?token=xxx
 | 1000 | server 或 client 任一方主动 close | 服务端 / 客户端正常关闭 | 否 | 客户端主动 close 不重连；服务端主动 close（如 graceful shutdown）客户端可选重连 |
 | 1001 | server 或 client 任一方主动 close | going away（服务端重启 / 客户端切后台） | 否 | 服务端重启 → 客户端**应**自动重连（指数退避，参考 iOS Story 12.5）；客户端切后台 → 客户端自身决定 |
 | 4006 | server 主动 close | 客户端违反协议策略 —— 节点 4 阶段唯一触发条件：单条消息 frame 超过 `ws.max_message_size_bytes`（默认 16 KB） | 是（reason = `"message too large"`） | **不**自动重连（视为客户端实装 bug，重连仍会被 close）；记 log error 后回退 |
-| 4007 | server 主动 close | leaver 通过 HTTP `POST /rooms/{roomId}/leave` 主动离开房间，且该 leaver 仍持有同一 `roomId` 的 WS 连接 —— server 在 leave 事务成功提交 + `member.left` 广播之后立即触发本 close；详见 §10.5 服务端逻辑步骤 8 | 是（reason = `"left room via HTTP"`） | **不**自动重连（业务级拒绝，leaver 已主动离开房间，重连会因 §12.1 校验顺序步骤 5"用户房间归属校验"失败被 close 4003）；client 收到本 close code **应**视为"自己的 HTTP leave 已被 server 端确认完成"的协议层信号 —— 用于触发本地 RoomView 退出 / RoomViewModel 清理等 UX 路径，client 实装层细节由 iOS Story 12.7 LeaveRoomUseCase 锚定 |
+| 4007 | server 主动 close | leaver 通过 HTTP `POST /rooms/{roomId}/leave` 主动离开房间，且该 leaver 仍持有同一 `roomId` 的 WS 连接 —— server 在 leave 事务成功提交 + `member.left` 广播之后立即触发本 close；详见 §10.5 服务端逻辑步骤 8 | 是（reason = `"left room via HTTP"`） | **不**自动重连（业务级拒绝，leaver 已主动离开房间，重连会因 §12.1 校验顺序步骤 5"用户房间归属校验"失败被 close 4003）；**4007 是 best-effort cleanup signal，不是 leave 完成的 authoritative confirmation** —— **HTTP `POST /rooms/{roomId}/leave` 的 200 响应（`data.left: true`）是 leave 完成的唯一权威信号**（§10.5 步骤 9 锚定），client **必须**以 HTTP 200 为推进 RoomView 退出 / 清房间状态的唯一触发点，**禁止**等待 4007 才 tear down（因 HTTP 与 WS 走两条独立连接，无 ordering / delivery 保证 —— leaver WS 早断 / 4007 比 HTTP 晚到 / 4007 丢包均合法）；client 收到 4007 时仅作**冗余 UX 辅助信号**：若已通过 HTTP 200 完成 RoomView 退出 → noop；若未收到 HTTP 200（极端场景如 HTTP 请求超时但 server 已成功处理）→ 作 fallback 触发 RoomView 退出 / RoomViewModel 清理 UX；client 实装层细节由 iOS Story 12.7 LeaveRoomUseCase 锚定 |
 | 1011 | server 主动 close | 服务端内部错误（panic / 不可恢复异常）；**含**握手完成后 SnapshotBuilder 构建初始 `room.snapshot` 失败的场景（reason = `"snapshot build failed"`） —— 因为 §12.1 钦定 `room.snapshot` 是握手成功后必发的第一条消息，构建失败若不 close 而仅推 `error`，client 会永远等待一个永不到达的 snapshot，房间页无法初始化 | 是（reason 应包含简短错误提示但**不**泄漏 stack trace） | 客户端**应**自动重连（指数退避，但限制最大重试次数避免雪崩） |
 
 **关键约束**：
 
-- 4001 / 4002 / 4003 / 4004 / 4006 / 4007 是**业务级**拒绝（4xxx 段是应用自定义；WebSocket RFC 6455 规定 4000-4999 为应用保留段），重试无意义，客户端**不**应自动重连；客户端应展示明确 UX 提示并回退（4006 = 客户端实装 bug，记 log error 后回退；4007 = 自身 HTTP leave 完成的协议层确认，触发 RoomView 退出 UX，不需提示错误）
+- 4001 / 4002 / 4003 / 4004 / 4006 / 4007 是**业务级**拒绝（4xxx 段是应用自定义；WebSocket RFC 6455 规定 4000-4999 为应用保留段），重试无意义，客户端**不**应自动重连；客户端应展示明确 UX 提示并回退（4006 = 客户端实装 bug，记 log error 后回退；4007 = server 端 best-effort cleanup 信号，仅作 fallback UX 辅助 —— **leave 完成的 authoritative signal 是 HTTP 200 响应**，client **禁止**等 4007 才推进 RoomView 退出，详见 4007 行 client 行为指引）
 - **4005 是 4xxx 段中的例外**：虽然位于 4xxx 应用自定义段，但语义是 transient network failure（心跳超时多半是网络抖动 / 客户端切后台），不是业务级拒绝；客户端**应**自动重连，与 1006 / 1011 同等对待（指数退避 + 最大重试次数限制）。该 retryable 语义的可行性由 §10.3 / §10.5 / §12.3 钦定共同保证："WS 断开（含心跳超时）仅清 ephemeral 层；持久层 `room_members` / `users.current_room_id` 仅由 HTTP join / leave 改变" —— 因此 4005 reconnect 握手时 `room_members` 行必然仍在，§12.1 校验顺序步骤 5 通过，client 重新进入原房间无需重新 join
 - 1000 / 1001 / 1011 是**协议 / 网络**级断开（1xxx 段是 RFC 标准段，可由服务端主动 emit），客户端**应**自动重连（除 1000 主动关闭外）
 - **不使用 RFC close code 1006 / 1008 / 1009**（**不**出现在上方 close code 表内，**也不**由服务端主动 emit，原因分两类）：
@@ -1862,11 +1873,12 @@ JSON 通用骨架：
 | `payload.room.id` | string | 必填 | 房间 ID（BIGINT 字符串化下发，遵循 §2.5 全局约定） |
 | `payload.room.maxMembers` | number (int) | 必填 | 房间容量上限（节点 4 阶段固定 4，由 Story 11.3 创建房间事务写入；本接口仅返回当前值） |
 | `payload.room.memberCount` | number (int) | 必填 | 房间总成员数 = 当前 `room_members WHERE room_id = ?` 行数；与下文 `payload.members` 数组长度严格相等（见本节末"不变量"小节）；节点 4 阶段 Story 10.7 placeholder 实现 = `SELECT COUNT(*) FROM room_members WHERE roomId=?` 的真实行数（或同一次 query 直接取 `len(members)`，二者必须一致），**禁止**写死为 1；Story 11.7 真实实现 = 同样的 `room_members` 行数，差异仅在于 placeholder 阶段不 JOIN `users` / `pets`（丰富字段降级），**不**在成员数量上与真实实装区分 |
-| `payload.members` | array | 必填 | 房间全成员列表 = 当前 `room_members WHERE room_id = ?` 全部行（**不**做"WS 此刻是否连接"层的过滤，roster 反映 server 端"仍在房间"的成员；与 §10.3 `data.members[]` 同语义，详见 §10.3 "roster 语义与 WS 断线交互"小节）；节点 4 阶段 Story 10.7 placeholder 实现 = `SELECT * FROM room_members WHERE roomId=?` 的全部行（**禁止**只返回当前握手用户自己 —— 房间已有 ≥2 成员时漏返其他成员会让 client 把 snapshot 当 authoritative state 错误清空已加载的 roster），单表查询不依赖 JOIN，本身已足够简单；丰富字段在 placeholder 阶段降级（`nickname` / `pet.*` 行为见各字段 placeholder 行）；Story 11.7 真实实现按 `room_members` JOIN `users` JOIN `pets` 聚合，**仅丰富字段差异**，成员条目数量与 placeholder 一致 |
+| `payload.members` | array | 必填 | 房间全成员列表 = 当前 `room_members WHERE room_id = ?` 全部行（**不**做"WS 此刻是否连接"层的过滤，roster 反映 server 端"仍在房间"的成员；与 §10.3 `data.members[]` 同语义，详见 §10.3 "roster 语义与 WS 断线交互"小节）；节点 4 阶段 Story 10.7 placeholder 实现 = `SELECT * FROM room_members WHERE roomId=?` 的全部行（**禁止**只返回当前握手用户自己 —— 房间已有 ≥2 成员时漏返其他成员会让 client 把 snapshot 当 authoritative state 错误清空已加载的 roster），单表查询不依赖 JOIN，本身已足够简单；丰富字段在 placeholder 阶段降级（`nickname` / `pet.*` 行为见各字段 placeholder 行）；Story 11.7 真实实现按 `room_members` INNER JOIN `users` + **LEFT JOIN `pets`** 聚合（**必须 LEFT JOIN `pets`**：pet-less 账号无活跃 pet 行，INNER JOIN 会丢行 → 违反 `memberCount === members.length` 不变量；与 §10.3 服务端逻辑步骤 3 一致），**仅丰富字段差异**，成员条目数量与 placeholder 一致 |
 | `payload.members[].userId` | string | 必填 | 成员用户 ID（BIGINT 字符串化）；node-4 placeholder 阶段直接来自 `room_members.userId`，**所有成员行都返回**（不限于握手用户） |
 | `payload.members[].nickname` | string | 必填 | 成员昵称；node-4 placeholder 阶段（Story 10.7）允许返回**空字符串** `""`（不 JOIN `users` 表，避免 placeholder 过度耦合 Story 11.7 的多表 JOIN）；**空字符串语义 = "我不知道这个值"**，client 按本节末"client merge contract"**保留** client 已有真实昵称（如来自 `GET /api/v1/rooms/{roomId}` 响应），**禁止**用空串覆盖；client 渲染时若本地无真实值，空串可降级为占位文案；Story 11.x（具体由 Story 11.7 真实 SnapshotBuilder 实装）由 `users.nickname` 真实回填 |
-| `payload.members[].pet.petId` | string | 必填 | 成员当前宠物 ID（BIGINT 字符串化）；node-4 placeholder 阶段（Story 10.7）允许返回**空字符串** `""`（不 JOIN `pets` 表）；**空字符串语义 = "我不知道这个值"**，client 按本节末"client merge contract"**保留** client 已有真实 petId（如来自 `GET /api/v1/rooms/{roomId}` 响应），**禁止**用空串覆盖；Story 14.x（pet 真实驱动时由 Story 11.7 同步扩展）回填真实 `pets.id` |
-| `payload.members[].pet.currentState` | number (int) | 必填 | 宠物当前状态枚举：`1 = rest` / `2 = walk` / `3 = run`（与数据库设计 §6.4 `pets.current_state` 同义）；node-4 placeholder 阶段（Story 10.7）固定返回 `1`；Story 11.7 真实实现亦固定返回 `1`（Epic 14 才真实驱动） |
+| `payload.members[].pet` | object \| null | 必填（nullable） | 成员当前宠物容器；与 §10.3 `data.members[].pet` / §5.1 GET /home `data.pet` 同语义，**pet-less 账号**（用户无活跃 pet 行，contract 内合法 edge case）下发 `null`；client 解析层按 `Optional<MemberPetDTO>` 处理（iOS / Go），`pet == null` 时**整个 pet 子树不下发**，渲染降级为"无宠物"占位；下方 `payload.members[].pet.*` 子字段**仅当 `pet ≠ null` 时存在**。**节点 4 placeholder 阶段（Story 10.7）的 LEFT JOIN 简化路径**：单表查询不 JOIN `pets`，service 实装层若无法判定该 user 是否 pet-less，可一律下发"`pet ≠ null` + `petId: ""`"占位结构（保持向后兼容，client merge contract 处理空串保留），但 Story 11.7 真实实装时**必须**LEFT JOIN `pets`，pet-less 时下发 `pet: null` |
+| `payload.members[].pet.petId` | string | 必填（仅当 `pet ≠ null`） | 成员当前宠物 ID（BIGINT 字符串化）；node-4 placeholder 阶段（Story 10.7）允许返回**空字符串** `""`（不 JOIN `pets` 表）；**空字符串语义 = "我不知道这个值"**，client 按本节末"client merge contract"**保留** client 已有真实 petId（如来自 `GET /api/v1/rooms/{roomId}` 响应），**禁止**用空串覆盖；Story 14.x（pet 真实驱动时由 Story 11.7 同步扩展）回填真实 `pets.id` |
+| `payload.members[].pet.currentState` | number (int) | 必填（仅当 `pet ≠ null`） | 宠物当前状态枚举：`1 = rest` / `2 = walk` / `3 = run`（与数据库设计 §6.4 `pets.current_state` 同义）；node-4 placeholder 阶段（Story 10.7）固定返回 `1`；Story 11.7 真实实现亦固定返回 `1`（Epic 14 才真实驱动） |
 | `ts` | number (int64) | 必填 | 服务端发送时间戳（ms） |
 
 > **Future Fields（节点 4 阶段为占位 / 节点 5 / 9 落地）**：
@@ -1875,7 +1887,7 @@ JSON 通用骨架：
 > - `payload.members[].pet.equips`（成员当前装备）：Epic 26 / Story 26.6 落地后由 Story 11.7 同步扩展；节点 4 阶段不返回（按 merge contract 保留 client 已有值）
 > - `payload.members[].pet.equips[].renderConfig`（装备渲染配置）：Epic 29 / Story 29.6 落地后由 Story 11.7 同步扩展；节点 4 阶段不返回（按 merge contract 保留 client 已有值）
 
-JSON 示例（真实示例，Story 11.7 落地后形态）：
+JSON 示例（真实示例，Story 11.7 落地后形态；含 1 个 pet-less 边界案例 `userId: "1003"`）：
 
 ```json
 {
@@ -1885,7 +1897,7 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
     "room": {
       "id": "3001",
       "maxMembers": 4,
-      "memberCount": 2
+      "memberCount": 3
     },
     "members": [
       {
@@ -1903,12 +1915,19 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
           "petId": "2002",
           "currentState": 1
         }
+      },
+      {
+        "userId": "1003",
+        "nickname": "C",
+        "pet": null
       }
     ]
   },
   "ts": 1776920345000
 }
 ```
+
+> **示例说明**：`userId: "1003"` 是 pet-less 账号（`pet: null`）—— 与 §10.3 GET /rooms/{roomId} 同语义，由 LEFT JOIN `pets` 在用户无活跃 pet 行时下发；client 解析层按 `Optional<MemberPetDTO>` 处理，`pet == null` 渲染降级为"无宠物"占位（不渲染 cat sprite），并按本节末 client merge contract `null` 处理路径直接覆盖 client 已有 pet 状态（authoritative pet-less 信号）；绝大部分用户场景下 `pet ≠ null`，但 contract 层必须覆盖该 edge case。
 
 > **不变量（snapshot 内部一致性）**：`memberCount` 必须**严格等于** `members[]` 数组长度。两者**统一表示当前 `room_members` 行数**（即 server 端"仍在房间"的全部成员），**不**做"WS 此刻是否连接"层的过滤 —— 即 snapshot 是房间的 full roster view（按 `room_members` 全行），**不是** WS-online-only view。理由：(a) 若 `memberCount` 与 `members[].length` 任一方做"WS 在线过滤"而另一方不做，违反不变量；(b) 节点 4 阶段服务端**不**在握手时广播 `member.joined`（详见 §12.1 末尾 placeholder 注），客户端无法靠后续推送补齐 row 还在但 WS 暂未连上的成员，snapshot 必须自包含 `room_members` 全行；(c) 节点 4 阶段**不**引入"online / offline" 字段层区分 —— `room_members` 行的删除**唯一**路径是 HTTP `POST /rooms/{roomId}/leave` 事务（删行后触发 `member.left` 广播，该 user 不再出现在后续 snapshot / GET /rooms 响应中）；任何 WS 层断开（含心跳超时 / TCP 1006 / app 关闭）**仅**清 ephemeral 层（SessionManager + Redis presence），**不**触动 `room_members` 行 —— 因此该 user 在断线期间仍出现在后续 snapshot / GET /rooms roster 中，与 §12.1 4005 retryable 语义自洽（详见 §10.3 末尾"roster 语义与 WS 断线交互"小节）。节点 4 阶段 Story 10.7 placeholder 实装时 `members[]` 必须**反映 `room_members` 全部成员行**（最少 1 个，即握手用户自己；房间已有 ≥2 成员时必须返回全部）—— **禁止**写"全零 placeholder"（`memberCount: 0` + `members: []`），也**禁止**写"单成员快照"（仅当前握手用户自己，`memberCount` 写死为 1），因为：(i) §12.1 第 5 步握手成功**充分条件**只校验"当前用户已在 `room_members` 表中"，**不**保证房间只有 1 个成员；房间已有 ≥2 成员时单成员 snapshot 会让 client 把首条 authoritative 消息当成"房间被清空"，错误清空已加载的合法 roster；(ii) 推荐房间进入流程要求 client 先 `GET /api/v1/rooms/{roomId}` 加载房间状态后再开 WS（详见 §11.5 客户端推荐调用顺序），client 已经持有合法 roster 视图，再收到一个比真实成员少的 snapshot 同样会错误覆盖（无论是零成员还是单成员都属于"少返"）；(iii) §12.1.3 钦定 `room.snapshot` 是握手成功后**必发**的第一条 authoritative 消息，client 把它作为权威态采用，placeholder 必须给出**结构上真实**的快照（成员条目齐全），仅在丰富字段（`nickname` / `pet.*`）层面降级为占位默认值，**不**在成员数量上偷工。Story 11.7 真实实装时由**同一次** `room_members` JOIN `users` JOIN `pets` 聚合产出 `members[]`，`memberCount` 取该数组长度（或同一次 query 的 `COUNT(*)`），server 实装层面**禁止**让两者出现 drift；与 Story 10.7 placeholder 的差异**仅在丰富字段**（`nickname` / `pet.*` 真实回填），**不在成员数量**。
 
@@ -1947,7 +1966,7 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 }
 ```
 
-> **placeholder 字段值来源说明**：上例 `members[]` 直接来自 `SELECT * FROM room_members WHERE roomId=?` 的全部行（**单表查询，不 JOIN `users` / `pets`**）—— `userId` 取 `room_members.userId`；`nickname` 在 placeholder 阶段返回空字符串 `""`（避免 JOIN `users`，由 Story 11.7 真实实装时由 `users.nickname` 回填）；`pet.petId` 在 placeholder 阶段返回空字符串 `""`（避免 JOIN `pets`，由 Story 14.x 真实驱动时由 Story 11.7 同步扩展）；`pet.currentState` 节点 4 阶段固定 `1`（rest，与数据库设计 §6.4 `pets.current_state` 同义；Epic 14 才真实驱动）。Story 10.7 SnapshotBuilder placeholder 实装路径：用单表查询 `SELECT * FROM room_members WHERE roomId=?` 取全部成员行（这是 placeholder 必须做的，**禁止**只取当前握手用户）；JOIN `users` / `pets` 由 Story 11.7 真实实装时再加，**不**在 Story 10.7 范围内 —— 这样 placeholder 反映真实 roster **结构**（成员 ID 全到位），仅丰富字段降级为 placeholder 默认值。
+> **placeholder 字段值来源说明**：上例 `members[]` 直接来自 `SELECT * FROM room_members WHERE roomId=?` 的全部行（**单表查询，不 JOIN `users` / `pets`**）—— `userId` 取 `room_members.userId`；`nickname` 在 placeholder 阶段返回空字符串 `""`（避免 JOIN `users`，由 Story 11.7 真实实装时由 `users.nickname` 回填）；`pet` 整体在 placeholder 阶段一律下发非空 object（`pet ≠ null`，`petId: ""` + `currentState: 1`）—— 因为 placeholder 阶段不 JOIN `pets`，service 实装层无法判定该 user 是否 pet-less（pet-less = 无活跃 pet 行的 contract 内 edge case），按"保留 client merge 兼容"原则一律下发 `pet ≠ null` + `petId: ""` 占位结构；client merge contract 处理 `petId: ""` 为"保留 client 已有值"路径，与下发 `null` 形态等价（client 都不会用 placeholder 值覆盖真实 petId）。`pet.currentState` 节点 4 阶段固定 `1`（rest，与数据库设计 §6.4 `pets.current_state` 同义；Epic 14 才真实驱动）。Story 10.7 SnapshotBuilder placeholder 实装路径：用单表查询 `SELECT * FROM room_members WHERE roomId=?` 取全部成员行（这是 placeholder 必须做的，**禁止**只取当前握手用户）；INNER JOIN `users` + **LEFT JOIN `pets`** 由 Story 11.7 真实实装时再加，**不**在 Story 10.7 范围内 —— 这样 placeholder 反映真实 roster **结构**（成员 ID 全到位），仅丰富字段降级为 placeholder 默认值。**Story 11.7 真实实装阶段** LEFT JOIN `pets` 后判定：若 `pets.*` 列为 NULL（pet-less 账号）→ 下发 `pet: null`；否则下发 `pet ≠ null` + 子字段全部填充。
 
 > **Client merge contract（client 解析 `room.snapshot` 时必须遵守）**：snapshot 是握手后**必发**的第一条 authoritative 消息（§12.1 握手成功流程），但其权威性是 **enrich/correct** 而**非** wipe-out。client 在收到 `room.snapshot` 时，**禁止**做 "把 `members[]` 整体替换 client 当前 roster" 的暴力赋值，**必须**对每个 member entry 做**字段级 merge**，规则如下：
 >
@@ -1955,7 +1974,7 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 > 2. **字段级（每个 entry 的字段值）**：
 >    - **非空值**（如 `nickname: "Alice"` / `pet.petId: "2002"` / `pet.currentState: 2`）：用 snapshot 的值**覆盖** client 已有值（这是真实 authoritative 数据，覆盖正确）。
 >    - **空字符串**（`""`）：**保留** client 已有值。空字符串 = "server 不知道这个值"的 placeholder 信号（节点 4 placeholder 阶段 / 任何未来未 enrich 的字段同义），**不是** "请清空" 的指令；若 client 通过 §15.6 推荐流程从 `GET /api/v1/rooms/{roomId}` 已加载真实昵称 / petId，必须保留这些真实值，避免"每次重连退化为空昵称 / 空 petId"。
->    - **`null` 值**：与空字符串语义不同 —— `null` 在本协议中保留给"明确无值"语义（如 §4.3 `currentRoomId: null` = 用户当前不在任何房间）；snapshot 字段表中**未出现** `null` 取值的字段（成员级别字段不 null），故节点 4 阶段不需要处理 null case。
+>    - **`null` 值**：与空字符串语义不同 —— `null` 在本协议中保留给"明确无值"语义（如 §4.3 `currentRoomId: null` = 用户当前不在任何房间，§5.1 `data.pet = null` = 用户 pet-less，本节 `payload.members[].pet = null` = 该成员 pet-less）；当 server 下发 `payload.members[].pet = null` 时，**这是 authoritative 的"该成员当前确实无 pet"信号**（与"server 不知道"的空字符串语义不同），client **应**直接覆盖 client 已有值（即把该成员 pet 状态置为 null，渲染降级为"无宠物"占位，不渲染 cat sprite）；其余成员级别字段（`userId` / `nickname` / `pet.petId` / `pet.currentState`）当前协议中**不**取 `null` 值。
 >    - **未出现的字段**（如 placeholder 阶段不下发 `avatarUrl` / `pet.equips`）：**保留** client 已有值（与空字符串等价处理）。
 > 3. **数值字段**（`pet.currentState`）：节点 4 阶段 placeholder 与 Story 11.7 真实实装均固定 `1`（Epic 14 才真实驱动 motion_state）；client 收到该值时**应**直接覆盖 client 已有值（无 placeholder 信号约定 —— 数值字段不存在"空字符串"语义；当未来 Epic 14 真实驱动后，server 下发 2/3 即真实值）。
 >
@@ -1967,7 +1986,7 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 
 **触发**：
 
-- `POST /api/v1/rooms/{roomId}/join` 加入房间事务**成功提交后**，server 调用 `BroadcastToRoom(roomID, {type: "member.joined", payload: {userId, nickname, avatarUrl, pet: {petId, currentState}}})` 广播给该房间内所有**其他**在线成员（不发给加入者自己 —— 加入者自己应收 HTTP 响应即知自己已加入，且加入者后续如建立 WS 连接，握手时 server 会下发含自己的 `room.snapshot`，与已连接成员通过 `member.joined` enrich roster 的路径互补）；payload **必须**含 `avatarUrl` + `pet.{petId, currentState}`，不能简化为仅 `userId + nickname` —— 已连接成员仅在握手时收一次 `room.snapshot`（§12.1.3 钦定），后续无新 snapshot 触发，**唯一**enrich 新成员展示字段（头像、宠物 ID、宠物状态）的路径就是 `member.joined` 自身 payload；若 trigger 实装层简化为仅下发 `userId + nickname`，已连接成员将永远看不到新成员的头像 / 宠物，违反"`member.joined` 必须自包含展示所需全部字段"语义（详见下方"字段"表 + Story 11.8 实装锚定）
+- `POST /api/v1/rooms/{roomId}/join` 加入房间事务**成功提交后**，server 调用 `BroadcastToRoom(roomID, {type: "member.joined", payload: {userId, nickname, avatarUrl, pet: {petId, currentState} | null}})` 广播给该房间内所有**其他**在线成员（不发给加入者自己 —— 加入者自己应收 HTTP 响应即知自己已加入，且加入者后续如建立 WS 连接，握手时 server 会下发含自己的 `room.snapshot`，与已连接成员通过 `member.joined` enrich roster 的路径互补）；payload **必须**含 `avatarUrl` + `pet`（其中 `pet` 是 nullable —— pet-less 账号下发 `null`，详见下方"字段"表 `payload.pet` 行；与 §10.3 / §12.3 `room.snapshot` `members[].pet` 同语义保持一致），不能简化为仅 `userId + nickname` —— 已连接成员仅在握手时收一次 `room.snapshot`（§12.1.3 钦定），后续无新 snapshot 触发，**唯一**enrich 新成员展示字段（头像、宠物 ID、宠物状态）的路径就是 `member.joined` 自身 payload；若 trigger 实装层简化为仅下发 `userId + nickname`，已连接成员将永远看不到新成员的头像 / 宠物，违反"`member.joined` 必须自包含展示所需全部字段"语义（详见下方"字段"表 + Story 11.8 实装锚定）
 - 节点 4 阶段**仅** Story 11.8 一处触发；任何 WS 层事件（含握手、心跳超时、断开重连）**都不**触发 `member.joined` —— `member.joined` 与 `room_members` 行的"新增"语义严格 1:1 对应，而新增持久层行**仅**通过 HTTP join 接口完成（详见 §10.4 服务端逻辑）；后续 epic 不在本路径加新触发条件（如 Story 14.x 状态广播走独立 `pet.state.changed`）
 
 **字段**：
@@ -1979,16 +1998,17 @@ JSON 示例（真实示例，Story 11.7 落地后形态）：
 | `payload.userId` | string | 必填 | 加入的成员 user 主键（BIGINT 字符串化）；来自加入事务的当前 user |
 | `payload.nickname` | string | 必填 | 加入的成员昵称；来自 `users.nickname`；**必非空字符串**（节点 2 阶段首次创建时 server 写入 `"用户{id}"`，必有真实值；不存在 placeholder 阶段空字符串场景） |
 | `payload.avatarUrl` | string | 必填 | 加入的成员头像 URL；来自 `users.avatar_url`；可空字符串 `""`（首次创建用户时 `users.avatar_url` 为空；节点 4 阶段 server 端未做头像上传链路），**不**为 null —— client 解析层按 `String` 处理（与 §10.3 `data.members[].avatarUrl` 一致） |
-| `payload.pet.petId` | string | 必填 | 加入的成员当前宠物 ID（BIGINT 字符串化）；来自加入事务前 server 已查询该 user 的活跃 `pets.id`；**必非空字符串**（节点 2 阶段首次注册时 server 写入默认 pet 行，每个 user 必有活跃 pet） |
-| `payload.pet.currentState` | number (int) | 必填 | 加入时刻宠物当前状态枚举（`1 = rest` / `2 = walk` / `3 = run`，与数据库设计 §6.4 `pets.current_state` 同义）；节点 4 阶段固定 `1`（与 §10.3 `data.members[].pet.currentState` / §12.3 `room.snapshot` 同语义，Epic 14 才真实驱动） |
+| `payload.pet` | object \| null | 必填（nullable） | 加入的成员当前宠物容器；与 §10.3 `data.members[].pet` / §12.3 `room.snapshot` `payload.members[].pet` / §5.1 GET /home `data.pet` 同语义，**pet-less 账号**（用户无活跃 pet 行，contract 内合法 edge case，与 §5.1 / Story 4.8 保持一致）下发 `null`；client 解析层按 `Optional<MemberPetDTO>` 处理；下方 `payload.pet.*` 子字段**仅当 `pet ≠ null` 时存在**；client 收到 `pet == null` 时 append entry 时 pet 字段置空，渲染降级为"无宠物"占位（与 `room.snapshot` 同 merge 规则） |
+| `payload.pet.petId` | string | 必填（仅当 `pet ≠ null`） | 加入的成员当前宠物 ID（BIGINT 字符串化）；来自加入事务前 server 已查询该 user 的活跃 `pets.id`；当 `pet ≠ null` 时**必非空字符串**（绝大部分用户场景：节点 2 阶段首次注册时 server 写入默认 pet 行，每个正常 user 都有活跃 pet；pet-less edge case 下整个 `pet` 已是 `null`，不进入本字段约束） |
+| `payload.pet.currentState` | number (int) | 必填（仅当 `pet ≠ null`） | 加入时刻宠物当前状态枚举（`1 = rest` / `2 = walk` / `3 = run`，与数据库设计 §6.4 `pets.current_state` 同义）；节点 4 阶段固定 `1`（与 §10.3 `data.members[].pet.currentState` / §12.3 `room.snapshot` 同语义，Epic 14 才真实驱动） |
 | `ts` | number (int64) | 必填 | 服务端发送时间戳（ms） |
 
 > **Future Fields（节点 4 阶段为占位 / 节点 9 / 10 落地）**：
 >
-> - `payload.pet.equips`（成员当前装备）：Epic 26 / Story 26.6 落地后由 Story 11.8 同步扩展；节点 4 阶段**不**下发该字段；client 解析层按 `[<EquipDTO>]?` 可选数组处理，未出现时不视为契约违反
+> - `payload.pet.equips`（成员当前装备）：Epic 26 / Story 26.6 落地后由 Story 11.8 同步扩展；节点 4 阶段**不**下发该字段；client 解析层按 `[<EquipDTO>]?` 可选数组处理，未出现时不视为契约违反；当 `pet == null` 时本字段亦不下发（整个 pet 子树缺席）
 > - `payload.pet.equips[].renderConfig`（装备渲染配置）：Epic 29 / Story 29.6 落地后由 Story 11.8 同步扩展；节点 4 阶段不下发
 
-JSON 示例：
+JSON 示例（常规场景，`pet ≠ null`）：
 
 ```json
 {
@@ -2007,21 +2027,37 @@ JSON 示例：
 }
 ```
 
+JSON 示例（pet-less edge case，`pet == null`）：
+
+```json
+{
+  "type": "member.joined",
+  "requestId": "",
+  "payload": {
+    "userId": "1003",
+    "nickname": "用户1003",
+    "avatarUrl": "",
+    "pet": null
+  },
+  "ts": 1776920345000
+}
+```
+
 **关键约束**：
 
 - `payload.nickname` **必非空字符串** —— 与 `room.snapshot.payload.members[].nickname` 在 placeholder 阶段允许空字符串的语义**不同**：`member.joined` 在加入事务**成功提交后**触发，server 必有真实 nickname（`users` 表已被读取过用于事务决策），无 placeholder 阶段；client 解析层应按 `nickname != ""` 假设处理（节点 4 阶段所有 `member.joined` 消息字段值都是真实数据）
 - 广播范围：**仅**该房间内当前在线的其他 Session（不含加入者自己）—— 由 BroadcastToRoom primitive（Story 10.5）实装的 fanout 路径决定；加入者自己 = 当前 HTTP 请求方，自己收 HTTP 200 响应已知道结果，不需要再收一份 WS 通知
-- `payload` 字段**完整自包含成员展示所需的全部丰富字段**（`userId` / `nickname` / `avatarUrl` / `pet.petId` / `pet.currentState`），client 收到 `member.joined` 后**可直接** append 一条完整的 roster entry，**不**需要走 `GET /api/v1/rooms/{roomId}` 二次拉取 —— 这是因为 `room.snapshot` 仅在握手时下发一次（§12.1.3），server **不**会在 `member.joined` 之后给已连接成员追发 snapshot；若 `member.joined` 仅含 `userId` / `nickname`，已连接成员将永远拿不到该新成员的 `avatarUrl` / `pet.*` 真实值（避坑：r1 review 指出过这条不一致）
-- `payload.avatarUrl` 与 `payload.pet.petId` 的填充语义与 `GET /api/v1/rooms/{roomId}.data.members[]` 同字段一致（都是 `users.avatar_url` / 该 user 活跃 `pets.id` 的真实回填），**不**走"placeholder 空字符串"路径 —— 加入事务**成功提交后**才广播，server 必有完整真实值
-- client 收到 `member.joined` 后**应**走 §12.3 client merge contract 字段级 merge：(a) roster 中已存在该 `userId` entry → 字段级覆盖（按 client merge contract"非空覆盖、空字符串保留 client 已有值"规则；本 story 中 `avatarUrl` 可能下发空串，按规则**保留** client 已有真实值）；(b) roster 中不存在该 `userId` entry → 新增完整 entry（含本字段表所有字段），渲染层立即可用，无需等待二次 snapshot 或额外 HTTP 拉取
-- `payload.userId` / `payload.nickname` / `payload.avatarUrl` / `payload.pet.petId` / `payload.pet.currentState` 都必填（**禁止** payload 为 `{}` 或仅 `userId` / `nickname`）；缺字段视为契约违反，client 解析层**应**走"安全忽略 + log warn"路径（与 Story 10.1 `安全忽略未识别 type` 相同的容错策略，避免单条 malformed 消息把房间页搞崩）
+- `payload` 字段**完整自包含成员展示所需的全部丰富字段**（`userId` / `nickname` / `avatarUrl` / `pet`，其中 `pet` 是 nullable —— pet-less 账号下发 `null`，否则下发 `{petId, currentState}` 完整 object），client 收到 `member.joined` 后**可直接** append 一条完整的 roster entry（`pet = null` 时 entry 中 pet 字段置空，渲染降级"无宠物"占位），**不**需要走 `GET /api/v1/rooms/{roomId}` 二次拉取 —— 这是因为 `room.snapshot` 仅在握手时下发一次（§12.1.3），server **不**会在 `member.joined` 之后给已连接成员追发 snapshot；若 `member.joined` 仅含 `userId` / `nickname`，已连接成员将永远拿不到该新成员的 `avatarUrl` / `pet.*` 真实值（避坑：r1 review 指出过这条不一致）
+- `payload.avatarUrl` 与 `payload.pet`（含子字段，仅当 `pet ≠ null`）的填充语义与 `GET /api/v1/rooms/{roomId}.data.members[]` 同字段一致（都是 `users.avatar_url` / 该 user 活跃 `pets.*` 的真实回填，`pet-less` 时 `pet = null`），**不**走"placeholder 空字符串"路径 —— 加入事务**成功提交后**才广播，server 必有完整 authoritative 值（含 `pet = null` 的 authoritative pet-less 信号）
+- client 收到 `member.joined` 后**应**走 §12.3 client merge contract 字段级 merge：(a) roster 中已存在该 `userId` entry → 字段级覆盖（按 client merge contract"非空覆盖、空字符串保留 client 已有值、null 直接覆盖（authoritative）"规则；本 story 中 `avatarUrl` 可能下发空串，按规则**保留** client 已有真实值；`pet = null` 是 authoritative pet-less 信号，**应**直接覆盖）；(b) roster 中不存在该 `userId` entry → 新增完整 entry（含本字段表所有字段，`pet = null` 时 entry 中 pet 字段置空），渲染层立即可用，无需等待二次 snapshot 或额外 HTTP 拉取
+- `payload.userId` / `payload.nickname` / `payload.avatarUrl` / `payload.pet` 都必填（**禁止** payload 为 `{}` 或仅 `userId` / `nickname`）；`payload.pet` 是 nullable 字段（`pet-less` 时下发 `null`，否则下发完整 `{petId, currentState}` object —— 不允许下发 `pet: {}` 空 object 或省略 `pet` key）；缺字段视为契约违反，client 解析层**应**走"安全忽略 + log warn"路径（与 Story 10.1 `安全忽略未识别 type` 相同的容错策略，避免单条 malformed 消息把房间页搞崩）
 - 节点 4 阶段加入者**不**主动收到自己的 `member.joined`：server 实装上应从 fanout 列表中排除加入者自己的 Session，client 解析层不需要做"自己 != 自己"的过滤（防御性编程层面 client 仍**应**对 `payload.userId == 当前 user.id` 走 noop 安全路径）
 
 ### 成员离开（member.left）
 
 **触发**（r3 锁定）：
 
-- `POST /api/v1/rooms/{roomId}/leave` 退出房间事务**成功提交后**，server 调用 `BroadcastToRoom(roomID, {type: "member.left", payload: {userId}})` 广播给该房间内所有**其他**在线成员（不发给离开者自己 —— 离开者已收 HTTP 响应；leaver 自己的 WS Session 由 §10.5 步骤 8 通过 close 4007 协议层确认完成）
+- `POST /api/v1/rooms/{roomId}/leave` 退出房间事务**成功提交后**，server 调用 `BroadcastToRoom(roomID, {type: "member.left", payload: {userId}})` 广播给该房间内所有**其他**在线成员（不发给离开者自己 —— 离开者以 HTTP 200 响应作为 leave 完成的 authoritative signal；leaver 自己的 WS Session 由 §10.5 步骤 8 close 4007 做 server 端 best-effort cleanup，不是 leave 完成的协议层确认）
 - **唯一触发条件**就是上一条 HTTP leave 路径；任何 WS 层断开（含心跳超时 → close 4005、client 主动 close、app 关闭 / 切后台、TCP 1006 异常断开）**都不**触发 `member.left` —— WS 断开仅清 ephemeral 层（SessionManager + Redis presence），不改 `room_members` / `users.current_room_id`，不广播 `member.left`；详见 §10.3 "roster 语义与 WS 断线交互" 小节 + §10.5 "WS 断线场景与本接口的关系" 注解块
 - 这条钦定与 §12.1 close code 4005 行"client 应自动重连"的 transient 语义自洽：心跳超时不删 row → reconnect 握手时 §12.1 校验顺序步骤 5 通过 → 用户保留座位
 
@@ -2050,9 +2086,9 @@ JSON 示例：
 **关键约束**：
 
 - `payload` 字段**精简**为仅 `userId`（与 `member.joined` 含 `nickname` 不同）—— 离开事件 client UX 不需要显示昵称（"X 离开了房间"中的 X 可由 client 从已有 roster 查到 nickname；即使没查到，UX 文案降级为"有人离开"也可接受），减少 server 加载压力
-- 广播范围：**仅**该房间内当前在线的其他 Session（不含离开者自己）；离开者已收 HTTP 200 响应 + 由 §10.5 步骤 8 close 4007 协议层确认完成，不需要也无法再收 WS `member.left` 消息
+- 广播范围：**仅**该房间内当前在线的其他 Session（不含离开者自己）；离开者以 HTTP 200 响应作为 leave 完成的 authoritative signal（§10.5 步骤 9）；步骤 8 的 close 4007 是 server 端 best-effort cleanup（让 leaver Session 立即解耦），离开者不需要也无法再收 WS `member.left` 消息（fanout 物理上跳过 leaver Session）
 - client 解析层收到 `member.left` 时**应**按 §12.3 client merge contract 集合层规则：从 client roster 中**移除** `payload.userId` 对应 entry（这是 authoritative 的离开信号，与 snapshot 集合层 authoritative 一致）；client **不**应等下一次 `room.snapshot` 才更新 roster
-- 节点 4 阶段离开者**不**主动收到自己的 `member.left`：server 实装上应从 fanout 列表中排除离开者自己的 Session（且离开者 Session 在 §10.5 步骤 8 close 4007 后已不在 SessionManager 列表中，自然 fanout 不到）；client 解析层防御性走 `payload.userId == 当前 user.id` 的 noop 安全路径
+- 节点 4 阶段离开者**不**主动收到自己的 `member.left`：server 实装上应从 fanout 列表中排除离开者自己的 Session（且离开者 Session 在 §10.5 步骤 8 close 4007 之后已不在 SessionManager 列表中 —— 注：步骤 8 是 best-effort cleanup，但即便 4007 frame 未到达 client，server 端 SessionManager 撤销动作总是发生，fanout 仍跳过该 Session）；client 解析层防御性走 `payload.userId == 当前 user.id` 的 noop 安全路径
 - **触发不重复**：server 实装层应保证 `member.left` 广播严格 1:1 对应"`room_members` 行被删除"事件 —— 由于唯一删行路径是 HTTP leave 事务（详见 §10.5 服务端逻辑），同一 user 在同一 leave 事件中**只触发一次** `member.left` 广播；任何 WS 断开（含心跳超时）**禁止**走"被动 leave"路径删 row + 广播 `member.left`（详见 §10.3 / §10.5 + Story 11.8 实装）
 
 ### 收到表情广播
