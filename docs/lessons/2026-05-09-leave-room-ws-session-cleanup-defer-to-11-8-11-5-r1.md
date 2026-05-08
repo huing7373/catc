@@ -2,7 +2,7 @@
 date: 2026-05-09
 source_review: codex review (epic-loop r1) — /tmp/epic-loop-review-11-5-r1.md
 story: 11-5-退出房间事务
-commit: <pending>
+commit: 312312e
 lesson_count: 1
 ---
 
