@@ -211,3 +211,4 @@
 | 2026-05-08 | [ACL 校验 + 受 ACL 保护的数据返回必须共享同一事务 snapshot（11-1 r8）](2026-05-08-acl-and-protected-data-must-share-snapshot-tx-11-1-r8.md) | 1 | security, architecture | `<pending>` |
 | 2026-05-08 | [snapshot 隔离 ≠ 锁；ACL guard 需 FOR SHARE 锁不止 snapshot；跨事务状态字段 drift 需 FOR UPDATE 串行化（11-1 r9）](2026-05-08-snapshot-isolation-needs-row-locks-and-cross-tx-rooms-status-drift-11-1-r9.md) | 2 | security, concurrency, architecture | `<pending>` |
 | 2026-05-08 | [`pet` 字段必须随 §5.1 GET /home 全协议 nullable / WS close 4007 是 best-effort cleanup 而非 leave 完成的 authoritative confirmation（11-1 r10 收官）](2026-05-08-pet-nullable-and-cross-channel-ack-best-effort-11-1-r10.md) | 2 | architecture, docs, protocol | `<pending>` |
+| 2026-05-08 | [给已有错误码新增接口用法时，必须反向扫描所有"该错误码仅用于 X"陈述（11-1 r11）](2026-05-08-stale-error-code-exclusivity-notes-when-adding-new-usage-11-1-r11.md) | 1 | docs | `<pending>` |
