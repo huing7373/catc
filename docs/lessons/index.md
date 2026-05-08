@@ -209,3 +209,4 @@
 | 2026-05-08 | [协议字段表 vs JSON 示例必须 zip 对齐 / prose 改了协议必须同步对应 mermaid sequenceDiagram（11-1 r6）](2026-05-08-snapshot-example-and-mermaid-diagram-must-mirror-prose-11-1-r6.md) | 2 | docs | `<pending>` |
 | 2026-05-08 | [接口默认 deny + 显式 allow（白名单 ACL）/ prose 步骤序与 mermaid sequenceDiagram 必须 zip 对齐（11-1 r7）](2026-05-08-default-deny-acl-and-prose-mermaid-zip-alignment-11-1-r7.md) | 2 | security, docs | `<pending>` |
 | 2026-05-08 | [ACL 校验 + 受 ACL 保护的数据返回必须共享同一事务 snapshot（11-1 r8）](2026-05-08-acl-and-protected-data-must-share-snapshot-tx-11-1-r8.md) | 1 | security, architecture | `<pending>` |
+| 2026-05-08 | [snapshot 隔离 ≠ 锁；ACL guard 需 FOR SHARE 锁不止 snapshot；跨事务状态字段 drift 需 FOR UPDATE 串行化（11-1 r9）](2026-05-08-snapshot-isolation-needs-row-locks-and-cross-tx-rooms-status-drift-11-1-r9.md) | 2 | security, concurrency, architecture | `<pending>` |

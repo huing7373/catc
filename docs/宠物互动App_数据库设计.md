@@ -959,35 +959,55 @@ CREATE TABLE emoji_configs (
 
 ## 8.6 加入房间事务
 
-建议一个事务内完成：
+事务内必须严格按顺序完成（详见 V1 接口设计 §10.4 服务端逻辑）：
 
-- 校验目标房间存在且未满
-- 校验当前用户不在其他房间
-- 插入 `room_members`
-- 更新 `users.current_room_id`
+1. 开事务
+2. **`SELECT ... FROM rooms WHERE id = ? FOR UPDATE`**（对 rooms 行加排他锁；与并发 §8.7 leave 跨事务串行化）
+3. 校验房间存在且 `status = 1 active`（否则回滚 → 6001 / 6005）
+4. `SELECT COUNT(*) FROM room_members WHERE room_id = ?` 校验未满（否则回滚 → 6002）
+5. 插入 `room_members`（撞 UNIQUE → 回滚 → 6003）
+6. 更新 `users.current_room_id`
+7. 提交事务
+
+**`FOR UPDATE` 的双重职责**（r9 P1#2 锁定）：
+
+- 同房间并发 join 串行化（5 个 user 抢 1 个空位，只有 1 个成功）
+- **跨事务与 §8.7 leave 串行化**：阻止 "leave A 删 row → join B 锁 rooms 看 status=1 → join B insert + commit → leave A UPDATE rooms.status=2" 这种 timeline 产生的 `rooms.status=closed` 但 `room_members` 非空 drift。两类事务在 `rooms` 行 lock 上排队后，B join 必须等 A leave 提交（含 status=2）后才能进入，B 看到 status=2 → 直接返回 6005，状态保持一致。
 
 ---
 
 ## 8.7 退出房间事务
 
-建议一个事务内完成：
+事务内必须严格按顺序完成（详见 V1 接口设计 §10.5 服务端逻辑）：
 
-- 删除 `room_members`
-- 清空 `users.current_room_id`
-- 如房间无人，则将 `rooms.status` 改为 `closed`
+1. 开事务
+2. **`SELECT ... FROM rooms WHERE id = ? FOR UPDATE`**（对 rooms 行加排他锁；与并发 §8.6 join 跨事务串行化，确保后续 step 4 remaining-count + step 5 status update 与并发 join 不交错）
+3. `DELETE FROM room_members WHERE room_id = ? AND user_id = ?` + 检查 `RowsAffected == 0`（同一 user 并发两次 leave 输家兜底 → 回滚 → 6004）
+4. 更新 `users.current_room_id = NULL`
+5. `SELECT COUNT(*) FROM room_members WHERE room_id = ?`，若 `== 0` → 更新 `rooms.status = 2 closed`
+6. 提交事务
+
+**`FOR UPDATE` 与 `RowsAffected == 0` 兜底正交**：前者解决"跨事务 leave-vs-join 状态 drift"（r9 P1#2），后者解决"同一 user 并发两次 leave 输家走完后续步骤产生重复广播"（r4 已锁定）。两者都是**必须**项，锁对象不同（`rooms` 行 vs `room_members` 行），不冲突。
 
 ---
 
-## 8.8 房间详情读快照事务
+## 8.8 房间详情读快照事务（含 ACL 共享锁）
 
-`GET /api/v1/rooms/{roomId}`（V1 接口设计 §10.3）虽然为只读查询，但需要在同一 MySQL 事务内（隔离级别 = **REPEATABLE READ**，InnoDB 默认）完成两次 SELECT：
+`GET /api/v1/rooms/{roomId}`（V1 接口设计 §10.3）虽然为只读查询，但需要在同一 MySQL 事务内（隔离级别 = **REPEATABLE READ**，InnoDB 默认）完成多步操作。**snapshot 隔离 + FOR SHARE 行锁两个机制是互补的，缺一不可**：
 
-- 步骤 1：`SELECT users.current_room_id` —— ACL 校验（caller 是否仍是该房间成员）
+- 步骤 1a：`SELECT users.current_room_id` —— ACL 校验（caller 是否仍是该房间成员）
+- 步骤 1b：**`SELECT 1 FROM room_members WHERE room_id = ? AND user_id = caller FOR SHARE`** —— 取共享锁锁定 caller 自己的成员行，**阻止并发 leave 的 DELETE 在本读事务期间提交**（DELETE 需要排他锁，与 FOR SHARE 互斥，必须等本读事务 commit 后才能继续）
 - 步骤 3：`SELECT room_members JOIN users JOIN pets` —— 受 ACL 保护的 roster 隐私数据
 
-**rationale**：若两次 SELECT 各自独立、不共享 snapshot，则 caller 并发 `POST /rooms/{roomId}/leave` 在步骤 1 → 步骤 3 之间提交时，本请求仍会返回完整 roster —— ACL 已失效但隐私数据照下发，绕过本接口的隐私边界。事务 snapshot 让两次 SELECT 看到同一时刻的状态，从而**ACL 校验与受 ACL 保护的数据返回 atomically 在同一 snapshot 内**。
+**rationale**：
 
-本读事务与写事务（§8.1 / §8.6 / §8.7）并列，归入"读快照事务"类型，方便后续 audit 时统一识别"哪些只读接口需要 snapshot 一致性"。后续若新增"`/me` 读个人 + 关联资源"等多次 SELECT 形态、且任一次 SELECT 是 ACL 校验 / 任一次 SELECT 是受 ACL 保护的数据，应同样开读快照事务。
+- **snapshot 隔离仅提供"事务内部一致性"**：两次 SELECT 看到同一时刻的状态。但**不**保证 "caller 在 HTTP 响应发出时仍是成员" —— 具体 race（r9 P1#1 锁定）：(t0) 本 GET 事务开始，snapshot 锁定在 t0 状态（caller 是成员）→ (t1) 并发 `POST /rooms/{roomId}/leave` 提交 DELETE → (t2) 本 GET 步骤 3 用 t0 snapshot SELECT 看到 caller 仍是成员，照返完整 roster → (t3) HTTP 响应发出，但 caller 已离开。snapshot 没有阻止 t1 的 DELETE 提交，因此**外部一致性**被破坏。
+- **FOR SHARE 行锁提供"外部一致性"**：让并发 leave 的 DELETE 必须等本读事务 commit / rollback 才能继续，从而保证响应发出时 ACL 仍然成立。
+- 两个机制缺一不可：仅 snapshot 没锁 → race 仍存在；仅 FOR SHARE 没 snapshot → 步骤 1 与步骤 3 可能看到不同状态（read committed 即每次 SELECT 看到最新 commit）。
+
+**关于 deadlock 风险**：caller 锁的是 `(room_id, user_id=caller)` 这一**特定行**；并发 leave 也只锁 `user_id=caller` 这一行（取排他锁后 DELETE）；其他成员 / 其他房间走的是不同 `(room_id, user_id)` 锁路径，不存在锁顺序循环 → 无 deadlock 风险。最坏情况是并发 leave 等本读事务 commit 后再提交，等待时长 = 本读事务全步骤时长（μs ~ 数 ms 量级），可忽略。
+
+本读事务与写事务（§8.1 / §8.6 / §8.7）并列，归入"读快照事务（含 ACL 共享锁）"类型，方便后续 audit 时统一识别"哪些只读接口需要 snapshot 一致性 + FOR SHARE 锁"。后续若新增"`/me` 读个人 + 关联资源"等多次 SELECT 形态、且任一次 SELECT 是 ACL 校验 / 任一次 SELECT 是受 ACL 保护的数据，应同样开读快照事务并对 ACL row 加 FOR SHARE 锁。
 
 ---
 

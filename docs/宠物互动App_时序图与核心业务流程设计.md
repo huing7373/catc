@@ -447,14 +447,14 @@ sequenceDiagram
 
     Client->>API: POST /api/v1/rooms/{roomId}/join
     API->>Service: joinRoom(userId, roomId)
-    Service->>MySQL: 查询 users.current_room_id
-    Service->>Service: 校验当前未在其他房间
-    Service->>MySQL: 查询 rooms
-    Service->>Service: 校验房间存在且 active
-    Service->>MySQL: 查询 room_members 数量
-    Service->>Service: 校验成员数 < 4
+    Service->>MySQL: 查询 users.current_room_id（预检，不开事务）
+    Service->>Service: 校验当前未在其他房间（否则 6003）
     Service->>MySQL: 开启事务
-    Service->>MySQL: 插入 room_members
+    Service->>MySQL: SELECT rooms WHERE id=? FOR UPDATE<br/>（双重职责：① 同房间并发 join 串行化；<br/>② 与 §10.5 leave 跨事务串行化，<br/>解决 r9 P1#2 cross-tx race）
+    Service->>Service: 校验房间存在（否则 6001）+ status=1（否则 6005）
+    Service->>MySQL: 查询 room_members 数量
+    Service->>Service: 校验成员数 < 4（否则 6002）
+    Service->>MySQL: 插入 room_members（撞 UNIQUE 兜底 → 6003）
     Service->>MySQL: 更新 users.current_room_id
     Service->>MySQL: 提交事务
     Note over Service,WSGateway: 事务提交后（post-commit）触发广播<br/>**顺序**：broadcast → HTTP 200<br/>（与 V1接口设计.md §10.4 步骤 8/9 zip 对齐；fire-and-forget 仅 log，不影响 HTTP 200 响应；自 Story 11.1 r7 锚定）
@@ -491,8 +491,12 @@ sequenceDiagram
 
     Client->>API: POST /api/v1/rooms/{roomId}/leave
     API->>Service: leaveRoom(userId, roomId)
+    Service->>MySQL: 查询 users.current_room_id（预检，不开事务）
+    Service->>Service: 校验等于 path roomId（否则 6004）
     Service->>MySQL: 开启事务
-    Service->>MySQL: 删除 room_members 中当前用户记录
+    Service->>MySQL: SELECT rooms WHERE id=? FOR UPDATE<br/>（与并发 §10.4 join 串行化，<br/>解决 r9 P1#2 cross-tx race；<br/>找不到行 → 1009 内部状态不一致）
+    Service->>MySQL: DELETE room_members 中当前用户记录
+    Service->>Service: 检查 RowsAffected == 0 → 回滚 + 6004<br/>（同一 user 并发两次 leave 输家兜底，r4 已锁定；<br/>与步骤 2 FOR UPDATE 职责正交不可互替）
     Service->>MySQL: 更新 users.current_room_id = null
     Service->>MySQL: 查询 room_members 剩余人数
     alt 剩余人数 = 0
