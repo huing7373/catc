@@ -40,6 +40,7 @@ import (
 
 	"github.com/huing/cat/server/internal/app/http/handler"
 	"github.com/huing/cat/server/internal/app/http/middleware"
+	wsapp "github.com/huing/cat/server/internal/app/ws"
 	"github.com/huing/cat/server/internal/infra/config"
 	"github.com/huing/cat/server/internal/infra/db"
 	"github.com/huing/cat/server/internal/infra/migrate"
@@ -178,7 +179,13 @@ func buildRoomHandlerIntegration(t *testing.T) (*gin.Engine, *sql.DB, *auth.Sign
 	userRepo := mysql.NewUserRepo(gormDB)
 	roomRepo := mysql.NewRoomRepo(gormDB)
 	roomMemberRepo := mysql.NewRoomMemberRepo(gormDB)
-	roomSvc := service.NewRoomService(txMgr, userRepo, roomRepo, roomMemberRepo)
+	petRepo := mysql.NewPetRepo(gormDB)
+	// Story 11.8 加：handler 端到端集成测试只验 HTTP envelope 链路，broadcast / close
+	// 路径走 no-op（service 层 fire-and-forget 不影响 HTTP 200 响应；broadcast 真实
+	// 验证由 service 层 dockertest case 14 / 15 / 16 覆盖）。
+	noopSessionMgr := wsapp.NewSessionManager()
+	noopBroadcastFn := wsapp.BroadcastFn(func(ctx context.Context, roomID uint64, msg []byte) (int, error) { return 0, nil })
+	roomSvc := service.NewRoomService(txMgr, userRepo, roomRepo, roomMemberRepo, petRepo, noopSessionMgr, noopBroadcastFn)
 
 	router := roomIntegrationTestRouter(roomSvc, signer)
 

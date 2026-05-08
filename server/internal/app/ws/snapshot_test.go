@@ -569,3 +569,163 @@ func TestRealSnapshotBuilder_BuildSnapshot_EmptyRoom_Returns0Members(t *testing.
 		t.Errorf("snapshot JSON must contain `\"members\":[]` for empty room (got %s)", string(bytes))
 	}
 }
+
+// ============================================================================
+// Story 11.8 — BuildMemberJoinedEnvelope / BuildMemberLeftEnvelope helper 单测
+// ============================================================================
+
+// case BMJ1: happy 路径 + 含 pet → 验证 envelope.Type / RequestID / Ts + payload
+// 字段值完整 round-trip
+func TestBuildMemberJoinedEnvelope_Happy_FullPayload(t *testing.T) {
+	payload := wsapp.MemberJoinedPayload{
+		UserID:    "1002",
+		Nickname:  "用户1002",
+		AvatarURL: "https://avatar/1002",
+		Pet: &wsapp.SnapshotPet{
+			PetID:        "7001",
+			CurrentState: 1,
+		},
+	}
+	before := time.Now().UnixMilli()
+	bs, err := wsapp.BuildMemberJoinedEnvelope(payload)
+	if err != nil {
+		t.Fatalf("BuildMemberJoinedEnvelope: %v", err)
+	}
+	after := time.Now().UnixMilli()
+
+	var env snapEnvelopeForTest
+	if err := json.Unmarshal(bs, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != "member.joined" {
+		t.Errorf("env.Type = %q, want \"member.joined\"", env.Type)
+	}
+	if env.RequestID != "" {
+		t.Errorf("env.RequestID = %q, want \"\" (主动推送类固定 \"\")", env.RequestID)
+	}
+	if env.Ts < before || env.Ts > after {
+		t.Errorf("env.Ts = %d, expected in [%d, %d]", env.Ts, before, after)
+	}
+
+	var got wsapp.MemberJoinedPayload
+	if err := json.Unmarshal(env.Payload, &got); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if got.UserID != payload.UserID {
+		t.Errorf("payload.userId round-trip: got %q, want %q", got.UserID, payload.UserID)
+	}
+	if got.Nickname != payload.Nickname {
+		t.Errorf("payload.nickname round-trip: got %q, want %q", got.Nickname, payload.Nickname)
+	}
+	if got.AvatarURL != payload.AvatarURL {
+		t.Errorf("payload.avatarUrl round-trip: got %q, want %q", got.AvatarURL, payload.AvatarURL)
+	}
+	if got.Pet == nil {
+		t.Fatalf("payload.pet round-trip: got nil, want non-nil pointer")
+	}
+	if got.Pet.PetID != payload.Pet.PetID {
+		t.Errorf("payload.pet.petId round-trip: got %q, want %q", got.Pet.PetID, payload.Pet.PetID)
+	}
+	if got.Pet.CurrentState != payload.Pet.CurrentState {
+		t.Errorf("payload.pet.currentState round-trip: got %d, want %d", got.Pet.CurrentState, payload.Pet.CurrentState)
+	}
+}
+
+// case BMJ2: pet-less 路径 → wire 上含 `"pet":null`（pointer nil → JSON null）
+func TestBuildMemberJoinedEnvelope_PetLess_PetIsJSONNull(t *testing.T) {
+	payload := wsapp.MemberJoinedPayload{
+		UserID:    "1003",
+		Nickname:  "用户1003",
+		AvatarURL: "",
+		Pet:       nil,
+	}
+	bs, err := wsapp.BuildMemberJoinedEnvelope(payload)
+	if err != nil {
+		t.Fatalf("BuildMemberJoinedEnvelope: %v", err)
+	}
+	if !strings.Contains(string(bs), `"pet":null`) {
+		t.Errorf("wire should contain `\"pet\":null` for pet-less path; got: %s", string(bs))
+	}
+}
+
+// case BMJ3: AvatarURL = "" → wire 上仍含 `"avatarUrl":""`（V1 §12.3 钦定 avatarUrl
+// 必填即使空字符串也必下发 key，**不**省略）
+func TestBuildMemberJoinedEnvelope_EmptyAvatarURL_StillIncludeKey(t *testing.T) {
+	payload := wsapp.MemberJoinedPayload{
+		UserID:    "1003",
+		Nickname:  "用户1003",
+		AvatarURL: "",
+		Pet:       nil,
+	}
+	bs, err := wsapp.BuildMemberJoinedEnvelope(payload)
+	if err != nil {
+		t.Fatalf("BuildMemberJoinedEnvelope: %v", err)
+	}
+	if !strings.Contains(string(bs), `"avatarUrl":""`) {
+		t.Errorf("wire should contain `\"avatarUrl\":\"\"` (key present even when value empty); got: %s", string(bs))
+	}
+}
+
+// case BML1: BuildMemberLeftEnvelope happy 路径 → envelope.Type=member.left +
+// payload.userId 字符串化正确
+func TestBuildMemberLeftEnvelope_Happy(t *testing.T) {
+	payload := wsapp.MemberLeftPayload{UserID: "1002"}
+	bs, err := wsapp.BuildMemberLeftEnvelope(payload)
+	if err != nil {
+		t.Fatalf("BuildMemberLeftEnvelope: %v", err)
+	}
+
+	var env snapEnvelopeForTest
+	if err := json.Unmarshal(bs, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != "member.left" {
+		t.Errorf("env.Type = %q, want \"member.left\"", env.Type)
+	}
+	if env.RequestID != "" {
+		t.Errorf("env.RequestID = %q, want \"\"", env.RequestID)
+	}
+	if env.Ts <= 0 {
+		t.Errorf("env.Ts = %d, want > 0", env.Ts)
+	}
+
+	var got wsapp.MemberLeftPayload
+	if err := json.Unmarshal(env.Payload, &got); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if got.UserID != "1002" {
+		t.Errorf("payload.userId round-trip: got %q, want \"1002\"", got.UserID)
+	}
+}
+
+// case BML2: payload 字段集合精简 —— 仅 userId 字段（V1 §12.3 行 2073-2080 钦定
+// leave payload 字段表精简，**不**含 nickname / avatarUrl / pet）
+func TestBuildMemberLeftEnvelope_PayloadShapeIsExactlyOneField(t *testing.T) {
+	payload := wsapp.MemberLeftPayload{UserID: "1002"}
+	bs, err := wsapp.BuildMemberLeftEnvelope(payload)
+	if err != nil {
+		t.Fatalf("BuildMemberLeftEnvelope: %v", err)
+	}
+
+	var env snapEnvelopeForTest
+	if err := json.Unmarshal(bs, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+
+	// 解析为 generic map 严格校验 payload 仅有 1 字段（不含 nickname / avatarUrl / pet）
+	var asMap map[string]interface{}
+	if err := json.Unmarshal(env.Payload, &asMap); err != nil {
+		t.Fatalf("unmarshal payload as map: %v", err)
+	}
+	if len(asMap) != 1 {
+		t.Errorf("payload field count = %d, want 1 (just userId); got fields: %v", len(asMap), asMap)
+	}
+	if _, ok := asMap["userId"]; !ok {
+		t.Errorf("payload missing userId field: %v", asMap)
+	}
+	for _, forbidden := range []string{"nickname", "avatarUrl", "pet"} {
+		if _, ok := asMap[forbidden]; ok {
+			t.Errorf("payload should NOT contain %q (V1 §12.3 leave payload 精简钦定): %v", forbidden, asMap)
+		}
+	}
+}

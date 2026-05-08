@@ -390,3 +390,94 @@ func SendRoomSnapshot(
 	)
 	return nil
 }
+
+// ============================================================================
+// Story 11.8 — member.joined / member.left payload + envelope helpers
+// ============================================================================
+
+// MemberJoinedPayload 是 member.joined 消息的 payload（Story 11.8 引入）。
+//
+// 与 V1 §12.3 行 2003-2013 字段表完全 1:1 对齐：
+//   - UserID:    BIGINT 字符串化（V1 §2.5 全局约定）
+//   - Nickname:  来自 users.nickname；必非空字符串（节点 2 阶段首次创建时 server 写入 "用户{id}"）
+//   - AvatarURL: 来自 users.avatar_url；可空字符串 ""（首次创建用户时为空），**不**为 null
+//   - Pet:       *SnapshotPet pointer：nil → JSON null（pet-less 路径），与 SnapshotMember.Pet
+//     同模式（Story 11.7 r1 P1 钦定 pointer 类型支持 JSON null 序列化）
+//
+// **关键决策**：本 struct **不**复用 SnapshotMember struct 自身 —— SnapshotMember 不含
+// avatarUrl 字段（11.7 r1 P1 范围红线已锁定不回工 SnapshotMember 字段集合）；本 story
+// 走"两个独立 struct，字段集合刻意 drift"路径，与 V1 §12.3 placeholder vs real vs
+// member.joined 三阶段独立锚定的设计哲学一致。
+//
+// **Pet 字段类型**：用 *SnapshotPet pointer 类型（不展平字段；与 SnapshotMember.Pet
+// 同模式），nil → JSON `"pet": null` + 非 nil → JSON object（含 petId / currentState）。
+// **不**新增 MemberJoinedPet struct 重复 SnapshotPet 字段集合（YAGNI；两个 payload
+// struct 共用 SnapshotPet 节省维护成本）。
+type MemberJoinedPayload struct {
+	UserID    string       `json:"userId"`
+	Nickname  string       `json:"nickname"`
+	AvatarURL string       `json:"avatarUrl"`
+	Pet       *SnapshotPet `json:"pet"` // pointer：nil → JSON null（pet-less 路径）
+}
+
+// MemberLeftPayload 是 member.left 消息的 payload（Story 11.8 引入）。
+//
+// 与 V1 §12.3 行 2073-2080 字段表完全 1:1 对齐 —— 仅 1 字段 userId（V1 §12.3 行 2097
+// 钦定 leave 事件 client UX 不需要显示昵称，payload 精简；client 从已有 roster 查
+// nickname，UX 文案降级为"有人离开"也可接受，减少 server 加载压力）。
+type MemberLeftPayload struct {
+	UserID string `json:"userId"`
+}
+
+// BuildMemberJoinedEnvelope wrap MemberJoinedPayload 进 serverEnvelope + json.Marshal
+// 返 ([]byte, error)（Story 11.8 引入）。
+//
+// 用途：service 层 RoomService.JoinRoom 在事务 commit 成功后调用本 helper 拿到
+// []byte 后调 BroadcastFn 推送给该房间内其他在线 Session；隐藏 ws 包内部
+// serverEnvelope struct，让 service 层只 import payload 类型 + helper 函数。
+//
+// envelope 字段值（V1 §12.3 通用信封 + 行 1840 钦定）：
+//   - Type:      "member.joined"
+//   - RequestID: ""（主动推送类消息固定 ""）
+//   - Payload:   入参 payload
+//   - Ts:        time.Now().UnixMilli()（服务端发送时间戳 ms）
+//
+// 错误：json.Marshal 在 marshalable struct 下不可能失败；防御性 wrap（与
+// SendRoomSnapshot 同模式）。caller 收到 error 时 log warn 不重试（与 broadcast
+// 失败同 fire-and-forget 语义）。
+func BuildMemberJoinedEnvelope(payload MemberJoinedPayload) ([]byte, error) {
+	env := serverEnvelope{
+		Type:      "member.joined",
+		RequestID: "", // V1 §12.3 主动推送类消息固定 ""
+		Payload:   payload,
+		Ts:        time.Now().UnixMilli(),
+	}
+	bytes, err := json.Marshal(env)
+	if err != nil {
+		return nil, fmt.Errorf("ws envelope: marshal member.joined: %w", err)
+	}
+	return bytes, nil
+}
+
+// BuildMemberLeftEnvelope wrap MemberLeftPayload 进 serverEnvelope + json.Marshal
+// 返 ([]byte, error)（Story 11.8 引入；与 BuildMemberJoinedEnvelope 同模式，
+// Type = "member.left"）。
+//
+// envelope 字段值（V1 §12.3 通用信封）：
+//   - Type:      "member.left"
+//   - RequestID: ""
+//   - Payload:   入参 payload（仅 userId 字段，V1 §12.3 钦定 leave 事件 payload 精简）
+//   - Ts:        time.Now().UnixMilli()
+func BuildMemberLeftEnvelope(payload MemberLeftPayload) ([]byte, error) {
+	env := serverEnvelope{
+		Type:      "member.left",
+		RequestID: "",
+		Payload:   payload,
+		Ts:        time.Now().UnixMilli(),
+	}
+	bytes, err := json.Marshal(env)
+	if err != nil {
+		return nil, fmt.Errorf("ws envelope: marshal member.left: %w", err)
+	}
+	return bytes, nil
+}

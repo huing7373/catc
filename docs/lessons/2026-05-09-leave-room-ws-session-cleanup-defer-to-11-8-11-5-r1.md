@@ -121,3 +121,4 @@ V1接口设计.md §10.5 行 1544 同样钦定 "步骤 7 close 4007 + 步骤 8 b
 - 上游 spec 设计 lesson（11.1 r2，`member.left` 协议契约 + close 4007 设计原始决策）：`docs/lessons/2026-05-08-leave-must-close-ws-and-cross-doc-event-trigger-alignment-11-1-r2.md`
 - Story 11.5 spec（钦定本轮 scope 切割）：`_bmad-output/implementation-artifacts/11-5-退出房间事务.md` 行 53-54 / 102 / 251-259 / 302-304 / 368-371 / 740 / 767 / 777
 - 未来 Story 11.8（实装目标）：尚未创建 spec 文件；进入 11.8 sprint planning 时必读本 lesson + V1 §10.5 步骤 7-8 + §12.3 `### 成员离开`
+- **Story 11.8 实装收尾**（本 lesson 的 defer-to-11.8 任务在 Story 11.8 真实实装后）：`_bmad-output/implementation-artifacts/11-8-成员加入-离开-ws-广播.md`（Story 11.8 dev-story commit hash 见 `chore(story-11-8)` commit message；`SECURITY-DEFER` 警告块已被真实实装代码替换 —— `LeaveRoom` post-commit 段调 `s.closeLeaverSession` + `s.broadcastMemberLeft` 接管 V1 §10.5 步骤 7 + 步骤 8）

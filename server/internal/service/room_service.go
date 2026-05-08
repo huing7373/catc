@@ -3,7 +3,10 @@ package service
 import (
 	"context"
 	stderrors "errors"
+	"log/slog"
+	"strconv"
 
+	ws "github.com/huing/cat/server/internal/app/ws"
 	apperror "github.com/huing/cat/server/internal/pkg/errors"
 	"github.com/huing/cat/server/internal/repo/mysql"
 	"github.com/huing/cat/server/internal/repo/tx"
@@ -219,8 +222,7 @@ type RoomService interface {
 	//   - 步骤 2d → 6003（DB UNIQUE 兜底；与预检 6003 message / errorCode 完全等价）
 	//   - 任何 DB 异常 → 1009
 	//
-	// **broadcast member.joined 由 Story 11.8 实装**：本 story 事务 commit 成功后
-	// 直接返回；11.8 在 commit 与 return 之间插入 BroadcastToRoom 调用。
+	// post-commit 阶段触发 fire-and-forget WS 广播 member.joined（V1 §10.4 步骤 8）。
 	JoinRoom(ctx context.Context, in JoinRoomInput) (*JoinRoomOutput, error)
 
 	// LeaveRoom: 退出当前房间（事务；Story 11.5 引入）。
@@ -250,15 +252,13 @@ type RoomService interface {
 	// 完全一致 —— client **不**应区分这三个子场景（含"用户不在任何房间" + "用户在
 	// 其他房间" + "并发两次 leave 输家"，client 不区分）。
 	//
-	// **broadcast member.left + close 4007 unregister leaver Session 由 Story 11.8 实装**：
-	// 本 story 实装层 commit 成功后**直接 return**，**不**调任何 WS broadcast / 不动
-	// SessionManager；Story 11.8 review 时在 return 前按 V1 §10.5 步骤 7-8 顺序（r13
-	// 锁定）插入：
-	//   1. close 4007 + unregister leaver Session（V1 §10.5 步骤 7）
-	//   2. BroadcastToRoom(roomID, member.left)（V1 §10.5 步骤 8）
+	// **post-commit 阶段**触发（V1 §10.5 步骤 7 + 步骤 8 钦定）：
+	//   1. close 4007 + SessionManager.Unregister leaver Session（步骤 7；fire-and-forget）
+	//   2. BroadcastToRoom(roomID, member.left) 给该房间其他在线成员（步骤 8；fire-and-forget）
 	//
-	// 顺序由 V1 §10.5 r13 钦定 —— BroadcastToRoom primitive 不带 excludeUserID 参数，
-	// 先 close + unregister 后 broadcast 让 fanout 列表自然不含 leaver。
+	// 顺序由 V1 §10.5 r13 钦定 —— 步骤 7 先于步骤 8，让 broadcast fanout 时
+	// ListSessionsByRoomID 返回列表自然不含 leaver Session（BroadcastToRoom primitive
+	// 不带 excludeUserID 参数）。
 	LeaveRoom(ctx context.Context, in LeaveRoomInput) (*LeaveRoomOutput, error)
 
 	// GetCurrentRoom: 查询当前用户所在房间号（Story 11.6 引入）。
@@ -313,30 +313,59 @@ type RoomService interface {
 //
 // 依赖（DI 注入；bootstrap.NewRouter 内 wire）：
 //   - txMgr: 事务管理器（4.2 落地）
-//   - userRepo: users 表访问；本 story 调 FindByID（预检）+ UpdateCurrentRoomID（事务内）
-//   - roomRepo: rooms 表访问；本 story 调 Create
-//   - roomMemberRepo: room_members 表访问；本 story 调 Create（双 UNIQUE 哨兵兜底 6003）
+//   - userRepo: users 表访问；调 FindByID（预检 / member.joined enrichment）+ UpdateCurrentRoomID（事务内）
+//   - roomRepo: rooms 表访问；调 Create / FindByIDForUpdate / FindByID / UpdateStatus
+//   - roomMemberRepo: room_members 表访问；调 Create / DeleteByRoomAndUser / CountByRoomID / ListRosterByRoomID / ExistsForShareByRoomAndUser
+//   - petRepo: pets 表访问（Story 11.8 引入）；用于 broadcastMemberJoined 查询加入者
+//     默认宠物以构造 member.joined.payload.pet（pet-less → ErrPetNotFound 走 nil 路径）
+//   - sessionMgr: WS Session 注册中心（Story 11.8 引入；10.3 落地）；用于 LeaveRoom
+//     post-commit 阶段查询 leaver 在该 roomID 的 Session + close 4007 + Unregister
+//   - broadcastFn: WS 广播函数值（Story 11.8 引入；10.5 落地的 BroadcastFn type alias）；
+//     用于 fire-and-forget 推 member.joined / member.left 给房间其他在线 Session
 type roomServiceImpl struct {
 	txMgr          tx.Manager
 	userRepo       mysql.UserRepo
 	roomRepo       mysql.RoomRepo
 	roomMemberRepo mysql.RoomMemberRepo
+	petRepo        mysql.PetRepo     // Story 11.8 加：member.joined 事件 pet enrichment
+	sessionMgr     ws.SessionManager // Story 11.8 加：close leaver Session（leave 路径）
+	broadcastFn    ws.BroadcastFn    // Story 11.8 加：fire-and-forget broadcast（join / leave 路径）
 }
 
-// NewRoomService 构造 RoomService。
+// NewRoomService 构造 RoomService（Story 11.8 扩展为 7 参数）。
 //
-// 全部依赖通过参数显式注入；不引入 wire / fx 框架（与 4.2 / 4.4 / 4.5 / 4.6 / 7.3 同模式）。
+// 全部依赖通过参数显式注入；不引入 wire / fx 框架（与 4.2 / 4.4 / 4.5 / 4.6 / 7.3 /
+// 11.3 ~ 11.7 同模式）。
+//
+// Story 11.8 新增 3 参数：
+//   - petRepo: pets 表访问；用于 JoinRoom post-commit 阶段查询加入者默认宠物以
+//     构造 member.joined.payload.pet（pet-less → ErrPetNotFound 走 nil 路径）
+//   - sessionMgr: WS Session 注册中心（10.3 落地）；用于 LeaveRoom post-commit
+//     阶段查询 leaver 在该 roomID 的 Session + close 4007 + Unregister
+//   - broadcastFn: WS 广播函数值（10.5 落地的 BroadcastFn type alias）；用于
+//     fire-and-forget 推 member.joined / member.left 给房间其他在线 Session
+//
+// **关键决策**：sessionMgr 直接传 SessionManager 实例（用于 ListSessionsByRoomID
+// / Unregister 双方法调用，无现成函数 alias 抽象）；broadcastFn 传 BroadcastFn
+// 函数值（让单测注入 mock closure 简单，与 ws/broadcast.go 行 40-69 钦定的
+// BroadcastFn 注入模式一致）。
 func NewRoomService(
 	txMgr tx.Manager,
 	userRepo mysql.UserRepo,
 	roomRepo mysql.RoomRepo,
 	roomMemberRepo mysql.RoomMemberRepo,
+	petRepo mysql.PetRepo,
+	sessionMgr ws.SessionManager,
+	broadcastFn ws.BroadcastFn,
 ) RoomService {
 	return &roomServiceImpl{
 		txMgr:          txMgr,
 		userRepo:       userRepo,
 		roomRepo:       roomRepo,
 		roomMemberRepo: roomMemberRepo,
+		petRepo:        petRepo,
+		sessionMgr:     sessionMgr,
+		broadcastFn:    broadcastFn,
 	}
 }
 
@@ -449,9 +478,9 @@ func (s *roomServiceImpl) CreateRoom(ctx context.Context, in CreateRoomInput) (*
 // ctx —— 用错 ctx 会绕过 tx 走 db pool 新连接，FOR UPDATE 锁立即释放，并发保护
 // 失效，r9 cross-tx race 重新出现。
 //
-// **broadcast member.joined 由 Story 11.8 实装**：本 story 实装层 commit 成功后
-// **直接 return**，**不**调任何 WS broadcast；Story 11.8 review 时在 return 前
-// 插入 s.broadcastMemberJoined(ctx, in.RoomID, in.UserID) 调用。
+// post-commit 阶段调 s.broadcastMemberJoined(ctx, in.RoomID, in.UserID) 触发
+// fire-and-forget WS 广播（V1 §10.4 步骤 8 钦定，事务外 fire-and-forget；broadcast
+// 失败不影响 HTTP 200 响应）。
 func (s *roomServiceImpl) JoinRoom(ctx context.Context, in JoinRoomInput) (*JoinRoomOutput, error) {
 	// (1) 预检 user.current_room_id（事务外，普通连接池查询）
 	user, err := s.userRepo.FindByID(ctx, in.UserID)
@@ -525,7 +554,9 @@ func (s *roomServiceImpl) JoinRoom(ctx context.Context, in JoinRoomInput) (*Join
 		return nil, apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
 	}
 
-	// (4) 事务 commit 成功 → 返回（broadcast 由 Story 11.8 在此处插入调用）
+	// (4) 事务 commit 成功 → fire-and-forget 触发 member.joined 广播（V1 §10.4
+	// 步骤 8 钦定：事务**外**触发，broadcast 失败不影响 HTTP 200 响应）。
+	s.broadcastMemberJoined(ctx, in.RoomID, in.UserID)
 	return &JoinRoomOutput{
 		RoomID: in.RoomID,
 		Joined: true,
@@ -556,15 +587,13 @@ func (s *roomServiceImpl) JoinRoom(ctx context.Context, in JoinRoomInput) (*Join
 // ctx —— 用错 ctx 会绕过 tx 走 db pool 新连接，FOR UPDATE 锁立即释放，并发保护
 // 失效，r9 cross-tx race 重新出现。
 //
-// **SECURITY-DEFER (Story 11.8 钦定范围)**：broadcast `member.left` + close 4007
-// unregister leaver Session 由 **Story 11.8 实装**，本 story 严守范围红线**不**调
-// 任何 WS primitive（不动 SessionManager / BroadcastToRoom）。post-commit 钩子的
-// 详细 trade-off + 当前 11.5↔11.8 窗口的影响范围（leaver Session 仍 registered →
-// SessionManager.ListSessionsByRoomID / BroadcastToRoom / presence 仍把 leaver 当
-// active member 直到心跳超时被动清理）见**函数末尾 (4) 段 SECURITY-DEFER 警告块**
-// 与 lesson `docs/lessons/2026-05-09-leave-room-ws-session-cleanup-defer-to-11-8-11-5-r1.md`。
-// codex review r1 (2026-05-08) 把这条 flag 为 [P1]；review 工程上 correct，但
-// 跨 story scope，按 spec 钦定 defer 至 11.8。
+// **post-commit 阶段（V1 §10.5 步骤 7 + 步骤 8 钦定，r13 顺序）**：commit 成功后
+// **先**走步骤 7（s.closeLeaverSession：从 SessionManager 撤销 leaver Session +
+// close 4007 reason "left room via HTTP"），**后**走步骤 8（s.broadcastMemberLeft：
+// BroadcastToRoom member.left）；两步均 fire-and-forget 不影响 HTTP 200 响应。
+// 步骤 7 在步骤 8 之前的顺序由 V1 §10.5 r13 钦定 —— 让 broadcast fanout 时
+// ListSessionsByRoomID 返回列表自然不含 leaver Session，无需 BroadcastToRoom
+// primitive 加 excludeUserID 参数。
 func (s *roomServiceImpl) LeaveRoom(ctx context.Context, in LeaveRoomInput) (*LeaveRoomOutput, error) {
 	// (1) 预检 user.current_room_id（事务外，普通连接池查询）
 	user, err := s.userRepo.FindByID(ctx, in.UserID)
@@ -626,51 +655,13 @@ func (s *roomServiceImpl) LeaveRoom(ctx context.Context, in LeaveRoomInput) (*Le
 		return nil, apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
 	}
 
-	// (4) 事务 commit 成功 → 返回。
-	//
-	// ============================================================================
-	// SECURITY-DEFER (Story 11.8 钦定范围 — 11.5 严守范围红线，刻意不实装)
-	// ============================================================================
-	//
-	// **当前现状**（本 story 11.5 done 后到 11.8 done 之前的窗口）：
-	//   LeaveRoom 事务 commit 后**直接 return**，**不**触碰 SessionManager。
-	//   若 leaver 此刻仍持有 `/ws/rooms/:roomId` WS 连接（典型场景：iOS 端 client
-	//   先发 HTTP leave 再自行 close WS，但中间存在 ms 级窗口；或 client 实装层
-	//   依赖 server close 4007 才退订），其 Session 仍 registered 在 SessionManager
-	//   的 room → sessions 索引里。
-	//
-	// **影响范围**（11.8 实装前）：
-	//   - SessionManager.ListSessionsByRoomID(roomID) 在 leave 事务 commit 后仍把
-	//     leaver Session 算作该房间的 active member；
-	//   - BroadcastToRoom(roomID, ...)（Story 10.5 primitive）fanout 列表仍含 leaver，
-	//     leaver 在 close 4007 / 心跳超时（默认 60s）窗口内会继续收到本 roomId 的
-	//     `member.joined` / 后续 epic 广播（如 14.x `pet.state.changed` /
-	//     17.x `emoji.received`），违反 V1 §10.5 行 1544 "HTTP leave 后立即与房间
-	//     WS 解耦" 语义；
-	//   - presence renewal（如 Story 11.x heartbeat tick）仍把 leaver 当作该房间在
-	//     线成员处理，直到 socket 自然断开 / 心跳超时框架被动清理。
-	//
-	// **11.8 必装内容（V1 §10.5 钦定）**：
-	//   (a) 步骤 7：close 4007 + unregister leaver Session —— 从 SessionManager
-	//       撤销 leaver 在该 roomID 的 Session + close underlying WebSocket
-	//       (close code = 4007, reason = "left room via HTTP")；
-	//   (b) 步骤 8：BroadcastToRoom(roomID, {type: "member.left", ...}) —— payload
-	//       字段表见 §12.3 `### 成员离开`；
-	//   (c) 顺序由 V1 §10.5 r13 钦定：**先 close + unregister，后 broadcast**，
-	//       让 fanout 时 ListSessionsByRoomID 返回列表自然不含 leaver Session
-	//       —— 无需 BroadcastToRoom primitive 加 excludeUserID 参数。
-	//
-	// **11.5 与 11.8 之间窗口的暴露面**：节点 4 demo 验收（epic 13）触发 epic 11
-	// 全 done 才会出现该窗口在 prod 出现的可能；epic 11 中间不存在 prod release
-	// 节奏暴露此问题（11.6 / 11.7 / 11.8 仍在同一节点内连续推进）。
-	//
-	// **codex review r1 (2026-05-08) flag 此问题为 [P1] 状态不一致** —— review 工程
-	// 上 correct，但跨 story scope，本 story spec
-	// (`_bmad-output/implementation-artifacts/11-5-退出房间事务.md` 行 53-54 / 251-259 /
-	// 740 / 767 / 777) 严守 "本 story 不调任何 WS primitive" 红线 ——
-	// 转 **defer-to-11.8**。详细 trade-off / cross-story traceability 见 lesson
-	// `docs/lessons/2026-05-09-leave-room-ws-session-cleanup-defer-to-11-8-11-5-r1.md`。
-	// ============================================================================
+	// (4) 事务 commit 成功 → 按 V1 §10.5 r13 钦定顺序：先 close 4007 + unregister
+	// leaver Session，后 broadcast member.left（让 broadcast fanout 时 ListSessionsByRoomID
+	// 返回列表自然不含 leaver Session，无需 BroadcastToRoom primitive 加 excludeUserID
+	// 参数）；两步均 fire-and-forget（V1 §10.5 步骤 7 / 8 钦定，broadcast 失败不影响
+	// HTTP 200 响应）。
+	s.closeLeaverSession(ctx, in.RoomID, in.UserID)
+	s.broadcastMemberLeft(ctx, in.RoomID, in.UserID)
 	return &LeaveRoomOutput{
 		RoomID: in.RoomID,
 		Left:   true,
@@ -806,4 +797,229 @@ func (s *roomServiceImpl) GetRoomDetail(ctx context.Context, in GetRoomDetailInp
 	}
 
 	return out, nil
+}
+
+// ============================================================================
+// Story 11.8 — post-commit WS 广播 / close 4007 unregister leaver session helpers
+// ============================================================================
+
+// broadcastMemberJoined 触发 member.joined WS 广播（Story 11.8 引入）。
+//
+// 流程（V1 §10.4 步骤 8 + §12.3 `### 成员加入` 字段表钦定）：
+//  1. userRepo.FindByID(ctx, joinerUserID) 拿 nickname / avatar_url（事务外，
+//     普通连接池查询）
+//  2. petRepo.FindDefaultByUserID(ctx, joinerUserID) 拿默认宠物：
+//     - ErrPetNotFound → pet-less 路径，pet=nil 构造 payload `pet: null`
+//     - 其他 raw error → log warn + pet=nil 路径降级
+//     - happy → pet=&ws.SnapshotPet{PetID: strconv.FormatUint(pet.ID, 10),
+//     CurrentState: 1}（节点 4 阶段固定 1 rest，V1 §12.3 钦定）
+//  3. 构造 ws.MemberJoinedPayload{UserID: 字符串化, Nickname: real, AvatarURL: real, Pet: <如上>}
+//  4. 调 ws.BuildMemberJoinedEnvelope(payload) 拿 marshal 后 []byte
+//  5. s.broadcastFn(ctx, roomID, msgBytes) 推送（fire-and-forget）
+//
+// **fire-and-forget 严格语义**（V1 §10.4 步骤 8 钦定）：本方法**永远不返 error** ——
+// 任何步骤失败（DB / marshal / broadcast）一律 log warn 不返；caller (JoinRoom)
+// 不需要走错误分流。原因：broadcast 失败不应影响 HTTP 200 响应（client 已通过
+// HTTP 拿到 join 成功 authoritative signal，broadcast 是事件通知，不参与事务原子性）。
+//
+// **事务外严格性**：本方法在 JoinRoom 事务 commit 成功**之后**调用，**不**包入
+// txMgr.WithTx fn 内 —— 与数据库设计 §8.6 加入房间事务边界 + V1 §10.4 步骤 8
+// 钦定一致。
+//
+// **加入者收不到自己的 member.joined**（V1 §12.3 行 2063 钦定）：BroadcastToRoom
+// primitive 走 ListSessionsByRoomID 全量 fanout（不带 excludeUserID 参数），但
+// 节点 4 阶段时序事实上加入者尚未建立该 roomID 的 WS 连接（HTTP join → broadcast
+// 是同步顺序，broadcast 入队时加入者 WS 还没握手），所以加入者 Session 不在
+// ListSessionsByRoomID 列表中，自然收不到自己的 member.joined —— 无需在 service
+// 层做任何 excludeUserID 过滤。
+func (s *roomServiceImpl) broadcastMemberJoined(ctx context.Context, roomID, joinerUserID uint64) {
+	logger := slog.Default().With(
+		slog.String("component", "room-service-broadcast"),
+		slog.String("event", "member.joined"),
+		slog.Uint64("roomId", roomID),
+		slog.Uint64("joinerUserId", joinerUserID),
+	)
+
+	// (1) 查 joiner user 信息
+	user, err := s.userRepo.FindByID(ctx, joinerUserID)
+	if err != nil {
+		logger.Warn("ws broadcast: load joiner user failed; skip broadcast",
+			slog.Any("error", err))
+		return
+	}
+
+	// (2) 查 joiner 默认宠物
+	var pet *ws.SnapshotPet
+	petRow, err := s.petRepo.FindDefaultByUserID(ctx, joinerUserID)
+	if err != nil {
+		if !stderrors.Is(err, mysql.ErrPetNotFound) {
+			// 非 pet-less 兜底；log warn 后 pet=nil 降级（不阻塞 broadcast）
+			logger.Warn("ws broadcast: load joiner default pet failed; pet-less downgrade",
+				slog.Any("error", err))
+		}
+		// ErrPetNotFound 走 pet=nil 合法路径，不 log warn（pet-less 是合法场景）
+	} else {
+		pet = &ws.SnapshotPet{
+			PetID:        strconv.FormatUint(petRow.ID, 10),
+			CurrentState: 1, // V1 §12.3 节点 4 阶段固定 1 rest
+		}
+	}
+
+	// (3) 构造 payload
+	payload := ws.MemberJoinedPayload{
+		UserID:    strconv.FormatUint(joinerUserID, 10),
+		Nickname:  user.Nickname,
+		AvatarURL: user.AvatarURL,
+		Pet:       pet,
+	}
+
+	// (4) marshal envelope
+	msgBytes, err := ws.BuildMemberJoinedEnvelope(payload)
+	if err != nil {
+		logger.Warn("ws broadcast: marshal envelope failed; skip broadcast",
+			slog.Any("error", err))
+		return
+	}
+
+	// (5) fire-and-forget broadcast
+	sent, err := s.broadcastFn(ctx, roomID, msgBytes)
+	if err != nil {
+		logger.Warn("ws broadcast: broadcastFn failed",
+			slog.Int("targetSessions", sent),
+			slog.Any("error", err))
+		return
+	}
+	logger.Info("ws broadcast: member.joined sent",
+		slog.Int("targetSessions", sent))
+}
+
+// closeLeaverSession 实装 V1 §10.5 步骤 7（Story 11.8 引入）：
+// 从 SessionManager 撤销 leaver 在该 roomID 的 Session + close 4007 reason
+// "left room via HTTP"。
+//
+// 流程：
+//  1. s.sessionMgr.ListSessionsByRoomID(ctx, roomID) 拿该 roomID 全部 active Session
+//  2. 线性扫描找到 Session.UserID() == leaverUserID 的 Session（节点 4 阶段单 room
+//     最多 4 user，O(N) 可接受 —— ws/session_manager.go 钦定单 user 单 session
+//     假设由 Register 替换路径兜底）
+//  3. 命中 → session.CloseWithCode(4007, "left room via HTTP") + sessionMgr.Unregister
+//     —— **两步顺序**：先 CloseWithCode（写 close frame）后 Unregister（清索引）；
+//     CloseWithCode 内部走 notifyClosed → Unregister 自动闭环（10.3 落地），但
+//     显式 Unregister 兜底保证即使 Close 内部 race / panic 索引仍被清理（Unregister
+//     idempotent，二次调用 no-op 无副作用）
+//  4. 未命中（leaver 未持该 roomID 的 WS / 已断开）→ no-op + log info（合法场景）
+//
+// **fire-and-forget 严格语义**（V1 §10.5 步骤 7 钦定）：本方法**永远不返 error** ——
+// CloseWithCode / Unregister 的 error 一律 log warn / log info 不返；caller (LeaveRoom)
+// 不需要走错误分流。Session 撤销失败（leaver 未持 WS / 已断开）→ no-op，不影响
+// HTTP 200 响应。
+//
+// **事务外严格性**：本方法在 LeaveRoom 事务 commit 成功**之后**调用，**不**包入
+// txMgr.WithTx fn 内（与数据库设计 §8.7 退出房间事务边界 + V1 §10.5 步骤 7 钦定一致）。
+//
+// **r13 顺序约束**：本方法**必须**在 broadcastMemberLeft **之前**调用，让 broadcast
+// fanout 时 ListSessionsByRoomID 返回列表自然不含 leaver Session（无需 BroadcastToRoom
+// primitive 加 excludeUserID 参数）。
+func (s *roomServiceImpl) closeLeaverSession(ctx context.Context, roomID, leaverUserID uint64) {
+	// **nil sessionMgr guard**：HTTP-only / test wiring 场景下 RoomService 可能不
+	// 注入 sessionMgr（与 router.go broadcastFn closure `if deps.SessionMgr == nil`
+	// 同模式）—— 此时 LeaveRoom 事务 commit 后 fire-and-forget 调用本方法不应 panic，
+	// 直接 no-op 返回（fire-and-forget 严格语义：永远不返 error，no-op 不影响 HTTP 200）。
+	if s.sessionMgr == nil {
+		return
+	}
+
+	logger := slog.Default().With(
+		slog.String("component", "room-service-broadcast"),
+		slog.String("event", "close.4007"),
+		slog.Uint64("roomId", roomID),
+		slog.Uint64("leaverUserId", leaverUserID),
+	)
+
+	sessions := s.sessionMgr.ListSessionsByRoomID(ctx, roomID)
+	var target *ws.Session
+	for _, sess := range sessions {
+		if sess.UserID() == leaverUserID {
+			target = sess
+			break
+		}
+	}
+	if target == nil {
+		logger.Info("ws close 4007: leaver session not registered; skip (合法场景)")
+		return
+	}
+
+	sessionID := target.SessionID()
+	if err := target.CloseWithCode(4007, "left room via HTTP"); err != nil {
+		// ErrSessionClosed (target 已被并发 close) → 走 Unregister 兜底（idempotent）；
+		// 其他 raw error → log warn 不返
+		logger.Warn("ws close 4007: CloseWithCode returned error",
+			slog.String("sessionId", sessionID),
+			slog.Any("error", err))
+	}
+
+	// **关键**：显式 Unregister 兜底（CloseWithCode → notifyClosed → Unregister 自动
+	// 闭环已就绪，但显式调用兜底；Unregister idempotent 双调安全）
+	if err := s.sessionMgr.Unregister(ctx, sessionID); err != nil {
+		logger.Warn("ws close 4007: Unregister returned error",
+			slog.String("sessionId", sessionID),
+			slog.Any("error", err))
+		return
+	}
+	logger.Info("ws close 4007: leaver session closed and unregistered",
+		slog.String("sessionId", sessionID))
+}
+
+// broadcastMemberLeft 触发 member.left WS 广播（Story 11.8 引入）。
+//
+// 流程（V1 §10.5 步骤 8 + §12.3 `### 成员离开` 字段表钦定）：
+//  1. 构造 ws.MemberLeftPayload{UserID: 字符串化}（V1 §12.3 行 2073-2080 字段表
+//     钦定仅 1 字段 userId）
+//  2. 调 ws.BuildMemberLeftEnvelope(payload) 拿 marshal 后 []byte
+//  3. s.broadcastFn(ctx, roomID, msgBytes) 推送（fire-and-forget）
+//
+// **与 broadcastMemberJoined 的差异**：member.left payload 不需要查 user / pet
+// 信息（V1 §12.3 行 2097 钦定 leave 事件 client UX 不需要显示昵称 + pet 信息），
+// 直接拿 leaverUserID 字符串化即可，**不**走 userRepo.FindByID / petRepo.FindDefaultByUserID。
+//
+// **fire-and-forget 严格语义**（V1 §10.5 步骤 8 钦定）：本方法**永远不返 error** ——
+// 任何步骤失败（marshal / broadcast）一律 log warn 不返。
+//
+// **事务外严格性 + r13 顺序约束**：本方法在 LeaveRoom 事务 commit 成功之后调用，
+// **必须**在 closeLeaverSession 之**后**调用 —— 让 broadcast fanout 时 leaver
+// Session 已被 Unregister 不在 ListSessionsByRoomID 返回列表中，自然跳过 leaver。
+//
+// **特例**：若 LeaveRoom 步骤 5 触发了 closed 转换（最后一人离开 → rooms.status=2），
+// 房间内已无其他在线广播对象 —— broadcast 路径仍调用 broadcastFn，但 fanout 时房间
+// 内已无其他在线 Session，broadcastFn 自然 no-op（详见 ws/broadcast.go：0 个 active
+// Session → 返 (0, nil)）。
+func (s *roomServiceImpl) broadcastMemberLeft(ctx context.Context, roomID, leaverUserID uint64) {
+	logger := slog.Default().With(
+		slog.String("component", "room-service-broadcast"),
+		slog.String("event", "member.left"),
+		slog.Uint64("roomId", roomID),
+		slog.Uint64("leaverUserId", leaverUserID),
+	)
+
+	// (1) 构造 payload + (2) marshal envelope
+	payload := ws.MemberLeftPayload{
+		UserID: strconv.FormatUint(leaverUserID, 10),
+	}
+	msgBytes, err := ws.BuildMemberLeftEnvelope(payload)
+	if err != nil {
+		logger.Warn("ws broadcast: marshal envelope failed; skip broadcast",
+			slog.Any("error", err))
+		return
+	}
+
+	// (3) fire-and-forget broadcast
+	sent, err := s.broadcastFn(ctx, roomID, msgBytes)
+	if err != nil {
+		logger.Warn("ws broadcast: broadcastFn failed",
+			slog.Int("targetSessions", sent),
+			slog.Any("error", err))
+		return
+	}
+	logger.Info("ws broadcast: member.left sent",
+		slog.Int("targetSessions", sent))
 }

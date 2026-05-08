@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"context"
 	stderrors "errors"
 	"fmt"
 	"log/slog"
@@ -366,7 +367,30 @@ func NewRouter(deps Deps) *gin.Engine {
 		if !wsTablesReady(deps.GormDB) {
 			panic("ws backing tables missing: rooms / room_members must exist (run migrations 0007 / 0008)")
 		}
-		roomSvc := service.NewRoomService(deps.TxMgr, userRepo, roomRepo, roomMemberRepo)
+		// Story 11.8 加：service.NewRoomService 签名扩展为 7 参数，新增 petRepo /
+		// sessionMgr / broadcastFn 三个尾部参数：
+		//   - petRepo: pets 表访问；用于 broadcastMemberJoined 查询加入者默认宠物
+		//     （**复用**上面已 wire 的 petRepo 实例，避免重复构造同一 db handle 的
+		//     多个 NewPetRepo 实例）
+		//   - deps.SessionMgr: WS Session 注册中心（10.3 落地）；用于 closeLeaverSession
+		//     查询 leaver 在 roomID 的 Session + close 4007 + Unregister；与 wsapp.NewGateway
+		//     调用点共享同一实例
+		//   - broadcastFn: closure 包装 wsapp.BroadcastToRoom 走 deps.SessionMgr，让
+		//     service 层不直接 import SessionManager 实例（与 ws/broadcast.go 行 40-69
+		//     钦定的 BroadcastFn 注入模式一致）
+		//
+		// **deps.SessionMgr 可能为 nil**（HTTP-only 部署 / 测试 fixture）；ws.BroadcastToRoom
+		// 在 SessionManager nil 时会 panic，所以本 closure 必须 nil-tolerant：deps.SessionMgr
+		// == nil → 直接返 (0, nil) no-op（room service 单元 / 端到端测试无 WS gateway 时安全）。
+		// roomSvc.broadcastMemberJoined / broadcastMemberLeft 走 fire-and-forget 不会
+		// 因 broadcastFn no-op 而导致 HTTP 业务回归。
+		roomBroadcastFn := wsapp.BroadcastFn(func(ctx context.Context, roomID uint64, msg []byte) (int, error) {
+			if deps.SessionMgr == nil {
+				return 0, nil
+			}
+			return wsapp.BroadcastToRoom(ctx, deps.SessionMgr, roomID, msg)
+		})
+		roomSvc := service.NewRoomService(deps.TxMgr, userRepo, roomRepo, roomMemberRepo, petRepo, deps.SessionMgr, roomBroadcastFn)
 		roomHandler := handler.NewRoomHandler(roomSvc)
 
 		api := r.Group("/api/v1")

@@ -29,9 +29,13 @@ package service_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	wsapp "github.com/huing/cat/server/internal/app/ws"
 	"github.com/huing/cat/server/internal/infra/config"
 	"github.com/huing/cat/server/internal/infra/db"
 	apperror "github.com/huing/cat/server/internal/pkg/errors"
@@ -66,8 +70,14 @@ func buildRoomServiceIntegration(t *testing.T) (svc service.RoomService, sqlDB *
 	userRepo := mysql.NewUserRepo(gormDB)
 	roomRepo := mysql.NewRoomRepo(gormDB)
 	roomMemberRepo := mysql.NewRoomMemberRepo(gormDB)
+	petRepo := mysql.NewPetRepo(gormDB)
+	// Story 11.8 集成测试默认走 no-op SessionManager + capture-less broadcastFn；
+	// 单独的 broadcast 路径集成 case 由专门的 buildRoomServiceIntegrationWithCapture
+	// 构造（注入 capture broadcastFn 让 case 可断言调用次数 + 入参 wire 内容）。
+	noopSessionMgr := wsapp.NewSessionManager()
+	noopBroadcastFn := wsapp.BroadcastFn(func(ctx context.Context, roomID uint64, msg []byte) (int, error) { return 0, nil })
 
-	svc = service.NewRoomService(txMgr, userRepo, roomRepo, roomMemberRepo)
+	svc = service.NewRoomService(txMgr, userRepo, roomRepo, roomMemberRepo, petRepo, noopSessionMgr, noopBroadcastFn)
 
 	rawDB, err := gormDB.DB()
 	if err != nil {
@@ -1042,5 +1052,290 @@ func TestRoomServiceIntegration_GetRoomDetail_ClosedRoom_CallerAlreadyLeft_Retur
 	}
 	if ae.Code != apperror.ErrUserNotInRoom {
 		t.Errorf("AppError.Code = %d, want %d (6004; closed 房间 caller 已离开)", ae.Code, apperror.ErrUserNotInRoom)
+	}
+}
+
+// ============================================================
+// Story 11.8 集成测试：broadcast / close 触发路径（dockertest + 真实 SessionManager
+// + capture broadcastFn）
+// ============================================================
+
+// recordedBroadcastCall 记录 capture broadcastFn 的单次调用。
+type recordedBroadcastCall struct {
+	roomID uint64
+	msg    []byte
+	seq    int64 // 单调序号（与 capture-aware close 4007 路径中 SessionManager Unregister 共用同一时钟）
+}
+
+// captureBroadcastFn 包装 ws.BroadcastFn；内部记录所有调用便于断言。
+type captureBroadcastFn struct {
+	mu     sync.Mutex
+	calls  []recordedBroadcastCall
+	seqGen *atomic.Int64
+}
+
+func newCaptureBroadcastFn(seqGen *atomic.Int64) *captureBroadcastFn {
+	return &captureBroadcastFn{seqGen: seqGen}
+}
+
+func (c *captureBroadcastFn) fn() wsapp.BroadcastFn {
+	return func(ctx context.Context, roomID uint64, msg []byte) (int, error) {
+		c.mu.Lock()
+		copied := append([]byte(nil), msg...)
+		c.calls = append(c.calls, recordedBroadcastCall{
+			roomID: roomID,
+			msg:    copied,
+			seq:    c.seqGen.Add(1),
+		})
+		c.mu.Unlock()
+		return 0, nil
+	}
+}
+
+func (c *captureBroadcastFn) callCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.calls)
+}
+
+// buildRoomServiceIntegrationWithCapture 同 buildRoomServiceIntegration，但注入
+// 真实 ws.SessionManager + capture broadcastFn 让 case 可断言 broadcast / close 4007
+// 触发路径。同时返回 sessionMgr / capture 给 case 直接消费。
+func buildRoomServiceIntegrationWithCapture(t *testing.T) (
+	svc service.RoomService,
+	sqlDB *sql.DB,
+	sessionMgr wsapp.SessionManager,
+	capture *captureBroadcastFn,
+	cleanup func(),
+) {
+	t.Helper()
+
+	dsn, dockerCleanup := startMySQL(t)
+	runMigrations(t, dsn)
+
+	cfg := config.MySQLConfig{
+		DSN:                dsn,
+		MaxOpenConns:       10,
+		MaxIdleConns:       2,
+		ConnMaxLifetimeSec: 60,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	gormDB, err := db.Open(ctx, cfg)
+	if err != nil {
+		dockerCleanup()
+		t.Fatalf("db.Open: %v", err)
+	}
+
+	txMgr := tx.NewManager(gormDB)
+	userRepo := mysql.NewUserRepo(gormDB)
+	roomRepo := mysql.NewRoomRepo(gormDB)
+	roomMemberRepo := mysql.NewRoomMemberRepo(gormDB)
+	petRepo := mysql.NewPetRepo(gormDB)
+
+	sessionMgr = wsapp.NewSessionManager()
+	seqGen := &atomic.Int64{}
+	capture = newCaptureBroadcastFn(seqGen)
+
+	svc = service.NewRoomService(txMgr, userRepo, roomRepo, roomMemberRepo, petRepo, sessionMgr, capture.fn())
+
+	rawDB, err := gormDB.DB()
+	if err != nil {
+		dockerCleanup()
+		t.Fatalf("gormDB.DB(): %v", err)
+	}
+
+	cleanup = func() {
+		_ = sessionMgr.Close()
+		_ = rawDB.Close()
+		dockerCleanup()
+	}
+	return svc, rawDB, sessionMgr, capture, cleanup
+}
+
+// integrationEnvelope 测试本地 wire mirror（与 ws.serverEnvelope 字段集合等价）。
+type integrationEnvelope struct {
+	Type      string          `json:"type"`
+	RequestID string          `json:"requestId"`
+	Payload   json.RawMessage `json:"payload"`
+	Ts        int64           `json:"ts"`
+}
+
+// case 14: B join → broadcastFn 被调用 1 次 + payload 字段值正确（含 nickname /
+// avatarUrl / pet）+ A 在 fixture 已建房；本 case 验证：commit 成功后 fire-and-forget
+// 路径在真实 dockertest 数据库 + 真实 SessionManager 下端到端工作
+func TestRoomServiceIntegration_JoinRoom_Happy_BroadcastFnInvokedOnce(t *testing.T) {
+	svc, sqlDB, _, capture, cleanup := buildRoomServiceIntegrationWithCapture(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	insertUser(t, sqlDB, userA, "uid-118-a", "用户A", "")
+	insertUser(t, sqlDB, userB, "uid-118-b", "用户B", "https://avatar/b")
+	// B 有默认 pet → broadcast payload pet ≠ null
+	insertPet(t, sqlDB, 8002, userB, 1, "PetB", 1, 1)
+
+	// A 创建房间
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+	roomID := createOut.RoomID
+	// 重置 capture（A 的 createRoom 不广播 member.joined，但 B 的 join 才是本 case 焦点；
+	// 这里清空让断言只看 join 触发的 1 次）
+	capture.mu.Lock()
+	capture.calls = nil
+	capture.mu.Unlock()
+
+	// B join
+	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userB, RoomID: roomID}); err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+
+	// 校验 capture：broadcastFn 被调 1 次 + roomID 正确 + payload 字段值正确
+	if got := capture.callCount(); got != 1 {
+		t.Fatalf("broadcastFn call count = %d, want 1 (after B join)", got)
+	}
+	call := capture.calls[0]
+	if call.roomID != roomID {
+		t.Errorf("call.roomID = %d, want %d", call.roomID, roomID)
+	}
+
+	var env integrationEnvelope
+	if err := json.Unmarshal(call.msg, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != "member.joined" {
+		t.Errorf("env.Type = %q, want \"member.joined\"", env.Type)
+	}
+
+	var payload struct {
+		UserID    string `json:"userId"`
+		Nickname  string `json:"nickname"`
+		AvatarURL string `json:"avatarUrl"`
+		Pet       *struct {
+			PetID        string `json:"petId"`
+			CurrentState int    `json:"currentState"`
+		} `json:"pet"`
+	}
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.UserID != "1002" {
+		t.Errorf("payload.userId = %q, want \"1002\"", payload.UserID)
+	}
+	if payload.Nickname != "用户B" {
+		t.Errorf("payload.nickname = %q, want \"用户B\"", payload.Nickname)
+	}
+	if payload.AvatarURL != "https://avatar/b" {
+		t.Errorf("payload.avatarUrl = %q, want \"https://avatar/b\"", payload.AvatarURL)
+	}
+	if payload.Pet == nil {
+		t.Fatalf("payload.pet = nil, want object (B 已 seed default pet)")
+	}
+	if payload.Pet.PetID != "8002" {
+		t.Errorf("payload.pet.petId = %q, want \"8002\"", payload.Pet.PetID)
+	}
+	if payload.Pet.CurrentState != 1 {
+		t.Errorf("payload.pet.currentState = %d, want 1", payload.Pet.CurrentState)
+	}
+}
+
+// case 15: B leave → close 路径走 no-op（B 未持 WS Session，sessionMgr.ListSessionsByRoomID
+// 返 []）+ broadcastFn 被调用 1 次 + payload type=member.left + payload.userId 正确
+func TestRoomServiceIntegration_LeaveRoom_Happy_BroadcastsMemberLeft(t *testing.T) {
+	svc, sqlDB, sessionMgr, capture, cleanup := buildRoomServiceIntegrationWithCapture(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	insertUser(t, sqlDB, userA, "uid-118-leave-a", "A", "")
+	insertUser(t, sqlDB, userB, "uid-118-leave-b", "B", "")
+
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+	roomID := createOut.RoomID
+
+	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userB, RoomID: roomID}); err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+
+	capture.mu.Lock()
+	capture.calls = nil
+	capture.mu.Unlock()
+
+	// B leave —— B 未持 WS Session，closeLeaverSession 走 no-op
+	if _, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userB, RoomID: roomID}); err != nil {
+		t.Fatalf("LeaveRoom: %v", err)
+	}
+
+	// 校验 sessionMgr：B 的 Session 不存在过（leave 路径不会创建 Session）
+	if sessions := sessionMgr.ListSessionsByRoomID(context.Background(), roomID); len(sessions) != 0 {
+		t.Errorf("sessions count = %d, want 0 (no WS Sessions registered)", len(sessions))
+	}
+
+	// 校验 capture：broadcastFn 被调用 1 次 + payload type=member.left + payload.userId 正确
+	if got := capture.callCount(); got != 1 {
+		t.Fatalf("broadcastFn call count = %d, want 1 (after B leave)", got)
+	}
+	call := capture.calls[0]
+	if call.roomID != roomID {
+		t.Errorf("call.roomID = %d, want %d", call.roomID, roomID)
+	}
+
+	var env integrationEnvelope
+	if err := json.Unmarshal(call.msg, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != "member.left" {
+		t.Errorf("env.Type = %q, want \"member.left\"", env.Type)
+	}
+	var payload struct {
+		UserID string `json:"userId"`
+	}
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.UserID != "1002" {
+		t.Errorf("payload.userId = %q, want \"1002\"", payload.UserID)
+	}
+}
+
+// case 16: 最后一人 leave → 房间 status=closed + broadcastFn 仍被调用 1 次（虽然
+// 无其他成员收 broadcast，service 层仍 trigger broadcastFn；与 V1 §10.5 步骤 8 钦定
+// 一致）
+func TestRoomServiceIntegration_LeaveRoom_LastMember_StillBroadcasts(t *testing.T) {
+	svc, sqlDB, _, capture, cleanup := buildRoomServiceIntegrationWithCapture(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	insertUser(t, sqlDB, userA, "uid-118-last", "A", "")
+
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+	roomID := createOut.RoomID
+
+	capture.mu.Lock()
+	capture.calls = nil
+	capture.mu.Unlock()
+
+	// A leave（最后一人）
+	if _, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userA, RoomID: roomID}); err != nil {
+		t.Fatalf("LeaveRoom: %v", err)
+	}
+
+	// 房间状态变为 closed=2
+	if got := fetchRoomStatus(t, sqlDB, roomID); got != 2 {
+		t.Errorf("rooms.status = %d, want 2 closed (last member leave)", got)
+	}
+
+	// broadcastFn 仍被调用 1 次（房间内无其他成员收 broadcast，但 service 层仍 trigger）
+	if got := capture.callCount(); got != 1 {
+		t.Errorf("broadcastFn call count = %d, want 1 (last member leave still broadcasts)", got)
 	}
 }
