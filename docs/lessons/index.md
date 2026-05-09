@@ -241,3 +241,4 @@
 | 2026-05-09 | [WS reconnect 状态机用 generation counter 隔离 stale task 的共享状态写入（12-5 r2）](2026-05-09-ws-reconnect-generation-counter-isolates-stale-tasks-12-5-r2.md) | 2 | architecture | `<pending>` |
 | 2026-05-09 | [WS reconnect: connectGate 也要 generation 守护（12-5 r3）](2026-05-09-ws-reconnect-connect-gate-needs-generation-scoping-12-5-r3.md) | 1 | architecture | `<pending>` |
 | 2026-05-09 | [WS reconnect: stream 复用 vs session 翻新必须双 generation 解耦（12-5 r4）](2026-05-09-ws-reconnect-stream-vs-session-generations-must-decouple-12-5-r4.md) | 1 | architecture | `<pending>` |
+| 2026-05-09 | [WS reconnect: precondition 必须先于 gen 翻新 & connectGate 覆盖前必 resolve（12-5 r5）](2026-05-09-ws-reconnect-precondition-must-precede-gen-bump-and-gate-supersede-12-5-r5.md) | 2 | architecture | `<pending>` |

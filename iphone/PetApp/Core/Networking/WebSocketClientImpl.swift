@@ -240,6 +240,25 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
     ///   - **`.connectionStateChanged(.connected)` 由 receive loop 在第一帧到达时同步 emit**
     ///     （早于第一帧 yield，避免与第一帧 yield 之间的调度 race；详见 startReceiveLoop 注释）
     public func connect(roomId: String) async throws {
+        // fix-review round 5 P1：preconditions 必须**先于** sessionGeneration 翻新.
+        //
+        // 旧实装在入口直接 `sessionGeneration += 1`，但若紧随的 `connectInternal` 因 token nil/空
+        // 或 `makeWSURL` throw 而早退（room switch 时 auth 暂时不可用是典型场景），现存活的 socket
+        // 仍在 receive，但其 receive-loop 持有的 `mySession` 已 < sessionGeneration → 后续 frame 走
+        // `yieldIfCurrent` / `emitConnectionStateIfCurrent` 全部 silent drop；此时连接物理上还活，
+        // 逻辑上已被 wedged，必须等外部显式 disconnect 才能恢复 —— **用户不可见**的 wedge.
+        //
+        // 修：preconditions 先 dry-run，throw 路径完全不动 generation / 不动 reconnect 状态.
+        //   - token 取（nil/空 → throw + 不翻 gen）
+        //   - URL 构造（throw → 不翻 gen）
+        //   - 都过了才进入 displace-session 持锁块：cancel 老 reconnectTask + 翻 gen + 重置 attempt
+        // 注：`connectInternal` 内仍会重做这两步检查（reconnect 路径直接走那条），代码重复 OK.
+        guard let token = tokenProvider(), !token.isEmpty else {
+            throw WSError.tokenMissing
+        }
+        _ = try makeWSURL(roomId: roomId, token: token)  // dry-run；throw 路径不翻 gen
+
+        // preconditions 都过 → 真正 displace 当前 session.
         // Story 12.5：caller 主动 connect → 清掉任何 in-flight reconnect 状态
         // fix-review round 2 P1：递增 sessionGeneration —— 之前 launch 的 receive-loop / reconnect-attempt
         //   再写共享状态时会因 mySession != sessionGeneration 被 silent drop（防 stale event 串到新 session）.
@@ -305,6 +324,25 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         // 时序契约：V1 §12.1 钦定握手成功后 server 必发 `room.snapshot` 作为第一条消息 ——
         //   "第一帧成功" 与 "握手成功" 等价；4001 / 4004 等 close 在 receive 上以 URLError 出现.
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            // fix-review round 5 P2：install 新 gate 前必须先 resolve 旧 gate ——
+            //   场景：caller-driven `connect()` 与已在 `connectInternal` 内 await 的 reconnect-attempt
+            //   竞争时，旧实装直接覆盖 `connectGate`，被覆盖的 reconnect 后续走 `resolveConnectGate(...)`
+            //   因 session 不匹配 silent drop → 那个 `withCheckedThrowingContinuation` 永远不被 resume,
+            //   reconnect 的 connectInternal await 永久 suspend → task 泄漏.
+            //
+            //   策略：抢锁内一次性 swap 旧 gate 引用出来（清字段），出锁后在 install 新 gate 之前
+            //   resume(throwing:) 让旧 caller 拿到明确失败而非 hang. 走 unconditional 路径——本场景
+            //   显式想 fail 旧 gate（caller 主动 supersede），不需要 generation 校验.
+            let staleGate: CheckedContinuation<Void, Error>?
+            lock.lock()
+            staleGate = connectGate
+            connectGate = nil
+            connectGateOwnerSession = nil
+            lock.unlock()
+            staleGate?.resume(throwing: WSError.connectionFailed(
+                underlyingDescription: "superseded by new connect attempt"
+            ))
+
             lock.lock()
             connectGate = cont
             // fix-review round 3 P1：把 gate 与本次 connectInternal 的 mySession 绑定 ——

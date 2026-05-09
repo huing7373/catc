@@ -1154,6 +1154,199 @@ final class WebSocketClientImplTests: XCTestCase {
             "last snapshot on reused stream should be ROOM_B, not stale RM01 (stale yield leak); collected=\(collected)")
     }
 
+    // MARK: - case#R16 (fix-review round 5 P1)
+    // connect(roomId:) 在 token nil/空 或 makeWSURL throw 时**绝不**翻 sessionGeneration ——
+    // 否则现存活的 receive-loop 立即被 stale 化（mySession 落后），still-open connection 的所有
+    // 后续 frame 走 yieldIfCurrent / emitConnectionStateIfCurrent 全部 silent drop → 用户不可见 wedge.
+    //
+    // 触发条件：room switch 时 auth 暂时不可用（tokenProvider 返回 nil）—— 切到新 room 失败，
+    //   但原 in-room session 必须仍可正常收消息.
+    // 测试设计：
+    //   1. 用一个动态 tokenProvider —— 首次 connect 返回 valid token；第二次（token-fail 注入）返回 nil.
+    //   2. 首次 connect RM01 成功 + 收到 snapshot → 然后注入 nil token + 调 connect("RM02") 期望 throws.
+    //   3. 失败 connect 之后再让 firstTask 推一帧（模拟 RM01 still-open 的后续 server push）—— 验证仍能 yield.
+    //
+    // 旧实装：第二步 connect 入口直接翻 gen → 第三步的 firstTask frame yield 时 mySession 落后 →
+    //   silent drop → 测试观察到 stream 上拿不到第二帧 RM01 message → wedge.
+    // 修复后：connect 入口先 dry-run 校验 token + URL；token nil → throw 时 gen 未翻 → 第二帧仍 yield.
+
+    func test_connect_tokenNilDoesNotInvalidateLiveSession_round5_P1() async throws {
+        let factory = FakeReconnectFactory()
+
+        // RM01：snapshot 解 latch + 之后 blockReceiveForever 保活；测试通过 enqueueFrame 在 connect 失败后再 push.
+        let firstTask = factory.scheduleNewTask()
+        let rm01Snapshot = """
+        {
+          "type": "room.snapshot",
+          "requestId": "",
+          "payload": {
+            "room": {"id": "RM01", "maxMembers": 4, "memberCount": 0},
+            "members": []
+          },
+          "ts": 1
+        }
+        """
+        let rm01PostFailMessage = """
+        {
+          "type": "member.left",
+          "requestId": "",
+          "payload": {"userId": "U1"},
+          "ts": 2
+        }
+        """
+        // 两帧：snapshot 解 latch；第二帧（heartbeat）会在第二次 connect 失败之后被 receive() 返回.
+        firstTask.scriptedFrames = [.string(rm01Snapshot), .string(rm01PostFailMessage)]
+        firstTask.blockReceiveForever = true
+
+        // 动态 token：用 NSLock 保护的 toggle.
+        let tokenLock = NSLock()
+        var tokenValid = true
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: {
+                tokenLock.lock()
+                defer { tokenLock.unlock() }
+                return tokenValid ? "tok" : nil
+            },
+            taskFactory: factory
+        )
+
+        let stream = client.messages
+        let collectTask = Task<[WSMessage], Never> {
+            var local: [WSMessage] = []
+            for await msg in stream {
+                if case .connectionStateChanged = msg { continue }
+                local.append(msg)
+                if local.count >= 2 { return local }  // snapshot + heartbeat
+            }
+            return local
+        }
+
+        // 1. 首次 connect RM01 成功
+        try await client.connect(roomId: "RM01")
+
+        // 2. 注入 nil token + 调 connect("RM02") 期望抛 tokenMissing.
+        tokenLock.lock(); tokenValid = false; tokenLock.unlock()
+        do {
+            try await client.connect(roomId: "RM02")
+            XCTFail("Expected WSError.tokenMissing")
+        } catch let err as WSError {
+            XCTAssertEqual(err, .tokenMissing)
+        } catch {
+            XCTFail("Expected WSError.tokenMissing, got \(error)")
+        }
+
+        // 3. 关键 assertion：firstTask 仍是当前 underlying；其第二帧 (rm01PostFailMessage) 应能正常 yield.
+        //    旧实装：connect 入口已翻 gen → mySession 落后 → yieldIfCurrent silent drop → collectTask 拿不到第二帧.
+        let collected = await withTaskGroup(of: [WSMessage].self) { group in
+            group.addTask { await collectTask.value }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                return []
+            }
+            let first = await group.next() ?? []
+            group.cancelAll()
+            return first
+        }
+
+        // 必须收到 2 条（snapshot + heartbeat）；只收到 1 条说明 silent drop.
+        XCTAssertEqual(collected.count, 2,
+            "still-open RM01 connection 必须仍可 yield；只收到 \(collected.count) 条 → 旧 P1 wedge 复现")
+        if collected.count >= 2 {
+            // 第二条应该是 .memberLeft（不是 .unknown）
+            if case .unknown = collected[1] {
+                XCTFail("expected member.left as 2nd message; got .unknown — 解码失败")
+            }
+        }
+
+        client.disconnect()
+    }
+
+    // MARK: - case#R17 (fix-review round 5 P2)
+    // connect(roomId:) 在 reconnect-attempt 已在 `connectInternal` 内 await connectGate 时被调用 ——
+    // 旧实装直接覆盖 connectGate 字段，被覆盖的旧 continuation 永远 hang（其后续 resolve 因 session
+    // 不匹配 silent drop）→ 旧 reconnect 的 await 永久 suspend，task 泄漏.
+    //
+    // 触发条件：reconnect backoff 期间 caller 主动 connect("ROOM_B")；或两个 caller 极端 race.
+    // 测试设计：
+    //   1. 起一个 manual `connectInternal` await（用 fresh client + 永不返回 frame 的 firstTask）—— 这个
+    //      `connect()` Task 会一直 stuck 在 `withCheckedThrowingContinuation`（即 connectGate）直到
+    //      被显式 resume.
+    //   2. 同步 connect("ROOM_B") —— install 新 connectGate；旧实装会丢弃旧 gate 让旧 connect Task hang.
+    //   3. 验证：旧 connect Task 在合理时间内拿到 thrown error（不再 hang），且新 connect 成功.
+
+    func test_connect_supersededInflightGateMustBeResolved_round5_P2() async throws {
+        let factory = FakeReconnectFactory()
+
+        // 首个 task：永不返回任何 frame —— 让 first connect 永远 stuck 在 connectGate await（在 P2 修复前
+        // 模拟"被覆盖且永远 hang"的场景；修复后此 connect 应被 superseded 抛出错误）.
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = []
+        firstTask.blockReceiveForever = true  // receive() 永远阻塞
+
+        // 第二次 connect ROOM_B：snapshot 解 latch.
+        let secondTask = factory.scheduleNewTask()
+        let roomBSnapshot = """
+        {
+          "type": "room.snapshot",
+          "requestId": "",
+          "payload": {
+            "room": {"id": "ROOM_B", "maxMembers": 4, "memberCount": 0},
+            "members": []
+          },
+          "ts": 2
+        }
+        """
+        secondTask.scriptedFrames = [.string(roomBSnapshot)]
+        secondTask.blockReceiveForever = true
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+
+        // 1. 起首个 connect Task —— 它会 stuck 在 connectGate 因为 firstTask 不返回任何 frame.
+        let firstConnectExpectation = expectation(description: "first connect throws or returns")
+        let firstConnectResult = SendableBox<Result<Void, Error>?>(value: nil)
+        let firstConnectTask = Task {
+            do {
+                try await client.connect(roomId: "RM01")
+                firstConnectResult.set(.success(()))
+            } catch {
+                firstConnectResult.set(.failure(error))
+            }
+            firstConnectExpectation.fulfill()
+        }
+
+        // 给 firstConnectTask 充分时间进入 await connectGate（首帧 task 已 install 但 receive() block）.
+        try await Task.sleep(nanoseconds: 100_000_000)  // 100ms
+
+        // 2. 同步发起第二次 connect ROOM_B —— P2 修复后会 resolve 旧 gate（throw connectionFailed），
+        //    然后 install 自己的 gate；secondTask snapshot yield → 解第二个 gate.
+        try await client.connect(roomId: "ROOM_B")
+
+        // 3. 旧 connect Task 必须在合理时间内拿到 thrown error（不能 hang）—— P2 旧实装会 hang 至超时.
+        await fulfillment(of: [firstConnectExpectation], timeout: 2.0)
+        firstConnectTask.cancel()  // 防御性
+
+        let firstResult = firstConnectResult.value
+        XCTAssertNotNil(firstResult, "first connect 必须 settle（不能永久 suspended）")
+        guard case .failure(let err)? = firstResult else {
+            XCTFail("first connect 应抛错（被新 connect superseded）；实际 result=\(String(describing: firstResult))")
+            return
+        }
+        // 期望 WSError.connectionFailed —— underlyingDescription 包含 "superseded".
+        guard case WSError.connectionFailed(let desc) = err else {
+            XCTFail("expected WSError.connectionFailed (superseded), got \(err)")
+            return
+        }
+        XCTAssertTrue(desc.contains("superseded"),
+            "underlyingDescription 应明示 superseded；实际=\(desc)")
+
+        client.disconnect()
+    }
+
     // MARK: - reconnect 测试 helpers
 
     /// 收集 stream 上的 connection state events 直到拿到指定数量（带超时）.
@@ -1405,5 +1598,28 @@ final class FakeReconnectFactory: WebSocketTaskFactory, @unchecked Sendable {
         }
         lock.unlock()
         return h
+    }
+}
+
+// MARK: - SendableBox helper (fix-review round 5 P2 test)
+
+/// 跨 task 边界传递可变值的最简 box —— `@unchecked Sendable` 通过 NSLock 保护内部 var.
+/// 仅供测试用，不进 production 代码.
+final class SendableBox<T>: @unchecked Sendable {
+    private var _value: T
+    private let lock = NSLock()
+
+    init(value: T) {
+        self._value = value
+    }
+
+    var value: T {
+        lock.lock(); defer { lock.unlock() }
+        return _value
+    }
+
+    func set(_ newValue: T) {
+        lock.lock(); defer { lock.unlock() }
+        _value = newValue
     }
 }
