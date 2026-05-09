@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-05-09 (epic-37 retrospective done)
+# last_updated: 2026-05-09 (story 12-2 done)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -156,7 +156,7 @@ development_status:
   epic-11-retrospective: done
   epic-12: in-progress
   12-1-房间页面-swiftui-骨架: done
-  12-2-websocketclient-封装: review
+  12-2-websocketclient-封装: done
   12-3-房间快照解析-成员列表渲染: backlog
   12-4-成员加入-离开-ws-消息处理: backlog
   12-5-自动重连: backlog

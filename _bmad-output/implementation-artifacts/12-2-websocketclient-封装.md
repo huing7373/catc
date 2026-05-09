@@ -1,6 +1,6 @@
 # Story 12.2: WebSocketClient 封装（基于 URLSessionWebSocketTask）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
