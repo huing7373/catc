@@ -46,7 +46,8 @@ final class RealRoomViewModelTests: XCTestCase {
     // MARK: - case#2 happy: WS 推 room.snapshot → members 正确派生
 
     /// 验证 `applySnapshot` 路径：3 成员 snapshot → members.count == 3 + 字段映射正确.
-    /// 涵盖 §12.3 client merge contract 最小路径：roster 集合裁剪 + nickname 非空覆盖 + isHost = (index == 0).
+    /// 涵盖 §12.3 client merge contract 最小路径：roster 集合裁剪 + nickname 非空覆盖 + **isHost 严格 false**
+    /// （fix-review round 4 P2：snapshot path 不依赖位置启发式推断 host）.
     func testRoomSnapshotMessagePopulatesMembers() async {
         let appState = AppState.makeHydrated(currentRoomId: "room_1234567")
         let mockWS = WebSocketClientMock()
@@ -76,7 +77,9 @@ final class RealRoomViewModelTests: XCTestCase {
         XCTAssertEqual(vm.members.count, 3, "snapshot 含 3 成员应当映射成 vm.members.count == 3")
         XCTAssertEqual(vm.members[0].id, "u_alice")
         XCTAssertEqual(vm.members[0].name, "小花", "snapshot 非空 nickname 应当直接覆盖")
-        XCTAssertTrue(vm.members[0].isHost, "snapshot 第一个成员节点 4 阶段约定为 host (index == 0)")
+        // fix-review round 4 P2：snapshot path 下所有 RoomMember.isHost 一律 false
+        // （旧实装 `isHost = index == 0` 在房主已离开的合法 server state 下会错误标"队长"）.
+        XCTAssertFalse(vm.members[0].isHost, "snapshot path 下 isHost 应严格 false（不依赖位置启发式）")
         XCTAssertEqual(vm.members[1].name, "Mocha")
         XCTAssertFalse(vm.members[1].isHost)
         XCTAssertEqual(vm.members[2].name, "Latte")
@@ -485,6 +488,61 @@ final class RealRoomViewModelTests: XCTestCase {
         XCTAssertEqual(vm.members, [], "A→nil 后 members 应保持空（且任何 stale snapshot 都不应让其复活）")
     }
 
+    // MARK: - case#11 fix-review round 4 P2: snapshot path 下所有 isHost 严格 false（不依赖位置启发式）
+
+    /// 验证 fix-review round 4 P2：snapshot path 下不论 N 个成员，RoomMember.isHost 全员应当为 false.
+    ///
+    /// 旧实装 `isHost = index == 0` 在合法 server state 下产生错误"队长"徽章：
+    ///   - 房主离开后房间继续存在（协议钦定）→ 剩下的"第一个成员"被错误标 isHost
+    ///   - 协议明文 client **不能**依赖 member 顺序 → 即使作为占位也不能用 index == 0 启发式
+    ///
+    /// 本 case 用一个 4 成员 snapshot（覆盖典型房间满员场景）回归：所有成员 isHost == false.
+    /// 等后续 epic snapshot 真带 host 字段时，再单独写"snapshot 带 hostUserId → 该成员 isHost == true"的 case.
+    ///
+    /// 注：vm 自身的 `userIsHost`（"我是不是房主"，与 RoomMember.isHost 是两个独立字段）
+    /// 由 RoomScaffoldDefaults.userIsHost 在 init 中 seed，applySnapshot **不**触碰它 ——
+    /// 等真实 host 字段下发后由 vm 单独从 `appState.currentUserId == hostUserId` 派生.
+    func testSnapshotPathDoesNotInferHostFromMemberOrder() async {
+        let appState = AppState.makeHydrated(currentRoomId: "room_full")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 4 成员 snapshot（典型房间满员；含覆盖 index 0/1/2/3 全部位置）
+        let payload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_full", maxMembers: 4, memberCount: 4),
+            members: [
+                RoomSnapshotMember(userId: "u_first", nickname: "First", pet: nil),
+                RoomSnapshotMember(userId: "u_second", nickname: "Second", pet: nil),
+                RoomSnapshotMember(userId: "u_third", nickname: "Third", pet: nil),
+                RoomSnapshotMember(userId: "u_fourth", nickname: "Fourth", pet: nil),
+            ]
+        )
+        // 注意：vm 构造时会被 RoomScaffoldDefaults.members（u1/u2/u3/u4）seed —— 4 成员满员占位.
+        // waitForMembersCount(expected: 4) 不能区分"种子默认 4 成员"与"snapshot 已 apply 后的 4 成员",
+        // 直接用 waitForFirstMemberId 等待 members[0].id 切到 snapshot 第一项 u_first.
+        mockWS.emit(.roomSnapshot(payload))
+        try? await waitForFirstMemberId(vm: vm, expected: "u_first")
+
+        // 关键回归断言：不论位置，所有成员 isHost == false（无位置启发式）
+        XCTAssertEqual(vm.members.count, 4)
+        XCTAssertEqual(vm.members.map { $0.id }, ["u_first", "u_second", "u_third", "u_fourth"],
+                       "snapshot 必须已 apply（roster 替换为 snapshot 的 4 成员；旧种子 u1/u2/u3/u4 应被替换）")
+        for (index, member) in vm.members.enumerated() {
+            XCTAssertFalse(member.isHost,
+                           "snapshot path 下成员 #\(index) (\(member.id)) 的 isHost 应为 false；"
+                           + "旧实装 `isHost = index == 0` 在房主已离开的合法 server state 下会错误标"
+                           + "\"队长\"徽章（协议钦定 client 不能依赖 member 顺序）")
+        }
+
+        // 反向断言：vm 自身的 userIsHost（独立字段）保留 RoomScaffoldDefaults seed，未被 applySnapshot 触碰.
+        XCTAssertEqual(vm.userIsHost, RoomScaffoldDefaults.userIsHost,
+                       "vm.userIsHost 应保留 init 时 seed 的 RoomScaffoldDefaults 占位值，"
+                       + "applySnapshot 不应触碰它（host 字段下发后由 vm 单独派生）")
+    }
+
     // MARK: - helpers
 
     /// 等待 vm.members.count 达到预期值（最多等 1 秒；防 Task consumer 调度时机不确定）.
@@ -492,6 +550,16 @@ final class RealRoomViewModelTests: XCTestCase {
         let deadline = Date().addingTimeInterval(1.0)
         while Date() < deadline {
             if vm.members.count == expected { return }
+            try await Task.sleep(nanoseconds: 10_000_000) // 10ms
+        }
+    }
+
+    /// 等待 vm.members 首个成员 id 切到预期值（用于 vm.members 已被 seed defaults 占位时,
+    /// 区分"种子 4 成员"与"snapshot 已 apply 后的 4 成员"——单纯 count==4 无法区分）.
+    private func waitForFirstMemberId(vm: RealRoomViewModel, expected: String) async throws {
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if vm.members.first?.id == expected { return }
             try await Task.sleep(nanoseconds: 10_000_000) // 10ms
         }
     }

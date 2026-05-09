@@ -231,3 +231,4 @@
 | 2026-05-09 | [Published 订阅 dropFirst 丢 restored state & 房间切换需 roster 重置（12-1 r1）](2026-05-09-published-subscription-dropfirst-and-room-switch-roster-reset-12-1-r1.md) | 2 | architecture | `<pending>` |
 | 2026-05-09 | [WebSocketClient 复用必须 prepareForReconnect 重置 stream & "空 roomId" 跨模块对齐 dispatcher（12-1 r2）](2026-05-09-ws-client-reuse-needs-stream-restart-and-empty-room-id-must-align-with-dispatcher-12-1-r2.md) | 2 | architecture | `<pending>` |
 | 2026-05-09 | [`room.snapshot` 必须按 room.id 校验丢弃 stale 消息（12-1 r3）](2026-05-09-stale-snapshot-discard-by-room-id-12-1-r3.md) | 1 | error-handling | `<pending>` |
+| 2026-05-09 | [`RoomMember.isHost` 不能用 snapshot 位置启发式推断（12-1 r4）](2026-05-09-snapshot-host-must-not-infer-from-position-12-1-r4.md) | 1 | other | `<pending>` |

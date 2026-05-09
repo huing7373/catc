@@ -289,17 +289,25 @@ public final class RealRoomViewModel: RoomViewModel {
 
     /// snapshot apply（roster 集合 + 字段级 merge）.
     /// 节点 4 阶段：snapshot members[] 直接映射为 RoomMember 数组（id=userId, name=nickname || 占位,
-    /// level=8 占位, status="在玩耍" 占位, isHost=index==0 占位）—— `level` / `status` / `isHost`
+    /// level=8 占位, status="在玩耍" 占位, **isHost=false**）—— `level` / `status` / `isHost`
     /// 由 Epic 14 / Epic 8 / 后续 host 字段下发后真实派生；本 story 仅保证 `id` / `name` 与 snapshot 一致.
     /// **节点 4 placeholder 阶段允许 nickname 为空字符串**——按 §12.3 "client merge contract" 空字符串 =
     /// "server 不知道"，应保留 client 已有值；本 story 实装策略（最小路径）：snapshot member.nickname 为空字符串时,
     /// **保留** client 已有同 userId 的 RoomMember.name；新成员（client 没有的 userId）首次出现 nickname 为空字符串时
     /// 降级为 placeholder "成员"（与 ui_design 占位一致；Story 11.7 真实 nickname 落地后即被覆盖）.
+    ///
+    /// **fix-review round 4 P2**：snapshot path 下 `RoomMember.isHost` 一律置 `false`（"未知 host"占位语义）.
+    /// 旧实装用 `isHost = index == 0` 在合法 server state 下产生错误"队长"徽章：
+    ///   - 房主离开后房间可继续存在（协议钦定）→ "剩下的第一个成员"会被错误标 isHost
+    ///   - 协议明文 client **不能**依赖 member 顺序
+    /// 即使作为占位也不能用 index == 0 启发式。等后续 epic snapshot 真带 host 字段时再接.
+    /// vm 自身的 `userIsHost`（"我是不是房主"，与 RoomMember.isHost 是两个独立字段）保留构造时
+    /// seed 的 RoomScaffoldDefaults.userIsHost 占位 —— 不被 applySnapshot 触碰.
     private func applySnapshot(_ payload: RoomSnapshotPayload) {
         let snapshotUserIds = Set(payload.members.map { $0.userId })
         // step 1: 按 userId 集合做"roster 权威"裁剪 + 增量
         var newMembers: [RoomMember] = []
-        for (index, snapshotMember) in payload.members.enumerated() {
+        for snapshotMember in payload.members {
             let existing = self.members.first { $0.id == snapshotMember.userId }
             // 字段级 merge: nickname 空字符串保留 existing.name；非空覆盖
             let mergedName: String = {
@@ -312,13 +320,13 @@ public final class RealRoomViewModel: RoomViewModel {
                 }
             }()
             // level / status / isHost 节点 4 阶段保持占位
+            // isHost 严格 false：snapshot 不带 host 字段时不做位置启发式（详见上方 fix-review round 4 P2 注释）.
             let merged = RoomMember(
                 id: snapshotMember.userId,
                 name: mergedName,
                 level: existing?.level ?? 8,
                 status: existing?.status ?? "在玩耍",
-                isHost: index == 0  // 节点 4 阶段约定：snapshot 第一个成员视为 host（与 ui_design room.jsx 默认渲染一致；
-                                    // 后续 epic 引入 host userId 字段后真实派生）
+                isHost: false
             )
             newMembers.append(merged)
         }
