@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-05-09 (story 11-9 review)
+# last_updated: 2026-05-09 (epic-37 retrospective done)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-05-09  # Epic 11 retrospective done
+last_updated: 2026-05-09  # Epic 37 retrospective done
 # Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
 # 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
@@ -107,7 +107,7 @@ development_status:
   37-12-joinroommodal-跨屏跳转: done
   37-13-accessibility-identifier-总表: done
   37-14-design-package-白名单: done
-  epic-37-retrospective: required
+  epic-37-retrospective: done
   # ===== Epic 37 ends =====
   epic-6: backlog
   6-1-跨端集成测试场景-自动登录-e2e: backlog
