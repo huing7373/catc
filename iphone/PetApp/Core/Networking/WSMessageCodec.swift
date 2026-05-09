@@ -57,6 +57,24 @@ public enum WSMessageCodec {
                 os_log(.error, log: logger, "error payload decode failed: %{public}@", String(describing: error))
                 return .unknown(rawType: "error")
             }
+        case "member.joined":
+            // Story 12.4：member.joined 路由（V1 §12.3 行 2003-2013 字段表）.
+            do {
+                let payload = try makeDecoder().decode(MemberJoinedEnvelope.self, from: data).payload.toDomain()
+                return .memberJoined(payload)
+            } catch {
+                os_log(.error, log: logger, "member.joined payload decode failed: %{public}@", String(describing: error))
+                return .unknown(rawType: "member.joined")
+            }
+        case "member.left":
+            // Story 12.4：member.left 路由（V1 §12.3 行 2073-2080 字段表）.
+            do {
+                let payload = try makeDecoder().decode(MemberLeftEnvelope.self, from: data).payload.toDomain()
+                return .memberLeft(payload)
+            } catch {
+                os_log(.error, log: logger, "member.left payload decode failed: %{public}@", String(describing: error))
+                return .unknown(rawType: "member.left")
+            }
         default:
             os_log(.info, log: logger, "unknown server type: %{public}@", envelope.type)
             return .unknown(rawType: envelope.type)
@@ -152,6 +170,47 @@ public enum WSMessageCodec {
         struct ErrorPayloadDTO: Decodable {
             let code: Int
             let message: String
+        }
+    }
+
+    // MARK: - Story 12.4 member.joined / member.left envelope DTOs
+
+    /// member.joined 整体信封 —— 与 V1 §12.3 行 2003-2013 字段表 1:1 对齐.
+    private struct MemberJoinedEnvelope: Decodable {
+        let payload: MemberJoinedPayloadDTO
+
+        struct MemberJoinedPayloadDTO: Decodable {
+            let userId: String
+            let nickname: String
+            let avatarUrl: String
+            let pet: PetDTO?  // V1 §12.3：null = pet-less authoritative 信号
+
+            struct PetDTO: Decodable {
+                let petId: String
+                let currentState: Int
+            }
+
+            func toDomain() -> MemberJoinedPayload {
+                MemberJoinedPayload(
+                    userId: userId,
+                    nickname: nickname,
+                    avatarUrl: avatarUrl,
+                    pet: pet.map { MemberJoinedPet(petId: $0.petId, currentState: $0.currentState) }
+                )
+            }
+        }
+    }
+
+    /// member.left 整体信封 —— 与 V1 §12.3 行 2073-2080 字段表 1:1 对齐.
+    private struct MemberLeftEnvelope: Decodable {
+        let payload: MemberLeftPayloadDTO
+
+        struct MemberLeftPayloadDTO: Decodable {
+            let userId: String
+
+            func toDomain() -> MemberLeftPayload {
+                MemberLeftPayload(userId: userId)
+            }
         }
     }
 

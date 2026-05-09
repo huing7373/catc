@@ -976,6 +976,419 @@ final class RealRoomViewModelTests: XCTestCase {
                        "新 userId 首次出现 + nickname 空字符串应降级为 \"成员\" placeholder（applySnapshot mergedName 路径）")
     }
 
+    // MARK: - Story 12.4 case#G1 happy: member.joined 增 1 个成员
+
+    /// Story 12.4 AC4 case#G1（epic line 2134）：收到 member.joined → ViewModel.members 多 1 个.
+    /// 关键覆盖：
+    ///   - append 而非 prepend（vm.members.last == 新加入成员）
+    ///   - name 来自 payload.nickname
+    ///   - isHost 严格 false（fix-review r4 lesson 同精神）
+    ///   - level=8 / status="在玩耍" 节点 4 阶段占位（与 applySnapshot 一致）
+    func testMemberJoinedAppendsOneMember() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_xxx")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. baseline 2 成员
+        let payload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 2),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice", pet: nil),
+                RoomSnapshotMember(userId: "u_bob", nickname: "Bob", pet: nil),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(payload))
+        try await waitForMembersCount(vm: vm, expected: 2)
+        XCTAssertEqual(vm.members.count, 2)
+
+        // 2. emit member.joined（新 userId u_charlie + 完整 payload）
+        let joined = MemberJoinedPayload(
+            userId: "u_charlie",
+            nickname: "Charlie",
+            avatarUrl: "https://example.com/charlie.png",
+            pet: MemberJoinedPet(petId: "p_c", currentState: 1)
+        )
+        mockWS.emit(.memberJoined(joined))
+        try await waitForMembersCount(vm: vm, expected: 3)
+
+        // 3. 关键断言
+        XCTAssertEqual(vm.members.count, 3, "member.joined 后应增 1 个成员")
+        XCTAssertEqual(vm.members.last?.id, "u_charlie", "新成员应 append 到末尾（不是 prepend）")
+        XCTAssertEqual(vm.members.last?.name, "Charlie", "新成员 name 应来自 payload.nickname")
+        XCTAssertEqual(vm.members.last?.isHost, false, "applyMemberJoined 必须 isHost 严格 false（fix-review r4 lesson 同精神）")
+        XCTAssertEqual(vm.members.last?.level, 8, "节点 4 阶段 level 占位 8（与 applySnapshot 一致）")
+        XCTAssertEqual(vm.members.last?.status, "在玩耍", "节点 4 阶段 status 占位（与 applySnapshot 一致）")
+    }
+
+    // MARK: - Story 12.4 case#G2 happy: member.left 减 1 个成员
+
+    /// Story 12.4 AC4 case#G2（epic line 2135）：收到 member.left → ViewModel.members 少 1 个.
+    /// 关键覆盖：
+    ///   - 中间成员被 remove（不是只能 remove last）
+    ///   - 其他成员 entry 字段不退化
+    func testMemberLeftRemovesOneMember() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_xxx")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. baseline 3 成员
+        let payload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 3),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice", pet: nil),
+                RoomSnapshotMember(userId: "u_bob", nickname: "Bob", pet: nil),
+                RoomSnapshotMember(userId: "u_charlie", nickname: "Charlie", pet: nil),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(payload))
+        try await waitForMembersCount(vm: vm, expected: 3)
+
+        // 2. emit member.left（移除中间成员 u_bob）
+        mockWS.emit(.memberLeft(MemberLeftPayload(userId: "u_bob")))
+        try await waitForMembersCount(vm: vm, expected: 2)
+
+        // 3. 关键断言
+        XCTAssertEqual(vm.members.count, 2, "member.left 后应少 1 个成员")
+        XCTAssertNil(vm.members.first(where: { $0.id == "u_bob" }), "u_bob 应被 remove")
+        XCTAssertEqual(vm.members.map { $0.id }, ["u_alice", "u_charlie"], "其他 2 个成员 entry 顺序保留")
+        XCTAssertEqual(vm.members.first(where: { $0.id == "u_alice" })?.name, "Alice", "其他成员 name 字段不退化")
+        XCTAssertEqual(vm.members.first(where: { $0.id == "u_charlie" })?.name, "Charlie", "其他成员 name 字段不退化")
+    }
+
+    // MARK: - Story 12.4 case#G3 edge: member.joined dedup（已存在 userId → enrich + count 不变）
+
+    /// Story 12.4 AC4 case#G3（epic line 2136）：收到 member.joined 但 userId 已存在 → 不重复添加 + log.
+    /// 关键覆盖：
+    ///   - dedup by userId：同一 userId 重复 emit 不重复 append（防"4 人房间显示 5 个成员"）
+    ///   - 字段级 enrich：nickname 非空覆盖（"小花" → "新名字"）
+    ///   - 其他成员未变化
+    func testMemberJoinedDedupsExistingUserAndEnrichesFields() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_xxx")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. baseline 3 成员（含 u_alice 名字 "小花"）
+        let payload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 3),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "小花", pet: nil),
+                RoomSnapshotMember(userId: "u_bob", nickname: "Bob", pet: nil),
+                RoomSnapshotMember(userId: "u_charlie", nickname: "Charlie", pet: nil),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(payload))
+        try await waitForMembersCount(vm: vm, expected: 3)
+
+        // 2. emit member.joined 复用同一 u_alice + 新 nickname "新名字"
+        let joined = MemberJoinedPayload(
+            userId: "u_alice",
+            nickname: "新名字",
+            avatarUrl: "",
+            pet: MemberJoinedPet(petId: "p_a", currentState: 1)
+        )
+        mockWS.emit(.memberJoined(joined))
+
+        // 等 enrich 路径生效：u_alice 的 name 切到 "新名字"
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if vm.members.first(where: { $0.id == "u_alice" })?.name == "新名字" { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        // 3. 关键断言
+        XCTAssertEqual(vm.members.count, 3, "member.joined 但 userId 已存在 → members.count 不变（dedup 防\"4 人房间显示 5 个成员\"）")
+        XCTAssertEqual(vm.members.first(where: { $0.id == "u_alice" })?.name, "新名字",
+                       "enrich 路径应字段级 merge：nickname 非空覆盖（\"小花\" → \"新名字\"）")
+        XCTAssertEqual(vm.members.first(where: { $0.id == "u_alice" })?.isHost, false,
+                       "enrich 路径 isHost 严格 false")
+        XCTAssertEqual(vm.members.first(where: { $0.id == "u_bob" })?.name, "Bob", "其他成员未变化")
+        XCTAssertEqual(vm.members.first(where: { $0.id == "u_charlie" })?.name, "Charlie", "其他成员未变化")
+    }
+
+    // MARK: - Story 12.4 case#G4 edge: member.left userId 不存在 → ignore + 不报错 + 不清空
+
+    /// Story 12.4 AC4 case#G4（epic line 2137）：收到 member.left 但 userId 不存在 → 不报错 + log warning.
+    /// 关键覆盖：
+    ///   - 不抛 exception
+    ///   - members.count 仍 == baseline（**不**清空 / **不**意外删除）
+    ///   - 所有 baseline 成员 entry 全部保持
+    func testMemberLeftIgnoresUnknownUserAndDoesNotClearRoster() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_xxx")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. baseline 3 成员
+        let payload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 3),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice", pet: nil),
+                RoomSnapshotMember(userId: "u_bob", nickname: "Bob", pet: nil),
+                RoomSnapshotMember(userId: "u_charlie", nickname: "Charlie", pet: nil),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(payload))
+        try await waitForMembersCount(vm: vm, expected: 3)
+
+        // 2. emit member.left 不存在的 userId u_unknown
+        mockWS.emit(.memberLeft(MemberLeftPayload(userId: "u_unknown")))
+        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms 充分等
+        await Task.yield()
+        await Task.yield()
+
+        // 3. 关键断言
+        XCTAssertEqual(vm.members.count, 3, "member.left 不存在 userId → members.count 不变（**不**清空 / **不**意外删除）")
+        XCTAssertEqual(vm.members.map { $0.id }, ["u_alice", "u_bob", "u_charlie"],
+                       "全部 baseline 成员 entry 保持（**不**因找不到 entry 清空整个 roster）")
+        XCTAssertEqual(vm.members.first(where: { $0.id == "u_alice" })?.name, "Alice", "baseline 成员字段不退化")
+    }
+
+    // MARK: - Story 12.4 case#G5 edge: 连续 join + leave 同一 user → members 数量正确
+
+    /// Story 12.4 AC4 case#G5（epic line 2138）：连续 join + leave 同一 user → members 数量正确.
+    /// 关键覆盖：joined+left 序列下 vm.members 增减一致.
+    func testMemberJoinedThenLeftSameUserResultsInOriginalRoster() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_xxx")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. baseline 2 成员（u_alice / u_bob）
+        let payload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 2),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice", pet: nil),
+                RoomSnapshotMember(userId: "u_bob", nickname: "Bob", pet: nil),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(payload))
+        try await waitForMembersCount(vm: vm, expected: 2)
+
+        // 2. emit member.joined u_charlie → 3 成员
+        mockWS.emit(.memberJoined(MemberJoinedPayload(
+            userId: "u_charlie", nickname: "Charlie", avatarUrl: "", pet: nil
+        )))
+        try await waitForMembersCount(vm: vm, expected: 3)
+        XCTAssertEqual(vm.members.last?.id, "u_charlie", "joined 后 u_charlie append")
+
+        // 3. emit member.left u_charlie → 2 成员
+        mockWS.emit(.memberLeft(MemberLeftPayload(userId: "u_charlie")))
+        try await waitForMembersCount(vm: vm, expected: 2)
+
+        // 4. 关键断言：仅含 u_alice / u_bob（u_charlie 已 remove）
+        XCTAssertEqual(vm.members.count, 2, "join+leave 同一 user 后 members 数量回到 baseline")
+        XCTAssertEqual(vm.members.map { $0.id }, ["u_alice", "u_bob"], "u_charlie 已 remove")
+        XCTAssertNil(vm.members.first(where: { $0.id == "u_charlie" }), "u_charlie 不在 roster")
+    }
+
+    // MARK: - Story 12.4 case#G6 edge: lastObservedRoomId == nil 时丢弃 stale member.joined
+
+    /// Story 12.4 AC4 case#G6（推荐，覆盖 12.1 r3 lesson 延伸）：lastObservedRoomId == nil 时
+    /// （已离开房间）收到 stale member.joined → 必须丢弃 + log debug，不应错误 append.
+    /// 关键覆盖：12.1 r3 lesson `2026-05-09-stale-snapshot-discard-by-room-id-12-1-r3.md` 同精神延伸到 member.* 消息层.
+    func testStaleMemberJoinedAfterLeaveDoesNotMutateRoster() async throws {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. 进入 room_xxx + baseline 2 成员
+        appState.setCurrentRoomId("room_xxx")
+        await Task.yield()
+        let payload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 2),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice", pet: nil),
+                RoomSnapshotMember(userId: "u_bob", nickname: "Bob", pet: nil),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(payload))
+        try await waitForMembersCount(vm: vm, expected: 2)
+
+        // 2. 离开（A → nil；subscribeRoomIdConnect A→nil 分支会 disconnect + clear members）
+        appState.setCurrentRoomId(nil)
+        await Task.yield()
+        XCTAssertEqual(vm.members.count, 0, "leave 后 members 应清空")
+
+        // 3. emit stale member.joined（注意：旧 stream 已 finish；要先 prepareForReconnect 让 emit 不被 drop）
+        mockWS.prepareForReconnect()
+        mockWS.emit(.memberJoined(MemberJoinedPayload(
+            userId: "u_late", nickname: "Late", avatarUrl: "", pet: nil
+        )))
+        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        await Task.yield()
+        await Task.yield()
+
+        // 4. 关键断言：lastObservedRoomId == nil 时 stale member.joined 应被丢弃
+        //    （即使有路径让 message 投递到 vm —— 旧 stream finish 已是一道防线，handle 内 guard 是第二道）
+        XCTAssertEqual(vm.members.count, 0,
+                       "lastObservedRoomId == nil（已离开房间）时收到的 member.joined 必须被丢弃；"
+                       + "旧实装无 guard 会错误 append → vm.members.count == 1（即使 UI 已不在房间）")
+    }
+
+    // MARK: - Story 12.4 case#G6.5 fix-review round 2 P1: cross-room race（A→B 切换时旧 stream member.* 被丢）
+
+    /// Story 12.4 fix-review round 2 P1：用户 A→B 切换路径下，旧 consumer task 在 cancel 前
+    /// 已 dequeue 但还没投递到 main actor 的 room A `member.joined` / `member.left` 事件，
+    /// 必须**不**被 apply 到 room B 的 members.
+    ///
+    /// V1 §12.3 钦定 `member.joined` / `member.left` payload 不含 room.id（仅 userId / nickname / pet 等），
+    /// 无法做 per-event payload-level room.id 校验。修复策略：`startConsumingMessages` 在启动 task
+    /// 时捕获当时 `lastObservedRoomId` 作为局部 `streamRoomId`；`handle(message:streamRoomId:)` 校验
+    /// `streamRoomId == lastObservedRoomId`，不匹配则丢弃.
+    ///
+    /// 测试构造说明：cross-room race 的真实端到端时序在 mock `disconnect()` 同步 `finish()` 旧 stream
+    /// 的模型下不易构造（finish 后旧 task 立即退出 `for await`，pending message 只能在 finish 之前的
+    /// 极短时间窗口被 dequeue，单测难以稳定复现）。最 robust 的回归是**直接调** vm 暴露的 internal
+    /// `handle(message:streamRoomId:)` API，模拟"旧 task 持有旧 streamRoomId、handle 时 lastObservedRoomId
+    /// 已切到新 room"的瞬间状态，断言 guard 正确丢弃 stale message.
+    func testCrossRoomMemberJoinedFromOldStreamIsDiscarded() async throws {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. 进入 room_A + baseline 1 成员（让 lastObservedRoomId = "room_A"）
+        appState.setCurrentRoomId("room_A")
+        await Task.yield()
+        let payloadA = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_A", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_alice", nickname: "Alice", pet: nil)]
+        )
+        mockWS.emit(.roomSnapshot(payloadA))
+        try await waitForMembersCount(vm: vm, expected: 1)
+
+        // 2. 直接切到 room_B（subscribeRoomIdConnect A→B 分支会清空 members + restart consumer）
+        appState.setCurrentRoomId("room_B")
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(vm.members, [], "A→B 切换瞬间 members 应被清空")
+
+        // 3. 模拟"旧 stream 上 dequeue 但还没 apply 的 room A late member.joined"投递：
+        //    旧 task 启动时 streamRoomId 捕获的是 "room_A"，但此刻 lastObservedRoomId 已是 "room_B"。
+        //    直接调 handle(streamRoomId: "room_A") 模拟该瞬间状态.
+        let staleJoined = MemberJoinedPayload(
+            userId: "u_ghost", nickname: "GhostFromA", avatarUrl: "", pet: nil
+        )
+        vm.handle(message: .memberJoined(staleJoined), streamRoomId: "room_A")
+
+        // 4. 关键断言：streamRoomId="room_A" != lastObservedRoomId="room_B" → guard 丢弃，
+        //    members 必须保持空（不被错误 append 一个 room A 的 ghost）.
+        XCTAssertEqual(vm.members, [],
+                       "cross-room race: 旧 stream 上 dequeue 的 room A member.joined 必须被丢弃；"
+                       + "旧实装仅守护 lastObservedRoomId != nil，A→B 切换后 lastObservedRoomId=B、"
+                       + "stale event 来自 room A 仍会被错误 apply → members.count == 1")
+
+        // 5. 同样验证 member.left：旧实装会从（已清空的）room B members 找 u_alice 找不到，
+        //    走 ignore 路径不破坏 —— 但若 room B 后续真有 u_alice，旧实装会错误 remove.
+        //    这里用 mock 一个 room B 的成员让漏洞可观测.
+        let payloadB = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_B", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_alice", nickname: "AliceB", pet: nil)]
+        )
+        mockWS.emit(.roomSnapshot(payloadB))
+        try await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.members.first?.id, "u_alice")
+        XCTAssertEqual(vm.members.first?.name, "AliceB", "room B 的 fresh snapshot 仍能 apply")
+
+        // 6. 模拟旧 stream 投递的 room A `member.left u_alice`（u_alice 在 room A 离开了）：
+        //    streamRoomId="room_A" != lastObservedRoomId="room_B" → 守护应丢弃，不 mutate room B 的 u_alice.
+        vm.handle(message: .memberLeft(MemberLeftPayload(userId: "u_alice")), streamRoomId: "room_A")
+
+        XCTAssertEqual(vm.members.count, 1,
+                       "cross-room race: 旧 stream 上 room A 的 member.left u_alice 必须被丢弃；"
+                       + "旧实装无 streamRoomId 守护会错误 remove room B 的 u_alice → members.count == 0")
+        XCTAssertEqual(vm.members.first?.id, "u_alice", "room B 的 u_alice 应保留")
+        XCTAssertEqual(vm.members.first?.name, "AliceB", "room B 的 u_alice 字段应保留")
+    }
+
+    /// fix-review round 2 P1 配套：streamRoomId 与 lastObservedRoomId 都为 nil 的边界
+    /// （已离开房间起的 task；不应发生但防御性兜底）—— guard 第一段 `streamRoomId != nil` 同样挡住.
+    /// 注意：vm 构造后 members 初值是 RoomScaffoldDefaults seed（4 个占位）；本 case 在进入 room 后再
+    /// 离开（A→nil 分支会 clear members）让 baseline 落到空数组，再调 handle 验证 stale 不破坏空 baseline.
+    func testHandleWithBothStreamRoomIdAndLastObservedRoomIdNilDiscardsMemberMessages() async throws {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. 进 room A → 离开 → vm.members = []，vm.lastObservedRoomId = nil
+        appState.setCurrentRoomId("room_A")
+        await Task.yield()
+        appState.setCurrentRoomId(nil)
+        await Task.yield()
+        XCTAssertEqual(vm.members, [], "leave 后 members 清空")
+
+        // 2. 直接调 handle(streamRoomId: nil) —— 模拟"任何 stream 都没起来时收到的 stray message".
+        let joined = MemberJoinedPayload(userId: "u_x", nickname: "X", avatarUrl: "", pet: nil)
+        vm.handle(message: .memberJoined(joined), streamRoomId: nil)
+        XCTAssertEqual(vm.members, [], "streamRoomId=nil 时任何 member.joined 应被丢弃")
+
+        vm.handle(message: .memberLeft(MemberLeftPayload(userId: "u_x")), streamRoomId: nil)
+        XCTAssertEqual(vm.members, [], "streamRoomId=nil 时任何 member.left 应被丢弃")
+    }
+
+    // MARK: - Story 12.4 case#G7 edge: member.joined payload pet=null（pet-less 账号）
+
+    /// Story 12.4 AC4 case#G7（推荐，契约 1 nullable pet 回归守护）：
+    /// member.joined payload pet 为 null（pet-less 账号）→ codec / payload 层正常解析 +
+    /// applyMemberJoined 不抛错 + members 正常 append.
+    func testMemberJoinedWithNullPetAppendsNormally() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_xxx")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. baseline 2 成员
+        let payload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 2),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice", pet: nil),
+                RoomSnapshotMember(userId: "u_bob", nickname: "Bob", pet: nil),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(payload))
+        try await waitForMembersCount(vm: vm, expected: 2)
+
+        // 2. emit member.joined pet=null（pet-less 账号）
+        let joined = MemberJoinedPayload(
+            userId: "u_petless",
+            nickname: "无宠物用户",
+            avatarUrl: "",
+            pet: nil
+        )
+        mockWS.emit(.memberJoined(joined))
+        try await waitForMembersCount(vm: vm, expected: 3)
+
+        // 3. 关键断言：members 正常 append（节点 4 阶段 RoomMember 不持 pet 字段，所以
+        //    pet=null 与 pet=non-null 在 vm.members 层无可见差异）
+        XCTAssertEqual(vm.members.count, 3, "member.joined pet=null 仍应正常 append")
+        XCTAssertEqual(vm.members.last?.id, "u_petless")
+        XCTAssertEqual(vm.members.last?.name, "无宠物用户")
+        XCTAssertEqual(vm.members.last?.isHost, false)
+    }
+
     // MARK: - helpers
 
     /// 等待 vm.members.count 达到预期值（最多等 1 秒；防 Task consumer 调度时机不确定）.

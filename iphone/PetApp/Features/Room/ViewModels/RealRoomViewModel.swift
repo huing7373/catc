@@ -276,14 +276,38 @@ public final class RealRoomViewModel: RoomViewModel {
 
     /// Story 12.1 AC4 关键路径：subscribe webSocketClient.messages → 解析 room.snapshot → 写 members.
     /// for-await 走 detached task；ViewModel deinit / disconnect 时 task cancel + stream finish 自然退出.
+    ///
+    /// **fix-review round 2 P1（Story 12.4）**：在启动 task 时**捕获**当时 `lastObservedRoomId` 作为
+    /// 局部 `streamRoomId`，传给 `handle(message:streamRoomId:)`。这是 cross-room race 的关键防御：
+    ///
+    /// 背景：A→B 切换路径下 `subscribeRoomIdConnect` 会 cancel 旧 consumer task + restart 新 task。
+    /// 但 `Task.cancel()` 不会立即中断已经被 `for await` dequeue 但还没 `await MainActor.run` 投递
+    /// 的 message —— 旧 task 在 cancel 前可能已 dequeue 一条 room A 的 `member.joined` / `member.left`，
+    /// 仍会被 handle 应用到 room B 的 members。
+    ///
+    /// V1 §12.3 钦定 `member.joined` / `member.left` payload **不**含 room.id
+    /// （`member.joined`：userId / nickname / avatarUrl / pet；`member.left`：userId）→
+    /// 无法做 per-event payload-level 的 room.id 校验。改用"启动 task 时捕获 lastObservedRoomId
+    /// 作为 streamRoomId，handle 时校验 streamRoomId == lastObservedRoomId"。
+    /// 守护语义统一覆盖三类 stale：
+    ///   - 已离开房间（streamRoomId=A, lastObservedRoomId=nil）→ 丢
+    ///   - A→B 切换（streamRoomId=A, lastObservedRoomId=B）→ 丢
+    ///   - 正常匹配 → 通过
+    ///
+    /// `room.snapshot` 自带 payload.room.id 校验（12.1 r3 落地，更精确），保留原校验路径不依赖
+    /// streamRoomId —— 但 streamRoomId 也作为防御层一并传入（不增加错检风险，因为 payload 校验更严格）.
     private func startConsumingMessages() {
         messageConsumerTask?.cancel()
         guard let client = webSocketClient else { return }
+        // 捕获启动时刻的 lastObservedRoomId 作为本 stream 的"语义所属房间"。
+        // 跨 room 场景下 sink 切换 lastObservedRoomId 后 restart 新 task，新 task 捕获新 streamRoomId；
+        // 旧 task 的 streamRoomId 已是旧值，handle 时与 lastObservedRoomId 不匹配 → 守护层挡住。
+        let streamRoomId = self.lastObservedRoomId
         messageConsumerTask = Task { [weak self] in
             for await message in client.messages {
                 guard let self else { return }
                 await MainActor.run {
-                    self.handle(message: message)
+                    self.handle(message: message, streamRoomId: streamRoomId)
                 }
             }
         }
@@ -295,8 +319,8 @@ public final class RealRoomViewModel: RoomViewModel {
     ///   - 字段级：非空值覆盖、空字符串保留 client 已有值、null 直接覆盖
     ///   - memberPetStates：节点 4 阶段 server 固定 currentState=1 → 本 story 保持空 map（Epic 14 真实驱动后再写入）
     ///
-    /// **fix-review round 3 P1**：`.roomSnapshot` 前先校验 `payload.room.id` 与 `lastObservedRoomId` 匹配,
-    /// 不匹配则丢弃 + log debug。
+    /// **fix-review round 3 P1（Story 12.1）**：`.roomSnapshot` 前先校验 `payload.room.id` 与
+    /// `lastObservedRoomId` 匹配，不匹配则丢弃 + log debug。
     /// 防 race：用户 leave / room A → B 切换瞬间，前一个 stream 上排队的 `room.snapshot` 可能在
     /// `currentRoomId` 已经变更后才被 deliver，导致 late snapshot for room A repopulate `members`
     /// 而 UI 已经展示 room B（或 no room）.
@@ -304,11 +328,24 @@ public final class RealRoomViewModel: RoomViewModel {
     /// publisher 通知顺序通常已切到新值，但 lastObservedRoomId 在 sink 内是字段级写入，比 computed
     /// getter 的 appState 读取更稳定（appState 字段也可能在中途被外部 mutate）.
     /// `""` 与 `""` 匹配，`""` 与 `nil` 不匹配 —— 与 HomeRoomDispatcher 把 "" 当 in-room 的语义对齐.
-    private func handle(message: WSMessage) {
+    ///
+    /// **fix-review round 2 P1（Story 12.4）**：`member.joined` / `member.left` 改用 `streamRoomId`
+    /// 守护防 cross-room race。`streamRoomId` 由 `startConsumingMessages` 在启动 task 时捕获当时
+    /// `lastObservedRoomId` 注入；A→B 切换路径 cancel 旧 task + restart 新 task 时旧 task 已
+    /// dequeue 但未投递的 message（pending main-actor await）仍会进 handle，但其 `streamRoomId`
+    /// 还是旧 room 的值，与新 `lastObservedRoomId` 不匹配 → 丢弃。
+    /// 协议层 V1 §12.3 钦定 `member.joined` / `member.left` payload 不含 room.id，无法做 per-event
+    /// payload-level 校验，必须用此 stream-lifecycle 层守护.
+    ///
+    /// **可见性**：`internal` 而非 `private` —— 让 `@testable import PetApp` 测试能直接调用
+    /// 验证 streamRoomId 守护契约（cross-room race 在 mock 上 finish-stream 模型下不易构造端到端
+    /// 时序，最 robust 的回归是直接调 handle(streamRoomId: <旧值>) + 断言 members 未被 mutate）.
+    func handle(message: WSMessage, streamRoomId: String?) {
         switch message {
         case .roomSnapshot(let payload):
             // fix-review round 3 P1：丢弃不属于当前房间的 stale snapshot.
             // 注意：lastObservedRoomId == nil 时（已离开房间）任何 snapshot 都属于 stale.
+            // payload-level 校验比 streamRoomId 校验更精确（payload 自带 room.id），保留原路径.
             guard let currentRoomId = lastObservedRoomId, payload.room.id == currentRoomId else {
                 os_log(.debug,
                        "RealRoomViewModel: discard stale room.snapshot (payload.room.id=%{public}@, current=%{public}@)",
@@ -317,6 +354,34 @@ public final class RealRoomViewModel: RoomViewModel {
                 return
             }
             applySnapshot(payload)
+        case .memberJoined(let payload):
+            // Story 12.4 fix-review round 2 P1：streamRoomId 守护防 cross-room race.
+            // V1 §12.3 钦定 `member.joined` payload 不带 room.id（仅 userId / nickname / avatarUrl / pet），
+            // server 端按 fanout 范围保证只投递到该房间的 sessions —— 但 client 在 A→B 切换时
+            // 旧 consumer task 已 dequeue 的 room A late message 仍可能在 cancel 前 deliver 到 main actor，
+            // 此时 lastObservedRoomId 已是 B 但 message 来自 room A 的 stream → streamRoomId（启动时捕获 = A）
+            // 与 lastObservedRoomId（= B）不匹配 → 丢弃 + log debug。
+            // streamRoomId == nil（已离开房间起的 task；不应发生但防御性兜底）也通过本守护被正确丢弃.
+            guard streamRoomId != nil, streamRoomId == lastObservedRoomId else {
+                os_log(.debug,
+                       "RealRoomViewModel: discard stale member.joined (userId=%{public}@, streamRoomId=%{public}@, current=%{public}@)",
+                       payload.userId,
+                       streamRoomId ?? "<nil>",
+                       lastObservedRoomId ?? "<nil>")
+                return
+            }
+            applyMemberJoined(payload)
+        case .memberLeft(let payload):
+            // 同 .memberJoined：streamRoomId 守护防 cross-room race.
+            guard streamRoomId != nil, streamRoomId == lastObservedRoomId else {
+                os_log(.debug,
+                       "RealRoomViewModel: discard stale member.left (userId=%{public}@, streamRoomId=%{public}@, current=%{public}@)",
+                       payload.userId,
+                       streamRoomId ?? "<nil>",
+                       lastObservedRoomId ?? "<nil>")
+                return
+            }
+            applyMemberLeft(payload)
         case .pong:
             // Story 12.6 心跳框架处理；本 story discard.
             break
@@ -375,6 +440,86 @@ public final class RealRoomViewModel: RoomViewModel {
         // 本 story 不动 memberPetStates（保持初始 [:]）.
         os_log(.debug, "RealRoomViewModel: applied snapshot (members.count = %{public}d)", newMembers.count)
         _ = snapshotUserIds  // for future use（Story 12.4 增量 mutate 时需要做 set diff）
+    }
+
+    // MARK: - Story 12.4 incremental mutate (member.joined / member.left)
+
+    /// V1 §12.3 client merge contract `member.joined` 处理路径（行 2061）.
+    ///
+    /// **增量 mutate 语义**（**不是** full snapshot replacement）：
+    ///   - 分支 (a) roster 中已存在该 userId entry → 字段级 enrich（dedup by userId 防"4 人房间显示 5 个成员"）：
+    ///     nickname 非空覆盖，空字符串保留 existing.name；level / status 沿用 existing；isHost 严格 false
+    ///   - 分支 (b) roster 中不存在该 userId entry → 新增完整 entry（占位 level=8 / status="在玩耍" / isHost=false）
+    ///
+    /// **节点 4 阶段实装策略**（与 applySnapshot 主干保持一致）：
+    ///   - `level / status / isHost` 沿用 applySnapshot 的占位（默认 8 / "在玩耍" / false）；
+    ///     `isHost` 严格 false（fix-review r4 lesson 同精神：不做位置启发式）
+    ///   - 节点 4 阶段 server `pet.currentState` 固定 1 → **不写入** `memberPetStates`（与 applySnapshot 一致；
+    ///     待 Epic 14 真实驱动）
+    ///   - `nickname` 空字符串场景理论不会发生（V1 §12.3 行 2008 钦定 member.joined nickname 必非空），
+    ///     但防御性写：empty string fallback "成员"（与 applySnapshot 同精神）
+    ///   - `avatarUrl` 字段当前 RoomMember struct 无对应 field —— 节点 4 阶段不挂入 RoomMember；
+    ///     server payload 已有 avatarUrl 但 client 还未渲染头像图（Story 37.13 a11y 表 + Story 30.x 真实
+    ///     渲染时挂入），本 story 仅 codec / payload 层透传.
+    private func applyMemberJoined(_ payload: MemberJoinedPayload) {
+        // 分支 (a)：dedup by userId —— 已存在 entry → 字段级 enrich（不重复 append）
+        if let existingIndex = members.firstIndex(where: { $0.id == payload.userId }) {
+            let existing = members[existingIndex]
+            // nickname 非空覆盖；空字符串保留 existing.name（防御性，理论不应发生）
+            let mergedName: String = payload.nickname.isEmpty ? existing.name : payload.nickname
+            // level / status 沿用 existing（applyMemberJoined 不应回退已有 level / status）；isHost 严格 false
+            let merged = RoomMember(
+                id: existing.id,
+                name: mergedName,
+                level: existing.level,
+                status: existing.status,
+                isHost: false
+            )
+            members[existingIndex] = merged
+            os_log(.debug,
+                   "RealRoomViewModel: applyMemberJoined enriched existing entry (userId=%{public}@)",
+                   payload.userId)
+            return
+        }
+        // 分支 (b)：新增完整 entry（占位 level=8 / status="在玩耍" / isHost=false）
+        let newName: String = payload.nickname.isEmpty ? "成员" : payload.nickname
+        let newMember = RoomMember(
+            id: payload.userId,
+            name: newName,
+            level: 8,                  // 节点 4 阶段占位（与 applySnapshot 一致）
+            status: "在玩耍",           // 节点 4 阶段占位（与 applySnapshot 一致）
+            isHost: false              // 严格 false（fix-review r4 lesson 同精神）
+        )
+        members.append(newMember)
+        os_log(.debug,
+               "RealRoomViewModel: applyMemberJoined appended new entry (userId=%{public}@, members.count=%{public}d)",
+               payload.userId, members.count)
+    }
+
+    /// V1 §12.3 client merge contract `member.left` 处理路径（行 2099）.
+    ///
+    /// **增量 mutate 语义**：从 roster 中**移除** payload.userId 对应 entry.
+    ///
+    /// **关键约束**：roster 中不存在该 userId 时 → ignore + log warning；
+    /// **禁止**抛错 / **禁止**因找不到 entry 把 vm.members 整体清空（防御性"诡异"server state 下不至于把
+    /// 整个房间清空；server bug 路径下 client 不应放大破坏）.
+    /// 必须先 firstIndex 校验存在性 + log warning，**禁止**用 `members.removeAll(where:)` 吞掉信号.
+    private func applyMemberLeft(_ payload: MemberLeftPayload) {
+        guard let index = members.firstIndex(where: { $0.id == payload.userId }) else {
+            os_log(.error,
+                   "RealRoomViewModel: applyMemberLeft userId not in members (userId=%{public}@, members.count=%{public}d)",
+                   payload.userId, members.count)
+            return
+        }
+        members.remove(at: index)
+        // memberPetStates 节点 4 阶段保持空 map；本 story 不动主干语义。
+        // 但若未来 Epic 14 落地时该 user 的 memberPetStates entry 已写入，**应**同步 remove —— 本 story
+        // 提前预埋安全语义：从 memberPetStates 也 remove 该 userId（节点 4 阶段空 map 下 no-op，但
+        // Epic 14 后真实驱动后该路径自动正确）.
+        memberPetStates.removeValue(forKey: payload.userId)
+        os_log(.debug,
+               "RealRoomViewModel: applyMemberLeft removed entry (userId=%{public}@, members.count=%{public}d)",
+               payload.userId, members.count)
     }
 
     // MARK: - override abstract methods

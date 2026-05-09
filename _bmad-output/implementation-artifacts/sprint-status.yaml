@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-05-09 (story 12-2 done)
+# last_updated: 2026-05-09 (story 12-4 review)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-05-09  # Story 12.3 done (epic-12)
+last_updated: 2026-05-09  # Story 12.4 ready-for-dev (epic-12)
 # Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
 # 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
@@ -158,7 +158,7 @@ development_status:
   12-1-房间页面-swiftui-骨架: done
   12-2-websocketclient-封装: done
   12-3-房间快照解析-成员列表渲染: done
-  12-4-成员加入-离开-ws-消息处理: backlog
+  12-4-成员加入-离开-ws-消息处理: review
   12-5-自动重连: backlog
   12-6-心跳维护: backlog
   12-7-创建-加入-退出-use-case-主界面入口完善: backlog

@@ -69,7 +69,7 @@ extension WebSocketClient {
 /// 服务端 → 客户端消息（按 §12.3 type 字段路由后的强类型 enum）.
 ///
 /// **Story 12.1 仅覆盖 Epic 10 阶段 server-active 三种 case** + `unknown` fallback；
-/// `member.joined` / `member.left` 由 Story 12.4 扩展；
+/// `member.joined` / `member.left` 由 **Story 12.4** 扩展（已落地）；
 /// `pet.state.changed` 由 Epic 14 / Story 14.x 扩展；
 /// `emoji.received` 由 Epic 17 / Story 17.x 扩展.
 public enum WSMessage: Equatable, Sendable {
@@ -85,6 +85,17 @@ public enum WSMessage: Equatable, Sendable {
     /// 节点 4 阶段服务端**不**主动推 error（除握手失败 close code 4001-4007 / 1011 / 1006，那些是 close frame，不走本 case）；
     /// Epic 11+ 业务流程的运行时状态错误推送会用本 case，本 story 仅占位 enum case 字段层就位.
     case error(code: Int, message: String, requestId: String)
+
+    /// `member.joined` —— 房间内**其他**成员通过 HTTP join 加入房间事件（V1 §12.3 行 1994-2063）.
+    /// payload 完整自包含展示字段（userId + nickname + avatarUrl + pet（nullable）），client 收到后
+    /// 可直接 append 一条 roster entry，不需要二次拉取 snapshot.
+    /// Story 12.4 落地；trigger 唯一来源 = HTTP `POST /api/v1/rooms/{roomId}/join` 加入事务成功提交后.
+    case memberJoined(MemberJoinedPayload)
+
+    /// `member.left` —— 房间内**其他**成员通过 HTTP leave 离开房间事件（V1 §12.3 行 2065-2101）.
+    /// payload 精简为仅 userId（V1 §12.3 行 2097 钦定 leave 事件 client UX 不需要显示昵称）.
+    /// Story 12.4 落地；trigger 唯一来源 = HTTP `POST /api/v1/rooms/{roomId}/leave` 退出事务成功提交后.
+    case memberLeft(MemberLeftPayload)
 
     /// 解码失败 fallback —— 不破坏 AsyncStream（与 epic Story 12.2 AC "edge: 服务端推未知 type
     /// → 解码失败 + log warning + 不破坏 stream" 一致）.
@@ -134,5 +145,55 @@ public struct RoomSnapshotPet: Equatable, Sendable {
     public init(petId: String, currentState: Int) {
         self.petId = petId
         self.currentState = currentState
+    }
+}
+
+// MARK: - Story 12.4 member.joined / member.left payload value types
+
+/// `member.joined` payload（V1 §12.3 行 2003-2013 字段表）.
+/// 完整 5 字段（userId + nickname + avatarUrl + pet（nullable））；
+/// 与 server-side `MemberJoinedPayload` struct（snapshot.go:416-421）字段集合 1:1 对齐.
+///
+/// **关键约束**：V1 §12.3 行 2008 钦定 `nickname` 必非空字符串（与 `room.snapshot` placeholder 阶段
+/// 允许空字符串的语义**不同** —— member.joined 在加入事务成功提交后触发，server 必有真实 nickname）；
+/// `avatarUrl` 可空字符串 ""（节点 4 阶段头像未实装），但**不**为 null；
+/// `pet = nil` 是 authoritative pet-less 信号（pet-less 账号下发 nil；否则下发 `{petId, currentState}` 完整 object）.
+public struct MemberJoinedPayload: Equatable, Sendable {
+    public let userId: String
+    public let nickname: String
+    public let avatarUrl: String
+    public let pet: MemberJoinedPet?
+
+    public init(userId: String, nickname: String, avatarUrl: String, pet: MemberJoinedPet?) {
+        self.userId = userId
+        self.nickname = nickname
+        self.avatarUrl = avatarUrl
+        self.pet = pet
+    }
+}
+
+/// `member.joined.payload.pet` 子结构（V1 §12.3 行 2011-2012）.
+/// 与 RoomSnapshotPet 字段集合一致；本 story 选独立类型而非 typealias —— 与 server 端 SnapshotPet 复用模式不同；
+/// 留出后续 Epic 26 / 29 装备字段独立演进的空间（V1 §12.3 server 端 SnapshotPet 复用同一 struct，
+/// client 端独立类型避免跨消息耦合；如未来字段演进路径相同可改为 typealias）.
+public struct MemberJoinedPet: Equatable, Sendable {
+    public let petId: String
+    public let currentState: Int       // 节点 4 阶段固定 1（rest）
+
+    public init(petId: String, currentState: Int) {
+        self.petId = petId
+        self.currentState = currentState
+    }
+}
+
+/// `member.left` payload（V1 §12.3 行 2073-2080 字段表）.
+/// 仅 1 字段 userId（V1 §12.3 行 2097 钦定 leave 事件 payload 精简 —— client UX 不需要显示昵称，
+/// client 从已有 roster 查 nickname；UX 文案降级"有人离开"也可接受）.
+/// 与 server-side `MemberLeftPayload` struct（snapshot.go:428-430）字段集合 1:1 对齐.
+public struct MemberLeftPayload: Equatable, Sendable {
+    public let userId: String
+
+    public init(userId: String) {
+        self.userId = userId
     }
 }
