@@ -379,16 +379,25 @@ type roomServiceImpl struct {
 	//
 	// **不同 roomID 仍并行**：每个 roomID 独立 channel + worker，互不阻塞，吞吐不损。
 	//
-	// **queue 满时降级**：channel 容量 256；满了 select default → log warn 不阻塞
-	// caller —— 节点 4 阶段单 room 最多 4 user，post-commit 处理速率 ~10ms 级，
-	// 256 容量远超合理上界（即使 burst 也吃得下）。如真满了说明 worker 卡死，
-	// drop 行为优于阻塞 caller HTTP 路径。
+	// **queue 满时背压**（r9 [P2] 修订，原 r5 silent drop 路径已废弃）：channel
+	// 容量 1024；满了 caller 阻塞 send 等 worker 消费 —— silent drop 会让 client
+	// 漏 member.joined / member.left → roster 永久 stale，是 silent corruption；
+	// 阻塞 caller 自然形成背压，最坏延迟 HTTP 200 但不丢事件，监控可见可 alarm。
+	// 节点 4 阶段单 room ≤ 4 user，post-commit 处理速率 ~10ms 级，1024 容量需要
+	// burst > 1024 / 30s 才会满 —— 极端场景。
 	//
 	// **queue / worker 不清理**（intentional）：节点 4 阶段 V1 §10.5 钦定房间 status
 	// 严格单调（active → closed 无回退），单进程生命周期内活跃 room 数量有界；不会
 	// 无限增长。worker goroutine 通过 channel close 机制下线；当前实装不主动 close
 	// （room closed 不触发 worker 退出，让残留事件能完成）。如未来引入 dynamic
 	// room reuse 或活跃 room 爆炸 → 加 LRU eviction 或定时 GC。
+	//
+	// LIFECYCLE-DEFER: Story 11-8 r8 决策 defer，详见 docs/lessons/2026-05-09-per-room-worker-lifecycle-defer-tech-debt-11-8-r8.md
+	// （codex r8 [P2] / r9 [P1] 重复 flag worker leak；MVP 节点 4 阶段量化上界可控
+	// —— 单进程活跃 room ≤ 上千、worker 栈 ~2KB、roomQueue ~8KB（1024-cap chan），
+	// 总开销 < 10MB；future epic 单独 story 处理 lifecycle 回收。三处 LIFECYCLE-DEFER
+	// 标记 ——`roomQueues` 字段 / `enqueueRoomEvent` / `runRoomQueueWorker` ——
+	// 防 r10 review 再 flag。）
 	roomQueues sync.Map
 
 	// roomCommitLocks **per-room commit serialization mutex pool**（Story 11.8
@@ -505,8 +514,12 @@ func (s *roomServiceImpl) acquireCommitLock(roomID uint64) *sync.Mutex {
 //
 // **fire-and-forget 严格语义**（V1 §10.4 步骤 8 / §10.5 步骤 7-8 钦定）：
 //
-//  1. **不阻塞 caller**：caller 同步段做 channel send（buffered + select default 兜底
-//     满 → log warn drop），非阻塞返回；worker goroutine 独立消费 channel 跑 fn。
+//  1. **caller 不等异步结果**（r9 [P2] 修订：satisfied 但 caller 在 queue 满时
+//     会 block 等 worker 消费一个槽位；非 1024-cap 满状态下立即返回）。caller
+//     同步段做 channel send，worker goroutine 独立消费 channel 跑 fn；caller
+//     拿不到 fn 结果（无 future / promise）—— "fire-and-forget" 语义本质指
+//     "不等结果"，不指"不阻塞"；queue 满时阻塞背压优于 silent drop（r5 实装
+//     的 silent drop 路径会让 client 漏 broadcast → roster permanently stale）。
 //
 //  2. **detached ctx**（context.WithoutCancel）：fn 收到的 ctx 与 request ctx 解耦
 //     cancel 信号但保留 values。client 断开 / handler deadline cancel request
@@ -538,8 +551,15 @@ func (s *roomServiceImpl) acquireCommitLock(roomID uint64) *sync.Mutex {
 // 没起来事件就到达 channel，会一直留 channel 里等到 once.Do 才被消费（语义
 // 仍正确但增加无谓延迟）。当前顺序：LoadOrStore 后立即 once.Do（启 worker），
 // 再 wg.Add + send，让 worker 已 ready 时事件入队即被消费。
+//
+// LIFECYCLE-DEFER: Story 11-8 r8 决策 defer，详见 docs/lessons/2026-05-09-per-room-worker-lifecycle-defer-tech-debt-11-8-r8.md
+// （per-room worker / sync.Map entry 永不 reclaim 是已知 tech-debt；MVP 节点 4
+// 阶段量化上界可控；future epic 单独 story 处理。codex r9 [P1] 重复 flag —— 三处
+// LIFECYCLE-DEFER 标记防 r10 再 flag。）
 func (s *roomServiceImpl) enqueueRoomEvent(ctx context.Context, roomID uint64, fn func(detachedCtx context.Context)) {
-	qIface, _ := s.roomQueues.LoadOrStore(roomID, &roomQueue{ch: make(chan func(), 256)})
+	// LIFECYCLE-DEFER: Story 11-8 r8 决策 defer，详见 docs/lessons/2026-05-09-per-room-worker-lifecycle-defer-tech-debt-11-8-r8.md
+	// 容量 1024（r9 [P2] 修复：双层防御 —— blocking send 是首选背压，1024 容量是常态吞吐覆盖）。
+	qIface, _ := s.roomQueues.LoadOrStore(roomID, &roomQueue{ch: make(chan func(), 1024)})
 	q := qIface.(*roomQueue)
 	q.once.Do(func() {
 		go s.runRoomQueueWorker(q)
@@ -563,22 +583,17 @@ func (s *roomServiceImpl) enqueueRoomEvent(ctx context.Context, roomID uint64, f
 		s.postCommitWG.Add(1)
 	}
 
-	// **non-blocking enqueue**：channel 满（即使 256 容量）→ log warn 不阻塞 caller。
-	// 满代表 worker 卡死或 burst 远超容量 —— production 不应发生；如发生则 drop
-	// 优于阻塞 HTTP 路径（fire-and-forget 严格语义）。
-	select {
-	case q.ch <- wrapped:
-		// 成功入队
-	default:
-		// 队列满：drop 事件 + log warn + 回滚 wg.Add（否则 wg.Wait 永远等不到 Done）
-		if s.postCommitWG != nil {
-			s.postCommitWG.Done()
-		}
-		slog.Default().Warn("room post-commit queue full; event dropped",
-			slog.String("component", "room-service-postcommit"),
-			slog.Uint64("roomId", roomID),
-			slog.Int("queueCapacity", cap(q.ch)))
-	}
+	// **blocking enqueue**（r9 [P2] 修复，取代 r5 的 non-blocking select default）：
+	// channel 满 → caller 阻塞等待 worker 消费一个槽位再送入。理由：
+	//   (a) silent drop（r5 默认行为）会让 client 漏 member.joined / member.left →
+	//       roster permanently stale，是 silent correctness bug，比 HTTP 延迟严重。
+	//   (b) 阻塞 caller 自然形成背压：caller 慢 → 上游 HTTP 慢 → 不会继续制造更
+	//       多 backlog，系统自洽收敛。
+	//   (c) 容量已 1024（双层防御），节点 4 阶段单 room ≤4 user，post-commit 处理
+	//       速率 ~10ms 级，1024 容量需要 burst > 1024 / 30s 才会满 —— 极端场景。
+	//   (d) 阻塞最坏延迟 HTTP 200 而不是丢事件，监控可见（HTTP latency P99 上升）
+	//       可被 alarm 捕获；silent drop 无任何信号。
+	q.ch <- wrapped
 }
 
 // runRoomQueueWorker 是单 roomID 的 worker goroutine（Story 11.8 r5 [P1] 修复引入）。
@@ -592,6 +607,10 @@ func (s *roomServiceImpl) enqueueRoomEvent(ctx context.Context, roomID uint64, f
 //
 // **panic safety**：fn panic 会 abort process（default Go 行为）；worker goroutine
 // 不加 recover，与 r2 / r4 行为一致。
+//
+// LIFECYCLE-DEFER: Story 11-8 r8 决策 defer，详见 docs/lessons/2026-05-09-per-room-worker-lifecycle-defer-tech-debt-11-8-r8.md
+// （worker 永不退出，当前实装不主动 close channel；MVP 节点 4 阶段量化上界可控；
+// future epic 单独 story 处理 lifecycle 回收。三处 LIFECYCLE-DEFER 标记防 r10 再 flag。）
 func (s *roomServiceImpl) runRoomQueueWorker(q *roomQueue) {
 	for fn := range q.ch {
 		fn()
@@ -1026,7 +1045,9 @@ func (s *roomServiceImpl) LeaveRoom(ctx context.Context, in LeaveRoomInput) (*Le
 	// **关键不变量**（lock 内每步都是 instant op）：
 	//   - DB commit（毫秒级）
 	//   - SessionManager.Unregister（map 操作 nano 级）
-	//   - channel send（buffered + select default 兜底，nano 级）
+	//   - channel send（buffered 1024-cap，常态 nano 级；r9 [P2] 修订为 blocking
+	//     send 替代 silent drop，满时阻塞但 instant-op 不变量在 1024-cap 未满路径
+	//     成立 —— 极端 burst > 1024 同 room 才会触发阻塞，节点 4 阶段不会发生）
 	//   - go spawn（runtime 创建 goroutine 是 nano 级；close drain 在 goroutine
 	//     内 5s 但不计入 lock 持有时间）
 	//
