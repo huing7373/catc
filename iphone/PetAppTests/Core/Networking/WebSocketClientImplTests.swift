@@ -1722,6 +1722,107 @@ final class WebSocketClientImplTests: XCTestCase {
         client.disconnect()
     }
 
+    /// fix-review round 4 P1：heartbeat ping 在 "lock unlock 之后、send 之前" 的 race window 内
+    /// 即使发生 reconnect / caller-driven connect() 把 underlyingTask 换成新 socket，
+    /// 旧 heartbeat **不能**把 stale ping 发到新 socket（否则 server 在 mandatory `room.snapshot`
+    /// 之前回 pong → 打破 "first frame == handshake snapshot" invariant → resolve connect()
+    /// 在 room state 初始化前 → caller 拿到 incomplete state）.
+    ///
+    /// race 触发时序（heartbeatInterval=50ms / pongTimeout=10s）：
+    ///   T0     : connect(firstTask) → snapshot 解 latch → heartbeat 启动 + mySession=N
+    ///   T0+50  : heartbeat 第一次循环 →
+    ///            (a) lock 内 install pendingPongCont + activeTask snapshot = firstTask + heartbeatSeq=1
+    ///            (b) lock.unlock()
+    ///            (c) **进 beforeHeartbeatSendHook**（unlock window 内的精确注入点）
+    ///   hook 内: prepareForReconnect()（cancel 旧 heartbeatTask + finish pongCont + sessionGen += 1）
+    ///            + connect(roomId:RM01) → install secondTask + 启动新 heartbeat（mySession=N+1）
+    ///            + 等 secondTask 收到自己的 snapshot 让 connect() resolve
+    ///   T_post : hook 返回 → 旧 heartbeat task 走 final pre-send 校验：
+    ///            (1) sessionGeneration（=N+1） != mySession（=N） → silent skip
+    ///            (2) 即便 gen check 漏掉，captured activeTask = firstTask（已被 prepareForReconnect cancel） → send 抛错也不会发到 secondTask
+    ///
+    /// 修复前断言失败：旧 heartbeat 调 `self.send(.ping)` re-read self.underlyingTask = secondTask
+    ///   → ping 发到 secondTask → secondTask.sentMessages.count >= 1.
+    /// 修复后断言成立：双层防御 silent skip → secondTask.sentMessages.count == 0（heartbeat 没污染新 socket）.
+    func test_heartbeat_unlockWindowRaceCanceledHeartbeatDoesNotPingNewSocket_round4_P1() async throws {
+        let factory = FakeReconnectFactory()
+
+        // firstTask：发 snapshot 启 heartbeat → blockReceiveForever 让 receive-loop 不主动退出.
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.hbSnapshotJSON)]
+        firstTask.blockReceiveForever = true
+
+        // secondTask：reconnect 后的新 socket —— 也发 snapshot 让 hook 内 connect() 能 resolve.
+        // 关键：secondTask.sentMessages 必须保持空（修复后断言）；任何 ping 进来都说明旧 heartbeat 把 ping 发到了新 socket.
+        let secondTask = factory.scheduleNewTask()
+        secondTask.scriptedFrames = [.string(Self.hbSnapshotJSON)]
+        secondTask.blockReceiveForever = true
+
+        // thirdTask：secondTask 上启动的新 heartbeat 也会触发 ping → 第二次 hook 返回后这个 task 上的 ping 是合法的，
+        // 与本测试核心断言无关；但为防 hook 在第二次 heartbeat 也被触发我们用 `hookFiredCount` 做单次门控.
+        // 不必 schedule 第三个 task —— 我们禁止再次进 hook，且 secondTask 自己的 ping 是合法行为，本测试不验证它.
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.heartbeatInterval = 0.05
+        client.pongTimeout = 10.0  // 长 pongTimeout 让旧 heartbeat 即使没死也不会因 timeout 走 reconnect 路径干扰断言
+        client.backoffSequence = [0.05]
+
+        // hook 单次门控：仅第一次（旧 heartbeat 的第一次 ping unlock window）触发 race；
+        // 防止 secondTask 上启动的新 heartbeat 第二次又触发 hook 形成死循环.
+        let hookFired = SendableBox<Bool>(value: false)
+        let weakClient = WeakRef(client)
+        client.beforeHeartbeatSendHook = { [hookFired, weakClient] in
+            // 单次门控：只有第一次（第一个 heartbeat 的第一次 ping）才模拟 race；后续 hook call 直接 no-op.
+            if hookFired.value { return }
+            hookFired.set(true)
+
+            guard let c = weakClient.value else { return }
+
+            // 模拟 reset 路径（与 prepareForReconnect 等价）：cancel 旧 heartbeatTask + finish pendingPongCont
+            //   + 翻 sessionGeneration → 旧 heartbeat 的 final pre-send 校验会看到 sessionGen != mySession → silent skip.
+            c.prepareForReconnect()
+
+            // 模拟 install 新 underlyingTask（caller-driven connect 路径）—— 跑 connect(roomId:) 让 secondTask 进 underlyingTask.
+            // 这会等 secondTask 的 snapshot 帧解 connect() latch，与 production "reconnect attempt 完成 install" 等价.
+            // 用 try? 兜底：本 hook 是 @Sendable async（不能 throws）；connect 失败则 secondTask.sentMessages 仍空（断言仍成立）.
+            try? await c.connect(roomId: "RM01")
+        }
+
+        try await client.connect(roomId: "RM01")
+
+        // 等 ~T0+700ms：保证旧 heartbeat 第一次循环已跑过 unlock window + hook 返回 + 旧 heartbeat 走完 final pre-send 校验
+        // → silent skip → return（不会 send 到 secondTask）.
+        // 同时给 secondTask 上启动的新 heartbeat ~600ms（足够发 1-12 次 ping，但全是合法 ping，本测试不限定其数量上限）.
+        try await Task.sleep(nanoseconds: 700_000_000)
+
+        // 核心断言：firstTask 收到了它自己的第一个 ping（前置：旧 heartbeat 至少进过一次 unlock window，hook 才会被调）.
+        // 但 firstTask 上的 ping 数 ≤ 1（hook 立刻把 firstTask cancel 掉，secondTask 上新 heartbeat 不会再 send 到 firstTask）.
+        XCTAssertTrue(hookFired.value,
+                      "前置：beforeHeartbeatSendHook 至少被调用过一次（说明旧 heartbeat 真的进了 unlock window）")
+
+        // 修复前断言失败的关键检查：secondTask **不应**收到来自旧 heartbeat 的 ping_1（其他 ping 是 secondTask 自己 heartbeat 的 ping，合法）.
+        // 检查：secondTask.sentMessages 中不应出现 requestId == "ping_1" 的 ping（旧 heartbeat 的 seq=1）—— 修复前 race
+        //   场景下旧 heartbeat 把 "ping_1" 发到 secondTask；修复后旧 heartbeat silent skip → secondTask 只可能收到自己新 heartbeat 的 ping
+        //   （新 heartbeat 的 heartbeatSeq 从 prepareForReconnect 后继续递增，但 secondTask 上的 ping 必然 != "ping_1" 因为
+        //   prepareForReconnect 不重置 seq；不过为保证语义清晰，我们直接检查 "secondTask 的 sentMessages 里没有 ping_1"）.
+        let secondTaskPings: [String] = secondTask.sentMessages.compactMap { msg in
+            guard case .string(let text) = msg,
+                  let data = text.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let type = json["type"] as? String, type == "ping",
+                  let requestId = json["requestId"] as? String else { return nil }
+            return requestId
+        }
+        XCTAssertFalse(secondTaskPings.contains("ping_1"),
+                       "修复前 race bug：旧 heartbeat 把 'ping_1' 发到 reconnect 后的新 socket（secondTask）；修复后双层防御应阻止此发送。actual secondTask pings=\(secondTaskPings)")
+
+        client.disconnect()
+    }
+
     // MARK: - reconnect 测试 helpers
 
     /// 收集 stream 上的 connection state events 直到拿到指定数量（带超时）.
@@ -2017,5 +2118,25 @@ final class SendableBox<T>: @unchecked Sendable {
     func set(_ newValue: T) {
         lock.lock(); defer { lock.unlock() }
         _value = newValue
+    }
+}
+
+// MARK: - WeakRef helper (fix-review round 4 P1 test)
+
+/// 跨 closure 边界 weak-capture class 的 Sendable wrapper.
+/// `@Sendable` closure 不能直接 `[weak self]` capture 任意 class，但可以 capture 一个
+/// 已经 `Sendable` 的 box；本 box 内部存 `weak var`，`@unchecked Sendable` 通过 NSLock 保护.
+/// 仅供测试用，不进 production 代码.
+final class WeakRef<T: AnyObject>: @unchecked Sendable {
+    private weak var _value: T?
+    private let lock = NSLock()
+
+    init(_ value: T?) {
+        self._value = value
+    }
+
+    var value: T? {
+        lock.lock(); defer { lock.unlock() }
+        return _value
     }
 }
