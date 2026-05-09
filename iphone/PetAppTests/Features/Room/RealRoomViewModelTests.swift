@@ -642,6 +642,117 @@ final class RealRoomViewModelTests: XCTestCase {
         XCTAssertEqual(vm.wsState, .connected, "同 instance rebind 不应改变 wsState")
     }
 
+    // MARK: - case#13 fix-review round 6 P2: same-instance rebind 必须 true no-op，consumer 不重启
+
+    /// 验证 fix-review round 6 P2：vm 已 bound 且在房间中，`bind(appState:webSocketClient:)`
+    /// 传入**同一** WebSocketClient instance 时，**不能** restart consumer task —— 否则
+    /// cancel 当前 consumer + 在同一 AsyncStream 上 start new iterator（没调 prepareForReconnect）
+    /// → in-flight `room.snapshot` 在 rebind 缝隙间被丢.
+    ///
+    /// 测试时序（关键）：
+    ///   1. init vm + 进房间 → consumer 起在 mockWS.messages 上
+    ///   2. 第一次 bind（same instance）
+    ///   3. **在 rebind 后**立即 emit snapshot（模拟 in-flight 消息）
+    ///   4. 断言 snapshot 被 vm 正确接收（members 包含 snapshot 内的 userId）
+    ///
+    /// 旧实装 bug：rebind 内 `else if webSocketClient != nil && lastObservedRoomId != nil`
+    /// 无条件调 startConsumingMessages → cancel 当前 consumer 然后 start new iterator on same stream.
+    /// AsyncStream 不支持多 iterator 重新订阅 —— 后起的 iterator 可能 miss buffered values.
+    /// 修复：only call startConsumingMessages 当 client 实际 swap / first injection.
+    func testSameInstanceRebindDoesNotDropInFlightSnapshot() async throws {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. 进入房间，让 consumer task 起在 mockWS.messages 上
+        appState.setCurrentRoomId("room_xxx")
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(vm.wsState, .connected)
+
+        // 2. baseline: 推一个 snapshot 让 members 有可观测值（验证 consumer task 已活）
+        let baselinePayload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_baseline", nickname: "Baseline", pet: nil)]
+        )
+        mockWS.emit(.roomSnapshot(baselinePayload))
+        try await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.members.first?.id, "u_baseline",
+                       "baseline: consumer task 必须能消费 snapshot")
+
+        // 3. 关键：第一次 same-instance rebind（模拟 reappear / dependency refresh 场景）
+        let prepareCountBeforeRebind = mockWS.prepareForReconnectCallCount
+        vm.bind(appState: appState, webSocketClient: mockWS)
+        await Task.yield()
+        await Task.yield()
+
+        // 关键断言 A: same-instance rebind 不应触发 prepareForReconnect（这是 swap 路径独有）
+        XCTAssertEqual(mockWS.prepareForReconnectCallCount, prepareCountBeforeRebind,
+                       "same-instance rebind 不应调 prepareForReconnect（这是 swap 路径独有的语义）")
+
+        // 4. 关键测试：rebind 后立即 emit snapshot（模拟 rebind 过程中 server 推的 in-flight 消息）
+        //    旧实装 bug 触发条件：bind 内 startConsumingMessages 在 rebind 期间 cancel 当前 consumer
+        //    + 同一 AsyncStream 上 start new iterator → emit 落入 stream buffer 后被新 iterator miss.
+        let inFlightPayload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_inflight", nickname: "InFlight", pet: nil)]
+        )
+        mockWS.emit(.roomSnapshot(inFlightPayload))
+
+        // 5. 关键断言 B: vm 必须能消费到 in-flight snapshot（members.first.id 切到 u_inflight）
+        try await waitForFirstMemberId(vm: vm, expected: "u_inflight")
+        XCTAssertEqual(vm.members.first?.id, "u_inflight",
+                       "same-instance rebind 后 in-flight snapshot 必须被原 consumer 接收（不应被 rebind 误 cancel + restart 路径丢失）")
+    }
+
+    // MARK: - case#14 fix-review round 6 P2: same-instance rebind 在两次 bind 之间 enqueue snapshot
+
+    /// 更严格的 fix-review round 6 P2 回归：bind 同 instance **两次** + 在两次 bind 之间
+    /// emit snapshot → 断言 vm 收到 snapshot.
+    ///
+    /// 与 case#13 区别：case#13 测的是「rebind 后 emit 不丢」；本 case 测的是「连续两次 same-instance
+    /// bind 之间 emit 不丢」—— 模拟更激进的 rebind 抖动（如 SwiftUI environment 多次 publish）.
+    func testRepeatedSameInstanceRebindPreservesInFlightSnapshot() async throws {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 进入房间
+        appState.setCurrentRoomId("room_xxx")
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(vm.wsState, .connected)
+
+        // 第一次 same-instance rebind
+        vm.bind(appState: appState, webSocketClient: mockWS)
+        await Task.yield()
+
+        // 在两次 bind 之间 enqueue snapshot
+        let snapshotBetween = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_between", nickname: "Between", pet: nil)]
+        )
+        mockWS.emit(.roomSnapshot(snapshotBetween))
+
+        // 第二次 same-instance rebind（模拟连续 rebind 抖动）
+        vm.bind(appState: appState, webSocketClient: mockWS)
+        await Task.yield()
+        await Task.yield()
+
+        // 断言：两次 rebind 之间 emit 的 snapshot 不应被丢
+        try await waitForFirstMemberId(vm: vm, expected: "u_between")
+        XCTAssertEqual(vm.members.first?.id, "u_between",
+                       "两次 same-instance rebind 之间 emit 的 snapshot 必须保留（consumer 不应被 rebind 误 restart 丢失消息）")
+        XCTAssertFalse(mockWS.didDisconnect,
+                       "两次 same-instance rebind 都不应误调 disconnect")
+    }
+
     // MARK: - helpers
 
     /// 等待 vm.members.count 达到预期值（最多等 1 秒；防 Task consumer 调度时机不确定）.

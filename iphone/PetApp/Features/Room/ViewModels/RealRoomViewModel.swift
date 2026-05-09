@@ -105,26 +105,43 @@ public final class RealRoomViewModel: RoomViewModel {
     /// 再 swap，否则旧 socket 仍 subscribed → 资源泄漏 + 旧 client deliver duplicate room traffic.
     /// 同 instance 重 bind 时 no-op（避免 redundant disconnect 把好 client 关掉）.
     /// 用 `===` identity 比较（WebSocketClient protocol 已是 `: AnyObject, Sendable`，class-only）.
+    ///
+    /// **fix-review round 6 P2**：consumer 重启必须 gated on 实际 client swap / first injection,
+    /// 不能在 same-instance rebind 时无条件 restart。三种语义：
+    ///   - a) `oldClient === newClient`（同 instance rebind）→ true no-op：**不**调 startConsumingMessages
+    ///        （否则 cancel 当前 consumer + 在同一已运行的 AsyncStream 上 start new iterator,
+    ///         没调 prepareForReconnect → in-flight `room.snapshot` 可能被丢）
+    ///   - b) `oldClient != nil && newClient != oldClient`（swap）→ disconnect 旧 + prepareForReconnect 新
+    ///        + startConsumingMessages（新 client 的新 stream 上起新 consumer）
+    ///   - c) `oldClient == nil && newClient != nil`（first injection）→ startConsumingMessages
+    ///        （**不**调 prepareForReconnect：mock 构造的是 fresh stream；production WebSocketClientImpl
+    ///        首次也无需 reset）
     public func bind(appState: AppState, webSocketClient: WebSocketClient? = nil) {
         let codeAlreadySubscribed = roomCodeSubscription != nil
         let connectAlreadySubscribed = roomIdConnectSubscription != nil
         self.appState = appState
 
-        // fix-review round 5 P2：替换 client instance 前先 tear down 旧 client.
-        // - 同 instance 重 bind（=== true）：no-op（既不 disconnect 也不 cancel task）
-        // - 不同 instance 替换：disconnect 旧 client + cancel 旧 messageConsumerTask + swap
-        // - 旧 client = nil（首次注入）：仅 swap（无旧 client 可关）
+        // fix-review round 5 P2 + round 6 P2：替换 client instance 时分三种语义分类处理.
+        // 跟踪是否为「真实的 client swap / first injection」—— 仅此情况才需重启 consumer task.
+        var clientChanged = false
         if let newClient = webSocketClient {
             if let oldClient = self.webSocketClient, oldClient === newClient {
-                // 同一 instance：do nothing（保留 wsState / task / subscription）
-            } else {
-                // 不同 instance（含旧 = nil 首次注入）：tear down 旧路径
-                if let oldClient = self.webSocketClient {
-                    oldClient.disconnect()
-                    self.messageConsumerTask?.cancel()
-                    self.messageConsumerTask = nil
-                }
+                // (a) 同一 instance：true no-op（既不 disconnect、也不 cancel task、也不 restart consumer）
+                clientChanged = false
+            } else if let oldClient = self.webSocketClient {
+                // (b) 不同 instance 替换：disconnect 旧 + cancel 旧 task + swap + prepareForReconnect 新 client
+                // prepareForReconnect 关键性：A→B / leave-rejoin 同样语义 —— 新 client 的 stream 必须是 fresh
+                // （否则 consumer 接已 finish stream，永远收不到消息）.
+                oldClient.disconnect()
+                self.messageConsumerTask?.cancel()
+                self.messageConsumerTask = nil
                 self.webSocketClient = newClient
+                newClient.prepareForReconnect()
+                clientChanged = true
+            } else {
+                // (c) 旧 = nil 首次注入：仅 swap（无旧 client 可 disconnect；newClient 的 stream 是 fresh）
+                self.webSocketClient = newClient
+                clientChanged = true
             }
         }
 
@@ -134,10 +151,14 @@ public final class RealRoomViewModel: RoomViewModel {
         if !connectAlreadySubscribed {
             // 首次订阅：sink 同步 emit 会按 (nil, currentRoomId) 决定是否启 task.
             subscribeRoomIdConnect(to: appState)
-        } else if webSocketClient != nil && lastObservedRoomId != nil {
-            // 已订阅 + 已在房间内 + 现在补注入 / 替换 client → 主动起 task 接上 messages stream
+        } else if clientChanged && webSocketClient != nil && lastObservedRoomId != nil {
+            // 已订阅 + 已在房间内 + **client 实际发生变更**（swap 或 first injection） → 主动起 task 接上 messages stream
             // （否则 task 永远等不到下一次 currentRoomId 切换才起）.
-            // 注意：上面 tear-down 已 cancel 旧 task 并 swap webSocketClient；这里起的是新 client 的 task.
+            //
+            // **fix-review round 6 P2 关键 gate**：`clientChanged` 才进；same-instance rebind 不进
+            // —— 否则 cancel 当前 consumer + 同一 stream 上 start new iterator → 丢 in-flight snapshot.
+            //
+            // 注意：上面 swap 分支已 cancel 旧 task；这里起的是新 client 的 task.
             if self.webSocketClient != nil {
                 self.wsState = .connected
             }
