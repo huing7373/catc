@@ -244,3 +244,4 @@
 | 2026-05-09 | [WS reconnect: precondition 必须先于 gen 翻新 & connectGate 覆盖前必 resolve（12-5 r5）](2026-05-09-ws-reconnect-precondition-must-precede-gen-bump-and-gate-supersede-12-5-r5.md) | 2 | architecture | `0223877` |
 | 2026-05-10 | [WS heartbeat 状态必须在 transient reconnect 前显式 reset（12-6 r1）](2026-05-10-ws-heartbeat-state-must-reset-before-transient-reconnect-12-6-r1.md) | 1 | architecture | `<pending>` |
 | 2026-05-10 | [WS heartbeat .pong 必须按 requestId 配对当前 in-flight ping，不能无条件 ack 任意 pong（12-6 r2）](2026-05-10-ws-heartbeat-pong-requestid-correlation-12-6-r2.md) | 1 | error-handling | `<pending>` |
+| 2026-05-10 | [WS heartbeat ping send 抛错必须强制走与 pong timeout 相同的 reconnect 路径，不能 silent return（12-6 r3）](2026-05-10-ws-heartbeat-ping-send-error-must-force-reconnect-12-6-r3.md) | 1 | error-handling | `<pending>` |

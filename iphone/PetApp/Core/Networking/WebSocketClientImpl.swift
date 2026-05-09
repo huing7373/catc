@@ -1275,17 +1275,27 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                     return
                 }
 
-                // 3. send ping —— 走既有 send(_:) 路径（注意：不能让 send 失败也吞掉）
+                // 3. send ping —— 走既有 send(_:) 路径.
+                // fix-review round 3 P1：send 抛错 **不能** silent return —— 旧实现假设 receive-loop 会
+                // 接管 catch 走 reconnect，但在 "locally broken socket" 场景下 send 失败时 receive() 仍
+                // blocked（没观察到 close） → heartbeat 静默停止 + nothing schedules reconnect → client 卡死
+                // 看起来仍 connected. 修复：send 失败强制走与 pong timeout **完全相同** 的 fallback ——
+                // cancelUnderlyingTaskWithGoingAwayIfCurrent 让 receive-loop classify 为 transient (1001)
+                // → schedule reconnect.
                 do {
                     try await strongSelf.send(.ping(requestId: "ping_\(seq)"))
                 } catch {
-                    // send 失败：underlying task 已死 / notConnected —— receive-loop 会接管 catch 走 reconnect.
-                    // 本 heartbeat task 退出即可；不主动 cancel underlying（避免双触发，让 receive-loop 自然 catch）
+                    os_log(.info,
+                           log: WebSocketClientImpl.logger,
+                           "heartbeat ping send failed → cancel underlying task with .goingAway (1001) → receive-loop catch transient → schedule reconnect")
+                    // 先做 latch cleanup（防 leak）
                     strongSelf.lock.lock()
                     strongSelf.pendingPongContinuation?.finish()
                     strongSelf.pendingPongContinuation = nil
                     strongSelf.pendingPongRequestId = nil  // round 2 P2
                     strongSelf.lock.unlock()
+                    // 强制走 reconnect 路径（与 pong timeout 同一路径）
+                    strongSelf.cancelUnderlyingTaskWithGoingAwayIfCurrent(mySession: mySession)
                     return
                 }
 

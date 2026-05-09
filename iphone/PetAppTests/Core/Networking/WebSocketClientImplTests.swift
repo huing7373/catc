@@ -1453,6 +1453,59 @@ final class WebSocketClientImplTests: XCTestCase {
         client.disconnect()
     }
 
+    /// case#HB2b edge (round 3 P1): heartbeat send(.ping) 抛错（locally broken socket）→
+    /// 强制走与 pong timeout 相同的 fallback —— cancel underlying with .goingAway → receive-loop catch
+    /// transient → schedule reconnect. 不能 silent return（旧 bug：客户端卡死无 heartbeat 无 reconnect）.
+    func test_heartbeat_pingSendThrows_cancelsUnderlyingWithGoingAwayTriggersReconnect() async throws {
+        let factory = FakeReconnectFactory()
+        // 第一个 task：发 snapshot 解 latch；之后 receive 阻塞（模拟 "locally broken socket，receive 仍 blocked"）.
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.hbSnapshotJSON)]
+        firstTask.blockReceiveForever = true
+        // sendThrowsError 让 heartbeat 第一次 send(.ping) 立即抛错（snapshot 帧已 receive，handshake latch 已解）.
+        firstTask.sendThrowsError = URLError(.notConnectedToInternet)
+        // cancel(.goingAway) 后 closeCode 必须 = .goingAway 让 receive-loop 走 transient (1001).
+        firstTask.stubbedCloseCode = .goingAway
+
+        // 第二个 task：reconnect attempt → 发 snapshot 让 .reconnecting → .connected 链跑通.
+        let secondTask = factory.scheduleNewTask()
+        secondTask.scriptedFrames = [.string(Self.hbSnapshotJSON)]
+        secondTask.blockReceiveForever = true
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.heartbeatInterval = 0.05
+        client.pongTimeout = 1.0  // 长 pongTimeout 排除 "pong timeout 触发 reconnect"路径，确认是 send 抛错触发
+        client.backoffSequence = [0.05, 0.05, 0.05, 0.05, 0.05]
+
+        try await client.connect(roomId: "RM01")
+
+        // 收集 stream 上的 connection states 至 3：[.connected, .reconnecting(1), .connected].
+        let states = try await collectConnectionStates(client: client, count: 3, timeout: 5.0)
+        XCTAssertGreaterThanOrEqual(states.count, 3, "应至少收到 3 个 state events")
+        XCTAssertEqual(states[0], .connected, "首次 connect 后 emit .connected")
+        if case .reconnecting(let attempt) = states[1] {
+            XCTAssertEqual(attempt, 1, "ping send 抛错触发 .reconnecting(attempt: 1)")
+        } else {
+            XCTFail("Expected .reconnecting(attempt: 1), got \(states[1])")
+        }
+        XCTAssertEqual(states[2], .connected, "reconnect 成功后 emit .connected")
+
+        // 断言：firstTask 收到了 .goingAway cancel（验证走的是 cancelUnderlyingTaskWithGoingAwayIfCurrent 路径）.
+        XCTAssertEqual(firstTask.lastCancelCloseCode, .goingAway,
+                       "ping send 抛错应 cancel underlying with .goingAway")
+        // 断言：firstTask 至少 "尝试" send 过一次 ping（fake handle 在抛错前已 append 到 sentMessages）.
+        XCTAssertGreaterThanOrEqual(firstTask.sentMessages.count, 1,
+                                    "send(.ping) 至少被调用一次（fake handle 抛错前已 append）")
+        // 断言：factory 真发了第二次 makeTask（reconnect 触发）.
+        XCTAssertEqual(factory.makeTaskCallCount, 2, "应触发 reconnect → 第二次 makeTask")
+
+        client.disconnect()
+    }
+
     /// case#HB3 happy: disconnect() 后 heartbeat task 停止（不再发 ping）.
     func test_heartbeat_disconnectStopsHeartbeatTaskNoMorePing() async throws {
         let factory = FakeWebSocketTaskFactory()
@@ -1807,6 +1860,11 @@ final class FakeWebSocketTaskHandle: WebSocketTaskHandle, @unchecked Sendable {
     /// 默认 nil = 不 sleep（与原行为一致）.
     var frameDelaysSec: [TimeInterval]?
 
+    /// Story 12.6 fix-review round 3 P1：send 抛错开关 —— 模拟 "locally broken socket"
+    /// （URLSessionWebSocketTask.send 失败但 receive() 仍 blocked，没观察到 close）.
+    /// 默认 nil = 不抛（与原行为一致）；非 nil = 每次 send 都抛此错误.
+    var sendThrowsError: Error?
+
     private var receiveIndex: Int = 0
     private var isCancelled: Bool = false
     private let lock = NSLock()
@@ -1839,7 +1897,12 @@ final class FakeWebSocketTaskHandle: WebSocketTaskHandle, @unchecked Sendable {
     func send(_ message: URLSessionWebSocketTask.Message) async throws {
         lock.lock()
         sentMessages.append(message)
+        let throwErr = sendThrowsError
         lock.unlock()
+        if let throwErr = throwErr {
+            // round 3 P1：先 append 再抛，让测试可以验证 "送出 ping 帧但 send 失败"路径.
+            throw throwErr
+        }
     }
 
     func receive() async throws -> URLSessionWebSocketTask.Message {
