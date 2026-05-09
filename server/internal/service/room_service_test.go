@@ -749,6 +749,19 @@ func TestRoomService_JoinRoom_Happy_5StepsExecute(t *testing.T) {
 		},
 	}
 	roomRepo := &roomTestStubRoomRepo{
+		// **r10 [P1] 修复**：cheap check（lock 之前）—— 直接放行（room 存在）。
+		findByIDFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			calls = append(calls, "roomRepo.FindByID")
+			if roomID != 3001 {
+				t.Errorf("FindByID roomID = %d, want 3001", roomID)
+			}
+			return &mysql.Room{
+				ID:            3001,
+				CreatorUserID: 1001,
+				Status:        1,
+				MaxMembers:    4,
+			}, nil
+		},
 		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
 			calls = append(calls, "roomRepo.FindByIDForUpdate")
 			if roomID != 3001 {
@@ -796,8 +809,11 @@ func TestRoomService_JoinRoom_Happy_5StepsExecute(t *testing.T) {
 
 	// Story 11.8 加：事务 commit 成功后 broadcastMemberJoined 会再调一次 userRepo.FindByID
 	// 拿 nickname / avatarUrl 构造 member.joined payload（fire-and-forget；事务外）。
+	//
+	// **r10 [P1] 修复后**：调用顺序首部多了 roomRepo.FindByID（cheap check，lock 之前）。
 	expected := []string{
 		"userRepo.FindByID",
+		"roomRepo.FindByID", // r10 cheap check（attack-vector 防御）
 		"roomRepo.FindByIDForUpdate",
 		"roomMemberRepo.CountByRoomID",
 		"roomMemberRepo.Create",
@@ -928,34 +944,52 @@ func TestRoomService_JoinRoom_UserAlreadyInTargetRoom_PrecheckReturns6003(t *tes
 }
 
 // TestRoomService_JoinRoom_RoomNotFound_Returns6001:
-// 事务内步骤 2a roomRepo.FindByIDForUpdate 返 mysql.ErrRoomNotFound → service 翻译 6001。
-// 后续 CountByRoomID / Create / UpdateCurrentRoomID **未**被调用（事务回滚）。
+// **r10 [P1] 修复后**：cheap room-exists check（lock 段之前的 roomRepo.FindByID）
+// 返 mysql.ErrRoomNotFound → service 翻译 6001 + **不进**事务 / lock 段。
+//
+// 关键断言（r10 attack-vector 防御）：
+//   - roomRepo.FindByID 被调用 1 次（cheap check）
+//   - WithTx **未**被调用（cheap check 已拦截，不进 acquireCommitLock + 不进事务）
+//   - FindByIDForUpdate / CountByRoomID / Create / UpdateCurrentRoomID **未**被调用
 func TestRoomService_JoinRoom_RoomNotFound_Returns6001(t *testing.T) {
+	withTxCalled := false
+	var findByIDCalls int
 	userRepo := &roomTestStubUserRepo{
 		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
 			return &mysql.User{ID: 1002, CurrentRoomID: nil}, nil
 		},
 		updateCurrentRoomIDFn: func(ctx context.Context, userID uint64, roomID *uint64) error {
-			t.Errorf("UpdateCurrentRoomID 不应被调用（FindByIDForUpdate 已失败）")
+			t.Errorf("UpdateCurrentRoomID 不应被调用（cheap check 已拦截）")
 			return nil
 		},
 	}
 	roomRepo := &roomTestStubRoomRepo{
-		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+		// **r10 修复**：cheap check 路径（lock 之前）—— 直接返 ErrRoomNotFound。
+		findByIDFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			findByIDCalls++
 			return nil, mysql.ErrRoomNotFound
+		},
+		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			t.Errorf("FindByIDForUpdate 不应被调用（cheap check 已拦截，不进事务）")
+			return nil, nil
 		},
 	}
 	memberRepo := &roomTestStubRoomMemberRepo{
 		countByRoomIDFn: func(ctx context.Context, roomID uint64) (int, error) {
-			t.Errorf("CountByRoomID 不应被调用（FindByIDForUpdate 已失败）")
+			t.Errorf("CountByRoomID 不应被调用（cheap check 已拦截）")
 			return 0, nil
 		},
 		createFn: func(ctx context.Context, m *mysql.RoomMember) error {
-			t.Errorf("Create 不应被调用（FindByIDForUpdate 已失败）")
+			t.Errorf("Create 不应被调用（cheap check 已拦截）")
 			return nil
 		},
 	}
-	txMgr := roomTestDefaultStubTxMgr()
+	txMgr := &roomTestStubTxMgr{
+		withTxFn: func(ctx context.Context, fn func(txCtx context.Context) error) error {
+			withTxCalled = true
+			return fn(ctx)
+		},
+	}
 
 	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
 	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
@@ -968,6 +1002,63 @@ func TestRoomService_JoinRoom_RoomNotFound_Returns6001(t *testing.T) {
 	}
 	if ae.Code != apperror.ErrRoomNotFound {
 		t.Errorf("AppError.Code = %d, want %d (ErrRoomNotFound 6001)", ae.Code, apperror.ErrRoomNotFound)
+	}
+	// r10 attack-vector 防御断言：cheap check 必须在 lock 段之前拦截。
+	if findByIDCalls != 1 {
+		t.Errorf("roomRepo.FindByID called %d times, want 1 (cheap check)", findByIDCalls)
+	}
+	if withTxCalled {
+		t.Errorf("WithTx 不应被调用（r10 修复：cheap check 拦截 → 不进 commit lock + 不进事务，attack vector 关闭）")
+	}
+}
+
+// TestRoomService_JoinRoom_CheapCheckRawDBError_Returns1009:
+// **r10 [P1] 修复新增**：cheap room-exists check 返 raw DB error（非 ErrRoomNotFound）
+// → service 包 1009 + **不进**事务 / lock 段（与 ErrRoomNotFound 路径一致；
+// 任何 cheap check failure 都不能进 acquireCommitLock）。
+func TestRoomService_JoinRoom_CheapCheckRawDBError_Returns1009(t *testing.T) {
+	wantCause := stderrors.New("simulated db connection error during cheap room-exists check")
+	withTxCalled := false
+
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1002, CurrentRoomID: nil}, nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			return nil, wantCause
+		},
+		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			t.Errorf("FindByIDForUpdate 不应被调用（cheap check raw err 已拦截）")
+			return nil, nil
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{}
+	txMgr := &roomTestStubTxMgr{
+		withTxFn: func(ctx context.Context, fn func(txCtx context.Context) error) error {
+			withTxCalled = true
+			return fn(ctx)
+		},
+	}
+
+	svc := service.NewRoomService(txMgr, userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
+	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: 1002, RoomID: 3001})
+	if err == nil {
+		t.Fatalf("JoinRoom returned nil error, want 1009")
+	}
+	if withTxCalled {
+		t.Errorf("WithTx 不应被调用（cheap check raw err 拦截 → 不进事务）")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrServiceBusy {
+		t.Errorf("AppError.Code = %d, want %d (ErrServiceBusy 1009)", ae.Code, apperror.ErrServiceBusy)
+	}
+	if !stderrors.Is(err, wantCause) {
+		t.Errorf("errors.Is should find wantCause; err=%v", err)
 	}
 }
 
@@ -985,6 +1076,10 @@ func TestRoomService_JoinRoom_RoomClosed_Returns6005(t *testing.T) {
 		},
 	}
 	roomRepo := &roomTestStubRoomRepo{
+		// r10 cheap check pass-through（room 存在，让事务路径继续）
+		findByIDFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: 3001, CreatorUserID: 1001, Status: 2, MaxMembers: 4}, nil
+		},
 		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
 			// 模拟 closed 房间
 			return &mysql.Room{
@@ -1035,6 +1130,10 @@ func TestRoomService_JoinRoom_RoomFull_Returns6002(t *testing.T) {
 		},
 	}
 	roomRepo := &roomTestStubRoomRepo{
+		// r10 cheap check pass-through
+		findByIDFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: 3001, CreatorUserID: 1001, Status: 1, MaxMembers: 4}, nil
+		},
 		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
 			return &mysql.Room{
 				ID:            3001,
@@ -1084,6 +1183,10 @@ func TestRoomService_JoinRoom_DBUniqueUserIDDuplicate_Returns6003(t *testing.T) 
 		},
 	}
 	roomRepo := &roomTestStubRoomRepo{
+		// r10 cheap check pass-through
+		findByIDFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: 3001, CreatorUserID: 1001, Status: 1, MaxMembers: 4}, nil
+		},
 		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
 			return &mysql.Room{
 				ID:            3001,
@@ -1136,6 +1239,10 @@ func TestRoomService_JoinRoom_DBUniqueRoomUserDuplicate_Returns6003(t *testing.T
 		},
 	}
 	roomRepo := &roomTestStubRoomRepo{
+		// r10 cheap check pass-through
+		findByIDFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: 3001, CreatorUserID: 1001, Status: 1, MaxMembers: 4}, nil
+		},
 		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
 			return &mysql.Room{ID: 3001, CreatorUserID: 1001, Status: 1, MaxMembers: 4}, nil
 		},
@@ -1180,6 +1287,10 @@ func TestRoomService_JoinRoom_FindByIDForUpdateFailsRawError_Returns1009(t *test
 		},
 	}
 	roomRepo := &roomTestStubRoomRepo{
+		// r10 cheap check pass-through（让事务进入；然后事务内 FindByIDForUpdate 失败）
+		findByIDFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: 3001, CreatorUserID: 1001, Status: 1, MaxMembers: 4}, nil
+		},
 		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
 			return nil, wantCause
 		},
@@ -1228,6 +1339,10 @@ func TestRoomService_JoinRoom_UpdateCurrentRoomIDFails_RollsBack(t *testing.T) {
 		},
 	}
 	roomRepo := &roomTestStubRoomRepo{
+		// r10 cheap check pass-through
+		findByIDFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: 3001, CreatorUserID: 1001, Status: 1, MaxMembers: 4}, nil
+		},
 		findByIDForUpdateFn: func(ctx context.Context, roomID uint64) (*mysql.Room, error) {
 			return &mysql.Room{ID: 3001, CreatorUserID: 1001, Status: 1, MaxMembers: 4}, nil
 		},
@@ -2348,6 +2463,10 @@ func TestRoomService_JoinRoom_Happy_BroadcastMemberJoinedCalled(t *testing.T) {
 		},
 	}
 	roomRepo := &roomTestStubRoomRepo{
+		// r10 cheap check pass-through
+		findByIDFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
+		},
 		findByIDForUpdateFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
 			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
 		},
@@ -2453,6 +2572,10 @@ func TestRoomService_JoinRoom_Happy_PetLess_BroadcastWithNullPet(t *testing.T) {
 		updateCurrentRoomIDFn: func(ctx context.Context, uid uint64, rid *uint64) error { return nil },
 	}
 	roomRepo := &roomTestStubRoomRepo{
+		// r10 cheap check pass-through
+		findByIDFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
+		},
 		findByIDForUpdateFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
 			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
 		},
@@ -2501,6 +2624,10 @@ func TestRoomService_JoinRoom_TxRollback_BroadcastNotCalled(t *testing.T) {
 		updateCurrentRoomIDFn: func(ctx context.Context, uid uint64, rid *uint64) error { return nil },
 	}
 	roomRepo := &roomTestStubRoomRepo{
+		// r10 cheap check pass-through（让事务进入；然后事务内 Create 失败回滚）
+		findByIDFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
+		},
 		findByIDForUpdateFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
 			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
 		},
@@ -2550,6 +2677,10 @@ func TestRoomService_JoinRoom_BroadcastFails_DoesNotAffectReturn(t *testing.T) {
 		updateCurrentRoomIDFn: func(ctx context.Context, uid uint64, rid *uint64) error { return nil },
 	}
 	roomRepo := &roomTestStubRoomRepo{
+		// r10 cheap check pass-through
+		findByIDFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
+		},
 		findByIDForUpdateFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
 			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
 		},
@@ -2812,6 +2943,10 @@ func TestRoomService_PostCommit_PerRoomSerialization_PreservesCausalOrdering(t *
 		updateCurrentRoomIDFn: func(ctx context.Context, uid uint64, rid *uint64) error { return nil },
 	}
 	roomRepo := &roomTestStubRoomRepo{
+		// r10 cheap check pass-through（让 join 进入事务 / lock 段）
+		findByIDFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
+		},
 		findByIDForUpdateFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
 			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
 		},
@@ -2959,6 +3094,10 @@ func TestRoomService_PostCommit_RapidJoinLeave_PreservesEnqueueOrder(t *testing.
 		},
 	}
 	roomRepo := &roomTestStubRoomRepo{
+		// r10 cheap check pass-through（让 join 进入事务 / lock 段）
+		findByIDFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
+		},
 		findByIDForUpdateFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
 			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
 		},
@@ -3157,6 +3296,10 @@ func TestRoomService_PostCommit_CommitTimeLockSerializesConcurrentJoinLeave(t *t
 		updateCurrentRoomIDFn: func(ctx context.Context, uid uint64, rid *uint64) error { return nil },
 	}
 	roomRepo := &roomTestStubRoomRepo{
+		// r10 cheap check pass-through（让 join 进入事务 / lock 段）
+		findByIDFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
+		},
 		findByIDForUpdateFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
 			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
 		},
@@ -3325,6 +3468,10 @@ func TestRoomService_PostCommit_LeaveUnregistersBeforeWorkerDrainsBacklog(t *tes
 		updateCurrentRoomIDFn: func(ctx context.Context, uid uint64, rid *uint64) error { return nil },
 	}
 	roomRepo := &roomTestStubRoomRepo{
+		// r10 cheap check pass-through（让 join 进入事务 / lock 段）
+		findByIDFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
+		},
 		findByIDForUpdateFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
 			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
 		},

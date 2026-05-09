@@ -503,6 +503,22 @@ func SetPostCommitWaitGroupForTest(svc RoomService, wg *sync.WaitGroup) {
 //
 // **生命周期**：LoadOrStore 模式不主动清理（与 roomQueues 同策略，节点 4 阶段
 // 活跃 room 数有界）。
+//
+// **LIFECYCLE-DEFER 分层**（review r8 / r9 / r10 累积结论）：
+//
+//	r8 / r9: successful-join 路径下 real roomID 的 lock entry 不回收 —— tech-debt
+//	         已 defer，与 roomQueues / worker goroutine 同源，节点 4 阶段不构成
+//	         attack vector（attacker 必须先获得 valid roomID 才能触发，速率受限）。
+//	r10:     **failed-join 路径**（room 不存在）必须**不进**本函数 —— attacker
+//	         可用任意 fake roomID 暴力调用 JoinRoom，若进 lock 段则每次都
+//	         LoadOrStore 一个新 entry → memory leak 攻击面扩大到
+//	         attacker-controlled。修法：JoinRoom 在调用本函数**之前**先做
+//	         cheap room-exists check（普通 SELECT），不存在 → 直接 6001 返回，
+//	         **不进**本函数，attack vector 关闭。详见 JoinRoom 注释。
+//
+// **关系**：r10 修复**不**解决 r8/r9 的 successful-join leak（仍是 tech-debt）；
+// r10 仅关闭 unauthenticated/non-existent attack vector。两者同 family（map entry
+// 不回收），分层应对。
 func (s *roomServiceImpl) acquireCommitLock(roomID uint64) *sync.Mutex {
 	muIface, _ := s.roomCommitLocks.LoadOrStore(roomID, &sync.Mutex{})
 	return muIface.(*sync.Mutex)
@@ -789,6 +805,31 @@ func (s *roomServiceImpl) JoinRoom(ctx context.Context, in JoinRoomInput) (*Join
 		// 用户已在房间中（V1 §10.4 步骤 1 钦定预检路径；含"已在目标房间" +
 		// "已在其他房间"两个子场景，client 不区分）→ 6003，不开事务
 		return nil, apperror.New(apperror.ErrUserAlreadyInRoom, apperror.DefaultMessages[apperror.ErrUserAlreadyInRoom])
+	}
+
+	// (1') **r10 [P1] 修复**：lock 之前先做 cheap room-exists check（普通 SELECT，
+	// 无 FOR UPDATE）—— 防止 attacker 用随机 / 不存在的 roomID 暴力 join 在
+	// roomCommitLocks sync.Map 内 LoadOrStore 出无穷多 entry 制造 memory leak
+	// （attacker-controlled）。
+	//
+	// **不变量**：本 check **best-effort**（lock 之前；race 内 room 可能被 close），
+	// 真正的正确性保证仍由事务内 SELECT FOR UPDATE 维护 —— 本 check 仅过滤掉
+	// 100% 不存在的 roomID，绝大多数 attacker 暴力 join 路径在此被丢弃，不再
+	// 污染 commit lock map。
+	//
+	// **与 r8/r9 worker leak 关系**：r8/r9 已 defer 的是"successful join 路径
+	// 留下 commit lock entry"（real roomID 累积，tech-debt 已记 lesson）；
+	// 本 r10 修复的是"failed join 路径（room 不存在）也留 entry"的 attack
+	// vector —— 二者同 family（map entry 不 reclaim），分层处理。
+	//
+	// **性能影响**：每 join 多 1 次普通 SELECT（ms 级；走 PRIMARY KEY 索引，无锁）
+	// —— 节点 4 阶段 join 频率低（人类操作级），可接受。
+	if _, err = s.roomRepo.FindByID(ctx, in.RoomID); err != nil {
+		if stderrors.Is(err, mysql.ErrRoomNotFound) {
+			return nil, apperror.New(apperror.ErrRoomNotFound, apperror.DefaultMessages[apperror.ErrRoomNotFound])
+		}
+		// 其他 DB 异常（连接 / 超时 / etc.）→ 1009，同样不进 lock 段
+		return nil, apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
 	}
 
 	// (2) acquire per-room commit lock + 开事务（数据库设计 §8.6 + V1 §10.4 钦定）
