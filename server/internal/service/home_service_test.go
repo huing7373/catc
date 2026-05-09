@@ -318,6 +318,120 @@ func TestHomeService_LoadHome_ChestNotFound_Returns1009(t *testing.T) {
 	}
 }
 
+// ============================================================
+// Story 11.10: GET /home 扩展 - room.currentRoomId 真实数据
+//
+// 节点 4 阶段（11.10 落地）service 层透传 user.CurrentRoomID 到
+// HomeOutput.Room.CurrentRoomID。本组 case 验证 service 层
+// **零额外 repo 调用** + **不做** rooms.status cross-check。
+// ============================================================
+
+// AC11.10.1 happy: 用户在房间 → HomeOutput.Room.CurrentRoomID = &roomID
+//
+// **关键**：节点 4 阶段（11.10 落地后）user.CurrentRoomID 不再被 service 层强制
+// 视为 nil；service 直接透传 mysql.User.CurrentRoomID 字段值到 HomeOutput.Room.CurrentRoomID。
+func TestHomeService_LoadHome_UserInRoom_RoomCurrentRoomIDIsRoomID(t *testing.T) {
+	roomID := uint64(3001)
+	svc := buildHomeService(
+		func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{
+				ID: 1, Nickname: "u", AvatarURL: "",
+				CurrentRoomID: &roomID, // 用户在房间 3001
+			}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.Pet, error) {
+			return &mysql.Pet{ID: 2, UserID: 1, PetType: 1, IsDefault: 1}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+			return &mysql.StepAccount{UserID: 1}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
+			return &mysql.UserChest{ID: 5, UserID: 1, Status: 1, UnlockAt: time.Now().UTC().Add(10 * time.Minute)}, nil
+		},
+	)
+	out, err := svc.LoadHome(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadHome: %v", err)
+	}
+	if out.Room.CurrentRoomID == nil {
+		t.Fatal("Room.CurrentRoomID = nil, want &3001")
+	}
+	if *out.Room.CurrentRoomID != 3001 {
+		t.Errorf("*Room.CurrentRoomID = %d, want 3001", *out.Room.CurrentRoomID)
+	}
+}
+
+// AC11.10.2 happy: 用户不在任何房间 → HomeOutput.Room.CurrentRoomID = nil
+//
+// users.current_room_id IS NULL 在 GORM 解析为 *uint64 nil；service 透传到
+// HomeOutput.Room.CurrentRoomID = nil；handler 把 nil 序列化为 JSON null。
+func TestHomeService_LoadHome_UserNotInAnyRoom_RoomCurrentRoomIDIsNil(t *testing.T) {
+	svc := buildHomeService(
+		func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{
+				ID: 1, Nickname: "u", AvatarURL: "",
+				CurrentRoomID: nil, // 用户不在任何房间
+			}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.Pet, error) {
+			return &mysql.Pet{ID: 2, UserID: 1, PetType: 1, IsDefault: 1}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+			return &mysql.StepAccount{UserID: 1}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
+			return &mysql.UserChest{ID: 5, UserID: 1, Status: 1, UnlockAt: time.Now().UTC().Add(10 * time.Minute)}, nil
+		},
+	)
+	out, err := svc.LoadHome(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadHome: %v", err)
+	}
+	if out.Room.CurrentRoomID != nil {
+		t.Errorf("Room.CurrentRoomID = %v, want nil", *out.Room.CurrentRoomID)
+	}
+}
+
+// AC11.10.3 edge: users.current_room_id 指向已 closed 的房间（理论不该）→ 仍返回该 id
+//
+// epics.md §Story 11.10 行 2040 钦定：service 层**不做** rooms 表 cross-check；client
+// 在拿到 currentRoomId 后调 /rooms/{id} 时由 11.6 ACL 走 6004 / 6005 自行处理。
+//
+// **rationale**：home 是聚合接口性能敏感，强制 cross-check rooms.status 会引入额外 1 次
+// rooms 表查询 + 与房间业务耦合；user.current_room_id 的"幻象"由 11.5 退出房间事务的
+// `UPDATE users SET current_room_id = NULL` 步骤兜底，正常情况下不会指向 closed room。
+func TestHomeService_LoadHome_CurrentRoomIDPointsToClosedRoom_StillReturnsID(t *testing.T) {
+	closedRoomID := uint64(9999) // 假设房间 9999 在 DB 中 status=2 closed（service 不知晓）
+	svc := buildHomeService(
+		func(ctx context.Context, id uint64) (*mysql.User, error) {
+			// service 层只看 user.CurrentRoomID 字段值，**不**查 rooms.status
+			return &mysql.User{
+				ID: 1, Nickname: "u",
+				CurrentRoomID: &closedRoomID,
+			}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.Pet, error) {
+			return &mysql.Pet{ID: 2, UserID: 1, PetType: 1, IsDefault: 1}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+			return &mysql.StepAccount{UserID: 1}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
+			return &mysql.UserChest{ID: 5, UserID: 1, Status: 1, UnlockAt: time.Now().UTC().Add(10 * time.Minute)}, nil
+		},
+	)
+	out, err := svc.LoadHome(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadHome: %v, want nil err (即便 currentRoomID 指向 closed 房间也不报错)", err)
+	}
+	if out.Room.CurrentRoomID == nil {
+		t.Fatal("Room.CurrentRoomID = nil, want &9999 (即便指向已 closed 房间也透传)")
+	}
+	if *out.Room.CurrentRoomID != 9999 {
+		t.Errorf("*Room.CurrentRoomID = %d, want 9999", *out.Room.CurrentRoomID)
+	}
+}
+
 // AC6.8 pet repo 非 NotFound 错误 → 1009（**不**被错认为可空 nil pet）
 func TestHomeService_LoadHome_PetRepoOtherError_Returns1009(t *testing.T) {
 	wantCause := stderrors.New("connection lost")
