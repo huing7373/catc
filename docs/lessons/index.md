@@ -239,3 +239,4 @@
 | 2026-05-09 | [WS codec 必须在构造 payload 前校验 required 字段语义有效性（12-4 r2）](2026-05-09-ws-codec-must-validate-required-fields-12-4-r2.md) | 1 | error-handling | `7b4c0d2` |
 | 2026-05-09 | [reconnect pre-handshake terminal close 必须分类 + connection-state 事件必须 streamRoomId 守护（12-5 r1）](2026-05-09-ws-reconnect-pre-handshake-close-classify-and-connection-state-stream-guard-12-5-r1.md) | 2 | error-handling, architecture | `<pending>` |
 | 2026-05-09 | [WS reconnect 状态机用 generation counter 隔离 stale task 的共享状态写入（12-5 r2）](2026-05-09-ws-reconnect-generation-counter-isolates-stale-tasks-12-5-r2.md) | 2 | architecture | `<pending>` |
+| 2026-05-09 | [WS reconnect: connectGate 也要 generation 守护（12-5 r3）](2026-05-09-ws-reconnect-connect-gate-needs-generation-scoping-12-5-r3.md) | 1 | architecture | `<pending>` |

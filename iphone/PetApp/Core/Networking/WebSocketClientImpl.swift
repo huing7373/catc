@@ -125,6 +125,15 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
     /// resolve 后置 nil 防双 resume；disconnect / prepareForReconnect 也会兜底 resume(throwing:).
     private var connectGate: CheckedContinuation<Void, Error>?
 
+    /// fix-review round 3 P1（Story 12.5）：与 `connectGate` 配对的 owner session generation.
+    /// install gate 时（`connectInternal` 内）记录当时的 `sessionGeneration`；
+    /// 任何 generation-scoped resolve 路径（receive-loop defer / catch path）必须用自己的 `mySession` 与
+    /// 此值比对：不匹配 silent drop（防 stale receive-task defer 跑去 resolve 新 session 的 gate
+    /// 让 fresh `connect(roomId:)` 拿到 stale failure）.
+    /// disconnect / prepareForReconnect / deinit 走"unconditional resolve" 路径（这三类 caller 显式
+    /// 想要 fail 当前 in-flight connect()，不需要 generation 校验）.
+    private var connectGateOwnerSession: Int?
+
     // MARK: - Story 12.5 reconnect 状态机字段
 
     /// Story 12.5：当前正在拨号 / 已连接的 roomId —— reconnect 路径用同一 roomId 重连.
@@ -284,6 +293,11 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             lock.lock()
             connectGate = cont
+            // fix-review round 3 P1：把 gate 与本次 connectInternal 的 mySession 绑定 ——
+            //   stale receive-task defer / catch 路径只能 resolve "自己 install 的 gate"；
+            //   新 session 的 connect 已 install 新 gate（new owner session）→ stale resolve 入口的
+            //   `mySession != connectGateOwnerSession` → silent drop，不污染新 connect.
+            connectGateOwnerSession = mySession
             lock.unlock()
             // 启动 receive 长任务（持 task / continuation 两个 reference 进闭包）
             // Story 12.5：isReconnectAttempt 让 receive loop pre-handshake 失败时不主动 finish stream
@@ -336,7 +350,9 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         oldReconnectTask?.cancel()  // Story 12.5：关键 —— 防 caller disconnect 后 client 仍在 reconnect 循环
         oldContinuation.finish()
         // fix-review round 1 P1：若 caller 在 connect() await 期间 disconnect → 兜底 resolve gate 防 hang.
-        resolveConnectGate(
+        // fix-review round 3 P1：disconnect 已经在持锁内 `sessionGeneration += 1`，但仍要显式 fail 当前
+        // in-flight connect()（caller 主动放弃）—— 走 unconditional 路径绕过 generation 校验.
+        resolveConnectGateUnconditionally(
             success: false,
             error: WSError.connectionFailed(underlyingDescription: "disconnect before first frame")
         )
@@ -366,7 +382,9 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         oldReceiveTask?.cancel()
         oldReconnectTask?.cancel()  // Story 12.5
         // fix-review round 1 P1：若 caller 在 connect() await 期间 prepareForReconnect → 兜底 resolve gate 防 hang.
-        resolveConnectGate(
+        // fix-review round 3 P1：同 disconnect —— prepareForReconnect 已翻 generation，但显式 fail in-flight
+        // connect() 是预期语义 → 走 unconditional 路径.
+        resolveConnectGateUnconditionally(
             success: false,
             error: WSError.connectionFailed(underlyingDescription: "prepareForReconnect before first frame")
         )
@@ -444,10 +462,14 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                     continuation.finish()
                 }
                 if !firstFrameReceived {
-                    // cancel 在握手期发生 —— 让 connect() 拿到失败信号
+                    // cancel 在握手期发生 —— 让 connect() 拿到失败信号.
+                    // fix-review round 3 P1：generation-gated resolve —— 旧 receive-task 的 defer 在新 connect
+                    // 已 install 新 gate（new owner session）之后才跑时，stale defer 不能 resolve 新 gate.
+                    // resolveConnectGate 内部检查 `mySession == connectGateOwnerSession` 不匹配 silent drop.
                     self?.resolveConnectGate(
                         success: false,
-                        error: WSError.connectionFailed(underlyingDescription: "receive task cancelled before first frame")
+                        error: WSError.connectionFailed(underlyingDescription: "receive task cancelled before first frame"),
+                        mySession: mySession
                     )
                 }
             }
@@ -466,7 +488,10 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                         // fix-review round 2 P1：emit 前 generation 校验 —— 旧 session 的 receive-loop 在新
                         // session 已 swap 新 stream 之后才跑，应 silent drop（不污染新 stream）.
                         self?.emitConnectionStateIfCurrent(.connected, mySession: mySession)
-                        self?.resolveConnectGate(success: true, error: nil)
+                        // fix-review round 3 P1：success resolve 也走 generation-gated 路径 ——
+                        // 极端时序下 stale receive-task 的 first frame 可能在新 connect 已 install 新 gate
+                        // 之后才到，stale `resume(())` 会让 fresh connect 拿到 spurious success（连错 session）.
+                        self?.resolveConnectGate(success: true, error: nil, mySession: mySession)
                     }
                     switch frame {
                     case .string(let text):
@@ -519,12 +544,15 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                             let closeCode = task.closeCode
                             let raw = closeCode.rawValue
                             if raw != 0 {
+                                // fix-review round 3 P1：generation-gated resolve —— stale receive-task 的
+                                // pre-handshake close 即使 raw != 0，也不能 resolve 新 session 的 gate.
                                 strongSelf.resolveConnectGate(
                                     success: false,
                                     error: WSError.closedByServer(
                                         code: raw,
                                         reason: "pre-handshake close during reconnect (rawCode=\(raw))"
-                                    )
+                                    ),
+                                    mySession: mySession
                                 )
                             }
                             // raw == 0：让 defer 兜底走 connectionFailed（attemptReconnect 视为 transient）
@@ -874,10 +902,46 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
 
     /// fix-review round 1 P1：resolve connectGate 一次（多次调用安全 —— 二次后是 no-op）.
     /// success=true → resume(()); success=false → resume(throwing: error).
-    private func resolveConnectGate(success: Bool, error: Error?) {
+    ///
+    /// fix-review round 3 P1：generation-gated resolve —— 仅当 `mySession == connectGateOwnerSession` 时
+    /// 才 resolve；不匹配 silent drop（log debug）.
+    /// 用途：receive-loop defer / catch path 等 "session-scoped task" 路径调用 —— 防 stale receive-task
+    /// 在新 connect 已 install 新 gate 之后才跑 defer 块，把 stale failure 写到新 session 的 gate.
+    /// disconnect / prepareForReconnect / deinit 显式想 fail 当前 in-flight connect → 走
+    /// `resolveConnectGateUnconditionally(...)` 而非本函数.
+    private func resolveConnectGate(success: Bool, error: Error?, mySession: Int) {
+        lock.lock()
+        guard connectGateOwnerSession == mySession else {
+            lock.unlock()
+            os_log(.debug,
+                   log: WebSocketClientImpl.logger,
+                   "resolveConnectGate dropped: stale mySession=%{public}d (gateOwner=%{public}@)",
+                   mySession,
+                   connectGateOwnerSession.map { String($0) } ?? "nil")
+            return
+        }
+        let cont = connectGate
+        connectGate = nil
+        connectGateOwnerSession = nil
+        lock.unlock()
+        guard let cont = cont else { return }
+        if success {
+            cont.resume()
+        } else {
+            cont.resume(throwing: error ?? WSError.connectionFailed(underlyingDescription: "unknown"))
+        }
+    }
+
+    /// fix-review round 3 P1：unconditional resolve —— 不做 generation 校验，专供 disconnect /
+    /// prepareForReconnect / deinit 路径使用：这三类 caller 已经在持锁内 `sessionGeneration += 1` 翻新了
+    /// generation，但仍然显式想"fail 当前 in-flight connect()"（caller 主动放弃）.
+    /// 安全性：此函数只读 + 清 `connectGate` / `connectGateOwnerSession` 两个字段，不写其他共享状态;
+    /// 二次调用 no-op（`cont == nil`）.
+    private func resolveConnectGateUnconditionally(success: Bool, error: Error?) {
         lock.lock()
         let cont = connectGate
         connectGate = nil
+        connectGateOwnerSession = nil
         lock.unlock()
         guard let cont = cont else { return }
         if success {
@@ -893,8 +957,10 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         currentContinuation.finish()
         // fix-review round 1 P1：deinit 期间 caller 还在 await connect() 概率极低（caller 通常持 strong ref），
         // 防御性兜底 resume(throwing:) 让 await 立即返回，不留 dangling continuation 触发 fatalError.
+        // fix-review round 3 P1：deinit 路径同步清 connectGateOwnerSession 字段（保字段一致性）.
         if let cont = connectGate {
             connectGate = nil
+            connectGateOwnerSession = nil
             cont.resume(throwing: WSError.connectionFailed(underlyingDescription: "deinit before first frame"))
         }
     }

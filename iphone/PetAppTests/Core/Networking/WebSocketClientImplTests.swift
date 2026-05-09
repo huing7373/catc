@@ -916,6 +916,109 @@ final class WebSocketClientImplTests: XCTestCase {
         client.disconnect()
     }
 
+    /// case#R13 fix-review round 3 P1：stale receive-task defer 的 resolveConnectGate 不污染新 connect 的 gate.
+    ///
+    /// 触发：
+    ///   1. 第一次 connect 成功（snapshot 解 latch）→ transient close 4005 → schedule reconnect (attempt 1)
+    ///   2. attempt 1 永久 block 在 receive() —— 模拟 "已经在 connectInternal 内卡住"
+    ///   3. caller disconnect() cancel reconnectTask + 翻 generation
+    ///   4. caller 立即 fresh `connect(roomId: "ROOM_C")`：fresh fake handle scriptedFrames=空 + blockReceiveForever
+    ///      —— 让 fresh connect 阻塞在 first frame 直到 mocked snapshot 出现
+    ///   5. 旧 attempt 1 receive task 因为 cancel 抛 URLError(.cancelled) → 走 defer block →
+    ///      调 `resolveConnectGate(success: false, ...)`
+    ///
+    /// 旧实装：resolveConnectGate 没 generation check —— stale defer resolve 新 gate → fresh connect 抛
+    ///   `WSError.connectionFailed` ↔ "receive task cancelled before first frame".
+    /// 修复后：resolveConnectGate 内部 `mySession != connectGateOwnerSession` → silent drop → fresh
+    ///   connect 继续 await（直到我们解开 fresh task 的 first frame）.
+    ///
+    /// 验证手段：在 stale defer 应当跑完后，我们让 fresh task 的 first frame 出现 —— fresh connect 应
+    ///   成功 return（不抛 stale failure）.
+    func test_reconnect_staleReceiveTaskDeferDoesNotResolveFreshConnectGate() async throws {
+        let factory = FakeReconnectFactory()
+
+        // 首次 RM01：snapshot 解 latch + 立即 transient 4005
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        firstTask.errorAfterFrames = true
+        firstTask.stubbedCloseCode = .init(rawValue: 4005)!
+
+        // attempt 1（卡住，永久 block 在 receive；将被 disconnect cancel）
+        let staleAttemptTask = factory.scheduleNewTask()
+        staleAttemptTask.scriptedFrames = []
+        staleAttemptTask.blockReceiveForever = true
+
+        // fresh ROOM_C：scriptedFrames 留空 + blockReceiveForever —— 让 fresh connect 阻塞在 first frame.
+        // 测试中我们后续会注入 first frame 让 connect 真正 resolve.
+        let freshTask = factory.scheduleNewTask()
+        freshTask.scriptedFrames = []
+        freshTask.blockReceiveForever = true
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.backoffSequence = [0.05, 0.05, 0.05, 0.05, 0.05]
+
+        try await client.connect(roomId: "RM01")
+
+        // 等 attempt 1 makeTask 发起
+        let attemptStartedDeadline = Date().addingTimeInterval(2.0)
+        while factory.makeTaskCallCount < 2, Date() < attemptStartedDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(factory.makeTaskCallCount, 2)
+
+        // disconnect → cancel attempt 1 + 翻 gen.
+        // 关键：disconnect() 自身走 unconditional resolve 路径 fail 当时的 in-flight gate（此时无 in-flight
+        // connect，所以 connectGate 是 nil，unconditional resolve no-op）.
+        client.disconnect()
+
+        // 立即 fresh connect ROOM_C —— 该 connect 进 connectInternal 后 install 新 gate (owner = new session).
+        // stale attempt 1 的 receive-task defer 即将跑（cancel 在 disconnect 内已下达）；
+        // 旧实装会 resolve 新 gate → 让本 connect 抛 stale failure.
+        // 修复后：stale defer 的 mySession（attempt 1 的 session）与新 gate owner 不匹配 → silent drop.
+        //
+        // 用 actor-isolated finished flag 跟踪 fresh connect 是否提前 finish（不能用直接 await freshConnectTask.value
+        // 因为 fresh task 永久 block 在 receive；测试需要 race timeout 而非 hang）.
+        let resultBox = ResultBox()
+        let freshConnectTask = Task<Void, Never> {
+            do {
+                try await client.connect(roomId: "ROOM_C")
+                await resultBox.set(.success(()))
+            } catch {
+                await resultBox.set(.failure(error))
+            }
+        }
+
+        // 给 stale defer 充分时间跑完（disconnect cancel 信号传播 + receive() throw + defer block + log）.
+        // 1.0s 经验值：远大于 cancellation 传播 + Swift Concurrency cooperative yield 的最坏情况.
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+
+        // 关键 assertion：fresh connect 不应在 stale defer 跑完后立即 finish（freshTask 永久 block 在 receive,
+        // 没有 first frame；唯一能让 connect() return/throw 的路径是 stale defer 错误地 resolve 新 gate）.
+        let resultBeforeCleanup = await resultBox.get()
+
+        // cleanup：disconnect 走 unconditional resolve 让 fresh connect throw + freshConnectTask 退出（防泄漏）.
+        client.disconnect()
+        _ = await freshConnectTask.value
+
+        // 修复后：resultBeforeCleanup == nil（fresh connect 仍在 await）.
+        // 旧实装 bug 复现：resultBeforeCleanup == .failure(WSError.connectionFailed("...cancelled before first frame...")).
+        if let result = resultBeforeCleanup {
+            XCTFail("fresh connect 不应在 stale defer 跑完后 finish；实际: \(result) —— stale resolveConnectGate 污染了新 gate")
+        }
+    }
+
+    /// case#R13 helper：actor-isolated Result box 让 freshConnectTask 把"是否已 finish + finish 结果"写到此 box,
+    /// 主测试 task 通过 `get()` 读取（避免直接 await freshConnectTask.value 阻塞测试 timeout race）.
+    private actor ResultBox {
+        private var value: Result<Void, Error>?
+        func set(_ v: Result<Void, Error>) { self.value = v }
+        func get() -> Result<Void, Error>? { self.value }
+    }
+
     // MARK: - reconnect 测试 helpers
 
     /// 收集 stream 上的 connection state events 直到拿到指定数量（带超时）.
