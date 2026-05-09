@@ -321,7 +321,40 @@ func broadcastToRoomFanout(ctx context.Context, mgr SessionManager, roomID uint6
 	// BroadcastToRoom return 时知道所有 session sendChan 都已入队完 → 跨调用
 	// 顺序保证（msg1 入队完 → BroadcastToRoom return → caller 调 msg2 入队 →
 	// 所有 session 的 sendChan 内 msg1 物理位置先于 msg2）。
+	//
+	// **review 11-8 r11 [P1] fix**：snapshot+send race —— ListSessionsByRoomID
+	// 返回的 `sessions` 切片是某一时刻的 snapshot；在 snapshot 与 Send 之间，
+	// 另一线程可能跑 LeaveRoom 同步段（unregisterLeaverSessionSync → Unregister
+	// 把 leaver 从 SessionManager 索引移除）。如果不 re-check，本 fanout 仍
+	// 调 Send 入队 leaver 的 sendChan → leaver writeLoop drain 中场仍消费一
+	// 条 stale member.joined / member.left → 违反 V1 §10.5 步骤 7 "HTTP leave
+	// immediately detaches WS" 语义。
+	//
+	// 修法：每个 Session Send 之前 re-check `mgr.IsRegistered(sessionID)`；
+	// 已 unregister → skip Send。IsRegistered 走 SessionManager.RLock 直接
+	// lookup，O(1)，对 N=4 单 room 可忽略。
+	//
+	// **残留极窄 race**：IsRegistered=true → Unregister 跑完 → Send 入队，仍
+	// 可能下发；这是 best-effort 不可避免的（要彻底原子化必须把 SessionManager
+	// 写锁与本 fanout 串行化，会大幅降低吞吐）。当前修复让 race window 从
+	// "snapshot 后整个 fanout 全程"缩小到"check 与 Send 之间纳秒级"，远小于
+	// HTTP leave 200 → client 收到 close.4007 → client 主动 close 的
+	// observable window。
+	//
+	// 顺带保护：BroadcastToRoom（无 except 路径）也享受同样保护 —— 任何 session
+	// 被并发 Unregister 的 race 都被 best-effort 拦截。
+	//
+	// **返回 sent 语义**（r11 修后）：sent 计数仅含**实际发起 Send** 的 Session 数 ——
+	// 被 r11 IsRegistered guard skip 掉的 Session 不计入 sent，让 caller log /
+	// metrics 反映真实 fanout 范围。skip 数也单独记 log 字段便于排查。
+	skippedUnregistered := 0
+	sentCount := 0
 	for _, s := range sessions {
+		// r11 P1 fix：re-check session 仍 registered（snapshot+send race window）
+		if !mgr.IsRegistered(ctx, s.SessionID()) {
+			skippedUnregistered++
+			continue
+		}
 		if sendErr := s.Send(payload); sendErr != nil {
 			logger.Warn("ws broadcast Send failed",
 				slog.String("sessionId", s.SessionID()),
@@ -330,7 +363,14 @@ func broadcastToRoomFanout(ctx context.Context, mgr SessionManager, roomID uint6
 				slog.Any("error", sendErr),
 			)
 		}
+		sentCount++
+	}
+	if skippedUnregistered > 0 {
+		logger.Info("ws broadcast: skipped unregistered sessions (snapshot+send race)",
+			slog.Int("skippedUnregistered", skippedUnregistered),
+			slog.Int("sent", sentCount),
+		)
 	}
 
-	return len(sessions), nil
+	return sentCount, nil
 }
