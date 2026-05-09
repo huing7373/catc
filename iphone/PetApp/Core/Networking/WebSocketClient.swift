@@ -19,11 +19,36 @@ public protocol WebSocketClient: AnyObject, Sendable {
     /// 服务端 → 客户端消息流（按 §12.3 通用信封解析后的强类型 enum）.
     /// 实装层（Story 12.2 `WebSocketClientImpl`）从 underlying URLSessionWebSocketTask 读出 text frame
     /// → JSONDecode 信封 → 按 `type` 路由到 enum case → yield 到该 stream.
+    ///
+    /// **重要语义**：getter 返回的 stream 在 `disconnect()` 后被 `finish()`；后续若要复用同一 client
+    /// 接收新消息（如 room A→B 切换、leave-rejoin），caller **必须**先调 `prepareForReconnect()` 重置
+    /// stream，然后再次读 `messages`（拿到新 stream）+ 起新 consumer task.
     var messages: AsyncStream<WSMessage> { get }
 
     /// 主动断开（用户 leave / app 切后台）；触发 close code 1000（client-initiated close）.
     /// 调用后 `messages` stream 终止（finish），caller 应取消 for-await 循环.
     func disconnect()
+
+    /// fix-review round 2 P1 修复：room A→B / leave-rejoin 时复用同一 client 实例的
+    /// reconnect/restart 接缝.
+    ///
+    /// **语义**：调用后 `messages` getter 返回**新的** AsyncStream（旧 stream 已被 disconnect finish；
+    ///   下一次 caller 起 for-await 拿到的是这个新 stream）.
+    ///
+    /// **本 story（12.1）阶段**：只有 mock 需要实装真正的 stream 重置；production `WebSocketClientImpl`
+    ///   尚未落地，protocol 给默认 **no-op**（见 protocol extension）.
+    ///
+    /// **Story 12.2 落地路线**：`WebSocketClientImpl.prepareForReconnect()` 在内部清掉旧 task 状态
+    ///   + 准备好新 stream/continuation（与 `connect(roomId:)` 串接：通常 caller 会调
+    ///   `prepareForReconnect()` → `connect(roomId: next)` → `for await ... in client.messages`）.
+    ///   届时本方法可以与 `connect(roomId:)` 合并，或保持独立接缝（让"准备 stream"与"拨号"解耦）.
+    func prepareForReconnect()
+}
+
+extension WebSocketClient {
+    /// 默认 no-op：对不需要重启 stream 的实装（例如未来某些一次性 client）保持向后兼容.
+    /// `WebSocketClientMock` 与 Story 12.2 的 `WebSocketClientImpl` 都会 override.
+    public func prepareForReconnect() {}
 }
 
 /// 服务端 → 客户端消息（按 §12.3 type 字段路由后的强类型 enum）.

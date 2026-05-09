@@ -229,3 +229,4 @@
 | 2026-05-09 | [昂贵资源分配必须在 cheap validation 之后；attack vector 与 successful-path leak 同 family 时分层处理（11-8 r10）](2026-05-09-expensive-resource-allocation-after-cheap-validation-11-8-r10.md) | 1 | security, perf, architecture | `d3080fc` |
 | 2026-05-09 | [snapshot+act 模式必须 atomic 持锁或 act 时 re-check 状态（11-8 r11）](2026-05-09-snapshot-then-act-must-recheck-or-be-atomic-11-8-r11.md) | 1 | concurrency | `3f50b78` |
 | 2026-05-09 | [Published 订阅 dropFirst 丢 restored state & 房间切换需 roster 重置（12-1 r1）](2026-05-09-published-subscription-dropfirst-and-room-switch-roster-reset-12-1-r1.md) | 2 | architecture | `<pending>` |
+| 2026-05-09 | [WebSocketClient 复用必须 prepareForReconnect 重置 stream & "空 roomId" 跨模块对齐 dispatcher（12-1 r2）](2026-05-09-ws-client-reuse-needs-stream-restart-and-empty-room-id-must-align-with-dispatcher-12-1-r2.md) | 2 | architecture | `<pending>` |

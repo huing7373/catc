@@ -162,15 +162,22 @@ public final class RealRoomViewModel: RoomViewModel {
     private func subscribeRoomIdConnect(to appState: AppState) {
         // 不预设 lastObservedRoomId（保持默认 nil）：让订阅同步 emit 走 (previous=nil, new=非 nil) connect 分支
         // 把 restored in-room session 的初始 currentRoomId 信号正确处理.
+        //
+        // **fix-review round 2 P2**：本 sink **不**把 `""` normalize 成 nil。
+        // 理由：`HomeRoomDispatcher.shouldShowRoom(currentRoomId:)`（HomeContainerView.swift:98）
+        //       钦定空字符串为 in-room（HomeContainerViewTests:41 锚定）；若本 sink 反向把 `""` 当 nil
+        //       走 disconnect 分支，会出现 UI 渲染 `RoomScaffoldView` 而 vm 走 disconnect/clear-members
+        //       的不一致状态。两边对齐 `""` ⇒ in-room 才能保持 UI ↔ vm 状态机自洽.
+        // server 契约保证 roomId 非空（数据库设计.md §room_id 钦定）；空字符串只可能来自 caller bug,
+        // 此时按 in-room 处理更安全（dispatcher 一侧已是这个语义）.
         roomIdConnectSubscription = appState.$currentRoomId
             .removeDuplicates()
             .sink { [weak self] newRoomId in
                 guard let self else { return }
                 let previous = self.lastObservedRoomId
-                let normalizedNew: String? = (newRoomId?.isEmpty == false) ? newRoomId : nil
-                self.lastObservedRoomId = normalizedNew
+                self.lastObservedRoomId = newRoomId
 
-                switch (previous, normalizedNew) {
+                switch (previous, newRoomId) {
                 case (nil, nil):
                     // 分支 1：订阅起步时同步 emit 的初始空房间状态 —— no-op.
                     // 这是 dropFirst 旧实装真正想避开的场景；用显式分支替代后既能正确处理
@@ -178,6 +185,13 @@ public final class RealRoomViewModel: RoomViewModel {
                     break
                 case (nil, .some(let roomId)):
                     // 分支 2：nil → A，进入房间.
+                    //
+                    // **fix-review round 2 P1**：若 client 之前被 disconnect 过（leave-rejoin 路径：
+                    //   A → nil → A'），其 `messages` stream 已被 finish；必须先调 `prepareForReconnect()`
+                    //   重置 stream，否则新 consumer task 接到的是已 finish 的 stream，subsequent
+                    //   `room.snapshot` 永远收不到。首次 nil→A（构造后第一次进房间）调 `prepareForReconnect()`
+                    //   也是安全的（mock no-cost；Story 12.2 后 production impl 是 idempotent）.
+                    self.webSocketClient?.prepareForReconnect()
                     if self.webSocketClient != nil {
                         self.wsState = .connected
                     }
@@ -188,15 +202,22 @@ public final class RealRoomViewModel: RoomViewModel {
                     // 否则同 @StateObject vm 实例下 room B 会渲染 room A 的 roster，
                     // 旧 stream 的 late messages 也会污染新房间.
                     //
-                    // 节点 4 阶段语义：本 story 仅暴露 `disconnect()` + `messages` stream，没有 `connect(roomId:)`；
-                    // A→B 真正"拨号到新 room channel"要等 Story 12.2 落地 `WebSocketClientImpl.connect(...)`
-                    // 接缝。本分支当前实装做的是：① disconnect 旧 stream（mock 下 finish stream，真实下关 socket）
-                    // ② 清空 roster ③ wsState 切 .connected（webSocketClient ≠ nil；占位语义）④ cancel 并重启
-                    // consumer task 让它跟最新 webSocketClient.messages stream（即使是同一对象，旧 task 也已 cancel）.
-                    // Story 12.2 后此分支在 disconnect 后再调 `webSocketClient.connect(roomId: next)` 完成真实重连.
+                    // 节点 4 阶段语义：本 story 仅暴露 `disconnect()` + `messages` stream + `prepareForReconnect()`
+                    // 接缝；没有 `connect(roomId:)`。A→B 真正"拨号到新 room channel"要等 Story 12.2 落地
+                    // `WebSocketClientImpl.connect(roomId:token:)`。本分支当前实装做的是：
+                    //   ① disconnect 旧 stream（mock 下 finish stream，真实下关 socket）
+                    //   ② 清空 roster
+                    //   ③ **fix-review round 2 P1**：调 `prepareForReconnect()` 让 client 准备好新 stream
+                    //      —— 否则新 consumer task 接到的是已被 finish 的旧 stream，永远收不到 room B 的
+                    //      `room.snapshot`，UI 永远空房间.
+                    //   ④ wsState 切 .connected（webSocketClient ≠ nil；占位语义）
+                    //   ⑤ cancel 并重启 consumer task（读 `client.messages` 拿新 stream）.
+                    // Story 12.2 后此分支在 `prepareForReconnect()` 后再调 `webSocketClient.connect(roomId: next)`
+                    // 完成真实重连.
                     self.webSocketClient?.disconnect()
                     self.members = []
                     self.memberPetStates = [:]
+                    self.webSocketClient?.prepareForReconnect()
                     if self.webSocketClient != nil {
                         self.wsState = .connected
                     }

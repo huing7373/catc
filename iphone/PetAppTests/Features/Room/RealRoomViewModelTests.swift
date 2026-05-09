@@ -275,6 +275,104 @@ final class RealRoomViewModelTests: XCTestCase {
         XCTAssertEqual(vm.wsState, .connected,
                        "A→B 直接切换 wsState 应保持 .connected（仍在房间内；Story 12.2 后重连真实 socket）")
         XCTAssertEqual(vm.roomId, "room_B")
+
+        // 5. fix-review round 2 P1 关键断言：A→B 切换必须调 `prepareForReconnect()`，
+        //    否则旧 stream 被 disconnect finish 后，新 consumer task 接到的还是已 finish stream，
+        //    后续 room B 的 `room.snapshot` 永远收不到 → UI 永远空房间.
+        XCTAssertGreaterThanOrEqual(mockWS.prepareForReconnectCallCount, 1,
+                                    "A→B 切换必须调 prepareForReconnect() 让 client 准备新 stream（否则 consumer 接已 finish stream → room B 永远收不到消息）")
+
+        // 6. 关键回归断言：A→B 切换后向 client 推 room B 的 snapshot，vm.members 必须能更新
+        //    （旧实装在已 finish 的 stream 上等永远收不到；本断言锁住 stream 重启可观测后果）.
+        let payloadB = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_B", maxMembers: 4, memberCount: 1),
+            members: [
+                RoomSnapshotMember(userId: "u_charlie_B", nickname: "CharlieB", pet: nil),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(payloadB))
+        try? await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.members.count, 1,
+                       "A→B 切换后 room B 的 snapshot 必须能驱动 vm.members（旧实装 stream 已 finish → 永远收不到 → 永远 0 成员）")
+        XCTAssertEqual(vm.members[0].name, "CharlieB",
+                       "A→B 切换后 vm.members 应反映 room B 的成员")
+    }
+
+    // MARK: - case#8 fix-review round 2 P1: leave-rejoin（A → nil → A'）路径必须能再收消息
+
+    /// 验证 fix-review round 2 P1 的另一面：用户在 room A 后离开（→ nil）再进 room A'，
+    /// 同一 webSocketClient 实例被复用 → A→nil 已 finish stream → 必须能再次收到 room A' 消息.
+    /// 旧实装 nil→A 分支不调 `prepareForReconnect()` → A' 的 stream 永远停在已 finish 状态 → 永远收不到消息.
+    func testLeaveRejoinReusesSameClientAndReceivesMessages() async {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. 进入 room A
+        appState.setCurrentRoomId("room_A")
+        await Task.yield()
+        let payloadA = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_A", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_a", nickname: "A", pet: nil)]
+        )
+        mockWS.emit(.roomSnapshot(payloadA))
+        try? await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.members.count, 1)
+
+        // 2. 离开 room A → nil（disconnect 被调 + stream 被 finish）
+        appState.setCurrentRoomId(nil)
+        await Task.yield()
+        XCTAssertTrue(mockWS.didDisconnect)
+        XCTAssertEqual(vm.wsState, .disconnected)
+
+        // 3. 重新进入 room A'（复用同一 mockWS 实例）
+        appState.setCurrentRoomId("room_Aprime")
+        await Task.yield()
+        XCTAssertEqual(vm.wsState, .connected,
+                       "leave-rejoin 后 wsState 应恢复 .connected")
+        XCTAssertGreaterThanOrEqual(mockWS.prepareForReconnectCallCount, 1,
+                                    "leave-rejoin 路径 nil→A' 分支必须调 prepareForReconnect() 重置 stream")
+
+        // 4. 关键断言：room A' 的 snapshot 必须能驱动 vm.members（旧实装：stream 已 finish → 永远 0）
+        let payloadAprime = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_Aprime", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_aprime", nickname: "APrime", pet: nil)]
+        )
+        mockWS.emit(.roomSnapshot(payloadAprime))
+        try? await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.members.count, 1,
+                       "leave-rejoin 后必须能再收到新 room 的 snapshot（旧实装 stream 永远 finish → 永远收不到）")
+        XCTAssertEqual(vm.members[0].name, "APrime")
+    }
+
+    // MARK: - case#9 fix-review round 2 P2: 空字符串 currentRoomId 与 HomeRoomDispatcher 对齐
+
+    /// 验证 fix-review round 2 P2：`""` currentRoomId 与 `HomeRoomDispatcher.shouldShowRoom("") == true` 对齐.
+    /// 即：`""` 应被本 vm 当 in-room 处理（走 connect 分支），而**不**走 disconnect/clear-members 分支.
+    /// 否则 UI 渲染 RoomScaffoldView（dispatcher 把 "" 当 in-room）但 vm 走 disconnect → 状态机不一致.
+    func testEmptyStringRoomIdTreatedAsInRoomAlignsWithDispatcher() async {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(vm.wsState, .disconnected, "初始 nil → .disconnected")
+
+        // 设置 "" —— HomeRoomDispatcher.shouldShowRoom("") == true（HomeContainerViewTests:41 锚定）
+        appState.setCurrentRoomId("")
+        await Task.yield()
+        await Task.yield()
+
+        // 关键断言：vm 必须把 "" 当 in-room 处理（与 dispatcher 对齐），走 connect 分支 → wsState .connected.
+        // 旧实装把 "" normalize 成 nil → 走 (nil, nil) no-op → wsState 永远 .disconnected → 与 UI 不一致.
+        XCTAssertEqual(vm.wsState, .connected,
+                       "currentRoomId == \"\" 应被当 in-room 处理（与 HomeRoomDispatcher.shouldShowRoom(\"\") == true 对齐），走 connect 分支")
+        XCTAssertFalse(mockWS.didDisconnect,
+                       "currentRoomId == \"\" 不应触发 disconnect（旧实装 normalize 成 nil 后会走 disconnect 分支）")
     }
 
     // MARK: - helpers
