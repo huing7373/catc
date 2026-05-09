@@ -254,9 +254,28 @@ public final class RealRoomViewModel: RoomViewModel {
     ///   - roster 集合层：以 snapshot 的 userId 集合为权威（缺失则移除、新增则 append）
     ///   - 字段级：非空值覆盖、空字符串保留 client 已有值、null 直接覆盖
     ///   - memberPetStates：节点 4 阶段 server 固定 currentState=1 → 本 story 保持空 map（Epic 14 真实驱动后再写入）
+    ///
+    /// **fix-review round 3 P1**：`.roomSnapshot` 前先校验 `payload.room.id` 与 `lastObservedRoomId` 匹配,
+    /// 不匹配则丢弃 + log debug。
+    /// 防 race：用户 leave / room A → B 切换瞬间，前一个 stream 上排队的 `room.snapshot` 可能在
+    /// `currentRoomId` 已经变更后才被 deliver，导致 late snapshot for room A repopulate `members`
+    /// 而 UI 已经展示 room B（或 no room）.
+    /// 校验源用 `lastObservedRoomId`（sink 切换瞬间已经更新成新值）而非现读 `roomId` —— 同一队列上
+    /// publisher 通知顺序通常已切到新值，但 lastObservedRoomId 在 sink 内是字段级写入，比 computed
+    /// getter 的 appState 读取更稳定（appState 字段也可能在中途被外部 mutate）.
+    /// `""` 与 `""` 匹配，`""` 与 `nil` 不匹配 —— 与 HomeRoomDispatcher 把 "" 当 in-room 的语义对齐.
     private func handle(message: WSMessage) {
         switch message {
         case .roomSnapshot(let payload):
+            // fix-review round 3 P1：丢弃不属于当前房间的 stale snapshot.
+            // 注意：lastObservedRoomId == nil 时（已离开房间）任何 snapshot 都属于 stale.
+            guard let currentRoomId = lastObservedRoomId, payload.room.id == currentRoomId else {
+                os_log(.debug,
+                       "RealRoomViewModel: discard stale room.snapshot (payload.room.id=%{public}@, current=%{public}@)",
+                       payload.room.id,
+                       lastObservedRoomId ?? "<nil>")
+                return
+            }
             applySnapshot(payload)
         case .pong:
             // Story 12.6 心跳框架处理；本 story discard.

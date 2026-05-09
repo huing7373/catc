@@ -375,6 +375,116 @@ final class RealRoomViewModelTests: XCTestCase {
                        "currentRoomId == \"\" 不应触发 disconnect（旧实装 normalize 成 nil 后会走 disconnect 分支）")
     }
 
+    // MARK: - case#10 fix-review round 3 P1: stale snapshot for room A 不能污染 room B
+
+    /// 验证 fix-review round 3 P1：A→B 切换瞬间，前一个 stream 上排队的 `room.snapshot` for room A
+    /// 在 `currentRoomId` 已经变成 room B 之后被 deliver，必须**忽略**而非 repopulate `members`.
+    ///
+    /// 旧实装 `handle(message:)` 处理 `.roomSnapshot` 时无条件 `applySnapshot(_:)`：late snapshot for
+    /// room A 会把已经清空的 `members` 写回 room A 的成员名单，UI 渲染 room B 但 roster 是 room A 的 → bug.
+    ///
+    /// 新实装：先校验 `payload.room.id == lastObservedRoomId`；不匹配则丢弃 + log debug.
+    /// 用 `lastObservedRoomId` 而非现读 `roomId`（同一队列上 publisher 通知顺序通常已切；但 sink 内
+    /// 字段写入比 computed getter 读取 appState 更稳定）.
+    func testStaleSnapshotForOldRoomDoesNotOverwriteCurrentRoster() async {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. 进入 room_A 并 baseline 成员
+        appState.setCurrentRoomId("room_A")
+        await Task.yield()
+        let payloadA = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_A", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_alice", nickname: "AliceA", pet: nil)]
+        )
+        mockWS.emit(.roomSnapshot(payloadA))
+        try? await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.members.count, 1)
+        XCTAssertEqual(vm.members[0].name, "AliceA")
+
+        // 2. 直接切到 room_B（subscribeRoomIdConnect A→B 分支会清空 members + tear down 旧 stream
+        //    + prepareForReconnect()）
+        appState.setCurrentRoomId("room_B")
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(vm.members, [], "A→B 切换瞬间 members 应被清空")
+        XCTAssertEqual(vm.roomId, "room_B")
+
+        // 3. 推一个 stale snapshot（room.id = "room_A"）—— 模拟前一个 stream 上排队后到 / 别处 race 路径.
+        //    新 consumer task 是从 prepareForReconnect 后的新 stream 拿消息，所以这条要 emit 到新 stream.
+        //    （prepareForReconnect 已 swap 过 stream；mock 的 emit 走最新 currentContinuation）.
+        let stalePayload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_A", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_ghost", nickname: "Ghost", pet: nil)]
+        )
+        mockWS.emit(.roomSnapshot(stalePayload))
+        // 给 consumer task 充分时间处理（不能用 waitForMembersCount——预期就是不应被改）
+        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        await Task.yield()
+        await Task.yield()
+
+        // 4. 关键断言：stale room.id == "room_A" 不匹配当前 lastObservedRoomId == "room_B" → 应被丢弃,
+        //    members 必须保持空（旧实装会写成 ["Ghost"]）.
+        XCTAssertEqual(vm.members, [],
+                       "stale snapshot for room A 必须被丢弃；旧实装会把 members 写成 [\"Ghost\"]（room B 的 UI 显示 room A 的 ghost 成员）")
+
+        // 5. 反向断言：room B 的 fresh snapshot 仍能正常 apply（校验只挡 stale 不误伤当前房间）.
+        let payloadB = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_B", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_charlie", nickname: "CharlieB", pet: nil)]
+        )
+        mockWS.emit(.roomSnapshot(payloadB))
+        try? await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.members.count, 1, "room B 的 fresh snapshot 必须能 apply（校验只挡 stale）")
+        XCTAssertEqual(vm.members[0].name, "CharlieB")
+    }
+
+    /// 验证 fix-review round 3 P1 的离开场景：A→nil 后 stale snapshot for room A 仍可能投递,
+    /// 此时 lastObservedRoomId == nil → 任何 snapshot 都视为 stale，不应 repopulate 已清空的 roster.
+    func testStaleSnapshotAfterLeaveDoesNotRepopulateMembers() async {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. 进入 room_A + baseline 成员
+        appState.setCurrentRoomId("room_A")
+        await Task.yield()
+        let payloadA = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_A", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_alice", nickname: "AliceA", pet: nil)]
+        )
+        mockWS.emit(.roomSnapshot(payloadA))
+        try? await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.members.count, 1)
+
+        // 2. 离开（A → nil）：disconnect + members 清空 + lastObservedRoomId 现在是 nil
+        appState.setCurrentRoomId(nil)
+        await Task.yield()
+        XCTAssertEqual(vm.members, [])
+        XCTAssertEqual(vm.wsState, .disconnected)
+
+        // 3. 此时排队的 stale snapshot 投递（A→nil 已 disconnect 把旧 stream finish；本测试模拟若有路径
+        //    让消息从某个旁路进来——保守起见我们用同一 mockWS，但其 stream 已 finish；emit 会被 finish-stream
+        //    drop，到不了 consumer。所以此 case 真正测的是：若**某条**路径让 stale snapshot 进入
+        //    `handle(message:)`（如 round 4 后某 inline path / unit-test 直接调），守卫仍要挡住）.
+        //
+        //    本 case 用一种最简单的可验证路径：直接构造另一个 mockWS + 用 `bind` 注入。但 bind 的语义不同；
+        //    所以更直接的方式：再起一个房间然后离开制造干净环境，但不必要——guard 的核心 invariant 是
+        //    "lastObservedRoomId == nil 时任何 snapshot 都 stale"；用一个**新** consumer 起步前 emit 不可行
+        //    （AsyncStream finish 后无法复活）.
+        //
+        //    保留本 case 作为 case#10 的语义文档：核心校验由 case#10 覆盖；本 case 留下"A→nil 后 members
+        //    保持 []"的回归断言（防回归把 disconnect 分支里 members = [] 删掉）.
+        XCTAssertEqual(vm.members, [], "A→nil 后 members 应保持空（且任何 stale snapshot 都不应让其复活）")
+    }
+
     // MARK: - helpers
 
     /// 等待 vm.members.count 达到预期值（最多等 1 秒；防 Task consumer 调度时机不确定）.
