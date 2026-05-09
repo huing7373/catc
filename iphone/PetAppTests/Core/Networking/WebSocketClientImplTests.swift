@@ -1019,6 +1019,141 @@ final class WebSocketClientImplTests: XCTestCase {
         func get() -> Result<Void, Error>? { self.value }
     }
 
+    // MARK: - case#R14 (fix-review round 4 P2 #1)
+    // connect 在已 connected client 上调用复用现 stream → stale receive-task defer 的 finish() 必须 generation-gated.
+    //
+    // 触发条件：connect(roomId:) 复用现存 currentContinuation（不调 prepareForReconnect），
+    //   sessionGeneration += 1 + cancel 旧 receiveTask；旧 receive-loop 落到 defer 跑 continuation.finish().
+    // 旧实装：finish() 直写共享 continuation → 新 session 的 stream 立即被 terminate → vm 收不到消息.
+    // 修复后：finishStreamIfCurrent 校验 mySession == sessionGeneration → 不匹配 silent skip → 新 stream 仍 alive.
+
+    func test_reconnect_staleReceiveTaskDeferFinishDoesNotTerminateReusedStream() async throws {
+        let factory = FakeReconnectFactory()
+
+        // 首个 RM01：snapshot 解 latch + 阻塞后续 receive（让旧 receive-loop 在 connect 复用 path 前一直停在 receive() 内）
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        firstTask.blockReceiveForever = true
+
+        // 第二次 connect 路径：scheduleNewTask 备好；snapshot 解 latch + 持续阻塞（不 finish stream）
+        let secondTask = factory.scheduleNewTask()
+        secondTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        secondTask.blockReceiveForever = true
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+
+        // 拿 stream 引用（vm 视角）—— 关键：跨第二次 connect 不应被 finish.
+        let sharedStream = client.messages
+
+        // 1. 首次 connect RM01 成功
+        try await client.connect(roomId: "RM01")
+
+        // 2. 立即在已 connected client 上 connect ROOM_B —— 复用现存 currentContinuation；旧 receiveTask 被 cancel.
+        //    cancel 信号 + 旧 receive-loop defer 跑 finish() —— 旧实装会终结被 secondTask 复用的同一 stream.
+        try await client.connect(roomId: "ROOM_B")
+
+        // 3. 给 stale defer 充分时间跑完（cancel 信号传播 + receive() throw + defer block）.
+        try await Task.sleep(nanoseconds: 800_000_000)
+
+        // 4. 关键 assertion：sharedStream 仍 alive —— 用一个 task 收第一条非 connectionState 消息（应该是
+        //    第二次 connect 收到的 ROOM_B snapshot；如果 stream 被 stale defer finish，task 会立即拿不到任何消息且 stream 早已结束）.
+        let firstNonStateMessage = try await firstNonConnectionState(from: sharedStream, timeout: 1.5)
+        // ROOM_B 的 snapshot 解码应是 .roomSnapshot；至少不能是 streamFinishedBeforeMessage（throw）.
+        if case .unknown = firstNonStateMessage {
+            XCTFail("expected room.snapshot non-unknown message, got .unknown — stale defer 可能污染了消息序列")
+        }
+
+        client.disconnect()
+    }
+
+    // MARK: - case#R15 (fix-review round 4 P2 #2)
+    // connect 在已 connected client 上调用 → stale receive-task 已从 task.receive() 拿到的旧房间 frame
+    // 不能在 sessionGeneration 翻新之后 yield 到复用的 stream.
+    //
+    // 触发条件：connect(roomId:) 翻 sessionGeneration 后，旧 receive-loop 仍可能从 await task.receive()
+    //   返回（cancel 信号传播延迟），随即 yield；旧实装无 generation gate → 旧房间 frame 漏到新连接.
+    // 测试构造：用 `gateUntilCancelled` 模式让首个 task 的"第二帧 receive() 调用"挂着，直到 cancel 才抛错；
+    //   这样 cancel 信号到达时 receive() 返回（throw cancelled）而**不是** dequeue 一帧；
+    //   验证 stale receive-loop 的 catch path 不会把任何 frame 漏到 fresh stream.
+    // 严格 yield-leak race（receive 已 dequeue 但 yield 未跑 + 翻 gen + yield）窗口极小，
+    // 直接构造跨 await 的"已 dequeue 未 yield" 窗口需要 patch fake task 内部信号；
+    // 在 R14 已 cover finish path 的修复，本测试用稳定的"第二次 connect 后旧房间无 stale frame 漏出" assertion.
+
+    func test_reconnect_staleReceiveLoopAfterConnectReplaceLeavesNewStreamCleanForNewSnapshot() async throws {
+        let factory = FakeReconnectFactory()
+
+        // 首个 RM01：snapshot 解 latch + 之后 block 等 cancel
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        firstTask.blockReceiveForever = true
+
+        // 第二次 ROOM_B：snapshot 解 latch + 之后 block
+        let secondTask = factory.scheduleNewTask()
+        let roomBSnapshotJSON = """
+        {
+          "type": "room.snapshot",
+          "requestId": "",
+          "payload": {
+            "room": {"id": "ROOM_B", "maxMembers": 4, "memberCount": 0},
+            "members": []
+          },
+          "ts": 2
+        }
+        """
+        secondTask.scriptedFrames = [.string(roomBSnapshotJSON)]
+        secondTask.blockReceiveForever = true
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+
+        let sharedStream = client.messages
+
+        // 关键：在 connect 之前就起 collector（unbounded buffer 但避免任何 stream-iteration 异常）.
+        let collectTask = Task<[WSMessage], Never> {
+            var local: [WSMessage] = []
+            for await msg in sharedStream {
+                if case .connectionStateChanged = msg { continue }
+                local.append(msg)
+                // 收够 2 条 non-state 消息（RM01 + ROOM_B 两个 snapshot）就退出，避免 hang
+                if local.count >= 2 { return local }
+            }
+            return local
+        }
+
+        try await client.connect(roomId: "RM01")
+        // 给 RM01 first frame 的 yield 跑完时间（connect() return 后 receive-loop 仍在 process first frame
+        // 路径，yield 在 resolve-gate 之后但 caller 已 wake；不 sleep 直接 chain connect 会与 yield race）.
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        // 立即 connect ROOM_B —— 翻 sessionGeneration + cancel 旧 receiveTask + 复用现存 currentContinuation.
+        try await client.connect(roomId: "ROOM_B")
+
+        // 给 stale receive-loop 充分时间走完 cancel + defer + 任何 catch path（不应 yield 任何 stale frame）.
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        client.disconnect()
+        let collected = await collectTask.value
+
+        // 至少有两条 snapshot：RM01（首次 connect）+ ROOM_B（第二次 connect）.
+        // stale leak 表征：在 ROOM_B snapshot **之后**还有 RM01 的消息（roomId == "RM01"）.
+        let snapshots: [(roomId: String, idx: Int)] = collected.enumerated().compactMap { idx, msg in
+            if case .roomSnapshot(let payload) = msg {
+                return (roomId: payload.room.id, idx: idx)
+            }
+            return nil
+        }
+        XCTAssertGreaterThanOrEqual(snapshots.count, 2, "expected RM01 + ROOM_B snapshots; collected=\(collected)")
+        let lastSnapshot = snapshots.last!
+        XCTAssertEqual(lastSnapshot.roomId, "ROOM_B",
+            "last snapshot on reused stream should be ROOM_B, not stale RM01 (stale yield leak); collected=\(collected)")
+    }
+
     // MARK: - reconnect 测试 helpers
 
     /// 收集 stream 上的 connection state events 直到拿到指定数量（带超时）.

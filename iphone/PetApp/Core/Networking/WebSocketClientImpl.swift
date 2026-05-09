@@ -183,6 +183,18 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
     /// 能 mutate 共享状态.
     private var sessionGeneration: Int = 0
 
+    /// fix-review round 4 P2（Story 12.5）：stream generation counter —— 与 sessionGeneration 解耦.
+    /// **递增点**：仅在 `makeStream()` 调用处（init / `prepareForReconnect()`）+1.
+    /// **不**在 `connect(roomId:)` 翻新 —— connect 在已 connected client 上调用时复用现存 stream / continuation.
+    /// **捕获点**：receive-loop launch 时把当时的 `streamGeneration` 抓进 local `myStreamGen`.
+    /// **校验点**：`yieldIfCurrent` / `finishStreamIfCurrent` 第一层 gate 用此字段判断 "stream 是否还是
+    /// receive-loop launch 时那个" —— 不一致 → 孤儿 continuation，yield silent drop / finish 仍走（让旧
+    /// consumer for-await 退出）.
+    /// **为什么不复用 sessionGeneration**：sessionGeneration 在每次 connect/prepareForReconnect/disconnect 都翻；
+    /// 但 connect-replace 路径（review 关切）下 stream **没换**，仍是同一个 currentContinuation/currentStream；
+    /// 单字段无法区分"stream 已 swap"vs"session 翻新但 stream 复用". 双字段精确刻画两个不同语义.
+    private var streamGeneration: Int = 0
+
     // MARK: - WebSocketClient protocol
 
     public var messages: AsyncStream<WSMessage> {
@@ -263,6 +275,7 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         let task = taskFactory.makeTask(with: request)
         let continuation: AsyncStream<WSMessage>.Continuation
         let mySession: Int  // fix-review round 2 P1：捕获当前 generation 传给 receive-loop
+        let myStreamGen: Int  // fix-review round 4 P2：捕获当前 stream generation 传给 receive-loop
         lock.lock()
         // Story 12.1 r6 lesson：同 instance 复用避免泄漏 —— connect 前若有旧 task / receiveTask，先清掉.
         // 正常 caller 路径应是 disconnect → prepareForReconnect → connect；这里防御性兜底.
@@ -275,6 +288,7 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         currentRoomId = roomId
         continuation = currentContinuation
         mySession = sessionGeneration
+        myStreamGen = streamGeneration
         lock.unlock()
 
         task.resume()
@@ -306,7 +320,8 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                 task: task,
                 continuation: continuation,
                 isReconnectAttempt: isReconnect,
-                mySession: mySession
+                mySession: mySession,
+                myStreamGen: myStreamGen
             )
         }
         os_log(.debug,
@@ -373,6 +388,9 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         // fix-review round 2 P1：递增 sessionGeneration —— 旧 receive-loop 的 catch path 即使在 swap 新 stream
         //   **之后**才跑，也会因 mySession != sessionGeneration 被 silent drop；不会污染新 stream / 错误 schedule.
         sessionGeneration += 1
+        // fix-review round 4 P2：递增 streamGeneration —— stream 已 swap，旧 receive-loop 的 yield/finish
+        //   通过 streamGeneration 校验时识别为孤儿（finish 仍允许让旧 consumer for-await 退出，yield silent drop）.
+        streamGeneration += 1
         self.currentStream = stream
         self.currentContinuation = cont
         lock.unlock()
@@ -446,7 +464,8 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         task: WebSocketTaskHandle,
         continuation: AsyncStream<WSMessage>.Continuation,
         isReconnectAttempt: Bool,
-        mySession: Int
+        mySession: Int,
+        myStreamGen: Int
     ) {
         let newReceiveTask = Task { [weak self] in
             var firstFrameReceived = false
@@ -457,9 +476,15 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
             // fix-review round 1 P1：loop 通过 cancellation 退出（while 条件假）时也必须 finish 继承 continuation,
             // 否则 prepareForReconnect / disconnect 后旧 stream 永远 hang 在 for-await 上.
             // defer 兜底兼容所有退出路径（cancel / catch / return）.
+            //
+            // fix-review round 4 P2 (#1)：defer 内 `continuation.finish()` 必须 generation-gated.
+            // 触发条件：`connect(roomId:)` 在 client 已 connected 时被调用 —— 复用现存 `currentContinuation`
+            // 但 `sessionGeneration += 1` 已先翻；旧 receiveTask 被 cancel 后落到本 defer，若无 generation
+            // 校验，stale `continuation.finish()` 会终结新 session 复用的 stream → 新连接立即失活.
+            // 走 `finishStreamIfCurrent(_:mySession:)` 包装：mySession != sessionGeneration → silent skip.
             defer {
                 if !leaveStreamOpen {
-                    continuation.finish()
+                    self?.finishStreamIfCurrent(continuation, mySession: mySession, myStreamGen: myStreamGen)
                 }
                 if !firstFrameReceived {
                     // cancel 在握手期发生 —— 让 connect() 拿到失败信号.
@@ -493,15 +518,20 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                         // 之后才到，stale `resume(())` 会让 fresh connect 拿到 spurious success（连错 session）.
                         self?.resolveConnectGate(success: true, error: nil, mySession: mySession)
                     }
+                    // fix-review round 4 P2 (#2)：所有 frame yield 也 generation-gated.
+                    // 触发条件：旧 receive-loop 已 dequeue 一条 frame（旧房间的 room.snapshot / member.*）
+                    // 但 cancel/replace 同时发生 → 不 generation-gate 的话 stale frame 会被 yield 到现在被
+                    // 新 session 复用的 stream 上 → 旧房间 traffic 漏到新连接.
+                    // 走 `yieldIfCurrent(_:to:mySession:)` 包装：mySession != sessionGeneration → silent drop.
                     switch frame {
                     case .string(let text):
                         let message = WSMessageCodec.decode(text)
-                        continuation.yield(message)
+                        self?.yieldIfCurrent(message, to: continuation, mySession: mySession, myStreamGen: myStreamGen)
                     case .data(let data):
                         // V1 §12.2 / §12.3：text frame only；binary frame 不应出现 —— 兜底兼容（解为 UTF-8 string 走同路径）
                         if let text = String(data: data, encoding: .utf8) {
                             let message = WSMessageCodec.decode(text)
-                            continuation.yield(message)
+                            self?.yieldIfCurrent(message, to: continuation, mySession: mySession, myStreamGen: myStreamGen)
                         } else {
                             os_log(.error, log: WebSocketClientImpl.logger, "binary frame non-UTF-8")
                         }
@@ -659,6 +689,97 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         let cont = currentContinuation
         lock.unlock()
         cont.yield(.connectionStateChanged(state))
+    }
+
+    /// fix-review round 4 P2：generation-gated yield —— stale receive-loop（旧 session 的）已 dequeue
+    /// 的 frame 在 cancel 与 connect-replace race 下，**不能**写到现在被新 session 复用的共享 stream 上.
+    ///
+    /// **gate 逻辑**（两层）：
+    ///   - **第 1 层 stream-owner 校验**：`myStreamGen != streamGeneration` → stream 已被 swap（典型路径
+    ///     `prepareForReconnect()`）→ 旧 continuation 是孤儿，silent drop（孤儿 stream 没人读，yield 浪费）.
+    ///   - **第 2 层 session 校验**：stream 仍是当前的（`myStreamGen == streamGeneration`）但 `mySession !=
+    ///     sessionGeneration` → 表示 stream 被复用（典型路径 `connect(roomId:)` 在 already-connected client
+    ///     上 chain 调用，不调 prepareForReconnect）；本 task 是 stale，silent drop —— 这正是 review #2 的修复.
+    ///   - 都通过 → 正常 yield.
+    ///
+    /// **为什么需要两个 generation 字段**：
+    ///   - sessionGeneration 在每次 `connect` / `prepareForReconnect` / `disconnect` 都翻；其中 `connect`
+    ///     不一定换 stream（已 connected client 复用 stream），所以单凭 sessionGeneration 不知道 stream
+    ///     是新是旧.
+    ///   - streamGeneration 仅在 makeStream() 时翻（init + `prepareForReconnect`），精确刻画"stream
+    ///     是否还是 receive-loop launch 时那个".
+    ///   - 两个字段解耦：sessionGeneration 区分"哪个 session 的 task"；streamGeneration 区分"哪个 stream
+    ///     的 owner". stream 被复用时只翻 sessionGeneration（review race）；stream 被换时翻两者
+    ///     （prepareForReconnect 路径）.
+    private func yieldIfCurrent(
+        _ message: WSMessage,
+        to continuation: AsyncStream<WSMessage>.Continuation,
+        mySession: Int,
+        myStreamGen: Int
+    ) {
+        lock.lock()
+        let curStreamGen = streamGeneration
+        let curSession = sessionGeneration
+        lock.unlock()
+        // 第 1 层：stream 已 swap → 孤儿 continuation，silent drop
+        if curStreamGen != myStreamGen {
+            os_log(.debug,
+                   log: WebSocketClientImpl.logger,
+                   "yieldIfCurrent dropped: orphan stream (myStreamGen=%{public}d != current=%{public}d)",
+                   myStreamGen, curStreamGen)
+            return
+        }
+        // 第 2 层：stream 复用 + generation 不匹配 → stale session，silent drop
+        if curSession != mySession {
+            os_log(.debug,
+                   log: WebSocketClientImpl.logger,
+                   "yieldIfCurrent dropped: stale mySession=%{public}d (current=%{public}d, streamGen=%{public}d)",
+                   mySession, curSession, curStreamGen)
+            return
+        }
+        continuation.yield(message)
+    }
+
+    /// fix-review round 4 P2：generation-gated stream finish —— stale receive-task 的 defer 块在
+    /// cancel 后跑到 `continuation.finish()` 时，若 `currentContinuation` 已被新 session 复用
+    /// （`connect(roomId:)` 复用现存 stream 路径，不调 prepareForReconnect），stale finish 会终结
+    /// 新 session 的 stream → 新连接的 vm 立即收不到任何消息.
+    ///
+    /// **gate 逻辑**：
+    ///   - **如果 stream 已被 swap（`myStreamGen != streamGeneration`，典型 `prepareForReconnect()`）**：
+    ///     **必须** finish 旧 continuation —— 旧 stream 的 consumer 仍 hang 在 for-await 上等终态信号；
+    ///     此路径不 race 新 stream（currentContinuation 已被换）→ 直接 finish.
+    ///   - **如果 stream 被复用（`myStreamGen == streamGeneration`）**：第 2 层 session gate；
+    ///     mySession != sessionGeneration → silent skip（防 stale finish 终结新 session 的 stream，review #1）；
+    ///     mySession == sessionGeneration → 正常 finish.
+    ///
+    /// 这个区分 critical：
+    ///   - test_prepareForReconnect_swapsToFreshStream 期望 prepareForReconnect 后旧 stream finish
+    ///   - review #1 的 race 是 stream 被复用时 stale finish 终结新 stream → 必须 session gate
+    private func finishStreamIfCurrent(
+        _ continuation: AsyncStream<WSMessage>.Continuation,
+        mySession: Int,
+        myStreamGen: Int
+    ) {
+        lock.lock()
+        let curStreamGen = streamGeneration
+        let curSession = sessionGeneration
+        lock.unlock()
+        // stream 已 swap → 孤儿 continuation，必须 finish 让旧 consumer for-await 退出.
+        // 这条路径不 race 新 stream（因为 currentContinuation 已被换）.
+        if curStreamGen != myStreamGen {
+            continuation.finish()
+            return
+        }
+        // stream 被复用 + session 不匹配 → stale finish 会终结新 session stream，silent skip
+        if curSession != mySession {
+            os_log(.debug,
+                   log: WebSocketClientImpl.logger,
+                   "finishStreamIfCurrent dropped: stale mySession=%{public}d (current=%{public}d, sameStream)",
+                   mySession, curSession)
+            return
+        }
+        continuation.finish()
     }
 
     /// fix-review round 2 P1：snapshot 校验当前 session generation —— 给 receive-loop catch 入口、
