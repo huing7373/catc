@@ -58,4 +58,53 @@ final class RoomUITests: XCTestCase {
             "roomMember_2 区块未找到"
         )
     }
+
+    /// Story 12.3 AC5: UITest 策略 A —— mock RoomViewModel 注入 3 fixed members → RoomScaffoldView 渲染
+    /// 3 个 `roomMember_<i>` 锚定可见 + 1 个空位 `roomMember_3` 锚定可见（4 - members.count = 1 dashed slot）
+    /// + 房间号 `roomIdDisplay` 锚定可见（roomCodeForCopy = RoomScaffoldDefaults "1234567"，UITEST_FORCE_IN_ROOM
+    /// 路径下 appState.currentRoomId = "1234567" 也是同值；本 case 不强断言文字内容，只断言 a11y 锚定可见 + 非空）.
+    ///
+    /// 路径选择（Story 12.3 钦定策略 A，详见 12-3 story acceptance §AC5）：
+    ///   launch arg `UITEST_ROOM_THREE_MEMBERS=1` → RootView.init() 检测 env flag → 把 `roomViewModel`
+    ///   @StateObject 切到 MockRoomViewModel(members: 3 fixed)；其余 UITest env / wire 不动.
+    ///
+    /// 与 testRoomScaffoldExposesUpgradedAccessibilityAnchors 关键区别：
+    ///   - 既有 case 在 RealRoomViewModel + RoomScaffoldDefaults 4 成员 seed 路径下验证（webSocketClient = nil）；
+    ///   - 本 case 在 MockRoomViewModel + 3 fixed members 路径下验证（不依赖真实 WS / RealRoomViewModel）；
+    ///     验证 4 - members.count = 1 个空位的 dashed slot 也正确挂 `roomMember_3` 锚.
+    func testRoomScaffoldRendersThreeMembersAndOneEmptySlotWhenMockHasThreeMembers() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
+        app.launchEnvironment["UITEST_FORCE_IN_ROOM"] = "1"           // 让 HomeContainerView 走 inRoom 分支
+        app.launchEnvironment["UITEST_ROOM_THREE_MEMBERS"] = "1"      // Story 12.3 AC5 新增 launch flag
+        app.launch()
+
+        let timeout: TimeInterval = 5
+
+        // 1) 房间号 a11y 锚 + 显示非空字符串
+        let roomIdDisplay = app.descendants(matching: .any)[AccessibilityID.Room.roomIdDisplay]
+        XCTAssertTrue(roomIdDisplay.waitForExistence(timeout: timeout),
+                      "roomIdDisplay a11y 锚未找到（RoomScaffoldView 顶部房间号区块漂移）")
+
+        // 2) 3 个成员行 a11y 锚定（mock 注入的 alice / bob / charlie 三 fixed members）
+        XCTAssertTrue(
+            app.descendants(matching: .any)[AccessibilityID.Room.member(at: 0)].waitForExistence(timeout: timeout),
+            "roomMember_0 区块未找到（MockRoomViewModel 3 fixed members 路径下应渲染第 1 行）"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)[AccessibilityID.Room.member(at: 1)].exists,
+            "roomMember_1 区块未找到（MockRoomViewModel 3 fixed members 路径下应渲染第 2 行）"
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)[AccessibilityID.Room.member(at: 2)].exists,
+            "roomMember_2 区块未找到（MockRoomViewModel 3 fixed members 路径下应渲染第 3 行）"
+        )
+
+        // 3) 1 个空位 a11y 锚定（4 - members.count = 1，dashed border "+ 等待好友加入" 行）
+        // RoomScaffoldView.emptySlot 也挂 AccessibilityID.Room.member(at: index) —— 与 memberRow 共享 ID 模式.
+        XCTAssertTrue(
+            app.descendants(matching: .any)[AccessibilityID.Room.member(at: 3)].exists,
+            "roomMember_3 dashed 空位未找到（4 - members.count = 1 个空位应有锚）"
+        )
+    }
 }

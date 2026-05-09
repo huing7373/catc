@@ -753,6 +753,229 @@ final class RealRoomViewModelTests: XCTestCase {
                        "两次 same-instance rebind 都不应误调 disconnect")
     }
 
+    // MARK: - Story 12.3 case#B happy: 同一 snapshot 推两次 → idempotent，members.count 仍 = 3
+
+    /// Story 12.3 AC4 case#B: snapshot 是 idempotent；同 userId 集合 + 同字段值 → members 数组 stable
+    /// （数量不变 + 字段不退化）.
+    /// 关键覆盖：snapshot 重复推送（如握手对齐 / 重新拉 snapshot 路径）下 members 不退化、不变化、不重复 append.
+    /// 与 Story 12.1 既有 testRoomSnapshotMessagePopulatesMembers 平级累加，不重写 / 不删除既有 case.
+    func testRoomSnapshotIsIdempotentOnRepeatedEmit() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_1234567")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        let payload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_1234567", maxMembers: 4, memberCount: 3),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice",
+                                   pet: RoomSnapshotPet(petId: "p_a", currentState: 1)),
+                RoomSnapshotMember(userId: "u_bob", nickname: "Bob",
+                                   pet: RoomSnapshotPet(petId: "p_b", currentState: 1)),
+                RoomSnapshotMember(userId: "u_charlie", nickname: "Charlie", pet: nil),
+            ]
+        )
+
+        // 第一次 emit
+        mockWS.emit(.roomSnapshot(payload))
+        try await waitForMembersCount(vm: vm, expected: 3)
+        XCTAssertEqual(vm.members.count, 3, "first snapshot 应当映射成 3 成员")
+        XCTAssertEqual(vm.members.map { $0.id }, ["u_alice", "u_bob", "u_charlie"])
+        XCTAssertEqual(vm.members.map { $0.name }, ["Alice", "Bob", "Charlie"])
+
+        // 第二次 emit 同 payload —— 关键：member 数量不变 + 字段值不退化
+        mockWS.emit(.roomSnapshot(payload))
+        // 给 consumer task 充分时间处理；count==3 是预期稳定值，不能用 waitForMembersCount 区分
+        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertEqual(vm.members.count, 3,
+                       "重复 emit 同 snapshot 后 members.count 仍 == 3（snapshot 是 idempotent）")
+        XCTAssertEqual(vm.members.map { $0.id }, ["u_alice", "u_bob", "u_charlie"],
+                       "重复 emit 后 member id 顺序 / 集合不变")
+        XCTAssertEqual(vm.members.map { $0.name }, ["Alice", "Bob", "Charlie"],
+                       "重复 emit 后 nickname 字段不退化（不被空串覆盖；不被错误 wipe-out）")
+        XCTAssertEqual(vm.memberPetStates, [:],
+                       "重复 emit 后 memberPetStates 仍保持空 map（节点 4 阶段不写入）")
+    }
+
+    // MARK: - Story 12.3 case#C happy: empty snapshot members → vm.members = []
+
+    /// Story 12.3 AC4 case#C: snapshot members[] 为空数组（不是 nil；server 不可能下发，
+    /// 但 contract layer 必须容忍）.
+    /// 关键覆盖：先 emit 3 成员 baseline → 再 emit empty snapshot（同 roomId）→ members 数组本身为 [] 非 nil.
+    /// 与 testCurrentRoomIdSwitchTogglesWsStateAndClearsMembers（A→nil 路径下清空）区别：
+    ///   本 case 测的是 "in-room 状态下 server 下发 empty roster" 路径（applySnapshot 算法本身的空数组路径），
+    ///   而非 leave-room transition 路径.
+    func testEmptyRoomSnapshotClearsMembers() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_xxx")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. baseline 3 成员
+        let payload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 3),
+            members: [
+                RoomSnapshotMember(userId: "u1", nickname: "A", pet: nil),
+                RoomSnapshotMember(userId: "u2", nickname: "B", pet: nil),
+                RoomSnapshotMember(userId: "u3", nickname: "C", pet: nil),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(payload))
+        try await waitForMembersCount(vm: vm, expected: 3)
+        XCTAssertEqual(vm.members.count, 3)
+
+        // 2. emit empty snapshot（same roomId 保证 stale-discard guard 不挡）
+        let emptyPayload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 0),
+            members: []
+        )
+        mockWS.emit(.roomSnapshot(emptyPayload))
+        try await waitForMembersCount(vm: vm, expected: 0)
+
+        XCTAssertEqual(vm.members.count, 0,
+                       "empty snapshot members[] 必须把 vm.members 清空（applySnapshot 空数组路径）")
+        XCTAssertEqual(vm.members, [],
+                       "vm.members 应该是空数组 [] 而非 nil")
+    }
+
+    // MARK: - Story 12.3 case#D edge: snapshot 解码失败 fallback (.unknown(rawType: "room.snapshot")) 不破坏 members
+
+    /// Story 12.3 AC4 case#D: snapshot 解码失败（payload schema mismatch）→
+    /// codec 兜底为 `.unknown(rawType: "room.snapshot")` → ViewModel 不破坏现有 members + log error.
+    /// 关键覆盖：现实路径的 codec fallback 语义（与 Story 12.1 既有 case#4 testUnknownMessageDoesNotCorruptMembers
+    /// 用 "garbage_type" 不同；本 case 显式用 server type "room.snapshot" + payload schema mismatch 路径）.
+    /// 锚定：Story 12.2 WSMessageCodec.decode payload 解码失败时 fallback 为 .unknown(rawType: ...) 不破坏 stream.
+    func testRoomSnapshotPayloadDecodeFailureFallbackDoesNotCorruptMembers() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_xxx")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. baseline 3 成员
+        let payload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 3),
+            members: [
+                RoomSnapshotMember(userId: "u1", nickname: "A", pet: nil),
+                RoomSnapshotMember(userId: "u2", nickname: "B", pet: nil),
+                RoomSnapshotMember(userId: "u3", nickname: "C", pet: nil),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(payload))
+        try await waitForMembersCount(vm: vm, expected: 3)
+        XCTAssertEqual(vm.members.count, 3)
+
+        // 2. 模拟 codec 解码 payload 失败 → fallback 为 .unknown(rawType: "room.snapshot")
+        // 这是 WSMessageCodec.decode 在拿到 type="room.snapshot" 但 payload schema mismatch 时的兜底路径.
+        mockWS.emit(.unknown(rawType: "room.snapshot"))
+        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        await Task.yield()
+        await Task.yield()
+
+        // 3. 关键断言：members 不破坏 + 字段值不退化
+        XCTAssertEqual(vm.members.count, 3,
+                       ".unknown(rawType: \"room.snapshot\") fallback 不应清空 members（codec 解码失败兜底，stream 不破坏）")
+        XCTAssertEqual(vm.members.map { $0.id }, ["u1", "u2", "u3"],
+                       "fallback 后 member id 集合不变")
+        XCTAssertEqual(vm.members.map { $0.name }, ["A", "B", "C"],
+                       "fallback 后 nickname 字段值不退化")
+
+        // 4. 反向断言：stream 仍活，后续 fresh snapshot 仍能 apply
+        let freshPayload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_fresh", nickname: "Fresh", pet: nil)]
+        )
+        mockWS.emit(.roomSnapshot(freshPayload))
+        try await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.members.first?.name, "Fresh",
+                       "fallback 不破坏 stream —— 后续 fresh snapshot 仍能 apply")
+    }
+
+    // MARK: - Story 12.3 case#F edge: nickname 空字符串保留 existing + pet null 直接覆盖（client merge contract 完整路径）
+
+    /// Story 12.3 AC4 case#F: V1 §12.3 client merge contract 字段级 merge 完整路径守护回归.
+    ///
+    /// 覆盖两个独立但同时落地的契约：
+    ///   - **nickname 空字符串**：保留 client 已有 RoomMember.name（"server 不知道"信号；不是 "请清空"指令）
+    ///   - **pet null**：直接覆盖 client 已有值（authoritative pet-less 信号；本 story RoomMember 类型暂不持
+    ///     pet 字段，因此本 case 仅断言不会 crash + members 数组依然 stable，与 RoomSnapshotMember 层 pet
+    ///     字段 preserve 一致）
+    ///
+    /// 锚定：本 case 是节点 4 placeholder 阶段（Story 10.7）与真实阶段（Story 11.7）共同 going-forward
+    /// 契约的最终守护，详见 V1 §12.3 "client merge contract" 段.
+    func testRoomSnapshotPreservesExistingNicknameOnEmptyStringAndOverridesPetWithNull() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_xxx")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. 第一次 emit snapshot 含 1 成员（nickname: "Alice", pet: ≠null）
+        let payloadV1 = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 1),
+            members: [
+                RoomSnapshotMember(
+                    userId: "u_alice",
+                    nickname: "Alice",
+                    pet: RoomSnapshotPet(petId: "p_a", currentState: 1)
+                ),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(payloadV1))
+        try await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.members[0].name, "Alice",
+                       "first snapshot 非空 nickname 应直接覆盖（authoritative）")
+
+        // 2. 第二次 emit 同 userId 但 nickname 为空字符串 + pet 改为 null
+        //    （placeholder 阶段语义：server 不知道这个值 → 保留 client 已有值；pet null 直接覆盖）
+        let payloadV2 = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 1),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "", pet: nil),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(payloadV2))
+        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        await Task.yield()
+        await Task.yield()
+
+        // 3. 关键断言：nickname 空字符串保留 existing.name == "Alice"（不被空串覆盖；不被降级 placeholder "成员"）
+        XCTAssertEqual(vm.members.count, 1, "merge contract 路径 members 数量不变")
+        XCTAssertEqual(vm.members[0].id, "u_alice", "userId 集合保持一致")
+        XCTAssertEqual(vm.members[0].name, "Alice",
+                       "nickname 空字符串必须保留 client 已有值（V1 §12.3 client merge contract: 空字符串 = \"server 不知道\"，不是 \"请清空\"）")
+
+        // 4. 反向 case：新 userId（client 没有的 userId）+ nickname 空字符串
+        //    → 首次出现降级为 "成员" placeholder（与 ui_design 占位一致；与 applySnapshot 内 mergedName 路径锁住）
+        let payloadV3 = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 2),
+            members: [
+                // 保留已有 alice（带回 nickname "Alice" 也行；这里测的是新成员路径）
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice",
+                                   pet: RoomSnapshotPet(petId: "p_a", currentState: 1)),
+                // 新成员，nickname 空字符串 → 应降级为 "成员" placeholder
+                RoomSnapshotMember(userId: "u_new", nickname: "", pet: nil),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(payloadV3))
+        try await waitForMembersCount(vm: vm, expected: 2)
+        XCTAssertEqual(vm.members.count, 2)
+        XCTAssertEqual(vm.members[0].name, "Alice",
+                       "alice 走非空 nickname 覆盖路径（authoritative）")
+        XCTAssertEqual(vm.members[1].id, "u_new")
+        XCTAssertEqual(vm.members[1].name, "成员",
+                       "新 userId 首次出现 + nickname 空字符串应降级为 \"成员\" placeholder（applySnapshot mergedName 路径）")
+    }
+
     // MARK: - helpers
 
     /// 等待 vm.members.count 达到预期值（最多等 1 秒；防 Task consumer 调度时机不确定）.

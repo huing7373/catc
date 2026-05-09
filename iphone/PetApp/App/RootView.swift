@@ -54,7 +54,12 @@ struct RootView: View {
     /// 实例类型 `RealRoomViewModel`（生产实装；onLeaveTap / onCopyTap override 完整）—— round 1 P2 fix
     /// 已把基类换 Real，让 inRoom path（UITEST_FORCE_IN_ROOM / 未来 Story 12.1 join flow）走 onLeaveTap
     /// 调 appState.setCurrentRoomId(nil) 切回 idle 不再 silent no-op.
-    @StateObject private var roomViewModel: RoomViewModel = RealRoomViewModel()
+    ///
+    /// Story 12.3 AC5（UITest 策略 A）：DEBUG build + `UITEST_ROOM_THREE_MEMBERS=1` env flag 路径下
+    /// 切到 `MockRoomViewModel(members: 3 fixed)` —— 让 UITest 直接锚定 `roomMember_0/1/2` + `roomMember_3`
+    /// （dashed empty slot）的 a11y identifier，而不依赖真实 WS server.
+    /// Production build 此 env 被忽略；UITest 跑完 reset env 即恢复正常.
+    @StateObject private var roomViewModel: RoomViewModel
 
     /// Story 37.9 AC5：WardrobeScaffoldView 注入入口；与 homeViewModel / roomViewModel 同模式
     /// @StateObject 持有 + .environmentObject 注入子树.
@@ -123,6 +128,33 @@ struct RootView: View {
     /// Story 2.8: dev "重置身份" 按钮 ViewModel.仅 Debug build 存在；Release build 字段不存在.
     @State private var resetIdentityViewModel: ResetIdentityViewModel?
     #endif
+
+    /// Story 12.3 AC5（UITest 策略 A）：根据 `UITEST_ROOM_THREE_MEMBERS` env flag 决定
+    /// `roomViewModel` @StateObject 初始值 —— flag = "1" 时切到 `MockRoomViewModel` 持 3 个 fixed members,
+    /// 让 UITest 验证 `RoomScaffoldView` 真实渲染 3 个成员行（roomMember_0/1/2）+ 1 个空位（roomMember_3）.
+    /// Production build / 无 env flag 路径走 `RealRoomViewModel()` 既有逻辑（Story 37.8 round 1 P2 fix
+    /// 钦定路径不动）.
+    /// `_roomViewModel = StateObject(wrappedValue:)` 是 SwiftUI 推荐的 @StateObject custom init 写法.
+    init() {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["UITEST_ROOM_THREE_MEMBERS"] == "1" {
+            // 3 个 fixed members（房主 + 2 普通）—— 与 UITest case 对齐：roomMember_0/1/2 可见 + 1 空位 roomMember_3.
+            let mock = MockRoomViewModel(
+                roomCodeForCopy: RoomScaffoldDefaults.roomCodeForCopy,
+                hostCatName: RoomScaffoldDefaults.hostCatName,
+                members: [
+                    RoomMember(id: "u_alice", name: "Alice", level: 8, status: "在玩耍", isHost: true),
+                    RoomMember(id: "u_bob", name: "Bob", level: 7, status: "在散步", isHost: false),
+                    RoomMember(id: "u_charlie", name: "Charlie", level: 9, status: "在玩耍", isHost: false),
+                ],
+                userIsHost: RoomScaffoldDefaults.userIsHost
+            )
+            self._roomViewModel = StateObject(wrappedValue: mock)
+            return
+        }
+        #endif
+        self._roomViewModel = StateObject(wrappedValue: RealRoomViewModel())
+    }
 
     var body: some View {
         ZStack {
