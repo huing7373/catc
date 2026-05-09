@@ -242,3 +242,4 @@
 | 2026-05-09 | [WS reconnect: connectGate 也要 generation 守护（12-5 r3）](2026-05-09-ws-reconnect-connect-gate-needs-generation-scoping-12-5-r3.md) | 1 | architecture | `355fbe5` |
 | 2026-05-09 | [WS reconnect: stream 复用 vs session 翻新必须双 generation 解耦（12-5 r4）](2026-05-09-ws-reconnect-stream-vs-session-generations-must-decouple-12-5-r4.md) | 1 | architecture | `26b9541` |
 | 2026-05-09 | [WS reconnect: precondition 必须先于 gen 翻新 & connectGate 覆盖前必 resolve（12-5 r5）](2026-05-09-ws-reconnect-precondition-must-precede-gen-bump-and-gate-supersede-12-5-r5.md) | 2 | architecture | `0223877` |
+| 2026-05-10 | [WS heartbeat 状态必须在 transient reconnect 前显式 reset（12-6 r1）](2026-05-10-ws-heartbeat-state-must-reset-before-transient-reconnect-12-6-r1.md) | 1 | architecture | `<pending>` |

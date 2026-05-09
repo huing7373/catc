@@ -195,6 +195,40 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
     /// 单字段无法区分"stream 已 swap"vs"session 翻新但 stream 复用". 双字段精确刻画两个不同语义.
     private var streamGeneration: Int = 0
 
+    // MARK: - Story 12.6 heartbeat 字段
+
+    /// Story 12.6：当前 in-flight heartbeat task（connect 成功 firstFrame 后启动；disconnect /
+    /// prepareForReconnect / 终态切 disconnected 时 cancel + 清 nil）.
+    /// **关键**：与 reconnectTask / receiveTask 同精神 —— 任何"终止活跃 session"路径必须 cancel
+    /// 此 task，否则用户主动断开后 client 仍在循环 send(.ping) → send 抛 notConnected → noise log,
+    /// 最坏情况 task 泄漏.
+    private var heartbeatTask: Task<Void, Never>?
+
+    /// Story 12.6：心跳间隔（秒）—— V1 §12.2 行 1807 钦定 30s 默认值.
+    /// `internal` 实例字段（非 static）让单测可注入短值（如 0.05s）跑 ms 级 fake-clock 路径,
+    /// 避免单测真实跑 30s（违反 ADR-0002 §3.1「unit test 必须秒级完成」）.
+    internal var heartbeatInterval: TimeInterval = 30.0
+
+    /// Story 12.6：pong 超时（秒）—— epic line 2176 钦定 5s.
+    /// 5s 未收到 pong → 视连接失效 → cancel underlying task with .goingAway（1001 transient）→
+    /// receive-loop catch → 12.5 状态机自动重连.
+    /// `internal` 实例字段同上 —— 单测可注入短值跑 fake-clock.
+    internal var pongTimeout: TimeInterval = 5.0
+
+    /// Story 12.6：心跳序号（每发一次 ping 自增；ping requestId = "ping_<seq>"）.
+    /// 单调递增 + 进程内复用即可（V1 §12.2 行 1784 钦定 requestId 仅用于 session 内 request-response 配对，
+    /// 不进 server 持久化日志）.
+    /// `internal` 可见让单测可读断言序列（"第 N 次 ping requestId == 'ping_N'"）.
+    internal var heartbeatSeq: Int = 0
+
+    /// Story 12.6：当前 in-flight ping 的 pong-arrived latch.
+    /// 每发一次 ping 在 lock 内创建新 AsyncStream<Void>.makeStream() 替换；receive-loop 收到
+    /// `.pong(...)` 调 `notifyPongReceivedIfCurrent(mySession:)` → yield + finish；
+    /// heartbeat task 用 `withTaskGroup` 并发等"latch yield"或"Task.sleep(pongTimeout)"先到者赢.
+    /// finish 后 nil；下一轮 ping 重新创建.
+    /// `private`（非 internal）—— 仅 client 内部 receive-loop / heartbeat task 写读，单测不直接访问.
+    private var pendingPongContinuation: AsyncStream<Void>.Continuation?
+
     // MARK: - WebSocketClient protocol
 
     public var messages: AsyncStream<WSMessage> {
@@ -262,13 +296,20 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         // Story 12.5：caller 主动 connect → 清掉任何 in-flight reconnect 状态
         // fix-review round 2 P1：递增 sessionGeneration —— 之前 launch 的 receive-loop / reconnect-attempt
         //   再写共享状态时会因 mySession != sessionGeneration 被 silent drop（防 stale event 串到新 session）.
+        // Story 12.6：caller 主动 connect 等价于"放弃当前 heartbeat 循环" —— cancel heartbeatTask + finish pong latch
         lock.lock()
         let oldReconnectTask = reconnectTask
+        let oldHeartbeatTask = heartbeatTask  // Story 12.6
+        let oldPongCont = pendingPongContinuation  // Story 12.6
         reconnectTask = nil
+        heartbeatTask = nil           // Story 12.6
         reconnectAttempt = 0
+        pendingPongContinuation = nil // Story 12.6
         sessionGeneration += 1
         lock.unlock()
         oldReconnectTask?.cancel()
+        oldHeartbeatTask?.cancel()    // Story 12.6
+        oldPongCont?.finish()         // Story 12.6
 
         try await connectInternal(roomId: roomId, isReconnect: false, attemptNumber: 0)
         // .connected 由 receive loop 在 firstFrameReceived 时已 emit；caller 不需重复 emit.
@@ -386,12 +427,16 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         let oldTask = underlyingTask
         let oldReceiveTask = receiveTask
         let oldReconnectTask = reconnectTask  // Story 12.5：cancel in-flight reconnect 防 disconnect 后仍 attempt
+        let oldHeartbeatTask = heartbeatTask  // Story 12.6：cancel in-flight heartbeat 防 disconnect 后仍发 ping
         let oldContinuation = currentContinuation
+        let oldPongCont = pendingPongContinuation  // Story 12.6
         underlyingTask = nil
         receiveTask = nil
         reconnectTask = nil           // Story 12.5
+        heartbeatTask = nil           // Story 12.6
         currentRoomId = nil           // Story 12.5：清掉 reconnect 复用源
         reconnectAttempt = 0          // Story 12.5：重置计数
+        pendingPongContinuation = nil // Story 12.6
         // fix-review round 2 P1：递增 sessionGeneration —— stale receive-loop / cancelled reconnect-attempt
         //   随后落到 catch path 时 mySession != sessionGeneration → 不再 emit / 不再 schedule.
         sessionGeneration += 1
@@ -401,6 +446,8 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         oldTask?.cancel(with: .normalClosure, reason: nil)
         oldReceiveTask?.cancel()
         oldReconnectTask?.cancel()  // Story 12.5：关键 —— 防 caller disconnect 后 client 仍在 reconnect 循环
+        oldHeartbeatTask?.cancel()  // Story 12.6
+        oldPongCont?.finish()       // Story 12.6：让 heartbeat task 的 awaitPongOrTimeout 立即退出
         oldContinuation.finish()
         // fix-review round 1 P1：若 caller 在 connect() await 期间 disconnect → 兜底 resolve gate 防 hang.
         // fix-review round 3 P1：disconnect 已经在持锁内 `sessionGeneration += 1`，但仍要显式 fail 当前
@@ -418,11 +465,15 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         let oldTask = underlyingTask
         let oldReceiveTask = receiveTask
         let oldReconnectTask = reconnectTask  // Story 12.5：caller-driven reset 也终止任何 in-flight reconnect
+        let oldHeartbeatTask = heartbeatTask  // Story 12.6
+        let oldPongCont = pendingPongContinuation  // Story 12.6
         underlyingTask = nil
         receiveTask = nil
         reconnectTask = nil           // Story 12.5
+        heartbeatTask = nil           // Story 12.6
         currentRoomId = nil           // Story 12.5：caller 通常马上调 connect(roomId:) 重新建立
         reconnectAttempt = 0          // Story 12.5
+        pendingPongContinuation = nil // Story 12.6
         // fix-review round 2 P1：递增 sessionGeneration —— 旧 receive-loop 的 catch path 即使在 swap 新 stream
         //   **之后**才跑，也会因 mySession != sessionGeneration 被 silent drop；不会污染新 stream / 错误 schedule.
         sessionGeneration += 1
@@ -437,6 +488,8 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         oldTask?.cancel(with: .normalClosure, reason: nil)
         oldReceiveTask?.cancel()
         oldReconnectTask?.cancel()  // Story 12.5
+        oldHeartbeatTask?.cancel()  // Story 12.6
+        oldPongCont?.finish()       // Story 12.6
         // fix-review round 1 P1：若 caller 在 connect() await 期间 prepareForReconnect → 兜底 resolve gate 防 hang.
         // fix-review round 3 P1：同 disconnect —— prepareForReconnect 已翻 generation，但显式 fail in-flight
         // connect() 是预期语义 → 走 unconditional 路径.
@@ -555,6 +608,9 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                         // 极端时序下 stale receive-task 的 first frame 可能在新 connect 已 install 新 gate
                         // 之后才到，stale `resume(())` 会让 fresh connect 拿到 spurious success（连错 session）.
                         self?.resolveConnectGate(success: true, error: nil, mySession: mySession)
+                        // Story 12.6：firstFrame 同步路径启动 heartbeat task（与 emitConnectionStateIfCurrent 同位置）.
+                        // 启动逻辑内部已 cancel 既有 heartbeatTask（防御性）+ 走 sessionGeneration 守护.
+                        self?.startHeartbeatTask(mySession: mySession)
                     }
                     // fix-review round 4 P2 (#2)：所有 frame yield 也 generation-gated.
                     // 触发条件：旧 receive-loop 已 dequeue 一条 frame（旧房间的 room.snapshot / member.*）
@@ -564,11 +620,21 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                     switch frame {
                     case .string(let text):
                         let message = WSMessageCodec.decode(text)
+                        // Story 12.6：先 internal pong-notify（清 latch），再 yield 到 stream（vm 仍 break）.
+                        // 顺序原因：pong notify 是 client-internal，必须比 vm main-actor hop 先到；否则 5s
+                        // pongTimeout 计算受 vm 的 main-actor 调度 jitter 影响 → 可能超时误判.
+                        if case .pong = message {
+                            self?.notifyPongReceivedIfCurrent(mySession: mySession)
+                        }
                         self?.yieldIfCurrent(message, to: continuation, mySession: mySession, myStreamGen: myStreamGen)
                     case .data(let data):
                         // V1 §12.2 / §12.3：text frame only；binary frame 不应出现 —— 兜底兼容（解为 UTF-8 string 走同路径）
                         if let text = String(data: data, encoding: .utf8) {
                             let message = WSMessageCodec.decode(text)
+                            // Story 12.6：与 .string 路径同
+                            if case .pong = message {
+                                self?.notifyPongReceivedIfCurrent(mySession: mySession)
+                            }
                             self?.yieldIfCurrent(message, to: continuation, mySession: mySession, myStreamGen: myStreamGen)
                         } else {
                             os_log(.error, log: WebSocketClientImpl.logger, "binary frame non-UTF-8")
@@ -663,6 +729,12 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                                log: WebSocketClientImpl.logger,
                                "post-handshake transient close (code=%{public}d) → schedule reconnect",
                                code)
+                        // fix-review round 1 P1：旧 socket close 已确定 → reconnect 前**必须**先 cancel
+                        // 旧 heartbeatTask + finish pendingPongContinuation；否则旧 pong 5s timer 会在
+                        // 新 underlyingTask install 之后才 fire，调 cancelUnderlyingTaskWithGoingAwayIfCurrent
+                        // 时 sessionGeneration 没翻（reconnect 透明续接）→ 错杀新 socket handshake.
+                        // 详见 cancelHeartbeatStateForReconnectIfCurrent 文档块.
+                        strongSelf.cancelHeartbeatStateForReconnectIfCurrent(mySession: mySession)
                         // 关键：schedule reconnect + **不**finish stream（契约 5）
                         strongSelf.scheduleReconnectIfCurrent(mySession: mySession)
                         leaveStreamOpen = true
@@ -951,6 +1023,11 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                    "attemptReconnect aborted: currentRoomId is nil (likely disconnect race)")
             return
         }
+        // fix-review round 1 P1（防御性双保险）：connectInternal install 新 underlyingTask 之前再做一次
+        // heartbeat reset；正常路径下 receive-loop catch 的 transient 分支已经 reset 过，
+        // 此处覆盖：(1) receive-loop 在 firstFrame 之前就 catch（heartbeat 还没启动 → no-op）；
+        //          (2) 极端时序绕过 #1 的 heartbeat 残留. 整体仍 generation-gated.
+        cancelHeartbeatStateForReconnectIfCurrent(mySession: mySession)
         do {
             try await connectInternal(roomId: roomId, isReconnect: true, attemptNumber: attempt)
             // 成功：重置计数；`.connected` 已由 receive loop 在 firstFrameReceived 时 emit（避免与 first frame yield 调度 race）.
@@ -1110,9 +1187,261 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         }
     }
 
+    // MARK: - Story 12.6 heartbeat helpers
+
+    /// Story 12.6：启动 heartbeat task. 在 firstFrameReceived 同步路径调，与 emitConnectionState(.connected) 同位置.
+    /// `mySession` 由 receive-loop 内捕获的 mySession 透传 —— heartbeat task 内任何 mutation / 调
+    /// `cancelUnderlyingTaskWithGoingAway` 之前必须 generation-gated.
+    ///
+    /// **lifecycle**：
+    ///   - 启动前 cancel 既有 heartbeatTask（防御性兜底；正常路径下 disconnect/prepareForReconnect 已 cancel）
+    ///   - 用 Task { ... } 起 detached-style task（捕获 self weak）
+    ///   - task 内 while !Task.isCancelled 循环：
+    ///     1. await Task.sleep(heartbeatInterval) —— 30s 心跳间隔
+    ///     2. 如果 cancelled / stale session → return
+    ///     3. lock 内创建新 pendingPongContinuation + 写入 + 自增 heartbeatSeq + 取出 underlyingTask
+    ///     4. 通过 self.send(.ping(requestId: "ping_\(seq)")) 发心跳；send 抛错（notConnected / underlying network error）→ return
+    ///        （send 已经间接通过 receive-loop catch 路径触发 reconnect，本 task 退出即可）
+    ///     5. 用 withTaskGroup 并发等：(a) AsyncStream 收到 yield 即 pong-arrived；(b) Task.sleep(pongTimeout) 即超时
+    ///     6. (a) 先到 → 清 pendingPongContinuation = nil → continue 下一轮
+    ///     7. (b) 先到 → cancel underlying task with .goingAway → return（receive-loop catch 接管走 12.5 transient → reconnect）
+    private func startHeartbeatTask(mySession: Int) {
+        lock.lock()
+        let oldTask = heartbeatTask
+        heartbeatTask = nil
+        lock.unlock()
+        oldTask?.cancel()
+
+        let interval = self.heartbeatInterval
+        let timeout = self.pongTimeout
+        let task = Task { [weak self] in
+            while !Task.isCancelled {
+                // 1. 心跳间隔 sleep
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                } catch {
+                    return  // cancellation
+                }
+                if Task.isCancelled { return }
+                guard let strongSelf = self else { return }
+                if !strongSelf.isCurrentSession(mySession) {
+                    return  // stale session
+                }
+
+                // 2. 创建 pong latch + 取 underlying task + 自增 seq
+                let (pongStream, pongCont) = AsyncStream<Void>.makeStream()
+                let activeTaskOpt: WebSocketTaskHandle?
+                let seq: Int
+                strongSelf.lock.lock()
+                // 再次 generation 校验（持锁内最终一致）
+                guard strongSelf.sessionGeneration == mySession else {
+                    strongSelf.lock.unlock()
+                    pongCont.finish()
+                    return
+                }
+                // 关 finish 既有 pendingPongContinuation（防泄漏；上一轮 ping 若没回 pong 也已被 timeout 处理过）
+                strongSelf.pendingPongContinuation?.finish()
+                strongSelf.pendingPongContinuation = pongCont
+                strongSelf.heartbeatSeq += 1
+                seq = strongSelf.heartbeatSeq
+                activeTaskOpt = strongSelf.underlyingTask
+                strongSelf.lock.unlock()
+
+                guard let activeTask = activeTaskOpt, activeTask.isRunning else {
+                    // underlying task 不在了（被 cancel / disconnect）→ 直接 return
+                    strongSelf.lock.lock()
+                    strongSelf.pendingPongContinuation?.finish()
+                    strongSelf.pendingPongContinuation = nil
+                    strongSelf.lock.unlock()
+                    return
+                }
+
+                // 3. send ping —— 走既有 send(_:) 路径（注意：不能让 send 失败也吞掉）
+                do {
+                    try await strongSelf.send(.ping(requestId: "ping_\(seq)"))
+                } catch {
+                    // send 失败：underlying task 已死 / notConnected —— receive-loop 会接管 catch 走 reconnect.
+                    // 本 heartbeat task 退出即可；不主动 cancel underlying（避免双触发，让 receive-loop 自然 catch）
+                    strongSelf.lock.lock()
+                    strongSelf.pendingPongContinuation?.finish()
+                    strongSelf.pendingPongContinuation = nil
+                    strongSelf.lock.unlock()
+                    return
+                }
+
+                // 4. 并发等 pong-arrived OR pong-timeout
+                let timedOut = await Self.awaitPongOrTimeout(
+                    pongStream: pongStream,
+                    timeout: timeout
+                )
+
+                // 5. 清 latch（无论 timedOut 与否；防泄漏）
+                strongSelf.lock.lock()
+                // 再次 generation 校验
+                guard strongSelf.sessionGeneration == mySession else {
+                    strongSelf.pendingPongContinuation?.finish()
+                    strongSelf.pendingPongContinuation = nil
+                    strongSelf.lock.unlock()
+                    return
+                }
+                strongSelf.pendingPongContinuation?.finish()
+                strongSelf.pendingPongContinuation = nil
+                strongSelf.lock.unlock()
+
+                if Task.isCancelled { return }
+                if timedOut {
+                    // 6. pong 超时 → cancel underlying task with .goingAway（1001 = transient）
+                    //    → receive-loop catch 走 12.5 状态机 schedule reconnect.
+                    //    **不**调 public disconnect()（那是 close 1000 = terminal 不重连）.
+                    strongSelf.cancelUnderlyingTaskWithGoingAwayIfCurrent(mySession: mySession)
+                    return
+                }
+                // 7. pong 正常到达 → continue 下一轮 sleep
+            }
+        }
+        lock.lock()
+        // 防御性兜底：极端 race 下若已有 disconnect / prepareForReconnect 抢着 cancel 旧 task 同时翻 gen，
+        // 此处校验确保 stale heartbeat 注入不污染新 session 的 heartbeatTask 字段.
+        if sessionGeneration == mySession {
+            heartbeatTask = task
+        } else {
+            task.cancel()
+        }
+        lock.unlock()
+    }
+
+    /// Story 12.6：内部 helper —— 并发等 pong-arrived OR Task.sleep timeout，先到者赢.
+    /// 返回 true = 超时；false = pong arrived（或 stream 被 finish）.
+    private static func awaitPongOrTimeout(
+        pongStream: AsyncStream<Void>,
+        timeout: TimeInterval
+    ) async -> Bool {
+        return await withTaskGroup(of: Bool.self) { group in
+            // task A: 等 pong yield；stream finish 后 for-await 自动退出 = false（pong 已到 / cancellation）
+            group.addTask {
+                for await _ in pongStream {
+                    return false  // pong arrived
+                }
+                // stream 被 finish 但没 yield —— 视为 cancellation（caller 路径），返回 false 让 caller 决策
+                return false
+            }
+            // task B: timer
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                return true  // timeout
+            }
+            // 第一个返回的赢
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
+    }
+
+    /// Story 12.6：在 underlying URLSessionWebSocketTask 上 cancel(with: .goingAway) ——
+    /// rawValue=1001 在 12.5 classifyCloseCode 是 transient → receive-loop catch → schedule reconnect.
+    /// generation-gated：stale heartbeat task 不能 cancel 新 session 的 underlying task.
+    private func cancelUnderlyingTaskWithGoingAwayIfCurrent(mySession: Int) {
+        lock.lock()
+        guard sessionGeneration == mySession else {
+            lock.unlock()
+            os_log(.debug,
+                   log: WebSocketClientImpl.logger,
+                   "heartbeat pong timeout drop: stale mySession=%{public}d (current=%{public}d)",
+                   mySession, sessionGeneration)
+            return
+        }
+        let task = underlyingTask
+        lock.unlock()
+        os_log(.info,
+               log: WebSocketClientImpl.logger,
+               "heartbeat pong timeout (5s) → cancel underlying task with .goingAway (1001) → receive-loop catch transient")
+        task?.cancel(with: .goingAway, reason: "heartbeat pong timeout".data(using: .utf8))
+    }
+
+    /// Story 12.6 fix-review round 1 P1：transient close 触发自动 reconnect 前**必须**显式
+    /// cancel 旧 heartbeatTask + finish pendingPongContinuation —— 否则 race 窗口打开：
+    ///
+    ///   T0  heartbeat task 已 sendPing → 进入 awaitPongOrTimeout（pendingPongContinuation 在场）
+    ///   T1  underlying 发生 transient close（1001/1006/1011/4005）→ receive-loop catch
+    ///   T2  receive-loop catch 调 scheduleReconnectIfCurrent —— **不**翻 sessionGeneration
+    ///       （契约 5：reconnect 透明续接，复用同一 session.gen / stream.gen）
+    ///   T3  attemptReconnect 跑 connectInternal → makeTask + resume → install 新 underlyingTask
+    ///   T4  旧 heartbeat task 的 5s pong timer fire → 调 cancelUnderlyingTaskWithGoingAwayIfCurrent
+    ///   T5  其内的 `sessionGeneration == mySession` guard **通过**（gen 没翻）→ 取出 underlyingTask
+    ///       （此刻指向新 socket）→ cancel(.goingAway)
+    ///   T6  新 socket handshake 被错杀 → 又被分类为 transient → 又一次 schedule reconnect ……
+    ///       一个 recoverable disconnect 演化成连续 reconnect 失败.
+    ///
+    /// **修复策略**（review 提示方向 1）：在"旧 socket close → 新 underlyingTask install" 的接缝上
+    /// **同步** cancel 旧 heartbeat task + finish 旧 pendingPongContinuation：
+    ///   - heartbeat task 被 cancel → 内层 `Task.sleep` / `awaitPongOrTimeout` 立即抛 cancellation → return.
+    ///   - pendingPongContinuation finish → awaitPongOrTimeout 内 `for await _ in pongStream` 自然退出
+    ///     （走 false 分支 = "pong 到达"语义；caller 已 cancel，下一行 `Task.isCancelled` 检测 → return，
+    ///     不再 fire `cancelUnderlyingTaskWithGoingAwayIfCurrent`）.
+    ///   - 即使极端时序漏过两层屏障让 cancelUnderlying 被调到，因为 heartbeatTask / pendingPong 字段已清，
+    ///     新 heartbeat 启动前不会被旧 task 污染；新 task 也会持有自己的 mySession（即将到来的 firstFrame
+    ///     重启路径会捕获最新 sessionGeneration）.
+    ///
+    /// **不**翻 sessionGeneration —— 因为 reconnect 必须保持 session 透明续接，外层 stream / vm 视角不能感知 session 翻新.
+    /// 整个修复仅限 heartbeat 子系统内部 reset.
+    ///
+    /// **callsite**：
+    ///   1. receive-loop catch path 的 transient close 分支，`scheduleReconnectIfCurrent` 之前
+    ///   2. attemptReconnect 进入 `connectInternal` 之前（防御性双保险，覆盖 receive-loop 在
+    ///      firstFrame 之前就 catch / 极端时序漏过 #1 的兜底）
+    ///
+    /// generation-gated：仅当 `sessionGeneration == mySession` 才执行 reset；stale 调用 silent drop
+    /// （防 stale receive-loop 的 catch path 在新 session swap 后才跑、把新 session 的 heartbeat 也清掉）.
+    private func cancelHeartbeatStateForReconnectIfCurrent(mySession: Int) {
+        lock.lock()
+        guard sessionGeneration == mySession else {
+            lock.unlock()
+            os_log(.debug,
+                   log: WebSocketClientImpl.logger,
+                   "cancelHeartbeatStateForReconnect dropped: stale mySession=%{public}d (current=%{public}d)",
+                   mySession, sessionGeneration)
+            return
+        }
+        let oldHeartbeatTask = heartbeatTask
+        let oldPongCont = pendingPongContinuation
+        heartbeatTask = nil
+        pendingPongContinuation = nil
+        lock.unlock()
+        os_log(.debug,
+               log: WebSocketClientImpl.logger,
+               "cancelHeartbeatStateForReconnect: cancelling old heartbeat (taskNonNil=%{public}@, pongContNonNil=%{public}@)",
+               oldHeartbeatTask != nil ? "yes" : "no",
+               oldPongCont != nil ? "yes" : "no")
+        oldHeartbeatTask?.cancel()
+        oldPongCont?.finish()
+    }
+
+    /// Story 12.6：generation-gated pong-notify —— receive-loop decode 出 .pong 时调.
+    /// stream-owner stale（旧 receive-loop 在新 session 已翻 gen 后才跑）silent drop，
+    /// 不打扰新 session 的 heartbeat latch.
+    private func notifyPongReceivedIfCurrent(mySession: Int) {
+        lock.lock()
+        guard sessionGeneration == mySession else {
+            lock.unlock()
+            os_log(.debug,
+                   log: WebSocketClientImpl.logger,
+                   "notifyPongReceived dropped: stale mySession=%{public}d (current=%{public}d)",
+                   mySession, sessionGeneration)
+            return
+        }
+        let cont = pendingPongContinuation
+        lock.unlock()
+        cont?.yield(())
+        // 注意：**不**在这里 finish + 清 nil；让 heartbeat task 内的 awaitPongOrTimeout return false 后
+        // 在 lock 内 finish + 清 nil（保单一所有权：pendingPongContinuation 的生命周期由 heartbeat task 拥有）.
+    }
+
     deinit {
         underlyingTask?.cancel(with: .normalClosure, reason: nil)
         receiveTask?.cancel()
+        reconnectTask?.cancel()       // Story 12.6：防御性（既有 12.5 落地未做）
+        heartbeatTask?.cancel()       // Story 12.6
+        pendingPongContinuation?.finish()  // Story 12.6
         currentContinuation.finish()
         // fix-review round 1 P1：deinit 期间 caller 还在 await connect() 概率极低（caller 通常持 strong ref），
         // 防御性兜底 resume(throwing:) 让 await 立即返回，不留 dangling continuation 触发 fatalError.

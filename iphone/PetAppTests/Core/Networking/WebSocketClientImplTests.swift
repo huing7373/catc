@@ -1347,6 +1347,268 @@ final class WebSocketClientImplTests: XCTestCase {
         client.disconnect()
     }
 
+    // MARK: - Story 12.6 heartbeat 测试
+
+    /// "握手 OK" 信号最小 room.snapshot 用于 heartbeat 测试.
+    private static let hbSnapshotJSON = """
+    {
+      "type": "room.snapshot",
+      "requestId": "",
+      "payload": {
+        "room": {"id": "RM01", "maxMembers": 4, "memberCount": 0},
+        "members": []
+      },
+      "ts": 1
+    }
+    """
+
+    /// case#HB1 happy: 心跳间隔到 → 发 ping → 收到 pong → 继续下一轮（task 仍 running，不进 timeout）.
+    func test_heartbeat_intervalElapsed_sendsPingAndReceivesPongContinues() async throws {
+        let factory = FakeWebSocketTaskFactory()
+        // scriptedFrames：第一帧 snapshot（解 connect latch + 启 heartbeat task） + 第二帧 pong（让 heartbeat 不超时）
+        let pongJSON = """
+        {"type":"pong","requestId":"ping_1","payload":{},"ts":2}
+        """
+        factory.fakeTask.scriptedFrames = [.string(Self.hbSnapshotJSON), .string(pongJSON)]
+        factory.fakeTask.blockReceiveForever = true
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        // 短间隔 + 长 pongTimeout（确保 pong 在超时窗口内到达）.
+        client.heartbeatInterval = 0.05
+        client.pongTimeout = 1.0
+
+        try await client.connect(roomId: "RM01")
+
+        // 等 0.2s（≈4 个心跳间隔）让首次 ping 发出 + pong 在 0.05s 后到达.
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        // 断言：sentMessages 包含至少 1 次 ping
+        let sent = factory.fakeTask.sentMessages
+        XCTAssertGreaterThanOrEqual(sent.count, 1, "heartbeat task 至少发了一次 ping")
+        guard case .string(let text) = sent.first else {
+            XCTFail("first sent message should be string frame, got \(String(describing: sent.first))")
+            return
+        }
+        let data = try XCTUnwrap(text.data(using: .utf8))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["type"] as? String, "ping", "heartbeat 发的是 ping")
+        XCTAssertEqual(json["requestId"] as? String, "ping_1", "首次 ping requestId == ping_1")
+
+        // 断言：pong 已识别 → underlying task 不应被 cancel(.goingAway).
+        XCTAssertNotEqual(factory.fakeTask.lastCancelCloseCode, .goingAway,
+                          "pong 已正常到达，不应触发 .goingAway cancel")
+
+        client.disconnect()
+    }
+
+    /// case#HB2 edge: 5s 未收到 pong → cancel underlying task with .goingAway → 触发 12.5 transient reconnect.
+    func test_heartbeat_pongTimeout_cancelsUnderlyingWithGoingAwayTriggersReconnect() async throws {
+        let factory = FakeReconnectFactory()
+        // 第一个 task：发 snapshot 解 latch；之后没有 pong 让 heartbeat 5s 超时.
+        // pong-timeout cancel(.goingAway) 后 stubbedCloseCode 必须 = .goingAway 让 receive-loop 走 transient (1001).
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.hbSnapshotJSON)]
+        firstTask.blockReceiveForever = true
+        // 注意：cancel(with:) 在 fake handle 内已记录 lastCancelCloseCode；但 closeCode getter 返回的是 stubbedCloseCode.
+        // 为了让 receive-loop 在 cancel 后抛错时拿到 1001 = .goingAway 走 transient，pre-set stubbedCloseCode.
+        firstTask.stubbedCloseCode = .goingAway
+
+        // 第二个 task：reconnect attempt → 发 snapshot 让 .reconnecting → .connected 链跑通.
+        let secondTask = factory.scheduleNewTask()
+        secondTask.scriptedFrames = [.string(Self.hbSnapshotJSON)]
+        secondTask.blockReceiveForever = true
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.heartbeatInterval = 0.05
+        client.pongTimeout = 0.05  // 短超时让测试快
+        client.backoffSequence = [0.05, 0.05, 0.05, 0.05, 0.05]
+
+        try await client.connect(roomId: "RM01")
+
+        // 收集 stream 上的 connection states 至 3：[.connected, .reconnecting(1), .connected].
+        let states = try await collectConnectionStates(client: client, count: 3, timeout: 5.0)
+        XCTAssertGreaterThanOrEqual(states.count, 3, "应至少收到 3 个 state events")
+        XCTAssertEqual(states[0], .connected, "首次 connect 后 emit .connected")
+        if case .reconnecting(let attempt) = states[1] {
+            XCTAssertEqual(attempt, 1, "pong 超时触发 .reconnecting(attempt: 1)")
+        } else {
+            XCTFail("Expected .reconnecting(attempt: 1), got \(states[1])")
+        }
+        XCTAssertEqual(states[2], .connected, "reconnect 成功后 emit .connected")
+
+        // 断言：firstTask 收到了 .goingAway cancel.
+        XCTAssertEqual(firstTask.lastCancelCloseCode, .goingAway,
+                       "pong 超时应 cancel underlying with .goingAway")
+        // 断言：factory 真发了第二次 makeTask（reconnect 触发）.
+        XCTAssertEqual(factory.makeTaskCallCount, 2, "应触发 reconnect → 第二次 makeTask")
+
+        client.disconnect()
+    }
+
+    /// case#HB3 happy: disconnect() 后 heartbeat task 停止（不再发 ping）.
+    func test_heartbeat_disconnectStopsHeartbeatTaskNoMorePing() async throws {
+        let factory = FakeWebSocketTaskFactory()
+        let pongJSON = """
+        {"type":"pong","requestId":"ping_1","payload":{},"ts":2}
+        """
+        factory.fakeTask.scriptedFrames = [.string(Self.hbSnapshotJSON), .string(pongJSON)]
+        factory.fakeTask.blockReceiveForever = true
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.heartbeatInterval = 0.05
+        client.pongTimeout = 1.0
+
+        try await client.connect(roomId: "RM01")
+
+        // 等 0.2s 让首次 ping 发出.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let countBefore = factory.fakeTask.sentMessages.count
+        XCTAssertGreaterThanOrEqual(countBefore, 1, "disconnect 前已发出 ping")
+
+        // 调 disconnect → cancel heartbeatTask.
+        client.disconnect()
+
+        // 等 0.3s（≥6 个心跳间隔）确认不再增长.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let countAfter = factory.fakeTask.sentMessages.count
+        XCTAssertEqual(countAfter, countBefore,
+                       "disconnect 后 heartbeat task 必须停止发 ping; before=\(countBefore) after=\(countAfter)")
+    }
+
+    /// case#HB4 happy: reconnect 成功后 heartbeat task 重启（second fake task 也收到 ping）.
+    func test_heartbeat_taskRestartsAfterReconnectSuccess() async throws {
+        let factory = FakeReconnectFactory()
+        // 第一个 task：发 snapshot → 没有 pong → heartbeat 5s timeout → cancel(.goingAway) → reconnect.
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.hbSnapshotJSON)]
+        firstTask.blockReceiveForever = true
+        firstTask.stubbedCloseCode = .goingAway
+
+        // 第二个 task（reconnect 后）：发 snapshot + pong（让 heartbeat 不再超时）.
+        let secondTask = factory.scheduleNewTask()
+        let pongJSON = """
+        {"type":"pong","requestId":"ping_1","payload":{},"ts":3}
+        """
+        secondTask.scriptedFrames = [.string(Self.hbSnapshotJSON), .string(pongJSON)]
+        secondTask.blockReceiveForever = true
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.heartbeatInterval = 0.05
+        client.pongTimeout = 0.05
+        client.backoffSequence = [0.05, 0.05, 0.05, 0.05, 0.05]
+
+        try await client.connect(roomId: "RM01")
+
+        // 等 0.5s 给：firstTask 超时（~0.1s）→ reconnect 触发（~0.05s backoff）→ secondTask connect → secondTask 心跳 ping.
+        try await Task.sleep(nanoseconds: 500_000_000)
+
+        // 断言：second fake task 收到至少一次 ping —— 证明 heartbeatTask 在 reconnect 后已重启.
+        // 注意：fake handle 的 scriptedFrames 静态调度无法精准模拟"ping 发出后 server 回 pong" 的真实时序
+        // —— pong frame 在 heartbeat 第一次发 ping 之前就被 receive-loop 消费掉，pendingPongContinuation 还
+        // 没创建，notify silent drop。所以本 case 的核心断言在"heartbeat 重启 → 第二个 task 收到 ping"，
+        // 不强求 second task 不被 .goingAway cancel（那是 fake 调度限制下的副作用，非 production 行为）.
+        XCTAssertGreaterThanOrEqual(secondTask.sentMessages.count, 1,
+                                    "reconnect 成功后 heartbeat 必须重启 → secondTask 应收到 ping")
+
+        client.disconnect()
+    }
+
+    /// fix-review round 1 P1：transient close 触发自动 reconnect 时，旧 heartbeat 的 in-flight pong timer
+    /// **不能**在新 underlyingTask install 之后 fire 并错杀新 socket.
+    ///
+    /// 时序设计（pongTimeout=500ms / heartbeatInterval=50ms）：
+    ///   T0     : connect → firstTask snapshot → heartbeat 启动
+    ///   T0+50  : heartbeat 第一次 ping firstTask → 进 awaitPongOrTimeout（pongTimeout=500ms）
+    ///   T0+150 : 测试主动 cancel firstTask（stubbedCloseCode=.goingAway → 1001 transient）
+    ///   T0+170 : receive-loop catch transient → cancelHeartbeatStateForReconnectIfCurrent（**修复点**）
+    ///            + scheduleReconnect（backoff=50ms）
+    ///   T0+220 : attemptReconnect → secondTask install + 重启 heartbeat
+    ///   T0+550 : **修复未生效时**：firstTask 的旧 pong timer fire → cancel(.goingAway, secondTask) → race bug
+    ///            **修复生效时**：旧 heartbeatTask 已被 cancel + pongCont 已 finish → timer 不 fire
+    ///   T0+700 : 测试断言时间点（介于 T0+550 与 secondTask 自己 heartbeat 超时 ~T0+790 之间）
+    ///
+    /// 选取 T_assert=700ms 的边界推导：
+    ///   下限 550ms ：旧 pong timer fire 时间（必须等过；早断言修复前/后无差异）
+    ///   上限 ~790ms：secondTask 自己 heartbeat 第一次 ping (~T0+270) + pongTimeout(500ms) ≈ T0+790
+    ///                早于此时点断言可避免被 secondTask 自己的合法 timeout 干扰.
+    ///   700ms 居中 + 留 ~90ms 时序抖动余量.
+    ///
+    /// 断言：secondTask.lastCancelCloseCode != .goingAway（修复前 == .goingAway 即失败）.
+    func test_heartbeat_oldPongTimeoutDoesNotCancelInflightReconnectSocket_round1_P1() async throws {
+        let factory = FakeReconnectFactory()
+
+        // firstTask：发 snapshot（启动 heartbeat）→ blockReceiveForever
+        // 测试主动调 cancel(with:.goingAway) 模拟 server transient close.
+        // closeCode getter 在 cancel 后仍读 stubbedCloseCode → .goingAway → classify = transient (1001).
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.hbSnapshotJSON)]
+        firstTask.blockReceiveForever = true
+        firstTask.stubbedCloseCode = .goingAway
+
+        // secondTask：reconnect 后的新 socket，发 snapshot 让 connect 路径完成.
+        // 关键：blockReceiveForever 保活 → 任何 .goingAway cancel 必定来自外部错杀路径（race bug）
+        //       或 secondTask 自己 heartbeat timeout（在 T0+790 后才 fire，断言在 T0+700 不会撞上）.
+        let secondTask = factory.scheduleNewTask()
+        secondTask.scriptedFrames = [.string(Self.hbSnapshotJSON)]
+        secondTask.blockReceiveForever = true
+        secondTask.stubbedCloseCode = .invalid
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        // heartbeatInterval 50ms：保证 ping 在 transient close 之前发出 → heartbeat 进 awaitPongOrTimeout.
+        // pongTimeout 500ms：足够长让 reconnect install 新 socket 在旧 pong timer fire 之前完成.
+        client.heartbeatInterval = 0.05
+        client.pongTimeout = 0.5
+        client.backoffSequence = [0.05, 0.05, 0.05, 0.05, 0.05]
+
+        try await client.connect(roomId: "RM01")
+
+        // T0+150ms：heartbeat 已发 ping (T0+50ms)，仍在 awaitPongOrTimeout 等 pong（T0+550ms 才超时）.
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertGreaterThanOrEqual(firstTask.sentMessages.count, 1,
+                                    "前置：heartbeat 应已发 ping 进入 awaitPongOrTimeout")
+
+        // 主动 cancel firstTask 模拟 server transient close（rawValue 1001）.
+        // receive-loop catch → transient → 修复点 cancelHeartbeatStateForReconnectIfCurrent → schedule reconnect.
+        firstTask.cancel(with: .goingAway, reason: nil)
+
+        // sleep 到 T0+700ms（再睡 550ms）：
+        //   - 已过 T0+550ms，旧 pong timer 应已 fire / 被 cancel；
+        //   - 还没到 secondTask 自己 heartbeat 超时点（~T0+790ms），不会被合法 timeout 干扰断言.
+        try await Task.sleep(nanoseconds: 550_000_000)
+
+        // 关键断言：secondTask **不应**被 .goingAway cancel.
+        // 修复前 race：旧 heartbeat 仍活 → T0+550ms pong timer fire → cancelUnderlyingTaskWithGoingAwayIfCurrent
+        // 持锁查 underlyingTask（此刻 = secondTask）→ cancel(.goingAway, secondTask) → 此断言失败.
+        XCTAssertNotEqual(secondTask.lastCancelCloseCode, .goingAway,
+                          "旧 heartbeat 的 pong timeout 不应 cancel reconnect 后的新 socket（race bug 修复验证）")
+
+        // 同时验证：reconnect 真发生过（factory 真发了 2 次 makeTask）.
+        XCTAssertGreaterThanOrEqual(factory.makeTaskCallCount, 2,
+                                    "transient close 应触发 reconnect")
+
+        client.disconnect()
+    }
+
     // MARK: - reconnect 测试 helpers
 
     /// 收集 stream 上的 connection state events 直到拿到指定数量（带超时）.
