@@ -3255,3 +3255,168 @@ func TestRoomService_PostCommit_CommitTimeLockSerializesConcurrentJoinLeave(t *t
 		t.Errorf("seq order: call[0].seq=%d should be < call[1].seq=%d", bcast.calls[0].seq, bcast.calls[1].seq)
 	}
 }
+
+// TestRoomService_PostCommit_LeaveUnregistersBeforeWorkerDrainsBacklog
+// （Story 11.8 codex review r7 [P1] regression test）：
+//
+// **r7 [P1] 背景**：r6 把 unregisterLeaverSessionSync 移进 worker 闭包以避开
+// caller 同步段 race，但 worker 是 FIFO 串行消费 —— 如果 worker queue 中已经有
+// 前序排队事件（比如同 room 之前 JoinRoom 的 broadcastMemberJoined 慢路径还在
+// 跑），LeaveRoom HTTP 200 已返回但 leaver 仍在 SessionManager；期间 worker
+// 处理 backlog 中那些 broadcast 时仍把 leaver 当 active member fanout，违反
+// V1 §10.5 步骤 7 "HTTP leave immediately detaches WS" 钦定。
+//
+// **r7 修法**：把 unregisterLeaverSessionSync 移回 LeaveRoom 的 commit-time lock
+// 段同步执行（commit 之后、enqueue 之前），保留 r6 的 lock 包 (commit + unregister
+// + enqueue + close-spawn) 保 commit-order = causal-order。HTTP 200 返回前 leaver
+// 已从 SessionManager 双索引清除，worker backlog 跑到时 ListSessionsByRoomID 不
+// 再命中 leaver。
+//
+// **测试策略**（暴露 r7 race）：
+//  1. 同 roomID 先 JoinRoom，但让 broadcastMemberJoined 内部 petRepo.FindDefault
+//     ByUserID 阻塞在一个 release channel 上 —— worker 卡在这第一条事件不返回。
+//  2. 此时 LeaveRoom 同 roomID（不同 user），断言：
+//     (a) LeaveRoom 立即 HTTP 200 返回（lock 内全 instant op）；
+//     (b) sessionMgr.unregisterCalls 已记录 leaver 的 sessionID
+//         —— 这是关键断言，**没有 r7 修复**：unregister 在 worker 闭包里，被
+//         join 的慢 broadcast 阻塞，此时 unregisterCalls 仍为空 → 断言失败。
+//         **有 r7 修复**：unregister 在 lock 段同步执行，HTTP 200 前已完成，
+//         此时 unregisterCalls 已包含 leaver sessionID。
+//  3. release join broadcast，wg.Wait() 等所有 worker 事件跑完，断言两条
+//     broadcast 顺序 [member.joined, member.left] 仍正确（commit-order 保留）。
+//
+// **限制**：本测试无法构造真 *wsapp.Session 实例（unexported newSession）；只
+// 通过 stub sessionMgr.unregisterCalls 列表断言"是否被调用 + 何时被调用"。
+// listSessionsByRoomIDFn 返一个可识别的 sessionID 字符串等价物 —— stub 实装
+// 的 Unregister 直接收 sessionID，不需要真 Session 引用。但 unregisterLeaver
+// SessionSync 需要先从 ListSessionsByRoomID 拿 *wsapp.Session 才知道 sessionID
+// → 简化方案：构造 newSession 工厂函数？当前 newSession unexported。
+//
+// **采用方案**：直接断言"r7 之前会失败"的 timing —— 在 join broadcast 阻塞
+// 期间，LeaveRoom 必须能完成 commit + (unregister 的尝试)。我们让 listSessions
+// ByRoomID 返 nil（没有真 leaver session 命中）—— 此时 unregister 走 no-op
+// path，但**关键**是 LeaveRoom 的 enqueueRoomEvent 必须能在 lock 内完成（不
+// 阻塞 worker），且后续 broadcastMemberLeft 排在 join broadcast 之后跑。
+//
+// 因此实际断言点是：
+//  - LeaveRoom HTTP 200 返回时 commit-time lock 已释放（HTTP 不阻塞）
+//  - HTTP 200 返回时 listSessionsByRoomIDFn 已被调用过（说明 unregister 路径
+//    在 lock 同步段执行了，而非排在 worker queue 后）
+//  - release join 后两条 broadcast 顺序 [joined, left] 保留
+func TestRoomService_PostCommit_LeaveUnregistersBeforeWorkerDrainsBacklog(t *testing.T) {
+	const userIDA = uint64(2002) // joiner
+	const userIDB = uint64(2003) // leaver
+	const roomID = uint64(4001)
+	const petID = uint64(8001)
+
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			switch id {
+			case userIDA:
+				return &mysql.User{ID: userIDA, Nickname: "A", AvatarURL: "https://avatar/A", CurrentRoomID: nil}, nil
+			case userIDB:
+				rid := roomID
+				return &mysql.User{ID: userIDB, Nickname: "B", CurrentRoomID: &rid}, nil
+			default:
+				t.Fatalf("unexpected FindByID id=%d", id)
+				return nil, nil
+			}
+		},
+		updateCurrentRoomIDFn: func(ctx context.Context, uid uint64, rid *uint64) error { return nil },
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDForUpdateFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
+		},
+		updateStatusFn: func(ctx context.Context, rid uint64, status int8) error { return nil },
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		countByRoomIDFn:       func(ctx context.Context, rid uint64) (int, error) { return 1, nil },
+		createFn:              func(ctx context.Context, m *mysql.RoomMember) error { return nil },
+		deleteByRoomAndUserFn: func(ctx context.Context, rid, uid uint64) (int64, error) { return 1, nil },
+	}
+
+	// petRepo 让 join 的 broadcastMemberJoined 阻塞在 release channel 上 ——
+	// worker 卡在这第一条事件不返回，模拟 worker backlog。
+	releaseJoin := make(chan struct{})
+	petRepo := &roomTestStubPetRepo{
+		findDefaultByUserIDFn: func(ctx context.Context, uid uint64) (*mysql.Pet, error) {
+			<-releaseJoin // 阻塞等主 goroutine 释放
+			return &mysql.Pet{ID: petID, UserID: uid, IsDefault: 1, CurrentState: 1}, nil
+		},
+	}
+
+	bcast, _, fn, exceptFn := newRoomTestStubBroadcastFnWithSeq()
+
+	// sessionMgr.listSessionsByRoomIDFn 在被调时记录调用次数 —— 断言点：LeaveRoom
+	// HTTP 200 返回时该计数 ≥ 1（说明 unregister 路径在 lock 同步段执行过；如果
+	// 在 worker 闭包，会被 join 的 release block 阻塞，此时 0 → 断言失败）。
+	var leaveListSessionsCalled atomic.Bool
+	sessionMgr := &roomTestStubSessionMgr{
+		listSessionsByRoomIDFn: func(ctx context.Context, rid uint64) []*wsapp.Session {
+			leaveListSessionsCalled.Store(true)
+			return nil // 不构造真 Session（newSession unexported）；走 unregister no-op
+		},
+	}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, sessionMgr, fn, exceptFn)
+	wg := &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
+
+	// 启动 A=Join：commit 同步返回 + enqueue 进 worker queue；worker 跑
+	// broadcastMemberJoined 阻塞在 petRepo.FindDefaultByUserID 上。
+	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userIDA, RoomID: roomID}); err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+
+	// 给 worker 时间消费 join 事件（让它进 petRepo.FindDefaultByUserID block）
+	// 50ms 足够 worker goroutine 启动 + 跑到 block 点。
+	time.Sleep(50 * time.Millisecond)
+
+	// 启动 B=Leave：commit-time lock 与 join 已 unlock 不冲突；lock 内同步段
+	// 含 unregister + enqueue + close-spawn，全 instant op。HTTP 200 必须立即
+	// 返回，**不**等 worker 处理 join backlog。
+	leaveStart := time.Now()
+	if _, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userIDB, RoomID: roomID}); err != nil {
+		t.Fatalf("LeaveRoom: %v", err)
+	}
+	leaveLatency := time.Since(leaveStart)
+
+	// 断言 1：LeaveRoom HTTP 路径不阻塞（worker 仍卡在 join 的 petRepo block）
+	if leaveLatency > 500*time.Millisecond {
+		t.Errorf("LeaveRoom HTTP latency = %v, want < 500ms (lock segment must be all instant ops; worker backlog must not block HTTP)", leaveLatency)
+	}
+
+	// 断言 2（**r7 关键断言**）：unregister 路径在 LeaveRoom HTTP 200 返回前
+	// 已执行 —— listSessionsByRoomIDFn 已被调用（unregisterLeaverSessionSync
+	// 同步段触发）。**没有 r7 修复**：unregister 在 worker 闭包里，被前面 join
+	// 的阻塞挡住，此时 leaveListSessionsCalled=false → 断言失败，暴露 r7 race。
+	if !leaveListSessionsCalled.Load() {
+		t.Errorf("listSessionsByRoomIDFn not called by LeaveRoom HTTP path; unregister must run synchronously in lock segment, not in worker closure (r7 [P1] regression: HTTP leave returns 200 but leaver still in SessionManager during worker backlog window)")
+	}
+
+	// 释放 join 阻塞 → worker 跑完 broadcastMemberJoined → 跑 LeaveRoom 入队的
+	// broadcastMemberLeft → wg 全部 Done。
+	close(releaseJoin)
+	wg.Wait()
+
+	// 断言 3：commit-order = causal-order 保留 —— [member.joined, member.left]。
+	bcast.mu.Lock()
+	defer bcast.mu.Unlock()
+	if len(bcast.calls) != 2 {
+		t.Fatalf("broadcast call count = %d, want 2 (1 join + 1 leave)", len(bcast.calls))
+	}
+	var env0, env1 story118EnvelopeForTest
+	if err := json.Unmarshal(bcast.calls[0].msg, &env0); err != nil {
+		t.Fatalf("unmarshal call[0]: %v", err)
+	}
+	if err := json.Unmarshal(bcast.calls[1].msg, &env1); err != nil {
+		t.Fatalf("unmarshal call[1]: %v", err)
+	}
+	if env0.Type != "member.joined" {
+		t.Errorf("call[0].type = %q, want \"member.joined\"", env0.Type)
+	}
+	if env1.Type != "member.left" {
+		t.Errorf("call[1].type = %q, want \"member.left\"", env1.Type)
+	}
+}

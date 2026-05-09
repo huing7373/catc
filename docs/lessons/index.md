@@ -223,3 +223,4 @@
 | 2026-05-09 | [异步化路径必须按业务 key（roomID）做 serialization 才能保留 caller commit 顺序的 causal ordering（11-8 r4）](2026-05-09-async-causal-ordering-needs-per-room-mutex-11-8-r4.md) | 1 | architecture, concurrency | `<pending>` |
 | 2026-05-09 | [并发顺序保证：lock 必须在 caller 同步段获取；long-running side effect 不应持 serialization lock（11-8 r5）](2026-05-09-async-ordering-must-enqueue-in-caller-sync-section-11-8-r5.md) | 2 | architecture, concurrency | `<pending>` |
 | 2026-05-09 | [commit-order = causal-order 必须 commit-time per-key serialization；caller 同步段任何工作都会破坏顺序（11-8 r6）](2026-05-09-commit-time-per-key-serialization-required-for-causal-order-11-8-r6.md) | 1 | architecture, concurrency | `<pending>` |
+| 2026-05-09 | [post-commit hook 三象限：sync 段必须 instant ops；slow ops 进 fire-and-forget；ordering-sensitive ops 进 worker queue（11-8 r7）](2026-05-09-post-commit-three-quadrants-instant-vs-slow-vs-ordered-11-8-r7.md) | 1 | architecture, concurrency | `<pending>` |
