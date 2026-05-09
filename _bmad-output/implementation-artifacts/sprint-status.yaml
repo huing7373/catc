@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-05-09 (story 11-8 done)
+# last_updated: 2026-05-09 (story 11-9 review)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-05-09  # Story 11.8 done
+last_updated: 2026-05-09  # Story 11.9 done
 # Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
 # 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
@@ -151,7 +151,7 @@ development_status:
   11-6-房间详情查询: done
   11-7-房间快照真实实现: done
   11-8-成员加入-离开-ws-广播: done
-  11-9-layer-2-集成测试-房间生命周期全流程: backlog
+  11-9-layer-2-集成测试-房间生命周期全流程: done
   11-10-get-home-扩展-room-currentroomid-真实数据: backlog
   epic-11-retrospective: optional
   epic-12: backlog
