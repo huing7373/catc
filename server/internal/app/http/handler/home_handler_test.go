@@ -203,7 +203,10 @@ func TestHomeHandler_HappyPath_FirstLogin_ReturnsCompleteSchema(t *testing.T) {
 		t.Errorf("chest.remainingSeconds = %v, want 600", chest["remainingSeconds"])
 	}
 
-	// room.currentRoomId 必须是 null（节点 2 阶段强制）
+	// room.currentRoomId 必须是 null（本 case stub 默认 RoomBrief{}.CurrentRoomID=nil
+	// 即"用户不在任何房间"；wire 行为与 4.8 节点 2 阶段一致，但 service 层语义已不同：
+	// 节点 2 阶段是 service 强制 nil；节点 4 阶段（Story 11.10 落地后）是 service 透传
+	// user.CurrentRoomID nil。本 case 输入未设 CurrentRoomID 故走 nil 分支）
 	room, ok := data["room"].(map[string]any)
 	if !ok {
 		t.Fatalf("data.room not object: %T", data["room"])
@@ -212,6 +215,100 @@ func TestHomeHandler_HappyPath_FirstLogin_ReturnsCompleteSchema(t *testing.T) {
 		t.Errorf("room.currentRoomId = %v, want nil (null)", room["currentRoomId"])
 	}
 	// 字面量验证 "currentRoomId":null
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"currentRoomId":null`)) {
+		t.Errorf(`body 未含 "currentRoomId":null 字面量；body=%s`, w.Body.String())
+	}
+}
+
+// ============================================================
+// Story 11.10: GET /home wire 层 room.currentRoomId 真实数据
+//
+// 验证 handler.homeResponseDTO 在节点 4 阶段（11.10 落地后）的 wire 输出：
+//   - out.Room.CurrentRoomID != nil → wire 写 strconv.FormatUint(...) 字符串
+//   - out.Room.CurrentRoomID == nil → wire 写 JSON null（**不**是 ""）
+// ============================================================
+
+// AC11.10.4 wire: 用户在房间 → response.data.room.currentRoomId = "3001"（string，**不**是 number）
+//
+// 验证 handler 把 *uint64 → strconv.FormatUint 字符串化路径正确。
+func TestHomeHandler_UserInRoom_CurrentRoomIDIsString(t *testing.T) {
+	roomID := uint64(3001)
+	uid := uint64(1)
+	svc := &stubHomeService{
+		loadHomeFn: func(ctx context.Context, userID uint64) (*service.HomeOutput, error) {
+			return &service.HomeOutput{
+				User:        service.UserBrief{ID: 1, Nickname: "u"},
+				Pet:         &service.PetBrief{ID: 2, PetType: 1, Name: "p", CurrentState: 1},
+				StepAccount: service.StepAccountBrief{},
+				Chest: service.ChestBrief{
+					ID: 5, Status: 1, UnlockAt: time.Now().UTC().Add(10 * time.Minute),
+					OpenCostSteps: 1000, RemainingSeconds: 600,
+				},
+				Room: service.RoomBrief{CurrentRoomID: &roomID},
+			}, nil
+		},
+	}
+	r := newHomeHandlerRouter(svc, &uid)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/home", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeHomeEnvelope(t, w.Body.Bytes())
+	data, ok := env.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("envelope.data not object: %T", env.Data)
+	}
+	room, ok := data["room"].(map[string]any)
+	if !ok {
+		t.Fatalf("data.room not object: %T", data["room"])
+	}
+	if room["currentRoomId"] != "3001" {
+		t.Errorf("room.currentRoomId = %v (%T), want \"3001\" (string)", room["currentRoomId"], room["currentRoomId"])
+	}
+	// 字面量验证：必须含 "currentRoomId":"3001" 而非 "currentRoomId":3001（number）
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"currentRoomId":"3001"`)) {
+		t.Errorf(`body 未含 "currentRoomId":"3001" 字面量；body=%s`, w.Body.String())
+	}
+}
+
+// AC11.10.5 wire: 用户不在任何房间 → response.data.room.currentRoomId = null（**不**是 ""）
+//
+// 验证 handler 把 nil *uint64 → JSON null 路径正确（与节点 2 阶段 4.8 同字面量行为，
+// 但 service 层语义不同：节点 2 是 service 强制 nil，节点 4 是 service 透传 user.CurrentRoomID nil）。
+func TestHomeHandler_UserNotInAnyRoom_CurrentRoomIDIsNull(t *testing.T) {
+	uid := uint64(1)
+	svc := &stubHomeService{
+		loadHomeFn: func(ctx context.Context, userID uint64) (*service.HomeOutput, error) {
+			return &service.HomeOutput{
+				User:        service.UserBrief{ID: 1, Nickname: "u"},
+				Pet:         &service.PetBrief{ID: 2, PetType: 1, Name: "p", CurrentState: 1},
+				StepAccount: service.StepAccountBrief{},
+				Chest: service.ChestBrief{
+					ID: 5, Status: 1, UnlockAt: time.Now().UTC().Add(10 * time.Minute),
+					OpenCostSteps: 1000, RemainingSeconds: 600,
+				},
+				Room: service.RoomBrief{CurrentRoomID: nil},
+			}, nil
+		},
+	}
+	r := newHomeHandlerRouter(svc, &uid)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/home", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeHomeEnvelope(t, w.Body.Bytes())
+	data := env.Data.(map[string]any)
+	room := data["room"].(map[string]any)
+	if room["currentRoomId"] != nil {
+		t.Errorf("room.currentRoomId = %v, want nil (null)", room["currentRoomId"])
+	}
+	// 字面量验证：必须含 "currentRoomId":null
 	if !bytes.Contains(w.Body.Bytes(), []byte(`"currentRoomId":null`)) {
 		t.Errorf(`body 未含 "currentRoomId":null 字面量；body=%s`, w.Body.String())
 	}

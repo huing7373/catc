@@ -85,16 +85,17 @@ func (h *HomeHandler) LoadHome(c *gin.Context) {
 //   - pet 可空：out.Pet == nil → "pet": null（**不**是 {} 空对象 —— V1 §5.1 行 335 钦定）
 //   - chest.unlockAt 用 RFC3339 格式（time.Time.Format(time.RFC3339)）
 //   - chest.remainingSeconds 已在 service 层算好（int 秒数；可能为 0）
-//   - room.currentRoomId 节点 2 阶段固定 nil（gin.H{"currentRoomId": nil} 序列化为 null）
+//   - room.currentRoomId 节点 4 阶段（Story 11.10）落地真实数据：nil → null /
+//     非 nil → strconv.FormatUint(...) 字符串化（V1 §5.1 行 374 钦定 string | null）
 //   - pet.equips 节点 2 阶段固定 `[]any{}`（**不**用 nil —— nil slice 序列化为 null）
 //
-// # V1 §5.1 节点 2 阶段必须严格返回的字段集（任一缺失 → iOS DTO 解码失败）
+// # V1 §5.1 节点 4 阶段必须严格返回的字段集（任一缺失 → iOS DTO 解码失败）
 //
 //   - data.user: id / nickname / avatarUrl
 //   - data.pet（可空）: id / petType / name / currentState / equips（[]）
 //   - data.stepAccount: totalSteps / availableSteps / consumedSteps
 //   - data.chest: id / status / unlockAt / openCostSteps / remainingSeconds
-//   - data.room: currentRoomId（null）
+//   - data.room: currentRoomId（string | null —— 节点 4 起由 Story 11.10 注入真实数据）
 func homeResponseDTO(out *service.HomeOutput) gin.H {
 	// petDTO 用 any 类型（非 gin.H）：让 nil 序列化为 JSON null（gin.H 是 map，
 	// nil map 序列化也是 null，但 any 类型最稳定且 reviewer 一目了然）
@@ -110,6 +111,21 @@ func homeResponseDTO(out *service.HomeOutput) gin.H {
 			"equips": []any{},
 		}
 	}
+
+	// room.currentRoomId: 节点 4 阶段（Story 11.10）落地真实数据。
+	//
+	//   - out.Room.CurrentRoomID == nil → wire 写 null（用户不在任何房间）
+	//   - out.Room.CurrentRoomID != nil → wire 写 strconv.FormatUint(...)（BIGINT 字符串化）
+	//
+	// V1 §5.1 行 374 钦定 currentRoomId 类型 string | null；BIGINT 字符串化对齐 V1 §2.5
+	// （避免 JS Number 精度丢失 + AR21 ID 字符串约定）；nil 序列化为 JSON null 走 any
+	// 显式类型路径，**不**用 *string 等过度迂回。与上方 petDTO 走同模式。
+	var currentRoomIDDTO any
+	if out.Room.CurrentRoomID != nil {
+		currentRoomIDDTO = strconv.FormatUint(*out.Room.CurrentRoomID, 10)
+	}
+	// currentRoomIDDTO 默认零值 = nil interface{} → json 序列化为 null
+
 	return gin.H{
 		"user": gin.H{
 			"id":        strconv.FormatUint(out.User.ID, 10),
@@ -130,9 +146,9 @@ func homeResponseDTO(out *service.HomeOutput) gin.H {
 			"remainingSeconds": out.Chest.RemainingSeconds,
 		},
 		"room": gin.H{
-			// 节点 2 阶段强制 null（即便 users.current_room_id 字段已存在）；
-			// Story 11.10 节点 4 才接 users.current_room_id 真值。
-			"currentRoomId": nil,
+			// 节点 4 阶段（Story 11.10）落地真实数据；之前节点 2 阶段（Story 4.8）写死 nil。
+			// 详见 currentRoomIDDTO 局部变量条件赋值。
+			"currentRoomId": currentRoomIDDTO,
 		},
 	}
 }

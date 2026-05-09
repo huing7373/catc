@@ -40,11 +40,14 @@ type HomeService interface {
 //   - Pet: 可空（用户无默认 pet → nil；V1 §5.1 钦定的 edge case）
 //   - StepAccount: 必有（登录初始化时已建；缺 → 1009）
 //   - Chest: 必有 + Status / RemainingSeconds 已动态计算（不是 DB 原值）
+//   - Room: 必有容器（即便用户不在任何房间也是 RoomBrief{} 而非 nil）—— V1 §5.1 行 374
+//     钦定 data.room **容器永远存在**，currentRoomId 字段才可空；详见 RoomBrief 注释
 type HomeOutput struct {
 	User        UserBrief
 	Pet         *PetBrief // 可空（nil = 用户无默认 pet）
 	StepAccount StepAccountBrief
 	Chest       ChestBrief
+	Room        RoomBrief
 }
 
 // UserBrief 是 V1 §5.1 data.user 的 service 层映射。
@@ -81,6 +84,26 @@ type ChestBrief struct {
 	UnlockAt         time.Time // UTC（与 V1 §2.5 一致）
 	OpenCostSteps   uint32
 	RemainingSeconds int64 // max(0, int64(unlockAt - now))
+}
+
+// RoomBrief 是 V1 §5.1 data.room 的 service 层映射。
+//
+// **节点 4 阶段唯一字段**：CurrentRoomID（*uint64，nil = 用户不在任何房间）。
+//
+// **不**含 roomCode / room.id / memberCount 等：V1 §5.1 data.room 在节点 4 阶段
+// 仅声明 `currentRoomId: string | null` 一个字段（详见 V1 §5.1 行 374）；房间详情
+// 由 §10.2 GET /rooms/current + §10.3 GET /rooms/{id} 单独查询。本 struct 故意只含
+// 1 个字段而非提前展开 —— 任何字段扩展（如 roomCode）由 future epic 决策（不在 V1 §5.1
+// schema 钦定范围内 → 不属于本 story 11.10）。
+//
+// 字段类型 *uint64 而非 uint64：
+//   - users.current_room_id 是 BIGINT UNSIGNED NULL（数据库设计 §5.1）
+//   - 用户不在任何房间 → user.CurrentRoomID == nil → 本字段也是 nil
+//   - 用户在房间 → user.CurrentRoomID == &roomID → 本字段也是 &roomID
+//   - 与 mysql.User.CurrentRoomID 字段类型 1:1 对齐，handler 层做 nil → null /
+//     非 nil → strconv.FormatUint 转字符串两路分支
+type RoomBrief struct {
+	CurrentRoomID *uint64 // nil = 用户不在任何房间（V1 §5.1 行 374 可空语义）
 }
 
 // homeServiceImpl 是 HomeService 的默认实装。
@@ -194,6 +217,15 @@ func (s *homeServiceImpl) LoadHome(ctx context.Context, userID uint64) (*HomeOut
 			OpenCostSteps:    chest.OpenCostSteps,
 			RemainingSeconds: remainingSeconds,
 		},
+		// Room: V1 §5.1 行 374 钦定 currentRoomId 类型 string | null。
+		// **节点 4 阶段（Story 11.10）落地真实数据** —— 节点 2 阶段（4.8）的"强制 nil"
+		// 红线在此解除：直接透传 user.CurrentRoomID（mysql.User.CurrentRoomID *uint64）。
+		//   - 用户不在任何房间 → user.CurrentRoomID == nil → RoomBrief{CurrentRoomID: nil}
+		//   - 用户在房间 X → user.CurrentRoomID == &X → RoomBrief{CurrentRoomID: &X}
+		// **零额外 repo 调用**：current_room_id 是 users 表字段，已在 (1) FindByID 一次性
+		// 返回；无需新建 RoomRepo / 不查 rooms 表 cross-check（epics.md §Story 11.10
+		// edge case 钦定 service **不做** rooms.status 校验）。
+		Room: RoomBrief{CurrentRoomID: user.CurrentRoomID},
 	}, nil
 }
 
