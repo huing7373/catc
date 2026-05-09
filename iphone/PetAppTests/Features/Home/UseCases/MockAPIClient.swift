@@ -27,6 +27,10 @@ final class MockAPIClient: APIClientProtocol, @unchecked Sendable {
     var stubResponse: [String: Stub] = [:]
     private(set) var invocations: [Endpoint] = []
 
+    /// fix-review round 1 P2（Story 12.2 review）：满足 APIClientProtocol.baseURL 约束.
+    /// 占位 host-only URL（mock 不真实拨号）；测试需要校验 baseURL 派生 WS URL 时可直接覆盖.
+    var baseURL: URL = URL(string: "http://mock.test")!
+
     func request<T: Decodable>(_ endpoint: Endpoint) async throws -> T {
         invocations.append(endpoint)
         guard let stub = stubResponse[endpoint.path] else {

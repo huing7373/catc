@@ -89,6 +89,11 @@ public final class AuthBoundaryAPIClient: APIClientProtocol {
         self.sink = sink
     }
 
+    /// fix-review round 1 P2（Story 12.2 review）：decorator 透传 inner baseURL.
+    /// 让 AppContainer 通过 wrappedAPIClient.baseURL 拿到与 REST 调用同源的 host-only URL,
+    /// 派生 WebSocketClient 时不会退回 Bundle.main 默认值（split-brain 隐患）.
+    public var baseURL: URL { inner.baseURL }
+
     public func request<T: Decodable>(_ endpoint: Endpoint) async throws -> T {
         do {
             return try await inner.request(endpoint)

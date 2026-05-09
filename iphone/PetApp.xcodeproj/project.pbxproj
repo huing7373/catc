@@ -44,6 +44,7 @@
 		373DAFC7ED3ECA3DA9F61201 /* KeychainServicesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C5ED72E2191EE2624B1770 /* KeychainServicesStore.swift */; };
 		3850A7F0D3CA11A7304E4911 /* RetryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1369A3F537485008A6066B8F /* RetryView.swift */; };
 		38802607E5107149270AF777 /* ErrorComponentSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 598DFB9DFABF82C3D9C33645 /* ErrorComponentSnapshotTests.swift */; };
+		39326C3DBDB59A8B79C9FA43 /* WebSocketClientImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B972013291833B073EE04C8 /* WebSocketClientImpl.swift */; };
 		3A17175565015AE8694093C4 /* WardrobeScaffoldDefaults.swift in Sources */ = {isa = PBXBuildFile; fileRef = 696D05F92B84441352736D9D /* WardrobeScaffoldDefaults.swift */; };
 		3AB75F44CAA4FEC4CA8F135E /* Friend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51C7B1DDF6EBE8D4659AB4C8 /* Friend.swift */; };
 		3D3F318DFF39E1A2230C8656 /* WardrobeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D836DE136F5616109D4BA59 /* WardrobeViewModel.swift */; };
@@ -53,11 +54,13 @@
 		4158EEBFA7D1499EC398928A /* HomeViewModelLoadHomeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E13185203AFBFE4069761426 /* HomeViewModelLoadHomeTests.swift */; };
 		4304F9B83AF96AF62042C7C8 /* FriendsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DFE6BFD422F3533CB8F1F7C /* FriendsViewModel.swift */; };
 		4449E09577B83A912CB4B872 /* MockAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DA46BB6516A8163D6A248A3 /* MockAPIClient.swift */; };
+		45073A0997BBCAD3123CCD55 /* WSMessageCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7EB4C4399B419EFC216FFF1 /* WSMessageCodec.swift */; };
 		45150EC475C8A7BF8C9052A3 /* PingEndpoints.swift in Sources */ = {isa = PBXBuildFile; fileRef = 517BF7C81F0AD987AB070D28 /* PingEndpoints.swift */; };
 		464399591B61E13F5171051A /* PingUseCaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B2ACBBE683A3060C031F2FD /* PingUseCaseTests.swift */; };
 		47857C117AE5354586EE0A4D /* MotionProviderMock.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEC51C8FA46026E39A419461 /* MotionProviderMock.swift */; };
 		4817EF1ED239EBF0E605B91D /* AuthBoundaryAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5FCD252237F18D574A5D62C /* AuthBoundaryAPIClient.swift */; };
 		493A434FD1736D7EF2108A3D /* HealthKitDevSeedUseCase.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACE012300639160326BEB63B /* HealthKitDevSeedUseCase.swift */; };
+		4999E396DE84ED73D2ECE77D /* WSError.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80BCC0927BBBB7F911E8BFF /* WSError.swift */; };
 		49C6231BB1B7E1AB69F5B84D /* ProfileViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A97B3FDFA80DE7BD738FB30A /* ProfileViewModel.swift */; };
 		4AD575B216B86E661E7A8750 /* ProfileSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B69F545EB0DBC3B71CE027D /* ProfileSummary.swift */; };
 		4B693DCA47561448DC6F9945 /* WebSocketClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F34F82C20EA4745D4A744162 /* WebSocketClient.swift */; };
@@ -77,6 +80,7 @@
 		58363A2ADA22DCBFBE7DC1BA /* RoomMember.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EA8CC02E98250460FA152FB /* RoomMember.swift */; };
 		584594D67CE4701160C928E2 /* HealthProviderMock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34163252941DF690995BFB1A /* HealthProviderMock.swift */; };
 		58649C096E537F2FA8D1E78E /* FriendsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC2CF38E3A76DC8E8662235E /* FriendsView.swift */; };
+		5878EDD188EA346A3E00DDF1 /* WSOutgoingMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 911171DD5AD8DFEC7848ECC3 /* WSOutgoingMessage.swift */; };
 		58EAFDF2A5E4320047CF61EA /* FriendsScaffoldView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F05CB847053EF404BADB71EF /* FriendsScaffoldView.swift */; };
 		5A3067A38CB01D5308374CC7 /* AnimationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA9576EF29E7DDEFE5364260 /* AnimationState.swift */; };
 		5D07216FD1E42F2C14420EE3 /* PingResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = 480BA05AC64B4E5774C10FA1 /* PingResult.swift */; };
@@ -133,6 +137,7 @@
 		96EB39DFB25796C8A79E9C53 /* StepSyncIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D83DEC0D12C9D61EA1A4441 /* StepSyncIntegrationTests.swift */; };
 		9748566553F6151446914CD9 /* MockHomeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53626EAC744E0B95F75982FC /* MockHomeViewModel.swift */; };
 		9784DD8C692C749E4ABF1148 /* PrimaryButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD04586F72889D42EE94EEE0 /* PrimaryButton.swift */; };
+		97F0C95E89DC7EA298D32DC4 /* WebSocketClientImplTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9F98024A6B0691C48CCB177 /* WebSocketClientImplTests.swift */; };
 		98254ACE6BE190BB8E11DE19 /* AccessibilityID.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79F734D5F9AF44A335420A7F /* AccessibilityID.swift */; };
 		98921A74BA58D2A6091083B4 /* RealWardrobeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE768111BA9DEEF46D0B24CE /* RealWardrobeViewModel.swift */; };
 		9983E34AA44F9B1A4B064F33 /* StatefulMockAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D064C818136EC5DFF7EBC59 /* StatefulMockAPIClient.swift */; };
@@ -349,8 +354,10 @@
 		888D225A128DCA72FB42B042 /* SampleTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleTypes.swift; sourceTree = "<group>"; };
 		89105F17F2BEF3B6D2F07293 /* AppLaunchStateMachineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLaunchStateMachineTests.swift; sourceTree = "<group>"; };
 		8B3B005848E85E46928DC192 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
+		8B972013291833B073EE04C8 /* WebSocketClientImpl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketClientImpl.swift; sourceTree = "<group>"; };
 		8C0714D4EFFFDAE1112D45FB /* ThemeSpacing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeSpacing.swift; sourceTree = "<group>"; };
 		8FB4F36ADF01E77F59557630 /* GuestLoginUseCaseIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuestLoginUseCaseIntegrationTests.swift; sourceTree = "<group>"; };
+		911171DD5AD8DFEC7848ECC3 /* WSOutgoingMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WSOutgoingMessage.swift; sourceTree = "<group>"; };
 		9671FE72F72308AF3D2862A5 /* LaunchingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchingView.swift; sourceTree = "<group>"; };
 		972FF916F8DB2CCEF03FB42C /* RoomViewScaffoldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomViewScaffoldTests.swift; sourceTree = "<group>"; };
 		998C34BD14F4C0B81C495080 /* PingStubURLProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PingStubURLProtocol.swift; sourceTree = "<group>"; };
@@ -397,6 +404,8 @@
 		C54775F74DADA7086E92823B /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
 		C5FCD252237F18D574A5D62C /* AuthBoundaryAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthBoundaryAPIClient.swift; sourceTree = "<group>"; };
 		C7D4931E35C60136DF59EBF3 /* RecentCollection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentCollection.swift; sourceTree = "<group>"; };
+		C7EB4C4399B419EFC216FFF1 /* WSMessageCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WSMessageCodec.swift; sourceTree = "<group>"; };
+		C9F98024A6B0691C48CCB177 /* WebSocketClientImplTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketClientImplTests.swift; sourceTree = "<group>"; };
 		CA0A53B2DE325D783AA52526 /* HealthProviderImpl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthProviderImpl.swift; sourceTree = "<group>"; };
 		CAA6988B9A64BBA62374B494 /* MockLoadHomeUseCase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockLoadHomeUseCase.swift; sourceTree = "<group>"; };
 		CAB6968619ECEAFB7605E183 /* CosmeticCategory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CosmeticCategory.swift; sourceTree = "<group>"; };
@@ -428,6 +437,7 @@
 		F3978CC2E5ACA8705B677290 /* MockRoomViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockRoomViewModel.swift; sourceTree = "<group>"; };
 		F5A7149609AC252D26069330 /* StepsSyncResponse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StepsSyncResponse.swift; sourceTree = "<group>"; };
 		F6A56BD4CDD8A553CC16BDF6 /* DeviceInfoProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceInfoProvider.swift; sourceTree = "<group>"; };
+		F80BCC0927BBBB7F911E8BFF /* WSError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WSError.swift; sourceTree = "<group>"; };
 		F9EFA8790E4F25D6B495C1B8 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		FB48C86EC0A0561EEFDB99CA /* MockAuthRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockAuthRepository.swift; sourceTree = "<group>"; };
 		FB5AFE430C56296FDF1008C1 /* CoreMotion.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMotion.framework; path = System/Library/Frameworks/CoreMotion.framework; sourceTree = SDKROOT; };
@@ -459,7 +469,11 @@
 				600F822FA6A6E05A63B10775 /* Endpoint.swift */,
 				FD158D72201FD8CE844F6A94 /* URLSessionProtocol.swift */,
 				F34F82C20EA4745D4A744162 /* WebSocketClient.swift */,
+				8B972013291833B073EE04C8 /* WebSocketClientImpl.swift */,
 				A61248D918E858BF304C7C6A /* WebSocketClientMock.swift */,
+				F80BCC0927BBBB7F911E8BFF /* WSError.swift */,
+				C7EB4C4399B419EFC216FFF1 /* WSMessageCodec.swift */,
+				911171DD5AD8DFEC7848ECC3 /* WSOutgoingMessage.swift */,
 			);
 			path = Networking;
 			sourceTree = "<group>";
@@ -593,6 +607,7 @@
 				A1AB60BB6D5DD6441DA59CF8 /* MockURLSession.swift */,
 				3D064C818136EC5DFF7EBC59 /* StatefulMockAPIClient.swift */,
 				B7213E6B5CAEC2E5615097D5 /* StubURLProtocol.swift */,
+				C9F98024A6B0691C48CCB177 /* WebSocketClientImplTests.swift */,
 			);
 			path = Networking;
 			sourceTree = "<group>";
@@ -1544,6 +1559,7 @@
 				129205EA53839C1ECEBC5F07 /* SyncStepsUseCaseTests.swift in Sources */,
 				4C1B4029CE0A263CAFEDE1B5 /* ThemeTests.swift in Sources */,
 				F7526C83559976D7C0658CA1 /* WardrobeViewScaffoldTests.swift in Sources */,
+				97F0C95E89DC7EA298D32DC4 /* WebSocketClientImplTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1686,12 +1702,16 @@
 				E15923D0952EB8D8EF69868F /* ThemeTypography.swift in Sources */,
 				92F54F64E168B9282A1B7FFE /* ToastView.swift in Sources */,
 				7870245EC5F30C39A3286B6A /* URLSessionProtocol.swift in Sources */,
+				4999E396DE84ED73D2ECE77D /* WSError.swift in Sources */,
+				45073A0997BBCAD3123CCD55 /* WSMessageCodec.swift in Sources */,
+				5878EDD188EA346A3E00DDF1 /* WSOutgoingMessage.swift in Sources */,
 				72B84D0BC5F8371D3BD92ADC /* WSState.swift in Sources */,
 				3A17175565015AE8694093C4 /* WardrobeScaffoldDefaults.swift in Sources */,
 				7ADBDC56A2CEB23A3498AF5A /* WardrobeScaffoldView.swift in Sources */,
 				53A82FAD3DD6950720ACC16A /* WardrobeView.swift in Sources */,
 				3D3F318DFF39E1A2230C8656 /* WardrobeViewModel.swift in Sources */,
 				4B693DCA47561448DC6F9945 /* WebSocketClient.swift in Sources */,
+				39326C3DBDB59A8B79C9FA43 /* WebSocketClientImpl.swift in Sources */,
 				C0D3AA07AFB73565A6F6F0F3 /* WebSocketClientMock.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -82,6 +82,17 @@ public final class AppContainer: ObservableObject {
     /// 测试场景通过 init(apiClient:keychainStore:unauthorizedHandlerSink:dateProvider:) 重载注入 mock）.
     public let dateProvider: DateProvider
 
+    /// Story 12.2 AC7 新增：全 App 共享的 WebSocketClient.
+    /// Story 12.7 LeaveRoomUseCase / JoinRoomUseCase 落地后通过 container.webSocketClient 注入到
+    /// RealRoomViewModel.bind(appState:webSocketClient:)；本 story 仅就位字段，**不**改 RootView wire
+    /// （RootView 仍传 nil；Story 12.7 才把真实 client 注入）.
+    ///
+    /// 默认 init：实例化 WebSocketClientImpl(baseURL:, tokenProvider:)，
+    ///   - baseURL 与 APIClient 共享（resolveDefaultBaseURL，host-only）
+    ///   - tokenProvider 闭包从 keychainStore 读 KeychainKey.authToken；与 APIClient 同源 token.
+    /// 测试 init 重载允许注入 mock client.
+    public let webSocketClient: WebSocketClient
+
     #if DEBUG
     /// Story 8.5 AC11: UITest 路径下注入的 mock StepRepository（替代默认 DefaultStepRepository）.
     /// 仅 DEBUG 编译；通过 `UITEST_MOCK_STEP_SYNC=1` launch arg 启用.
@@ -114,6 +125,15 @@ public final class AppContainer: ObservableObject {
         let baseAPIClient = APIClient(baseURL: baseURL, keychainStore: keychainStore)
         let sink = UnauthorizedHandlerSink()
         let wrappedAPIClient = AuthBoundaryAPIClient(inner: baseAPIClient, sink: sink)
+
+        // Story 12.2 AC7：实例化默认 WebSocketClientImpl（与 baseAPIClient 共享 baseURL + keychainStore）.
+        // tokenProvider 闭包在 connect 时调；闭包内 strong-capture keychainStore（与 baseAPIClient / AuthBoundary 同源）.
+        let wsClient = WebSocketClientImpl(
+            baseURL: baseURL,
+            tokenProvider: { [keychainStore] in
+                return try? keychainStore.get(forKey: KeychainKey.authToken.rawValue)
+            }
+        )
 
         #if DEBUG
         // Story 8.5 AC11: UITest 路径走 launch env 注入 mock StepRepository + mock HealthProvider.
@@ -149,6 +169,7 @@ public final class AppContainer: ObservableObject {
             apiClient: wrappedAPIClient,
             keychainStore: keychainStore,
             unauthorizedHandlerSink: sink,
+            webSocketClient: wsClient,
             healthProvider: uitestMockHealth,
             uiTestMockStepRepository: uitestMockStepRepo
         )
@@ -156,7 +177,8 @@ public final class AppContainer: ObservableObject {
         self.init(
             apiClient: wrappedAPIClient,
             keychainStore: keychainStore,
-            unauthorizedHandlerSink: sink
+            unauthorizedHandlerSink: sink,
+            webSocketClient: wsClient
         )
         #endif
     }
@@ -172,6 +194,7 @@ public final class AppContainer: ObservableObject {
         apiClient: APIClientProtocol,
         keychainStore: KeychainStoreProtocol = KeychainServicesStore(),
         unauthorizedHandlerSink: UnauthorizedHandlerSink = UnauthorizedHandlerSink(),
+        webSocketClient: WebSocketClient? = nil,
         dateProvider: DateProvider = DefaultDateProvider(),
         healthProvider: HealthProvider? = nil,
         uiTestMockStepRepository: StepRepositoryProtocol? = nil
@@ -181,6 +204,16 @@ public final class AppContainer: ObservableObject {
         self.keychainStore = keychainStore
         self.sessionStore = SessionStore()
         self.unauthorizedHandlerSink = unauthorizedHandlerSink
+        // Story 12.2 AC7 + fix-review round 1 P2：webSocketClient 默认 nil 时 fallback 到
+        //   **apiClient.baseURL**（保 REST + WS 同源），而**不是** Bundle.main 默认值
+        //   —— 避免 split-brain（如测试 / Preview / alt-env 注入非默认 apiClient 后，
+        //   container.webSocketClient 仍打 localhost）.
+        self.webSocketClient = webSocketClient ?? WebSocketClientImpl(
+            baseURL: apiClient.baseURL,
+            tokenProvider: { [keychainStore] in
+                return try? keychainStore.get(forKey: KeychainKey.authToken.rawValue)
+            }
+        )
         self.healthProvider = healthProvider ?? HealthProviderImpl()
         self.motionProvider = MotionProviderImpl()
         self.dateProvider = dateProvider
@@ -191,6 +224,7 @@ public final class AppContainer: ObservableObject {
         apiClient: APIClientProtocol,
         keychainStore: KeychainStoreProtocol = KeychainServicesStore(),
         unauthorizedHandlerSink: UnauthorizedHandlerSink = UnauthorizedHandlerSink(),
+        webSocketClient: WebSocketClient? = nil,
         dateProvider: DateProvider = DefaultDateProvider()
     ) {
         self.apiClient = apiClient
@@ -198,6 +232,13 @@ public final class AppContainer: ObservableObject {
         self.keychainStore = keychainStore
         self.sessionStore = SessionStore()
         self.unauthorizedHandlerSink = unauthorizedHandlerSink
+        // Story 12.2 AC7 + fix-review round 1 P2：见 DEBUG 分支同段注释.
+        self.webSocketClient = webSocketClient ?? WebSocketClientImpl(
+            baseURL: apiClient.baseURL,
+            tokenProvider: { [keychainStore] in
+                return try? keychainStore.get(forKey: KeychainKey.authToken.rawValue)
+            }
+        )
         self.healthProvider = HealthProviderImpl()
         self.motionProvider = MotionProviderImpl()
         self.dateProvider = dateProvider

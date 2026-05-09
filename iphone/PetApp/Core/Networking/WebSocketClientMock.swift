@@ -26,6 +26,17 @@ public final class WebSocketClientMock: WebSocketClient, @unchecked Sendable {
     /// 测试用：记录 `prepareForReconnect()` 调用次数（让 viewmodel A→B / leave-rejoin 路径可断言）.
     public private(set) var prepareForReconnectCallCount: Int = 0
 
+    /// Story 12.2 AC6 新增：记录 connect 调用（让单测断言"connect 被调 + roomId 正确"）.
+    public private(set) var connectCallArgs: [String] = []
+
+    /// Story 12.2 AC6 新增：记录 send 调用（让单测断言"ping 被发出 + requestId 一致"）.
+    public private(set) var sentMessages: [WSOutgoingMessage] = []
+
+    /// Story 12.2 AC6 新增：connect / send 的可控 stub 错误（默认 nil = 不抛错）.
+    /// 测试场景：模拟"token 失效"路径让 connect 抛 WSError.tokenMissing.
+    public var connectError: WSError?
+    public var sendError: WSError?
+
     public init() {
         let (stream, cont) = AsyncStream<WSMessage>.makeStream()
         self.currentStream = stream
@@ -35,6 +46,18 @@ public final class WebSocketClientMock: WebSocketClient, @unchecked Sendable {
     /// 测试用：手动 yield 消息驱动 RealRoomViewModel 解析路径.
     public func emit(_ message: WSMessage) {
         currentContinuation.yield(message)
+    }
+
+    /// Story 12.2 AC6：mock connect —— 不真实拨号，只记录调用 + 可选抛错.
+    public func connect(roomId: String) async throws {
+        connectCallArgs.append(roomId)
+        if let err = connectError { throw err }
+    }
+
+    /// Story 12.2 AC6：mock send —— 不真实发送，只记录调用 + 可选抛错.
+    public func send(_ message: WSOutgoingMessage) async throws {
+        sentMessages.append(message)
+        if let err = sendError { throw err }
     }
 
     public func disconnect() {

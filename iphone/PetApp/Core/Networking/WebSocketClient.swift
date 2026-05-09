@@ -25,6 +25,25 @@ public protocol WebSocketClient: AnyObject, Sendable {
     /// stream，然后再次读 `messages`（拿到新 stream）+ 起新 consumer task.
     var messages: AsyncStream<WSMessage> { get }
 
+    /// Story 12.2 新增：拨号到指定 roomId 的 WS 网关.
+    ///
+    /// 实装层（WebSocketClientImpl）：
+    /// 1. 用 tokenProvider() 取最新 Bearer token（nil → throw WSError.tokenMissing）
+    /// 2. 拼接 `{ws_scheme}://{host}/ws/rooms/{roomId}?token={url-encoded}`（V1 §12.1）
+    /// 3. URLSession.webSocketTask(with: URLRequest) → resume()
+    /// 4. 启动 receive 长任务，把 underlying frame 解码为 WSMessage 并 yield 到 messages stream
+    /// 5. 拨号失败（DNS / TLS / connection refused）→ throw WSError.connectionFailed(underlying:)
+    ///
+    /// 调用约定：caller（Story 12.7 UseCase 或 Story 12.5 reconnect 状态机）必须在 `messages`
+    /// 被消费之前调；同一 client 复用时（leave-rejoin / room A→B）必须先 disconnect → prepareForReconnect → connect.
+    func connect(roomId: String) async throws
+
+    /// Story 12.2 新增：发送 client → server 消息（节点 4 阶段仅 ping —— Story 12.6 心跳消费）.
+    ///
+    /// 实装层：JSONEncode WSOutgoingMessage → 写 underlying URLSessionWebSocketTask.send(.string(...)).
+    /// 未连接 / 已 disconnect → throw WSError.notConnected.
+    func send(_ message: WSOutgoingMessage) async throws
+
     /// 主动断开（用户 leave / app 切后台）；触发 close code 1000（client-initiated close）.
     /// 调用后 `messages` stream 终止（finish），caller 应取消 for-await 循环.
     func disconnect()
@@ -35,13 +54,9 @@ public protocol WebSocketClient: AnyObject, Sendable {
     /// **语义**：调用后 `messages` getter 返回**新的** AsyncStream（旧 stream 已被 disconnect finish；
     ///   下一次 caller 起 for-await 拿到的是这个新 stream）.
     ///
-    /// **本 story（12.1）阶段**：只有 mock 需要实装真正的 stream 重置；production `WebSocketClientImpl`
-    ///   尚未落地，protocol 给默认 **no-op**（见 protocol extension）.
-    ///
     /// **Story 12.2 落地路线**：`WebSocketClientImpl.prepareForReconnect()` 在内部清掉旧 task 状态
     ///   + 准备好新 stream/continuation（与 `connect(roomId:)` 串接：通常 caller 会调
     ///   `prepareForReconnect()` → `connect(roomId: next)` → `for await ... in client.messages`）.
-    ///   届时本方法可以与 `connect(roomId:)` 合并，或保持独立接缝（让"准备 stream"与"拨号"解耦）.
     func prepareForReconnect()
 }
 

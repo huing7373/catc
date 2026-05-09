@@ -222,4 +222,40 @@ final class AppContainerTests: XCTestCase {
         XCTAssertEqual(allowsLocal, true,
                        "NSAllowsLocalNetworking 必须为 true；缺失会让 ping/version 在真机和模拟器都被 ATS 拒绝")
     }
+
+    // MARK: - fix-review round 1 P2 (Story 12.2)：injected apiClient + 默认 webSocketClient 必须同源 baseURL
+
+    /// case#6 (Story 12.2 r1 [P2])：当 caller 注入非默认 baseURL 的 apiClient 但**不**传 webSocketClient,
+    /// 默认 fallback 必须从 apiClient.baseURL 派生 WS URL —— 不能 silent 退回 Bundle.main / localhost.
+    /// 否则 REST 打注入 backend、WS 打 default host → split-brain container.
+    /// 详见本轮 review 修复（fix-review round 1 P2）.
+    func testWebSocketClientFallbackUsesInjectedAPIClientBaseURL() throws {
+        // 注入一个非默认 baseURL 的 APIClient（模拟测试 / Preview / alt-env 场景）
+        let injectedBaseURL = URL(string: "https://staging.example.com")!
+        let injectedAPIClient = APIClient(baseURL: injectedBaseURL)
+
+        let testService = "com.zhuming.pet.app.tests.\(UUID().uuidString)"
+        let isolatedKeychain = KeychainServicesStore(service: testService)
+        defer { try? isolatedKeychain.removeAll() }
+
+        // 不传 webSocketClient → 走 fallback path
+        let container = AppContainer(
+            apiClient: injectedAPIClient,
+            keychainStore: isolatedKeychain
+        )
+
+        // container.webSocketClient 应为 WebSocketClientImpl 且 baseURL 与 injectedBaseURL 同源
+        guard let wsImpl = container.webSocketClient as? WebSocketClientImpl else {
+            XCTFail("Expected fallback WebSocketClientImpl, got \(type(of: container.webSocketClient))")
+            return
+        }
+
+        // 通过 makeWSURL（internal）验证派生路径用的是 injectedBaseURL host —— 不该出现 localhost.
+        let derivedURL = try wsImpl.makeWSURL(roomId: "RM01", token: "tok")
+        XCTAssertEqual(derivedURL.host, injectedBaseURL.host,
+                       "fallback WebSocketClient 的 host 必须与 injected apiClient.baseURL.host 同源；" +
+                       "若拿到 localhost 说明走了 Bundle.main 默认值（split-brain bug）")
+        XCTAssertEqual(derivedURL.scheme, "wss",
+                       "https://staging.example.com 应派生 wss")
+    }
 }

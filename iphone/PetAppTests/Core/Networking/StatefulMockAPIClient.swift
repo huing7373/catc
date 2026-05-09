@@ -48,6 +48,10 @@ final class StatefulMockAPIClient: APIClientProtocol, @unchecked Sendable {
         return _callCounts[path, default: 0]
     }
 
+    /// fix-review round 1 P2（Story 12.2 review）：满足 APIClientProtocol.baseURL 约束.
+    /// 占位 host-only URL（mock 不真实拨号）；测试需要校验 baseURL 派生 WS URL 时可直接覆盖.
+    var baseURL: URL = URL(string: "http://mock.test")!
+
     func request<T: Decodable>(_ endpoint: Endpoint) async throws -> T {
         let stub: Stub? = {
             lock.lock()

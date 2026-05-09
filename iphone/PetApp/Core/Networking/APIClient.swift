@@ -38,6 +38,16 @@ public protocol APIClientProtocol: Sendable {
     /// - Throws: APIError.business / .unauthorized / .missingCredentials / .localStoreFailure
     ///           / .network / .decoding（详见 APIError 文档）
     func request<T: Decodable>(_ endpoint: Endpoint) async throws -> T
+
+    /// fix-review round 1 P2（Story 12.2 review）：
+    /// 暴露当前实例使用的 host-only baseURL，让 AppContainer 在为注入的 apiClient
+    /// 派生 WebSocketClient 时不退回 Bundle.main 默认值（split-brain 隐患）.
+    ///
+    /// **契约**：
+    ///   - normalize 后的 URL（无 trailing slash，与 init 内 `Self.normalize` 后存的字段一致）
+    ///   - host-only：scheme + host[:port]，path 必须 ∅ 或 `/`（详见 AppContainer.validatedBaseURL 校验）
+    ///   - decorator（如 `AuthBoundaryAPIClient`）必须透传内部 `inner.baseURL`
+    var baseURL: URL { get }
 }
 
 /// 统一 REST 客户端。
@@ -63,7 +73,9 @@ public protocol APIClientProtocol: Sendable {
 /// - 不做 request / response 日志（→ Story 2.7 测试基础设施落地 logger 后再对接）
 /// - 不缓存（→ MVP 不做）
 public final class APIClient: APIClientProtocol {
-    private let baseURL: URL
+    /// fix-review round 1 P2（Story 12.2 review）: 由 `private` 改为 protocol-required getter.
+    /// 字段语义不变（normalize 后的 host-only baseURL）；外部仅 read-only，配置仍只能通过 init 注入.
+    public let baseURL: URL
     private let session: URLSessionProtocol
     /// Story 5.3 新增：token 来源。Optional 默认 nil 保证向后兼容
     /// （Story 2.4 / 2.5 既有 `APIClient(baseURL:)` / `APIClient(baseURL:, session:)` 调用零改动）。
