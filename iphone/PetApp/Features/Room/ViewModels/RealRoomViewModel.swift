@@ -1,34 +1,33 @@
-// RealRoomViewModel.swift
-// Story 37.8 AC2: RoomViewModel 生产实装子类（构造注入 AppState；override 2 个 abstract method 占位 stub）.
+// RealRoomViewModel.swift（Story 12.1 升级版；保留 Story 37.8 Lessons：
+//   round 1 P2 fix - init seed scaffold defaults
+//   round 3 P2 fix - 删除 hostCatName 派生自 currentPet
+// ）.
 //
-// 范围（本 story 占位；Story 12.1 / 12.7 / 12.2-12.6 等填充真实 WS / UseCase 调用）：
-//   - 构造注入 AppState（按 ADR-0010 §3.1 ViewModel 注入规则）+ parameterless init() 走 bind(appState:)
-//   - override onLeaveTap / onCopyTap 为占位行为：
-//     · onLeaveTap: 调 appState.setCurrentRoomId(nil) 让 HomeContainerView 互斥状态机切回 idle
-//       （依赖 Story 37.3 数据流；不调 LeaveRoomUseCase 真实 — Story 12.7 落地）
-//     · onCopyTap: print log（实际复制行为靠 RoomScaffoldView 内 SwiftUI UIPasteboard 调用 + @State 1.2s feedback）
+// 范围（本 story 完整路径）：
+//   - 构造注入 AppState + WebSocketClient（webSocketClient 默认 nil 让 RootView 老 wire 不破）
+//   - roomId computed getter 来自 appState.currentRoomId（不持本地副本，避免双 source of truth）
+//   - 订阅 appState.$currentRoomId：non-nil → connect WS（Story 12.2 后真实拨号；本 story 仅记 wsState = .connected 占位）；
+//     nil → disconnect WS（断开 + members 清空）
+//   - 订阅 webSocketClient.messages stream：解析 room.snapshot → 按 client merge contract 写 members
+//   - onLeaveTap 保持 Story 37.8 行为：调 appState.setCurrentRoomId(nil) 让 HomeContainerView 切回 idle
 //
-// **不**调用任何 UseCase / Repository / APIClient（Epic 37 红线：UI Scaffold 数据完全 mock）.
-// **不**订阅 WS / appState.$currentRoomId（Story 12.1 落地；本 story RealRoomViewModel 仅占位骨架）.
+// 本 story 不接 真实 URLSessionWebSocketTask 拨号（Story 12.2 落地）；wsState = .connected 仅由"appState.$currentRoomId
+// 切到 non-nil + webSocketClient ≠ nil 之路径"显式切；webSocketClient = nil 时 wsState 保持 .disconnected.
 //
-// Story 37.8 设计（与 RealHomeViewModel Story 37.7 round 1 P1 fix 同模式）：
-//   parameterless `init()` 路径让 RootView `@StateObject` 老模式可用 —— AppState 也是同级 @StateObject,
-//   不能在属性初始化器内交叉引用（编译期不允许 self 提前求值）；AppState 通过 `bind(appState:)` 异步注入.
-// 派生 state 用 sink 路径而非一次性 hydrate（与 RealHomeViewModel codex round 4 [P3] lesson 同精神）：
-//   roomCodeForCopy 订阅 appState.$currentRoomId，reset 路径（appState.reset() 把 currentRoomId 置 nil）
-//   也能即时反映到字段（不残留旧值）.
-//
-// round 1 P2 fix（codex review）：
-//   两条 init 路径都用 RoomScaffoldDefaults seed 起始 members / userIsHost / hostCatName / roomCodeForCopy；
-//   sink 路径作为 override（currentRoomId 来 → 派生 roomCodeForCopy），
-//   不让 RoomScaffoldView 在 Real path 渲染空房间（4 个 mock 占位先在；Story 12.1 接 WS 后被 snapshot 覆盖）.
-//
-// round 3 P2 fix（codex review）：删除 hostCatName 的 sink — 不再从 appState.$currentPet 派生.
-//   原因：`currentPet` 是**本地用户的猫**，不是 room host 的猫. 用户加入别人的房间时,
-//   restored session 走 sink 派生 → hostCatName 显示"我的猫的小屋"是 user-visible 错误数据.
-//   Pre-WS 阶段安全策略 = "不知道就用 placeholder"；hostCatName 永远保持 RoomScaffoldDefaults.hostCatName
-//   占位，直到 Story 12.1 接 WS room.snapshot 后由 RealRoomViewModel 新 subscribe 入口写真实 host 名
-//   （**不**复用 appState.currentPet — currentPet 仅适用于"自己作为 host"的场景，不是通用 host 名源）.
+// 关键决策：
+//   1. `roomId` 是 computed getter（`var roomId: String? { appState?.currentRoomId }`），**不**用 `@Published` 修饰 ——
+//      View 层不需要单独 observe `roomId`（已经通过 `roomCodeForCopy` 派生展示；`roomIdDisplay` UITest 锚定的也是
+//      `roomCodeForCopy` 文本），同时避免与 AppState.currentRoomId 双 source of truth.
+//   2. `subscribeRoomIdConnect` 用 `.removeDuplicates()` —— 防 AppState 多次重复 emit 同值（如 hydrate 两次）
+//      触发重复 connect / disconnect.
+//   3. `webSocketClient = nil` 时 wsState 保持 `.disconnected` —— RootView 当前 wire `RealRoomViewModel()` 无参 init
+//      （无 webSocketClient），即使 user 已 hydrate 进房间，wsState 仍 `.disconnected`；待 Story 12.2 + 12.7
+//      落地后由 UseCase 注入真实 client + 调用 `bind(appState:webSocketClient:)`，wsState 切 `.connected`.
+//      这是**显式**的"半完成"语义，不是 bug —— 让 UI 在节点 4 阶段就有占位反映 WS 真实态.
+//   4. `applySnapshot` 实装"最小 client merge contract" —— 严格按 §12.3 字段级 merge 规则；但**简化**
+//      `level` / `status` / `isHost` 节点 4 阶段占位逻辑（`isHost = index == 0`）.
+//   5. `memberPetStates` 节点 4 阶段保持空 map —— server `currentState` 固定 1 不携带真实值；待 Epic 14 后真实驱动.
+//   6. `startConsumingMessages` 在 `webSocketClient = nil` 时 early return（不启 task）—— 避免空跑 task.
 
 import Foundation
 import Combine
@@ -36,69 +35,102 @@ import os.log
 
 @MainActor
 public final class RealRoomViewModel: RoomViewModel {
-    /// 构造注入 AppState（与 RealHomeViewModel Story 37.7 round 1 P1 fix 同模式）.
-    /// `bind(appState:)` 路径让 RootView `@StateObject` 老模式可用 — AppState 也是同级 @StateObject,
-    /// 不能在属性初始化器内交叉引用（编译期不允许 self 提前求值）.
+    /// 构造注入的 AppState 引用（同 Story 37.8 模式：可经 init(appState:webSocketClient:) 或
+    /// bind(appState:webSocketClient:) 注入）.
     private var appState: AppState?
 
-    /// Story 37.8（同 RealHomeViewModel codex round 4 [P3] lesson 精神）：派生 state 必须订阅
-    /// publisher，而不是一次性 hydrate；reset 路径（appState.reset() 把 currentRoomId 置 nil）才能
-    /// 即时反映到 roomCodeForCopy。hookup 时机：
-    ///   - init(appState:) 路径：构造完成后立即订阅
-    ///   - bind(appState:) 路径：override 内首次 bind 时订阅（防多次 .task 重订阅）.
-    ///
-    /// round 3 P2 fix（codex review）：原 `hostCatNameSubscription` 字段已删除 — 不再从
-    /// `appState.$currentPet` 派生 hostCatName（currentPet 是本地用户的猫，不是 room host 的猫；
-    /// 用户加入别人的房间时显示"我的猫的小屋"是 user-visible 错误数据）.
-    /// Story 12.1 接 WS 后通过新 subscribe 入口写真实 host 名（**不**复用 appState.currentPet）.
+    /// 构造注入的 WebSocketClient（Story 12.1 新增；默认 nil 让 RootView `@StateObject` 老 wire 路径继续工作）.
+    /// Story 12.2 / 12.7 后由真实 UseCase 注入 `WebSocketClientImpl` 实例.
+    private var webSocketClient: WebSocketClient?
+
+    /// roomId 派生 getter —— 直接来自 appState.currentRoomId，**不**持本地副本.
+    /// 避免与 appState 双 source of truth（防 codex BLOCKER 4 重复出现：详见 sprint-change-proposal-2026-04-29-v2.md §3）.
+    public var roomId: String? {
+        appState?.currentRoomId
+    }
+
+    /// Story 37.8 round 3 P2 / Story 12.1 共用的 currentRoomId 订阅（派生 roomCodeForCopy）.
+    /// 保留 Story 37.8 lesson "published-derived-state-needs-publisher-subscription"（不用一次性 hydrate）.
     private var roomCodeSubscription: AnyCancellable?
 
-    /// parameterless init —— RootView `@StateObject` 老模式可用; AppState 通过 bind 异步注入.
-    /// 不写 `override`：基类没有显式 no-arg init（Swift 通过默认参数合成无参调用，不形成 override 关系）.
-    /// round 1 P2 fix：seed `members` / `userIsHost` / `hostCatName` / `roomCodeForCopy` 全部走
-    /// RoomScaffoldDefaults，让 UITEST_FORCE_IN_ROOM / 手动 debug mutation / Story 37.12 后 JoinRoomModal
-    /// 落地等任何走 in-room state 的 Real path 渲染时立刻有 4 个 mock member 占位，不再渲染空房间.
+    /// Story 12.1 新增：`appState.$currentRoomId` 订阅（roomId nil ↔ non-nil 切换驱动 WS connect/disconnect + members 清空）.
+    private var roomIdConnectSubscription: AnyCancellable?
+
+    /// Story 12.1 新增：WebSocket messages stream consumer task（订阅 webSocketClient.messages → 解析 → 派生 members）.
+    private var messageConsumerTask: Task<Void, Never>?
+
+    /// Story 12.1 fix-review round 1：跟踪订阅看到的"上一次 currentRoomId 值"，用于在 sink 闭包内
+    /// 区分四种转换：nil→nil（no-op）/ nil→A（connect）/ A→B（reset roster + 重启 stream）/ A→nil（disconnect）.
+    /// A→A 同值由 `removeDuplicates()` 在 publisher 层挡掉，不会进 sink.
+    ///
+    /// **关键**：订阅起步前**不**预设此字段为 `appState.currentRoomId` 当前值 —— 否则
+    /// `Published` 订阅时同步 emit 的当前值进入 sink 会被识别为 A→A no-op，restored in-room
+    /// session 路径下"nil → 已非 nil"的转换信号丢失. 字段保持默认 nil；
+    /// 若 ViewModel 在 appState.currentRoomId 已非 nil 时订阅，第一条 emission 走 `(nil, A)` connect 分支
+    /// 把 wsState 切对.
+    private var lastObservedRoomId: String?
+
     public override init() {
         super.init()
         self.appState = nil
-        // 视觉初值（hydrate 前 placeholder）；bind(appState:) 后 sink 派生覆盖 roomCodeForCopy / hostCatName.
+        self.webSocketClient = nil
+        // Story 37.8 round 1 P2 fix：seed RoomScaffoldDefaults 让首帧渲染不空.
         self.roomCodeForCopy = RoomScaffoldDefaults.roomCodeForCopy
         self.hostCatName = RoomScaffoldDefaults.hostCatName
         self.members = RoomScaffoldDefaults.members
         self.userIsHost = RoomScaffoldDefaults.userIsHost
+        // wsState / memberPetStates 走基类默认值（.disconnected / [:]）.
     }
 
-    public init(appState: AppState) {
+    public init(appState: AppState, webSocketClient: WebSocketClient? = nil) {
         super.init()
         self.appState = appState
-        // round 1 P2 fix：先 seed scaffold defaults（让 sink 还没派发前 RoomScaffoldView 有数据可渲染）.
+        self.webSocketClient = webSocketClient
+        // Story 37.8 round 1 P2 fix：seed.
         self.roomCodeForCopy = RoomScaffoldDefaults.roomCodeForCopy
         self.hostCatName = RoomScaffoldDefaults.hostCatName
         self.members = RoomScaffoldDefaults.members
         self.userIsHost = RoomScaffoldDefaults.userIsHost
-        // 构造路径已注入 AppState；立即订阅 currentRoomId 变化派生 roomCodeForCopy,
-        // 一旦 publisher 同步发首值即覆盖上面的 default seed（reset 路径置 nil 时会 fallback 回 default）.
-        // round 3 P2 fix：不再订阅 currentPet 派生 hostCatName — pre-WS 阶段保持 RoomScaffoldDefaults
-        // 占位（currentPet 是本地用户的猫，不是 room host；详见文件头注释）.
-        // Story 12.1 接 WS room.snapshot 后通过新 subscribe 入口写真实 host 名（不复用 appState.currentPet）.
         subscribeRoomCode(to: appState)
-        // members / userIsHost / hostCatName 在 Story 12.1 接 WS room.snapshot 后被覆盖；
-        // 当前保留 RoomScaffoldDefaults seed.
+        // fix-review round 1：consumer task 不在 init 起步；由 subscribeRoomIdConnect 在 nil→A / A→B 分支
+        // 调用 startConsumingMessages 唯一起 task，避免 init + sink 双起 task 争抢 AsyncStream（同一 stream
+        // 多 iterator 是未定义行为；表现为消息丢失 → snapshot 不被 consume）.
+        subscribeRoomIdConnect(to: appState)
     }
 
-    /// AppState 异步注入入口（与 HomeViewModel.bind(appState:) 同模式 + RealHomeViewModel.bind 单路 sink）.
-    /// round 3 P2 fix：去掉 subscribeHostCatName — 详见文件头 round 3 注释.
-    public func bind(appState: AppState) {
-        let alreadySubscribed = roomCodeSubscription != nil
+    /// AppState + WebSocketClient 异步注入入口（与 Story 37.8 bind 同模式扩展两路）.
+    public func bind(appState: AppState, webSocketClient: WebSocketClient? = nil) {
+        let codeAlreadySubscribed = roomCodeSubscription != nil
+        let connectAlreadySubscribed = roomIdConnectSubscription != nil
         self.appState = appState
-        guard !alreadySubscribed else { return }
-        subscribeRoomCode(to: appState)
+        if let client = webSocketClient {
+            self.webSocketClient = client
+            // fix-review round 1：bind 路径由 subscribeRoomIdConnect 起 task；同一 stream 多 iterator 是未定义行为.
+            // 但若 connectAlreadySubscribed=true 且当前已经在房间内，subscribeRoomIdConnect 不会再触发 sink；
+            // 那种情况下需要主动 startConsumingMessages 接上新 client. 详见下面分支.
+            _ = client
+        }
+        if !codeAlreadySubscribed {
+            subscribeRoomCode(to: appState)
+        }
+        if !connectAlreadySubscribed {
+            // 首次订阅：sink 同步 emit 会按 (nil, currentRoomId) 决定是否启 task.
+            subscribeRoomIdConnect(to: appState)
+        } else if webSocketClient != nil && lastObservedRoomId != nil {
+            // 已订阅 + 已在房间内 + 现在补注入 client → 主动起 task 接上 messages stream
+            // （否则 task 永远等不到下一次 currentRoomId 切换才起）.
+            if self.webSocketClient != nil {
+                self.wsState = .connected
+            }
+            startConsumingMessages()
+        }
     }
+
+    // MARK: - subscribe helpers
 
     /// 订阅 appState.$currentRoomId —— hydrate / reset / 单独 mutate 都派生 roomCodeForCopy.
     /// nil → fallback 到 RoomScaffoldDefaults.roomCodeForCopy 占位（避免 in-room scaffold 显示空房间号）；
-    /// non-nil → 直接用 roomId 值（Story 12.1 后接 WS room.snapshot 时 server 返回的房间号会
-    /// 写入 currentRoomId，本期 mock 同样读 currentRoomId 派生展示用号码）.
+    /// non-nil → 直接用 roomId 值.
     private func subscribeRoomCode(to appState: AppState) {
         roomCodeSubscription = appState.$currentRoomId
             .sink { [weak self] roomId in
@@ -107,30 +139,172 @@ public final class RealRoomViewModel: RoomViewModel {
             }
     }
 
-    // round 3 P2 fix（codex review）：
-    //   原 `subscribeHostCatName(to:)` 方法已删除 — 不再从 appState.$currentPet 派生 hostCatName.
-    //   理由：currentPet 是**本地用户的猫**，不是 room host 的猫. 用户加入别人的房间（restored
-    //   session 走 /home → currentRoomId 非 nil + currentPet=本地猫）时，sink 派生让 scaffold title
-    //   显示"<我的猫>的小屋"，是 user-visible 错误数据.
-    //   Pre-WS 阶段安全策略 = "不知道就用 placeholder"：hostCatName 永远保持 init 时 seed 的
-    //   RoomScaffoldDefaults.hostCatName 占位.
-    //
-    //   forward action — Story 12.1 落地 WS：RealRoomViewModel 加新 subscribe 入口（如 subscribe room
-    //   snapshot stream）写真实 host 名，**不**复用 appState.currentPet（currentPet 仅适用于"自己作为
-    //   host"的场景，不是通用 host 名源）.
+    /// Story 12.1 AC4 关键路径：roomId 转换驱动 wsState + members 清空 + stream 重启.
+    /// 单元测试 case#3 直接测本订阅触发的副作用.
+    ///
+    /// 关键决策（fix-review round 1 修订）：
+    ///
+    /// **不再用 `.dropFirst()`** —— 旧实装抑制了"订阅时的同步 emit"，但 `/home` restored in-room
+    /// session 路径（`AppState.applyHomeData(homeData)` 在 ViewModel 订阅前已写非 nil currentRoomId）下
+    /// 第一个 emission 就是真实转换信号被 dropFirst 吃掉，wsState 永远停 .disconnected。
+    /// 改用 `lastObservedRoomId` 字段在 sink 内识别四种转换，保留同步 emit 但避免 nil→nil 的 no-op
+    /// 触发"未拨号即 disconnect"副作用（注释写在原决策里的同问题）.
+    ///
+    /// 四种转换分支：
+    ///   1. nil → nil：订阅时同步 emit 的初始空房间状态 —— **no-op**（不调 disconnect 避免误关刚注入的 mock client）
+    ///   2. nil → A：进入房间 —— wsState = .connected（webSocketClient ≠ nil 时）+ 启动 stream consumer
+    ///   3. A → B：room 切换 —— **重置 roster** (members / memberPetStates 清空) + tear down 旧 stream
+    ///      + 启动新 stream consumer + wsState 保持 .connected（避免旧 room late messages 污染新 room）
+    ///   4. A → nil：离开房间 —— disconnect + 清空 roster + wsState = .disconnected
+    ///   5. A → A 同值：`removeDuplicates` 已抑制；不会进 sink
+    ///
+    /// `removeDuplicates` 仍保留以防同值重复 emit（如 hydrate 两次都把 currentRoomId 置为同 roomId）.
+    private func subscribeRoomIdConnect(to appState: AppState) {
+        // 不预设 lastObservedRoomId（保持默认 nil）：让订阅同步 emit 走 (previous=nil, new=非 nil) connect 分支
+        // 把 restored in-room session 的初始 currentRoomId 信号正确处理.
+        roomIdConnectSubscription = appState.$currentRoomId
+            .removeDuplicates()
+            .sink { [weak self] newRoomId in
+                guard let self else { return }
+                let previous = self.lastObservedRoomId
+                let normalizedNew: String? = (newRoomId?.isEmpty == false) ? newRoomId : nil
+                self.lastObservedRoomId = normalizedNew
 
-    // MARK: - override abstract methods（本 story 占位；Story 12.7 实装真实 LeaveRoomUseCase）
+                switch (previous, normalizedNew) {
+                case (nil, nil):
+                    // 分支 1：订阅起步时同步 emit 的初始空房间状态 —— no-op.
+                    // 这是 dropFirst 旧实装真正想避开的场景；用显式分支替代后既能正确处理
+                    // restored in-room（previous=nil + newRoomId 已非 nil 走分支 2）也能保留 no-op 语义.
+                    break
+                case (nil, .some(let roomId)):
+                    // 分支 2：nil → A，进入房间.
+                    if self.webSocketClient != nil {
+                        self.wsState = .connected
+                    }
+                    self.startConsumingMessages()
+                    os_log(.debug, "RealRoomViewModel: nil → %{public}@ (WS stream started)", roomId)
+                case (.some(let prev), .some(let next)):
+                    // 分支 3：A → B，房间切换 —— 必须清空旧 roster + tear down 旧 stream + 取消旧 consumer task.
+                    // 否则同 @StateObject vm 实例下 room B 会渲染 room A 的 roster，
+                    // 旧 stream 的 late messages 也会污染新房间.
+                    //
+                    // 节点 4 阶段语义：本 story 仅暴露 `disconnect()` + `messages` stream，没有 `connect(roomId:)`；
+                    // A→B 真正"拨号到新 room channel"要等 Story 12.2 落地 `WebSocketClientImpl.connect(...)`
+                    // 接缝。本分支当前实装做的是：① disconnect 旧 stream（mock 下 finish stream，真实下关 socket）
+                    // ② 清空 roster ③ wsState 切 .connected（webSocketClient ≠ nil；占位语义）④ cancel 并重启
+                    // consumer task 让它跟最新 webSocketClient.messages stream（即使是同一对象，旧 task 也已 cancel）.
+                    // Story 12.2 后此分支在 disconnect 后再调 `webSocketClient.connect(roomId: next)` 完成真实重连.
+                    self.webSocketClient?.disconnect()
+                    self.members = []
+                    self.memberPetStates = [:]
+                    if self.webSocketClient != nil {
+                        self.wsState = .connected
+                    }
+                    self.startConsumingMessages()
+                    os_log(.debug, "RealRoomViewModel: %{public}@ → %{public}@ (roster reset + stream restarted)", prev, next)
+                case (.some(let prev), nil):
+                    // 分支 4：A → nil，离开房间.
+                    self.webSocketClient?.disconnect()
+                    self.members = []
+                    self.memberPetStates = [:]
+                    self.wsState = .disconnected
+                    os_log(.debug, "RealRoomViewModel: %{public}@ → nil (cleared roster + WS disconnected)", prev)
+                }
+            }
+    }
+
+    /// Story 12.1 AC4 关键路径：subscribe webSocketClient.messages → 解析 room.snapshot → 写 members.
+    /// for-await 走 detached task；ViewModel deinit / disconnect 时 task cancel + stream finish 自然退出.
+    private func startConsumingMessages() {
+        messageConsumerTask?.cancel()
+        guard let client = webSocketClient else { return }
+        messageConsumerTask = Task { [weak self] in
+            for await message in client.messages {
+                guard let self else { return }
+                await MainActor.run {
+                    self.handle(message: message)
+                }
+            }
+        }
+    }
+
+    /// §12.3 client merge contract 实装：snapshot 是 enrich/correct 而非 wipe-out.
+    /// 节点 4 阶段（本 story）实装最小路径：
+    ///   - roster 集合层：以 snapshot 的 userId 集合为权威（缺失则移除、新增则 append）
+    ///   - 字段级：非空值覆盖、空字符串保留 client 已有值、null 直接覆盖
+    ///   - memberPetStates：节点 4 阶段 server 固定 currentState=1 → 本 story 保持空 map（Epic 14 真实驱动后再写入）
+    private func handle(message: WSMessage) {
+        switch message {
+        case .roomSnapshot(let payload):
+            applySnapshot(payload)
+        case .pong:
+            // Story 12.6 心跳框架处理；本 story discard.
+            break
+        case .error(let code, let message, _):
+            os_log(.error, "RealRoomViewModel WS error: code=%{public}d, msg=%{public}@", code, message)
+        case .unknown(let rawType):
+            os_log(.error, "RealRoomViewModel WS unknown message type: %{public}@", rawType)
+        }
+    }
+
+    /// snapshot apply（roster 集合 + 字段级 merge）.
+    /// 节点 4 阶段：snapshot members[] 直接映射为 RoomMember 数组（id=userId, name=nickname || 占位,
+    /// level=8 占位, status="在玩耍" 占位, isHost=index==0 占位）—— `level` / `status` / `isHost`
+    /// 由 Epic 14 / Epic 8 / 后续 host 字段下发后真实派生；本 story 仅保证 `id` / `name` 与 snapshot 一致.
+    /// **节点 4 placeholder 阶段允许 nickname 为空字符串**——按 §12.3 "client merge contract" 空字符串 =
+    /// "server 不知道"，应保留 client 已有值；本 story 实装策略（最小路径）：snapshot member.nickname 为空字符串时,
+    /// **保留** client 已有同 userId 的 RoomMember.name；新成员（client 没有的 userId）首次出现 nickname 为空字符串时
+    /// 降级为 placeholder "成员"（与 ui_design 占位一致；Story 11.7 真实 nickname 落地后即被覆盖）.
+    private func applySnapshot(_ payload: RoomSnapshotPayload) {
+        let snapshotUserIds = Set(payload.members.map { $0.userId })
+        // step 1: 按 userId 集合做"roster 权威"裁剪 + 增量
+        var newMembers: [RoomMember] = []
+        for (index, snapshotMember) in payload.members.enumerated() {
+            let existing = self.members.first { $0.id == snapshotMember.userId }
+            // 字段级 merge: nickname 空字符串保留 existing.name；非空覆盖
+            let mergedName: String = {
+                if !snapshotMember.nickname.isEmpty {
+                    return snapshotMember.nickname
+                } else if let existing = existing {
+                    return existing.name  // client 已有值（来自上一次 snapshot 或 GET /rooms 响应）
+                } else {
+                    return "成员"  // placeholder（首次出现 + nickname 空字符串；Story 11.7 后即覆盖）
+                }
+            }()
+            // level / status / isHost 节点 4 阶段保持占位
+            let merged = RoomMember(
+                id: snapshotMember.userId,
+                name: mergedName,
+                level: existing?.level ?? 8,
+                status: existing?.status ?? "在玩耍",
+                isHost: index == 0  // 节点 4 阶段约定：snapshot 第一个成员视为 host（与 ui_design room.jsx 默认渲染一致；
+                                    // 后续 epic 引入 host userId 字段后真实派生）
+            )
+            newMembers.append(merged)
+        }
+        self.members = newMembers
+        // memberPetStates：节点 4 阶段 server 固定 currentState=1，不写入；Epic 14 后真实驱动.
+        // 本 story 不动 memberPetStates（保持初始 [:]）.
+        os_log(.debug, "RealRoomViewModel: applied snapshot (members.count = %{public}d)", newMembers.count)
+        _ = snapshotUserIds  // for future use（Story 12.4 增量 mutate 时需要做 set diff）
+    }
+
+    // MARK: - override abstract methods
 
     public override func onLeaveTap() {
         os_log(.debug, "RealRoomViewModel.onLeaveTap (Story 12.7 will wire LeaveRoomUseCase)")
-        // 节点 1 占位：直接置 currentRoomId = nil 让 HomeContainerView 切回 idle
-        // （依赖 Story 37.3 互斥状态机数据流；不调 server LeaveRoom API — Story 12.7 落地）.
+        // 节点 4 占位：直接置 currentRoomId = nil（subscribeRoomIdConnect 自动触发 disconnect + members
+        // 清空 + wsState = .disconnected）.
+        // Story 12.7 落地 LeaveRoomUseCase 后改为：调 server POST /rooms/{id}/leave → 成功后再 setCurrentRoomId(nil).
         self.appState?.setCurrentRoomId(nil)
     }
 
     public override func onCopyTap() {
         os_log(.debug, "RealRoomViewModel.onCopyTap")
-        // 实际 UIPasteboard 复制 + 1.2s 视觉反馈由 RoomScaffoldView 内 SwiftUI @State 持有 + 调用此方法即触发.
-        // 本 ViewModel 层仅记录 / 透传；不直接操作 UIKit（Epic 37 红线：ViewModel 层不依赖 UIKit）.
+        // 实际 UIPasteboard 复制由 RoomScaffoldView 内 SwiftUI @State + 调用本方法时一起触发（Story 37.8 落地）.
+    }
+
+    deinit {
+        messageConsumerTask?.cancel()
     }
 }

@@ -48,6 +48,7 @@ public struct RoomScaffoldView: View {
             ScrollView {
                 VStack(spacing: theme.spacing.s14) {
                     topBar               // 区块 1: 返回按钮 + 标题
+                    wsStateLabel         // Story 12.1 AC5: WS 连接态占位文字（"已连接 / 正在重连… / 已断开"）
                     roomCodeCard         // 区块 2: 房间号 + 复制按钮
                     sharedStage          // 区块 3: 共享舞台（粉橙渐变 + 装饰 + MiniCat 弹跳）
                     membersList          // 区块 4: 4 格成员列表
@@ -101,6 +102,28 @@ public struct RoomScaffoldView: View {
             Color.clear.frame(width: 40, height: 40)
         }
         .padding(.top, 4)
+    }
+
+    // MARK: - Story 12.1 AC5: wsStateLabel (WS 连接态占位文字)
+
+    /// WebSocket 连接态文字（"已连接 / 正在重连… / 已断开"）.
+    /// 派生自 `state.wsState`；webSocketClient = nil 路径下显示"已断开"占位（AC4 关键决策 3）.
+    /// accessibility identifier `wsStateLabel`（inline 字面量；Story 12.5 真实重连交互落地后再决定常量化收口至 `AccessibilityID.Room`）.
+    private var wsStateLabel: some View {
+        Text(wsStateText)
+            .font(.system(size: 12, weight: .regular))
+            .foregroundColor(theme.colors.inkSoft)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .accessibilityIdentifier("wsStateLabel")
+    }
+
+    /// `state.wsState` 三态 → 占位文字派生.
+    private var wsStateText: String {
+        switch state.wsState {
+        case .connected: return "已连接"
+        case .reconnecting: return "正在重连…"
+        case .disconnected: return "已断开"
+        }
     }
 
     // MARK: - 区块 2: roomCodeCard (room.jsx:33-56)

@@ -228,3 +228,4 @@
 | 2026-05-09 | [fire-and-forget queue 满应阻塞背压而非 silent drop / defer tech-debt 必须在代码层加显著注释（11-8 r9）](2026-05-09-fire-and-forget-queue-blocking-backpressure-vs-silent-drop-11-8-r9.md) | 2 | architecture, process | `30b360f` |
 | 2026-05-09 | [昂贵资源分配必须在 cheap validation 之后；attack vector 与 successful-path leak 同 family 时分层处理（11-8 r10）](2026-05-09-expensive-resource-allocation-after-cheap-validation-11-8-r10.md) | 1 | security, perf, architecture | `d3080fc` |
 | 2026-05-09 | [snapshot+act 模式必须 atomic 持锁或 act 时 re-check 状态（11-8 r11）](2026-05-09-snapshot-then-act-must-recheck-or-be-atomic-11-8-r11.md) | 1 | concurrency | `3f50b78` |
+| 2026-05-09 | [Published 订阅 dropFirst 丢 restored state & 房间切换需 roster 重置（12-1 r1）](2026-05-09-published-subscription-dropfirst-and-room-switch-roster-reset-12-1-r1.md) | 2 | architecture | `<pending>` |
