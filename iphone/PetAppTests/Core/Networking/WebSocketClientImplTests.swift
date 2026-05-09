@@ -105,9 +105,11 @@ final class WebSocketClientImplTests: XCTestCase {
         )
         try await client.connect(roomId: "1234567")
 
-        // 拿到 messages stream，await 第一条消息
+        // 拿到 messages stream，await 第一条非 connectionStateChanged 消息
+        // Story 12.5：first frame 触发时 receive loop 先 emit .connectionStateChanged(.connected) 再 yield snapshot；
+        // 本 case 验证 server-side payload 解码，因此跳过 .connectionStateChanged 事件取真实 payload.
         let stream = client.messages
-        let message = try await firstMessage(from: stream, timeout: 2.0)
+        let message = try await firstNonConnectionState(from: stream, timeout: 2.0)
 
         guard case .roomSnapshot(let payload) = message else {
             XCTFail("Expected .roomSnapshot, got \(message)")
@@ -220,11 +222,14 @@ final class WebSocketClientImplTests: XCTestCase {
         )
         try await client.connect(roomId: "RM01")
 
+        // Story 12.5：first frame 触发时 receive loop 先 emit .connectionStateChanged(.connected) 再 yield 第一帧；
+        // 本 case 验证 server-side payload，因此过滤掉 .connectionStateChanged 事件后看 server-side 顺序.
         var collected: [WSMessage] = []
-        let collectExpectation = expectation(description: "collect 2 messages")
+        let collectExpectation = expectation(description: "collect 2 server-side messages")
         let stream = client.messages
         let collectTask = Task {
             for await msg in stream {
+                if case .connectionStateChanged = msg { continue }  // skip Story 12.5 emit
                 collected.append(msg)
                 if collected.count == 2 {
                     collectExpectation.fulfill()
@@ -235,7 +240,7 @@ final class WebSocketClientImplTests: XCTestCase {
         await fulfillment(of: [collectExpectation], timeout: 3.0)
         collectTask.cancel()
 
-        XCTAssertEqual(collected.count, 2, "stream 应仍 alive，收到 2 条消息")
+        XCTAssertEqual(collected.count, 2, "stream 应仍 alive，收到 2 条 server-side 消息（不含 connectionStateChanged）")
         guard case .unknown(let raw) = collected[0] else {
             XCTFail("Expected .unknown, got \(collected[0])")
             return
@@ -350,12 +355,15 @@ final class WebSocketClientImplTests: XCTestCase {
         }
     }
 
-    /// 第一帧成功后 receive 错 —— connect() 应已 return；caller 通过 messages stream finish 感知后续断开.
+    /// Story 12.5 后：第一帧成功后 receive 错 + closeCode 是 terminal（如 1000）→ stream finish.
+    /// 节点说明：原 Story 12.2 测试用 .invalid（1006）默认 closeCode，pre-12.5 走 finish；12.5 后 1006 是
+    /// transient 应触发 reconnect。本 case 显式注入 1000 (.normalClosure) 走 terminal 路径与原意图一致.
     func test_connect_succeeds_afterFirstFrame_evenIfLaterReceiveErrors() async throws {
         let factory = FakeWebSocketTaskFactory()
-        // 一帧 snapshot 后耗尽 → receive 抛 cancelled（"建连后断"路径）
+        // 一帧 snapshot 后耗尽 → receive 抛 cancelled，closeCode=1000 (terminal)
         factory.fakeTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
         factory.fakeTask.blockReceiveForever = false
+        factory.fakeTask.stubbedCloseCode = .normalClosure  // 1000 = terminal
 
         let client = WebSocketClientImpl(
             baseURL: URL(string: "http://localhost:8080")!,
@@ -366,9 +374,9 @@ final class WebSocketClientImplTests: XCTestCase {
         // connect() 应正常 return（first frame received）
         try await client.connect(roomId: "RM01")
 
-        // stream 应能拿到 first frame，后续 finish
+        // stream 应能拿到 first frame + .connected + .disconnected，后续 finish
         var collected: [WSMessage] = []
-        let streamFinishedExp = expectation(description: "stream finishes after receive error")
+        let streamFinishedExp = expectation(description: "stream finishes after receive error (terminal close)")
         let stream = client.messages
         let streamTask = Task {
             for await msg in stream {
@@ -379,11 +387,388 @@ final class WebSocketClientImplTests: XCTestCase {
         await fulfillment(of: [streamFinishedExp], timeout: 3.0)
         streamTask.cancel()
 
-        XCTAssertEqual(collected.count, 1, "应收到 first frame（snapshot），之后 stream finish")
-        guard case .roomSnapshot = collected.first else {
-            XCTFail("Expected first message to be .roomSnapshot, got \(String(describing: collected.first))")
+        // Story 12.5：stream 上有 .connected (first frame) + snapshot + .disconnected (terminal close) → finish
+        let serverSideMessages = collected.filter {
+            if case .connectionStateChanged = $0 { return false }
+            return true
+        }
+        XCTAssertEqual(serverSideMessages.count, 1, "应收到 1 条 server-side 消息（snapshot）")
+        guard case .roomSnapshot = serverSideMessages.first else {
+            XCTFail("Expected first server-side message to be .roomSnapshot, got \(String(describing: serverSideMessages.first))")
             return
         }
+        // 验证 connection state 序列：.connected → .disconnected
+        let connStates: [WSConnectionState] = collected.compactMap {
+            if case .connectionStateChanged(let s) = $0 { return s }
+            return nil
+        }
+        XCTAssertEqual(connStates.first, .connected)
+        XCTAssertEqual(connStates.last, .disconnected, "terminal close → emit .disconnected then finish")
+    }
+
+    // MARK: - Story 12.5 reconnect 状态机测试
+
+    /// case#R1 happy: transient close 4005 → schedule reconnect + emit `.reconnecting(attempt: 1)`.
+    ///
+    /// 时序：fake task receive() 第一帧 snapshot 解 latch → connect() 成功 → emit .connected →
+    /// 第二次 receive() 抛错 + closeCode=4005 → reconnect 状态机 emit .reconnecting(attempt: 1) →
+    /// schedule reconnect → 第二个 fake task 注入 → reconnect 成功 → emit .connected.
+    func test_reconnect_transientClose4005_emitsReconnectingThenReconnects() async throws {
+        let factory = FakeReconnectFactory()
+        // 第一个 task：发 snapshot + 抛 4005
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        firstTask.errorAfterFrames = true
+        firstTask.stubbedCloseCode = .init(rawValue: 4005)!
+        // 第二个 task（reconnect attempt 1）：发 snapshot 即可
+        let secondTask = factory.scheduleNewTask()
+        secondTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        secondTask.blockReceiveForever = true
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        // 用 ms 级 backoff 避免单测真跑 1s
+        client.backoffSequence = [0.05, 0.05, 0.05, 0.05, 0.05]
+
+        try await client.connect(roomId: "RM01")
+
+        // 收集 stream 上的 connection state events（≥3：.connected, .reconnecting(1), .connected）
+        let states = try await collectConnectionStates(client: client, count: 3, timeout: 3.0)
+        XCTAssertEqual(states.count, 3)
+        XCTAssertEqual(states[0], .connected, "首次 connect 后 emit .connected")
+        if case .reconnecting(let attempt) = states[1] {
+            XCTAssertEqual(attempt, 1, "transient close → emit .reconnecting(attempt: 1)")
+        } else {
+            XCTFail("Expected .reconnecting, got \(states[1])")
+        }
+        XCTAssertEqual(states[2], .connected, "reconnect 成功后 emit .connected")
+
+        // verify factory 真的发了第二个 task（reconnect 触发）
+        XCTAssertEqual(factory.makeTaskCallCount, 2, "应触发 reconnect → 第二次 makeTask")
+
+        client.disconnect()
+    }
+
+    /// case#R2 happy: transient close 1006 (.invalid) → schedule reconnect.
+    /// 同 R1，但 closeCode 是 .invalid（rawValue=0）—— 验证 V1 §12.1 行 1729 钦定的 1006 客户端合成等价语义.
+    func test_reconnect_transientClose1006Invalid_schedulesReconnect() async throws {
+        let factory = FakeReconnectFactory()
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        firstTask.errorAfterFrames = true
+        firstTask.stubbedCloseCode = .invalid  // rawValue=0 ↔ 1006
+
+        let secondTask = factory.scheduleNewTask()
+        secondTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        secondTask.blockReceiveForever = true
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.backoffSequence = [0.05, 0.05, 0.05, 0.05, 0.05]
+
+        try await client.connect(roomId: "RM01")
+        let states = try await collectConnectionStates(client: client, count: 3, timeout: 3.0)
+        XCTAssertEqual(states[0], .connected)
+        if case .reconnecting = states[1] {} else {
+            XCTFail("Expected .reconnecting for closeCode=.invalid (1006), got \(states[1])")
+        }
+        XCTAssertEqual(states[2], .connected)
+        client.disconnect()
+    }
+
+    /// case#R3 terminal: close 4001 → emit .disconnected + finish stream（不重连）.
+    func test_reconnect_terminalClose4001_emitsDisconnectedFinishesStream() async throws {
+        let factory = FakeReconnectFactory()
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        firstTask.errorAfterFrames = true
+        firstTask.stubbedCloseCode = .init(rawValue: 4001)!
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.backoffSequence = [0.05, 0.05, 0.05, 0.05, 0.05]
+
+        try await client.connect(roomId: "RM01")
+        let states = try await collectConnectionStatesUntilFinish(
+            client: client,
+            timeout: 3.0
+        )
+        XCTAssertEqual(states.first, .connected)
+        XCTAssertEqual(states.last, .disconnected, "terminal close → 最终 emit .disconnected")
+        // 关键：不应触发 reconnect
+        XCTAssertEqual(factory.makeTaskCallCount, 1, "terminal close 不应 schedule 第二次 makeTask")
+    }
+
+    /// case#R4: 多 terminal close code → 行为一致.
+    /// 参数化覆盖 4002 / 4003 / 4004 / 4006 / 4007 / 1000 都走 terminal 路径.
+    func test_reconnect_multipleTerminalCloseCodes_allFinishStream() async throws {
+        let codes: [Int] = [4002, 4003, 4004, 4006, 4007, 1000]
+        for code in codes {
+            let factory = FakeReconnectFactory()
+            let firstTask = factory.scheduleNewTask()
+            firstTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+            firstTask.errorAfterFrames = true
+            firstTask.stubbedCloseCode = .init(rawValue: code)!
+
+            let client = WebSocketClientImpl(
+                baseURL: URL(string: "http://localhost:8080")!,
+                tokenProvider: { "tok" },
+                taskFactory: factory
+            )
+            client.backoffSequence = [0.05, 0.05, 0.05, 0.05, 0.05]
+
+            try await client.connect(roomId: "RM01")
+            let states = try await collectConnectionStatesUntilFinish(client: client, timeout: 3.0)
+            XCTAssertEqual(states.last, .disconnected,
+                           "close code \(code) 必须按 terminal 处理 (最后一条状态应为 .disconnected)")
+            XCTAssertEqual(factory.makeTaskCallCount, 1,
+                           "close code \(code) 不应 reconnect")
+        }
+    }
+
+    /// case#R5 happy: 5 次 reconnect 连续失败 → 最终 emit .disconnected + finish stream.
+    /// 用短 backoff 跑得快；每次 reconnect 都在第一帧失败.
+    func test_reconnect_fiveAttemptsFail_finallyDisconnected() async throws {
+        let factory = FakeReconnectFactory()
+        // 第一个 task：发 snapshot 解 latch → 立即抛 4005 transient
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        firstTask.errorAfterFrames = true
+        firstTask.stubbedCloseCode = .init(rawValue: 4005)!
+        // reconnect attempts 1..5：在 receive() 第一次就抛错（pre-handshake）
+        for _ in 0..<5 {
+            let t = factory.scheduleNewTask()
+            t.errorAfterFrames = true
+            t.scriptedFrames = []  // 没有 first frame → receive 立即抛错
+            t.stubbedCloseCode = .invalid
+        }
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.backoffSequence = [0.02, 0.02, 0.02, 0.02, 0.02]
+
+        try await client.connect(roomId: "RM01")
+        let states = try await collectConnectionStatesUntilFinish(client: client, timeout: 5.0)
+        // states: [.connected, .reconnecting(1), .reconnecting(2), .reconnecting(3), .reconnecting(4), .reconnecting(5), .disconnected]
+        XCTAssertEqual(states.first, .connected)
+        XCTAssertEqual(states.last, .disconnected, "5 次失败后最终 .disconnected")
+        let reconnectingCount = states.filter { state in
+            if case .reconnecting = state { return true }
+            return false
+        }.count
+        XCTAssertEqual(reconnectingCount, 5, "应 emit 5 次 .reconnecting (attempt 1..5)")
+    }
+
+    /// case#R6 happy: disconnect() 必须 cancel in-flight reconnect task.
+    /// 测试核心：transient close → schedule reconnect → 在 reconnect attempt 真跑前 disconnect →
+    /// 不应再调 makeTask（reconnect task 被 cancel）+ stream 应被 finish.
+    func test_reconnect_disconnectCancelsInflightReconnectTask() async throws {
+        let factory = FakeReconnectFactory()
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        firstTask.errorAfterFrames = true
+        firstTask.stubbedCloseCode = .init(rawValue: 4005)!
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        // 用较长 backoff 让我们有时间在 reconnect attempt 真正发起前 disconnect
+        client.backoffSequence = [1.0, 1.0, 1.0, 1.0, 1.0]
+
+        try await client.connect(roomId: "RM01")
+        // 等收到 .reconnecting(1)（说明 schedule 已下发但 backoff 还在 sleep）
+        var seenReconnecting = false
+        let stream = client.messages
+        let waitTask = Task {
+            for await msg in stream {
+                if case .connectionStateChanged(.reconnecting) = msg {
+                    seenReconnecting = true
+                    return
+                }
+            }
+        }
+        // 等 2s 给 schedule 上传 .reconnecting；同时 backoff sleep 还远未结束.
+        let timeoutDeadline = Date().addingTimeInterval(2.0)
+        while !seenReconnecting && Date() < timeoutDeadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        waitTask.cancel()
+        XCTAssertTrue(seenReconnecting, "应 emit .reconnecting(attempt: 1)（schedule 之后，attempt 真跑之前）")
+
+        // disconnect → cancel reconnectTask
+        client.disconnect()
+
+        // 等 1.5s 给 reconnect task 充分被 cancel 的时间
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        XCTAssertEqual(factory.makeTaskCallCount, 1,
+                       "disconnect 应 cancel reconnect task → 不应触发第二次 makeTask")
+    }
+
+    /// case#R7 happy: 未知 close code（如 4099）→ 保守 terminal（不重连）.
+    func test_reconnect_unknownCloseCode_treatedAsTerminal() async throws {
+        let factory = FakeReconnectFactory()
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        firstTask.errorAfterFrames = true
+        firstTask.stubbedCloseCode = .init(rawValue: 4099)!  // 未在 V1 §12.1 close code 表中
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.backoffSequence = [0.05, 0.05, 0.05, 0.05, 0.05]
+
+        try await client.connect(roomId: "RM01")
+        let states = try await collectConnectionStatesUntilFinish(client: client, timeout: 3.0)
+        XCTAssertEqual(states.last, .disconnected, "未知 close code 4099 必须保守 terminal")
+        XCTAssertEqual(factory.makeTaskCallCount, 1, "未知 close code 不应 reconnect (防野生 server bug 死循环)")
+    }
+
+    /// case#R8 fix-review round 2 P1：reconnect 期间 **pre-handshake** terminal close（如 4001）→
+    /// 立即 emit .disconnected + finish stream + **不**继续 retry.
+    ///
+    /// 触发场景：第一次连接后 transient close 4005 → schedule reconnect → reconnect attempt 1 在 first frame
+    /// 之前被 server reject（4001 token 过期）—— 旧实装 attemptReconnect catch 无条件 schedule next attempt,
+    /// 白白消耗 5 次 backoff，永远不触发 caller 的 re-auth handling path.
+    /// 修复后：reconnect catch 按 close code 分类 → 4001 立即 terminal stop.
+    func test_reconnect_terminalCloseDuringHandshake_stopsRetrying() async throws {
+        let factory = FakeReconnectFactory()
+        // 第一个 task：成功握手 → 发 snapshot → transient close 4005 触发 reconnect
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        firstTask.errorAfterFrames = true
+        firstTask.stubbedCloseCode = .init(rawValue: 4005)!
+        // reconnect attempt 1：**pre-handshake** 失败 + closeCode 4001（terminal）→ 应停 retry
+        let reconnectTask = factory.scheduleNewTask()
+        reconnectTask.scriptedFrames = []  // 没有 first frame
+        reconnectTask.errorAfterFrames = true
+        reconnectTask.stubbedCloseCode = .init(rawValue: 4001)!  // token 过期 = terminal
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.backoffSequence = [0.02, 0.02, 0.02, 0.02, 0.02]
+
+        try await client.connect(roomId: "RM01")
+        let states = try await collectConnectionStatesUntilFinish(client: client, timeout: 3.0)
+
+        // 关键断言 1：states 里只有 1 次 .reconnecting（不是 5 次）
+        let reconnectingCount = states.filter { state in
+            if case .reconnecting = state { return true }
+            return false
+        }.count
+        XCTAssertEqual(reconnectingCount, 1,
+                       "reconnect 期间 pre-handshake 4001（terminal）→ 应只 emit 1 次 .reconnecting，不应继续 retry 5 次")
+
+        // 关键断言 2：最后状态是 .disconnected
+        XCTAssertEqual(states.last, .disconnected,
+                       "reconnect pre-handshake terminal close → 最终 emit .disconnected")
+
+        // 关键断言 3：只发起了 2 次 makeTask（第一次连接 + 第一次 reconnect）
+        XCTAssertEqual(factory.makeTaskCallCount, 2,
+                       "reconnect 期间 pre-handshake terminal close 不应继续触发后续 makeTask（旧实装会跑到 5 次）")
+    }
+
+    /// case#R9 fix-review round 2 P1：reconnect 期间 pre-handshake **transient** close（如 4005）→
+    /// 仍 schedule 下一次 retry（与 R8 终态对照确保不误伤 transient 路径）.
+    func test_reconnect_transientCloseDuringHandshake_continuesRetrying() async throws {
+        let factory = FakeReconnectFactory()
+        // 第一个 task：握手 → snapshot → transient close 4005
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        firstTask.errorAfterFrames = true
+        firstTask.stubbedCloseCode = .init(rawValue: 4005)!
+        // reconnect attempts 1..4：pre-handshake 失败 + transient closeCode 4005
+        for _ in 0..<4 {
+            let t = factory.scheduleNewTask()
+            t.scriptedFrames = []
+            t.errorAfterFrames = true
+            t.stubbedCloseCode = .init(rawValue: 4005)!
+        }
+        // reconnect attempt 5：成功（snapshot OK）—— 验证 5 次内的 transient retry 路径不被误伤
+        let finalTask = factory.scheduleNewTask()
+        finalTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.backoffSequence = [0.02, 0.02, 0.02, 0.02, 0.02]
+
+        try await client.connect(roomId: "RM01")
+        // 等待第二次 .connected（reconnect attempt 5 成功）
+        let states = try await collectConnectionStates(client: client, count: 7, timeout: 5.0)
+        // [.connected, .reconnecting(1), .reconnecting(2), .reconnecting(3), .reconnecting(4), .reconnecting(5), .connected]
+        XCTAssertEqual(states.first, .connected)
+        XCTAssertEqual(states.last, .connected, "transient retry 5 次内成功 → 最终 .connected")
+        XCTAssertEqual(factory.makeTaskCallCount, 6,
+                       "transient pre-handshake close → 应继续 retry 直到成功（1 + 5 = 6 次 makeTask）")
+    }
+
+    // MARK: - reconnect 测试 helpers
+
+    /// 收集 stream 上的 connection state events 直到拿到指定数量（带超时）.
+    private func collectConnectionStates(
+        client: WebSocketClientImpl,
+        count: Int,
+        timeout: TimeInterval
+    ) async throws -> [WSConnectionState] {
+        let stream = client.messages
+        var collected: [WSConnectionState] = []
+        let exp = expectation(description: "collected \(count) connection states")
+        let task = Task {
+            for await msg in stream {
+                if case .connectionStateChanged(let state) = msg {
+                    collected.append(state)
+                    if collected.count >= count {
+                        exp.fulfill()
+                        return
+                    }
+                }
+            }
+        }
+        await fulfillment(of: [exp], timeout: timeout)
+        task.cancel()
+        return collected
+    }
+
+    /// 收集 stream 上 connection state events 直到 stream finish（用于 terminal 路径验证）.
+    private func collectConnectionStatesUntilFinish(
+        client: WebSocketClientImpl,
+        timeout: TimeInterval
+    ) async throws -> [WSConnectionState] {
+        let stream = client.messages
+        var collected: [WSConnectionState] = []
+        let exp = expectation(description: "stream finished")
+        let task = Task {
+            for await msg in stream {
+                if case .connectionStateChanged(let state) = msg {
+                    collected.append(state)
+                }
+            }
+            exp.fulfill()
+        }
+        await fulfillment(of: [exp], timeout: timeout)
+        task.cancel()
+        return collected
     }
 
     // MARK: - 辅助：从 AsyncStream 拿第一条消息（带超时）
@@ -413,6 +798,30 @@ final class WebSocketClientImplTests: XCTestCase {
         case streamFinishedBeforeMessage
         case timeout
     }
+
+    /// Story 12.5：取 stream 上第一条**非** connectionStateChanged 消息（带超时）.
+    /// connectionStateChanged 是 client-internal emit，server-side payload 测试想跳过这类事件.
+    private func firstNonConnectionState(
+        from stream: AsyncStream<WSMessage>,
+        timeout: TimeInterval
+    ) async throws -> WSMessage {
+        try await withThrowingTaskGroup(of: WSMessage.self) { group in
+            group.addTask {
+                for await msg in stream {
+                    if case .connectionStateChanged = msg { continue }
+                    return msg
+                }
+                throw FirstMessageError.streamFinishedBeforeMessage
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                throw FirstMessageError.timeout
+            }
+            let first = try await group.next()
+            group.cancelAll()
+            return try XCTUnwrap(first, "task group returned nil")
+        }
+    }
 }
 
 // MARK: - Fake task factory + handle
@@ -437,6 +846,15 @@ final class FakeWebSocketTaskHandle: WebSocketTaskHandle, @unchecked Sendable {
     var scriptedFrames: [URLSessionWebSocketTask.Message] = []
     var blockReceiveForever: Bool = false
 
+    /// Story 12.5：模拟 server emit 的 close code —— 在 `receiveErrorCloseCode` 模式下,
+    /// receive() 抛错时让 closeCode getter 返回此值.
+    /// 默认 `.invalid`（rawValue=0 ↔ 1006 client 本地合成；与 production URLSessionWebSocketTask 默认一致）.
+    var stubbedCloseCode: URLSessionWebSocketTask.CloseCode = .invalid
+
+    /// Story 12.5：scriptedFrames 耗尽后立即抛错（不 sleep 100ms）—— 模拟 transient/terminal close 触发链.
+    /// 与 blockReceiveForever 互斥：blockReceiveForever=true → 阻塞；errorAfterFrames=true → 立即抛错.
+    var errorAfterFrames: Bool = false
+
     private var receiveIndex: Int = 0
     private var isCancelled: Bool = false
     private let lock = NSLock()
@@ -444,6 +862,12 @@ final class FakeWebSocketTaskHandle: WebSocketTaskHandle, @unchecked Sendable {
     var isRunning: Bool {
         lock.lock(); defer { lock.unlock() }
         return !isCancelled
+    }
+
+    /// Story 12.5：暴露 stubbedCloseCode 让 reconnect 状态机分类决策.
+    var closeCode: URLSessionWebSocketTask.CloseCode {
+        lock.lock(); defer { lock.unlock() }
+        return stubbedCloseCode
     }
 
     func resume() {
@@ -475,6 +899,7 @@ final class FakeWebSocketTaskHandle: WebSocketTaskHandle, @unchecked Sendable {
         let frames = scriptedFrames
         let cancelled = isCancelled
         let blockAfter = blockReceiveForever
+        let errorAfter = errorAfterFrames
         if idx < frames.count {
             receiveIndex += 1
         }
@@ -485,6 +910,12 @@ final class FakeWebSocketTaskHandle: WebSocketTaskHandle, @unchecked Sendable {
         }
         if idx < frames.count {
             return frames[idx]
+        }
+        if errorAfter {
+            // Story 12.5：耗尽后立即抛错（不 sleep）—— 模拟 server 主动 close（带 stubbedCloseCode）.
+            // 给 receive loop 极短时间消化 first frame（让 firstFrameReceived 在抛错前 set 为 true）.
+            try await Task.sleep(nanoseconds: 5_000_000)  // 5ms
+            throw URLError(.cancelled)
         }
         if blockAfter {
             // fix-review round 1 P1：耗尽后通过短间隔轮询 isCancelled / Task.isCancelled 实现快速感应,
@@ -501,5 +932,47 @@ final class FakeWebSocketTaskHandle: WebSocketTaskHandle, @unchecked Sendable {
         // 耗尽后等一帧时间然后抛错（让 receive loop 自然退出）
         try await Task.sleep(nanoseconds: 100_000_000)  // 100ms
         throw URLError(.cancelled)
+    }
+}
+
+// MARK: - Story 12.5 reconnect-friendly factory
+
+/// Story 12.5 reconnect 状态机测试用 factory：每次 `makeTask` 返回**新**的 fake handle，
+/// 让单测可独立配置每次 reconnect attempt 的行为（首帧 / 抛错 / closeCode）.
+final class FakeReconnectFactory: WebSocketTaskFactory, @unchecked Sendable {
+    var requests: [URLRequest] = []
+    /// 预先 schedule 好的 handles 队列；按 makeTask 顺序消费.
+    var handles: [FakeWebSocketTaskHandle] = []
+    /// 已 makeTask 调用次数（断言 reconnect 是否真的触发了第二次 makeTask）.
+    var makeTaskCallCount: Int = 0
+
+    private let lock = NSLock()
+
+    /// 提前 schedule 一个新 fake handle 进队列；返回引用让测试 case 配置 scriptedFrames / closeCode.
+    func scheduleNewTask() -> FakeWebSocketTaskHandle {
+        let h = FakeWebSocketTaskHandle()
+        lock.lock()
+        handles.append(h)
+        lock.unlock()
+        return h
+    }
+
+    func makeTask(with request: URLRequest) -> WebSocketTaskHandle {
+        lock.lock()
+        requests.append(request)
+        makeTaskCallCount += 1
+        let h: FakeWebSocketTaskHandle
+        if !handles.isEmpty {
+            h = handles.removeFirst()
+        } else {
+            // 队列耗尽 fallback：返回一个 immediately-error fake（防测试漏配置卡住）
+            let stub = FakeWebSocketTaskHandle()
+            stub.scriptedFrames = []
+            stub.errorAfterFrames = true
+            stub.stubbedCloseCode = .invalid
+            h = stub
+        }
+        lock.unlock()
+        return h
     }
 }

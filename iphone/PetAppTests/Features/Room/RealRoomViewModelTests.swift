@@ -1478,6 +1478,179 @@ final class RealRoomViewModelTests: XCTestCase {
         XCTAssertEqual(rawType, "member.left")
     }
 
+    // MARK: - Story 12.5 case#H1-H5：connectionStateChanged → wsState 三态映射
+
+    /// case#H1 happy: emitConnectionState(.reconnecting(attempt:)) → vm.wsState = .reconnecting.
+    func testConnectionStateChangedReconnectingMapsToWsStateReconnecting() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_X")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // connect 路径下 vm.wsState 默认应为 .connected（webSocketClient ≠ nil + currentRoomId 非 nil）
+        XCTAssertEqual(vm.wsState, .connected, "in-room + non-nil client → wsState 默认 .connected")
+
+        mockWS.emitConnectionState(.reconnecting(attempt: 1))
+        try await waitForWsState(vm: vm, expected: .reconnecting)
+        XCTAssertEqual(vm.wsState, .reconnecting,
+                       "connectionStateChanged(.reconnecting) → wsState 切 .reconnecting")
+    }
+
+    /// case#H2 happy: .disconnected → .connected 三态切换路径.
+    func testConnectionStateChangedThreeStateMapping() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_X")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // .reconnecting → .reconnecting
+        mockWS.emitConnectionState(.reconnecting(attempt: 2))
+        try await waitForWsState(vm: vm, expected: .reconnecting)
+
+        // .disconnected
+        mockWS.emitConnectionState(.disconnected)
+        try await waitForWsState(vm: vm, expected: .disconnected)
+
+        // .connected
+        mockWS.emitConnectionState(.connected)
+        try await waitForWsState(vm: vm, expected: .connected)
+    }
+
+    /// case#H3 happy: .disconnected → vm.wsState = .disconnected.
+    /// 与 case#H2 第一阶段重叠但单独一 case 覆盖不依赖前置状态.
+    func testConnectionStateChangedDisconnectedMapsToWsStateDisconnected() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_X")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        mockWS.emitConnectionState(.disconnected)
+        try await waitForWsState(vm: vm, expected: .disconnected)
+        XCTAssertEqual(vm.wsState, .disconnected)
+    }
+
+    /// case#H4 happy: reconnect 后 server 推 room.snapshot → vm 自动 applySnapshot 对齐.
+    /// 关键回归 acceptance 行 2153 "重连成功 → 立即重新拉 snapshot 对齐"语义：
+    /// vm 不需特殊处理，server 自动重发 snapshot，vm 通过 applySnapshot 自动对齐 roster.
+    func testReconnectFollowedBySnapshotRealignsRoster() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_R")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. baseline 2 成员
+        let initial = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_R", maxMembers: 4, memberCount: 2),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice", pet: nil),
+                RoomSnapshotMember(userId: "u_bob", nickname: "Bob", pet: nil),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(initial))
+        try await waitForMembersCount(vm: vm, expected: 2)
+
+        // 2. 触发重连状态变化
+        mockWS.emitConnectionState(.reconnecting(attempt: 1))
+        try await waitForWsState(vm: vm, expected: .reconnecting)
+
+        // 3. reconnect 成功 + server 自动重发 snapshot（含新成员）
+        mockWS.emitConnectionState(.connected)
+        try await waitForWsState(vm: vm, expected: .connected)
+        let updated = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_R", maxMembers: 4, memberCount: 3),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice", pet: nil),
+                RoomSnapshotMember(userId: "u_bob", nickname: "Bob", pet: nil),
+                RoomSnapshotMember(userId: "u_charlie", nickname: "Charlie", pet: nil),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(updated))
+        try await waitForMembersCount(vm: vm, expected: 3)
+
+        XCTAssertEqual(vm.members.count, 3, "reconnect 后 snapshot 自动对齐 roster")
+        XCTAssertEqual(vm.members.last?.id, "u_charlie", "新加入成员应在 roster 中")
+    }
+
+    /// case#H5 fix-review round 2 P2: connectionStateChanged **必须**受 streamRoomId 守护.
+    ///
+    /// **推翻** dev 阶段开放问题 §6 "不守护" 决定（fix-review round 2 P2）：
+    /// connection state 事件也"绑定 specific socket / stream"，跨 stream 投递的 .reconnecting /
+    /// .disconnected 在 lastObservedRoomId 已变更后被 apply 会覆盖当前 room 的 status banner
+    /// （显示前一个连接的 stale 状态）→ 与 .memberJoined / .memberLeft 同精神必须守护.
+    ///
+    /// 校验方式：直接调 vm.handle(message: .connectionStateChanged, streamRoomId: <旧值>) 模拟
+    /// 旧 stream 上的 stale 事件投递；wsState 不应被改变.
+    func testConnectionStateChangedGuardedByStreamRoomId() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_B")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // baseline：vm 处于 in-room → wsState 默认 .connected
+        XCTAssertEqual(vm.wsState, .connected, "in-room + non-nil client → wsState 默认 .connected")
+
+        // 1. 模拟"旧 stream 上 dequeue 的 .disconnected"（streamRoomId="room_A"，lastObservedRoomId="room_B"）
+        //    —— A→B 切换瞬间旧 consumer task 投递 stale .disconnected 事件
+        vm.handle(
+            message: .connectionStateChanged(.disconnected),
+            streamRoomId: "room_A"
+        )
+        XCTAssertEqual(vm.wsState, .connected,
+                       "stale streamRoomId 的 .disconnected 应被守护丢弃，wsState 保持当前 room 的 .connected")
+
+        // 2. streamRoomId=nil（极端 stale，已离开房间起的 task）也应被守护丢弃
+        vm.handle(
+            message: .connectionStateChanged(.reconnecting(attempt: 3)),
+            streamRoomId: nil
+        )
+        XCTAssertEqual(vm.wsState, .connected,
+                       "streamRoomId=nil 时 connectionStateChanged 应被守护丢弃（stream 不在任何房间）")
+
+        // 3. streamRoomId 与当前 room 匹配 → 守护通过 → wsState 正常更新
+        vm.handle(
+            message: .connectionStateChanged(.reconnecting(attempt: 1)),
+            streamRoomId: "room_B"
+        )
+        XCTAssertEqual(vm.wsState, .reconnecting,
+                       "streamRoomId 与 lastObservedRoomId 匹配 → 守护通过 → wsState 正常更新")
+    }
+
+    /// case#H6 fix-review round 2 P2: A→B 切换路径下旧 stream 的 .reconnecting 不应污染 room B 的 wsState.
+    /// 端到端语义验证（与 H5 单元级互补）：vm 在 in-room 状态切到另一房间后，旧 stream 上的 stale
+    /// connection state 事件不能覆盖新 room 的 status banner.
+    func testStaleConnectionStateFromOldRoomDoesNotPollute() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_A")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(vm.wsState, .connected, "room_A in-room → 默认 .connected")
+
+        // A→B 切换（vm 内部会 cancel 旧 consumer + restart 新 task with streamRoomId="room_B"）
+        appState.setCurrentRoomId("room_B")
+        await Task.yield()
+        await Task.yield()
+
+        // 模拟"旧 stream 仍 enqueue 一个 .reconnecting"（streamRoomId="room_A" 的旧 task 投递）
+        vm.handle(
+            message: .connectionStateChanged(.reconnecting(attempt: 2)),
+            streamRoomId: "room_A"
+        )
+        XCTAssertNotEqual(vm.wsState, .reconnecting,
+                          "stale .reconnecting from room_A stream 不应污染 room_B 的 wsState")
+    }
+
     // MARK: - helpers
 
     /// 等待 vm.members.count 达到预期值（最多等 1 秒；防 Task consumer 调度时机不确定）.
@@ -1485,6 +1658,15 @@ final class RealRoomViewModelTests: XCTestCase {
         let deadline = Date().addingTimeInterval(1.0)
         while Date() < deadline {
             if vm.members.count == expected { return }
+            try await Task.sleep(nanoseconds: 10_000_000) // 10ms
+        }
+    }
+
+    /// Story 12.5：等 vm.wsState 切到预期值（同 waitForMembersCount 精神；防 Task consumer 调度时机不确定）.
+    private func waitForWsState(vm: RealRoomViewModel, expected: WSState) async throws {
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if vm.wsState == expected { return }
             try await Task.sleep(nanoseconds: 10_000_000) // 10ms
         }
     }

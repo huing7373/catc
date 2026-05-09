@@ -237,3 +237,4 @@
 | 2026-05-09 | [WebSocket connect() 必须 await 握手结果 & DI 容器 fallback 必须跟随注入的 baseURL（12-2 r1）](2026-05-09-ws-connect-must-await-handshake-and-container-fallback-must-track-injected-baseurl-12-2-r1.md) | 2 | error-handling, architecture | `e9bcf77` |
 | 2026-05-09 | [cross-room race 必须用 stream-startup 时刻捕获的 roomId 守护（payload 不带 room.id 的 WS 消息）（12-4 r1）](2026-05-09-cross-room-race-needs-stream-roomid-capture-12-4-r1.md) | 1 | architecture | `8841b92` |
 | 2026-05-09 | [WS codec 必须在构造 payload 前校验 required 字段语义有效性（12-4 r2）](2026-05-09-ws-codec-must-validate-required-fields-12-4-r2.md) | 1 | error-handling | `7b4c0d2` |
+| 2026-05-09 | [reconnect pre-handshake terminal close 必须分类 + connection-state 事件必须 streamRoomId 守护（12-5 r1）](2026-05-09-ws-reconnect-pre-handshake-close-classify-and-connection-state-stream-guard-12-5-r1.md) | 2 | error-handling, architecture | `<pending>` |

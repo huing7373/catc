@@ -97,9 +97,38 @@ public enum WSMessage: Equatable, Sendable {
     /// Story 12.4 落地；trigger 唯一来源 = HTTP `POST /api/v1/rooms/{roomId}/leave` 退出事务成功提交后.
     case memberLeft(MemberLeftPayload)
 
+    /// Story 12.5 新增：client-internal 连接状态变更通知（**不**是 server-side 协议消息）.
+    /// 由 `WebSocketClientImpl` 内部 reconnect 状态机 emit；vm 收到后写 `wsState`（三态映射）.
+    /// **不**走 `WSMessageCodec.decode` 路径（codec 仅解码 server-side text frame，本 case 是 client-internal emit）.
+    /// 与 vm-唯一-stream 接缝原则一致（vm 与 client 唯一通信通道是 `messages: AsyncStream<WSMessage>`，
+    /// 12.1 锁定）；本 case 让 vm 在同一 stream 上一并感知连接状态，无需新增 publisher.
+    case connectionStateChanged(WSConnectionState)
+
     /// 解码失败 fallback —— 不破坏 AsyncStream（与 epic Story 12.2 AC "edge: 服务端推未知 type
     /// → 解码失败 + log warning + 不破坏 stream" 一致）.
     case unknown(rawType: String)
+}
+
+/// Story 12.5 引入：WS 连接状态变更事件载荷（与 `WSMessage.connectionStateChanged(...)` 配套）.
+///
+/// 三态映射 `WSState`（vm 一行 switch 写完）；`reconnecting(attempt:)` 携带 attempt 字段为预留 ——
+/// 节点 4 阶段 `RoomScaffoldView.wsStateLabel` 不展示 N（仅"正在重连…"），但保留字段让 Story 12.6 /
+/// Epic 13 端到端验证想展示"第 N 次重连"时无字段层迁移成本.
+///
+/// 设计说明：
+///   - **不**给 `disconnected` 加 `code: Int` 携带 close code —— vm 不需要 close code（business
+///     decision 由 caller / UseCase 层处理；vm 仅渲染三态文字）.
+///   - 由 `WebSocketClientImpl` reconnect 状态机内部 emit，vm 通过 `messages` stream 透明感知.
+public enum WSConnectionState: Equatable, Sendable {
+    /// connect 成功（首次 / reconnect 成功后） —— vm 写 `wsState = .connected`.
+    case connected
+
+    /// 第 N 次 reconnect in-flight（attempt 从 1 起算）—— vm 写 `wsState = .reconnecting`.
+    case reconnecting(attempt: Int)
+
+    /// terminal close（含主动 disconnect / 业务级拒绝 close 4001-4007 / 重连超 5 次失败 / 未知 close code 保守 terminal）.
+    /// vm 写 `wsState = .disconnected`.
+    case disconnected
 }
 
 /// `room.snapshot` payload（§12.3 schema）—— 仅本 story 用到的字段就位，

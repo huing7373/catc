@@ -382,6 +382,38 @@ public final class RealRoomViewModel: RoomViewModel {
                 return
             }
             applyMemberLeft(payload)
+        case .connectionStateChanged(let state):
+            // Story 12.5：client-internal 状态变更.
+            // **不**调 `setCurrentRoomId(_:)` —— wsState 变更不影响 currentRoomId（房间归属仅由
+            // HTTP join/leave 改变；V1 §10.5 r3 锁定）.
+            // **不**反向命令 client（例如 webSocketClient?.disconnect()）—— 本 case 仅是状态通知.
+            //
+            // **fix-review round 2 P2**：必须用 streamRoomId 守护防 cross-room race（推翻 dev 阶段开放
+            // 问题 §6"不守护"决定）.
+            // 触发场景：A→B 房间切换 / leave-rejoin 期间，旧 stream 的 consumer task 可能已 dequeue 一个
+            // `.reconnecting` / `.disconnected` 事件，在 lastObservedRoomId 已变更后 apply →
+            // 覆盖当前 room 的 status banner（显示前一个连接的 stale 状态）.
+            // 与 .memberJoined / .memberLeft 同精神：connection state 也"绑定 specific socket / stream",
+            // 跨 stream apply 没有协议上的合理性 —— 必须丢弃.
+            guard streamRoomId != nil, streamRoomId == lastObservedRoomId else {
+                os_log(.debug,
+                       "RealRoomViewModel: discard stale .connectionStateChanged (state=%{public}@, streamRoomId=%{public}@, current=%{public}@)",
+                       String(describing: state),
+                       streamRoomId ?? "<nil>",
+                       lastObservedRoomId ?? "<nil>")
+                return
+            }
+            switch state {
+            case .connected:
+                self.wsState = .connected
+            case .reconnecting:
+                self.wsState = .reconnecting
+            case .disconnected:
+                self.wsState = .disconnected
+            }
+            os_log(.debug,
+                   "RealRoomViewModel: wsState updated from connectionStateChanged → %{public}@",
+                   String(describing: self.wsState))
         case .pong:
             // Story 12.6 心跳框架处理；本 story discard.
             break

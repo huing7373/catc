@@ -48,6 +48,13 @@ public final class WebSocketClientMock: WebSocketClient, @unchecked Sendable {
         currentContinuation.yield(message)
     }
 
+    /// Story 12.5 测试用：手动 emit `connectionStateChanged` 到 stream，让单测验证 vm 处理路径.
+    /// 不实装真实 reconnect 状态机（mock 无 closeCode / backoff 逻辑）—— 仅暴露 emit 接缝.
+    /// reconnect 状态机本身的单测在 `WebSocketClientImplTests.swift` 通过 fake `WebSocketTaskHandle` 覆盖.
+    public func emitConnectionState(_ state: WSConnectionState) {
+        currentContinuation.yield(.connectionStateChanged(state))
+    }
+
     /// Story 12.2 AC6：mock connect —— 不真实拨号，只记录调用 + 可选抛错.
     public func connect(roomId: String) async throws {
         connectCallArgs.append(roomId)
