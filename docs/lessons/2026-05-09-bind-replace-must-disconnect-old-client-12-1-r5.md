@@ -2,7 +2,7 @@
 date: 2026-05-09
 source_review: codex review (epic-loop round 5) — /tmp/epic-loop-review-12-1-r5.md
 story: 12-1-房间页面-swiftui-骨架
-commit: <pending>
+commit: 791d942
 lesson_count: 1
 ---
 

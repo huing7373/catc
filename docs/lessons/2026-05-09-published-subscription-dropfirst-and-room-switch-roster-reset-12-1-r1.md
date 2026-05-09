@@ -2,7 +2,7 @@
 date: 2026-05-09
 source_review: codex review --uncommitted (Story 12.1 round 1)
 story: 12-1-房间页面-swiftui-骨架
-commit: <pending>
+commit: e73978f
 lesson_count: 2
 ---
 
