@@ -229,6 +229,15 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
     /// `private`（非 internal）—— 仅 client 内部 receive-loop / heartbeat task 写读，单测不直接访问.
     private var pendingPongContinuation: AsyncStream<Void>.Continuation?
 
+    /// Story 12.6 fix-review round 2 P2：当前 in-flight ping 的 requestId（"ping_<seq>"）.
+    /// V1 §12.2 钦定 `pong.requestId` 必须 echo 对应 ping 的 requestId.
+    /// receive-loop 收到 `.pong(requestId:)` 必须先校验 == pendingPongRequestId 才 yield latch；
+    /// 不匹配 = stale / duplicated pong（旧 ping 的迟到 pong），silent drop + log debug.
+    /// 旧实装无条件接受任何 .pong 当 ack → 旧 pong 错误 ack 当前 in-flight ping → miss 当前 ping
+    /// 实际未被 ack → 推迟一整个 heartbeat interval 才检测到 reconnect 需要.
+    /// 生命周期：与 pendingPongContinuation 严格同步；同时由 lock 保护一起读写.
+    private var pendingPongRequestId: String?
+
     // MARK: - WebSocketClient protocol
 
     public var messages: AsyncStream<WSMessage> {
@@ -305,6 +314,7 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         heartbeatTask = nil           // Story 12.6
         reconnectAttempt = 0
         pendingPongContinuation = nil // Story 12.6
+        pendingPongRequestId = nil    // Story 12.6 fix-review round 2 P2：与 pendingPongContinuation 同步清
         sessionGeneration += 1
         lock.unlock()
         oldReconnectTask?.cancel()
@@ -437,6 +447,7 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         currentRoomId = nil           // Story 12.5：清掉 reconnect 复用源
         reconnectAttempt = 0          // Story 12.5：重置计数
         pendingPongContinuation = nil // Story 12.6
+        pendingPongRequestId = nil    // Story 12.6 fix-review round 2 P2
         // fix-review round 2 P1：递增 sessionGeneration —— stale receive-loop / cancelled reconnect-attempt
         //   随后落到 catch path 时 mySession != sessionGeneration → 不再 emit / 不再 schedule.
         sessionGeneration += 1
@@ -474,6 +485,7 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         currentRoomId = nil           // Story 12.5：caller 通常马上调 connect(roomId:) 重新建立
         reconnectAttempt = 0          // Story 12.5
         pendingPongContinuation = nil // Story 12.6
+        pendingPongRequestId = nil    // Story 12.6 fix-review round 2 P2
         // fix-review round 2 P1：递增 sessionGeneration —— 旧 receive-loop 的 catch path 即使在 swap 新 stream
         //   **之后**才跑，也会因 mySession != sessionGeneration 被 silent drop；不会污染新 stream / 错误 schedule.
         sessionGeneration += 1
@@ -623,8 +635,9 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                         // Story 12.6：先 internal pong-notify（清 latch），再 yield 到 stream（vm 仍 break）.
                         // 顺序原因：pong notify 是 client-internal，必须比 vm main-actor hop 先到；否则 5s
                         // pongTimeout 计算受 vm 的 main-actor 调度 jitter 影响 → 可能超时误判.
-                        if case .pong = message {
-                            self?.notifyPongReceivedIfCurrent(mySession: mySession)
+                        // fix-review round 2 P2：携 requestId 让 notify 路径校验 in-flight ping 配对.
+                        if case .pong(let requestId) = message {
+                            self?.notifyPongReceivedIfCurrent(requestId: requestId, mySession: mySession)
                         }
                         self?.yieldIfCurrent(message, to: continuation, mySession: mySession, myStreamGen: myStreamGen)
                     case .data(let data):
@@ -632,8 +645,9 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                         if let text = String(data: data, encoding: .utf8) {
                             let message = WSMessageCodec.decode(text)
                             // Story 12.6：与 .string 路径同
-                            if case .pong = message {
-                                self?.notifyPongReceivedIfCurrent(mySession: mySession)
+                            // fix-review round 2 P2：携 requestId 让 notify 路径校验 in-flight ping 配对.
+                            if case .pong(let requestId) = message {
+                                self?.notifyPongReceivedIfCurrent(requestId: requestId, mySession: mySession)
                             }
                             self?.yieldIfCurrent(message, to: continuation, mySession: mySession, myStreamGen: myStreamGen)
                         } else {
@@ -1244,6 +1258,10 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                 strongSelf.pendingPongContinuation = pongCont
                 strongSelf.heartbeatSeq += 1
                 seq = strongSelf.heartbeatSeq
+                // fix-review round 2 P2：在持锁内一起写 requestId —— receive-loop notify 路径与本写入用同一锁,
+                // 保证"新一轮 ping 发出 + pendingPongRequestId 切换"是 lock 内原子；不会有"旧 requestId 还在 +
+                // 新 latch 已 install" 的中间态被 receive-loop 错配.
+                strongSelf.pendingPongRequestId = "ping_\(strongSelf.heartbeatSeq)"
                 activeTaskOpt = strongSelf.underlyingTask
                 strongSelf.lock.unlock()
 
@@ -1252,6 +1270,7 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                     strongSelf.lock.lock()
                     strongSelf.pendingPongContinuation?.finish()
                     strongSelf.pendingPongContinuation = nil
+                    strongSelf.pendingPongRequestId = nil  // round 2 P2
                     strongSelf.lock.unlock()
                     return
                 }
@@ -1265,6 +1284,7 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                     strongSelf.lock.lock()
                     strongSelf.pendingPongContinuation?.finish()
                     strongSelf.pendingPongContinuation = nil
+                    strongSelf.pendingPongRequestId = nil  // round 2 P2
                     strongSelf.lock.unlock()
                     return
                 }
@@ -1281,11 +1301,13 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                 guard strongSelf.sessionGeneration == mySession else {
                     strongSelf.pendingPongContinuation?.finish()
                     strongSelf.pendingPongContinuation = nil
+                    strongSelf.pendingPongRequestId = nil  // round 2 P2
                     strongSelf.lock.unlock()
                     return
                 }
                 strongSelf.pendingPongContinuation?.finish()
                 strongSelf.pendingPongContinuation = nil
+                strongSelf.pendingPongRequestId = nil  // round 2 P2：本轮结束，下一轮 ping 会重置.
                 strongSelf.lock.unlock()
 
                 if Task.isCancelled { return }
@@ -1406,6 +1428,7 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         let oldPongCont = pendingPongContinuation
         heartbeatTask = nil
         pendingPongContinuation = nil
+        pendingPongRequestId = nil  // round 2 P2：与 pendingPongContinuation 同生命周期
         lock.unlock()
         os_log(.debug,
                log: WebSocketClientImpl.logger,
@@ -1419,7 +1442,15 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
     /// Story 12.6：generation-gated pong-notify —— receive-loop decode 出 .pong 时调.
     /// stream-owner stale（旧 receive-loop 在新 session 已翻 gen 后才跑）silent drop，
     /// 不打扰新 session 的 heartbeat latch.
-    private func notifyPongReceivedIfCurrent(mySession: Int) {
+    ///
+    /// fix-review round 2 P2：`incomingRequestId` 必须 == `pendingPongRequestId` 才 yield latch.
+    /// V1 §12.2 钦定 `pong.requestId` echo 对应 ping 的 requestId —— receive-loop 必须按
+    /// requestId 配对 pong 与 in-flight ping，**不能**无条件接受任何 pong 当 ack.
+    /// 不匹配场景：server 发的 delayed / duplicated pong（旧 ping 的 pong 才到达，但此时 client
+    /// 已发出新 ping 等新 pong）→ silent drop + log debug；让 in-flight ping 真等到 timeout / 真 pong.
+    /// 旧实装无条件 yield → 旧 pong 错误 ack 当前 in-flight ping → miss 当前 ping 实际未被 ack →
+    /// 推迟一整个 heartbeat interval 才检测到 reconnect 需要.
+    private func notifyPongReceivedIfCurrent(requestId incomingRequestId: String, mySession: Int) {
         lock.lock()
         guard sessionGeneration == mySession else {
             lock.unlock()
@@ -1427,6 +1458,19 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                    log: WebSocketClientImpl.logger,
                    "notifyPongReceived dropped: stale mySession=%{public}d (current=%{public}d)",
                    mySession, sessionGeneration)
+            return
+        }
+        // fix-review round 2 P2：requestId 校验 —— 必须 == 当前 in-flight ping 的 requestId.
+        // pendingPongRequestId == nil 场景：本轮无 in-flight ping（heartbeat 还在 sleep / 上一轮已 ack）→
+        //   收到 pong 必然是 stale（重复 / 迟到的旧 pong）→ silent drop.
+        // pendingPongRequestId != incomingRequestId 场景：旧 ping 的迟到 pong → silent drop.
+        guard let expected = pendingPongRequestId, expected == incomingRequestId else {
+            let actualExpected = pendingPongRequestId ?? "<nil>"
+            lock.unlock()
+            os_log(.debug,
+                   log: WebSocketClientImpl.logger,
+                   "notifyPongReceived dropped: requestId mismatch (incoming=%{public}@, expected=%{public}@) — stale or duplicated pong",
+                   incomingRequestId, actualExpected)
             return
         }
         let cont = pendingPongContinuation

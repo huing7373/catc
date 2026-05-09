@@ -243,3 +243,4 @@
 | 2026-05-09 | [WS reconnect: stream 复用 vs session 翻新必须双 generation 解耦（12-5 r4）](2026-05-09-ws-reconnect-stream-vs-session-generations-must-decouple-12-5-r4.md) | 1 | architecture | `26b9541` |
 | 2026-05-09 | [WS reconnect: precondition 必须先于 gen 翻新 & connectGate 覆盖前必 resolve（12-5 r5）](2026-05-09-ws-reconnect-precondition-must-precede-gen-bump-and-gate-supersede-12-5-r5.md) | 2 | architecture | `0223877` |
 | 2026-05-10 | [WS heartbeat 状态必须在 transient reconnect 前显式 reset（12-6 r1）](2026-05-10-ws-heartbeat-state-must-reset-before-transient-reconnect-12-6-r1.md) | 1 | architecture | `<pending>` |
+| 2026-05-10 | [WS heartbeat .pong 必须按 requestId 配对当前 in-flight ping，不能无条件 ack 任意 pong（12-6 r2）](2026-05-10-ws-heartbeat-pong-requestid-correlation-12-6-r2.md) | 1 | error-handling | `<pending>` |

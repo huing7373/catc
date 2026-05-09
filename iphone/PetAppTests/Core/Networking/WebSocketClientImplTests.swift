@@ -1609,6 +1609,66 @@ final class WebSocketClientImplTests: XCTestCase {
         client.disconnect()
     }
 
+    /// fix-review round 2 P2：heartbeat .pong 必须按 requestId 配对当前 in-flight ping.
+    /// 旧实装无条件 ack 任何 .pong → server 推 stale pong（旧 ping 的迟到 / 重复 pong）会
+    /// 错误 ack 当前 in-flight ping → miss 当前 ping 实际未被 ack → 推迟一整个 heartbeat
+    /// interval 才检测到 reconnect 需要.
+    ///
+    /// 时序设计（heartbeatInterval=50ms / pongTimeout=300ms / framedelay=120ms）：
+    ///   T0     : connect → snapshot 解 latch → heartbeat 启动
+    ///   T0+50  : heartbeat 第一次 ping (requestId="ping_1") → pendingPongRequestId="ping_1" → 进 awaitPongOrTimeout
+    ///   T0+120 : fake handle frame[1] = stale pong (requestId="stale_id") 到达 receive-loop
+    ///            → notifyPongReceivedIfCurrent("stale_id", mySession) 校验 "stale_id" != "ping_1" → silent drop
+    ///   T0+350 : pongTimeout fire → cancel underlying with .goingAway (1001 transient)
+    ///   T0+400 : 测试断言时间点
+    ///
+    /// 修复前断言失败：notify 无 requestId 校验 → stale pong 错配 ack ping_1 → awaitPongOrTimeout
+    ///   return false → continue 下一轮 sleep；underlying 不会被 cancel(.goingAway)。
+    /// 修复后断言成立：requestId 校验 silent drop stale → pongTimeout 真正 fire → cancel(.goingAway).
+    func test_heartbeat_stalePongMismatchedRequestIdDoesNotAckInflightPing_round2_P2() async throws {
+        let factory = FakeWebSocketTaskFactory()
+        // frame[0]: snapshot 解 connect latch + 启 heartbeat
+        // frame[1]: stale pong with requestId="stale_id"（不匹配 ping_1）
+        let stalePongJSON = """
+        {"type":"pong","requestId":"stale_id","payload":{},"ts":99}
+        """
+        factory.fakeTask.scriptedFrames = [.string(Self.hbSnapshotJSON), .string(stalePongJSON)]
+        // frame[1] 注入 120ms 延迟 → ping_1 在 T0+50 已发出（pendingPongRequestId="ping_1"）→ T0+120 stale pong 到达.
+        factory.fakeTask.frameDelaysSec = [0.0, 0.12]
+        factory.fakeTask.blockReceiveForever = true
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.heartbeatInterval = 0.05
+        client.pongTimeout = 0.3   // T0+50 ping → T0+350 pong timeout
+        client.backoffSequence = [10.0]  // 防 reconnect attempt 干扰断言（pongTimeout 触发后我们不需要 reconnect 跑通）
+
+        try await client.connect(roomId: "RM01")
+
+        // 等 ~T0+400ms：足够让 stale pong 到达 + pongTimeout fire + cancelUnderlyingTaskWithGoingAwayIfCurrent.
+        try await Task.sleep(nanoseconds: 400_000_000)
+
+        // 修复后核心断言：stale pong 被 silent drop → pongTimeout fire → cancel(.goingAway).
+        XCTAssertEqual(factory.fakeTask.lastCancelCloseCode, .goingAway,
+                       "stale pong (requestId mismatch) 必须被 silent drop → pongTimeout 真触发 cancel(.goingAway)")
+
+        // 顺带验证：ping 真发出过（前置条件，否则断言无意义）.
+        let sent = factory.fakeTask.sentMessages
+        XCTAssertGreaterThanOrEqual(sent.count, 1, "前置：heartbeat task 应已发出至少一次 ping")
+        guard case .string(let text) = sent.first else {
+            XCTFail("first sent message should be string frame")
+            return
+        }
+        let data = try XCTUnwrap(text.data(using: .utf8))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["requestId"] as? String, "ping_1", "首次 ping requestId == ping_1（与 stale pong requestId='stale_id' 必然不匹配）")
+
+        client.disconnect()
+    }
+
     // MARK: - reconnect 测试 helpers
 
     /// 收集 stream 上的 connection state events 直到拿到指定数量（带超时）.
@@ -1741,6 +1801,12 @@ final class FakeWebSocketTaskHandle: WebSocketTaskHandle, @unchecked Sendable {
     /// 与 blockReceiveForever 互斥：blockReceiveForever=true → 阻塞；errorAfterFrames=true → 立即抛错.
     var errorAfterFrames: Bool = false
 
+    /// Story 12.6 fix-review round 2 P2：每个 scriptedFrames index 对应的 pre-receive 延迟（秒）.
+    /// 数组与 scriptedFrames 同 index 配对；超过 scriptedFrames 长度的 entry 忽略.
+    /// 用于让 stale pong 等场景在 heartbeat 已发 ping 之后才到达 receive-loop（精准重现 race 时序）.
+    /// 默认 nil = 不 sleep（与原行为一致）.
+    var frameDelaysSec: [TimeInterval]?
+
     private var receiveIndex: Int = 0
     private var isCancelled: Bool = false
     private let lock = NSLock()
@@ -1786,6 +1852,7 @@ final class FakeWebSocketTaskHandle: WebSocketTaskHandle, @unchecked Sendable {
         let cancelled = isCancelled
         let blockAfter = blockReceiveForever
         let errorAfter = errorAfterFrames
+        let delays = frameDelaysSec
         if idx < frames.count {
             receiveIndex += 1
         }
@@ -1795,6 +1862,10 @@ final class FakeWebSocketTaskHandle: WebSocketTaskHandle, @unchecked Sendable {
             throw URLError(.cancelled)
         }
         if idx < frames.count {
+            // round 2 P2：按 index 查 delay；让 stale pong 等场景能在 heartbeat ping 已发出之后才到达.
+            if let ds = delays, idx < ds.count, ds[idx] > 0 {
+                try await Task.sleep(nanoseconds: UInt64(ds[idx] * 1_000_000_000))
+            }
             return frames[idx]
         }
         if errorAfter {
