@@ -152,6 +152,28 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
     /// `internal` 实例字段让单测可注入更小值（如 3）覆盖"超过上限"路径而不必跑 5 次.
     internal var maxReconnectAttempts: Int = 5
 
+    /// fix-review round 2 P1（Story 12.5）：session generation counter —— 用于把"过期 session 的 stale task"
+    /// 与"当前活跃 session 的 task"在共享状态写入处隔离.
+    ///
+    /// **递增点**：每次 `connect(roomId:)` / `prepareForReconnect()` / `disconnect()` 都 +1.
+    /// **捕获点**：所有 launched async task（receive-loop / reconnect attempt / scheduleReconnect 闭包）在 launch
+    ///   时把当时的 `sessionGeneration` 抓进 local `mySession` 常量.
+    /// **校验点**：任何写 `currentContinuation` / `reconnectTask` / 调 `emitConnectionState` /
+    ///   `scheduleReconnect` 之前先校验 `mySession == sessionGeneration`，不匹配 silent return（log debug）.
+    ///
+    /// **为什么需要**：
+    ///   - 旧 receive-loop 的 catch path 可能在 `prepareForReconnect()` 已 swap 新 stream **之后**才跑 ——
+    ///     旧 task 通过新 `currentContinuation` emit `.disconnected` / `scheduleReconnect`，导致
+    ///     room A 的 late close 在 room B 的 stream 上显示 `.disconnected`/`.reconnecting`，
+    ///     甚至触发错误 session 的 reconnect logic.
+    ///   - `disconnect()` / `prepareForReconnect()` cancel 一个已经在 `connectInternal` 内的 reconnect attempt
+    ///     时，cancelled task 仍然落到 catch block；旧实装无 generation check，stale catch 安装新 reconnectTask
+    ///     → 如果 fresh `connect(roomId:)` 在 stale catch 跑之前发生，delayed retry 会 race 新 connection 连错房间.
+    ///
+    /// 与 12.4 r1 的 `streamRoomId` 守护同精神：用 generation counter 保证只有"当前活跃 session" 的 task
+    /// 能 mutate 共享状态.
+    private var sessionGeneration: Int = 0
+
     // MARK: - WebSocketClient protocol
 
     public var messages: AsyncStream<WSMessage> {
@@ -198,10 +220,13 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
     ///     （早于第一帧 yield，避免与第一帧 yield 之间的调度 race；详见 startReceiveLoop 注释）
     public func connect(roomId: String) async throws {
         // Story 12.5：caller 主动 connect → 清掉任何 in-flight reconnect 状态
+        // fix-review round 2 P1：递增 sessionGeneration —— 之前 launch 的 receive-loop / reconnect-attempt
+        //   再写共享状态时会因 mySession != sessionGeneration 被 silent drop（防 stale event 串到新 session）.
         lock.lock()
         let oldReconnectTask = reconnectTask
         reconnectTask = nil
         reconnectAttempt = 0
+        sessionGeneration += 1
         lock.unlock()
         oldReconnectTask?.cancel()
 
@@ -228,6 +253,7 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         // 4. webSocketTask + resume + 启动 receive 长任务
         let task = taskFactory.makeTask(with: request)
         let continuation: AsyncStream<WSMessage>.Continuation
+        let mySession: Int  // fix-review round 2 P1：捕获当前 generation 传给 receive-loop
         lock.lock()
         // Story 12.1 r6 lesson：同 instance 复用避免泄漏 —— connect 前若有旧 task / receiveTask，先清掉.
         // 正常 caller 路径应是 disconnect → prepareForReconnect → connect；这里防御性兜底.
@@ -239,6 +265,7 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         // Story 12.5：记录 currentRoomId 让 reconnect 路径可复用
         currentRoomId = roomId
         continuation = currentContinuation
+        mySession = sessionGeneration
         lock.unlock()
 
         task.resume()
@@ -260,7 +287,13 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
             lock.unlock()
             // 启动 receive 长任务（持 task / continuation 两个 reference 进闭包）
             // Story 12.5：isReconnectAttempt 让 receive loop pre-handshake 失败时不主动 finish stream
-            startReceiveLoop(task: task, continuation: continuation, isReconnectAttempt: isReconnect)
+            // fix-review round 2 P1：mySession 让 receive loop 在 stale session 时 silent drop 共享状态写入
+            startReceiveLoop(
+                task: task,
+                continuation: continuation,
+                isReconnectAttempt: isReconnect,
+                mySession: mySession
+            )
         }
         os_log(.debug,
                log: WebSocketClientImpl.logger,
@@ -292,6 +325,9 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         reconnectTask = nil           // Story 12.5
         currentRoomId = nil           // Story 12.5：清掉 reconnect 复用源
         reconnectAttempt = 0          // Story 12.5：重置计数
+        // fix-review round 2 P1：递增 sessionGeneration —— stale receive-loop / cancelled reconnect-attempt
+        //   随后落到 catch path 时 mySession != sessionGeneration → 不再 emit / 不再 schedule.
+        sessionGeneration += 1
         lock.unlock()
 
         // client-initiated close（V1 §12.1 close code 1000 normalClosure）
@@ -318,6 +354,9 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         reconnectTask = nil           // Story 12.5
         currentRoomId = nil           // Story 12.5：caller 通常马上调 connect(roomId:) 重新建立
         reconnectAttempt = 0          // Story 12.5
+        // fix-review round 2 P1：递增 sessionGeneration —— 旧 receive-loop 的 catch path 即使在 swap 新 stream
+        //   **之后**才跑，也会因 mySession != sessionGeneration 被 silent drop；不会污染新 stream / 错误 schedule.
+        sessionGeneration += 1
         self.currentStream = stream
         self.currentContinuation = cont
         lock.unlock()
@@ -381,10 +420,15 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
     ///
     /// `isReconnectAttempt`：true → 此 receive 任务由 reconnect 状态机的 `attemptReconnect` 启动.
     ///   pre-handshake 失败时 caller (attemptReconnect) 控制 stream finish/不 finish；defer 不主动 finish.
+    ///
+    /// `mySession`：fix-review round 2 P1 —— launch 时 caller（`connectInternal`）捕获当时的
+    ///   `sessionGeneration` 传入；任何写共享状态前先 `isCurrentSession(mySession)` 校验，stale session
+    ///   silent return.
     private func startReceiveLoop(
         task: WebSocketTaskHandle,
         continuation: AsyncStream<WSMessage>.Continuation,
-        isReconnectAttempt: Bool
+        isReconnectAttempt: Bool,
+        mySession: Int
     ) {
         let newReceiveTask = Task { [weak self] in
             var firstFrameReceived = false
@@ -419,7 +463,9 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                         // [.connected, room.snapshot]，避免 emit 与 yield 间的 caller-scheduler race.
                         // **不**通过 connect() 路径（caller 唤醒后 emit）—— 那条路径下 caller 唤醒由 scheduler
                         // 决定，可能晚于本 receive task yield 第一帧（snapshot），导致 vm 先收到 snapshot 再收到 .connected.
-                        self?.emitConnectionState(.connected)
+                        // fix-review round 2 P1：emit 前 generation 校验 —— 旧 session 的 receive-loop 在新
+                        // session 已 swap 新 stream 之后才跑，应 silent drop（不污染新 stream）.
+                        self?.emitConnectionStateIfCurrent(.connected, mySession: mySession)
                         self?.resolveConnectGate(success: true, error: nil)
                     }
                     switch frame {
@@ -487,6 +533,17 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                     }
 
                     // post-handshake 错误：按 close code 分类决策
+                    // fix-review round 2 P1：所有写共享状态 / 调 emit / 调 scheduleReconnect 之前先做 generation
+                    //   校验 —— stale session（旧 receive-loop 在新 session swap 之后才跑）silent drop.
+                    if !strongSelf.isCurrentSession(mySession) {
+                        os_log(.debug,
+                               log: WebSocketClientImpl.logger,
+                               "stale receive-loop catch dropped (mySession=%{public}d != current)",
+                               mySession)
+                        // 不更动新 session 的 leaveStreamOpen 决策 —— 保持初始值即可；新 session 的 receive-loop
+                        // 自己的 defer 会按需 finish 它自己的 continuation（捕获了 fresh 的 continuation 引用）.
+                        return
+                    }
                     let closeCode = task.closeCode
                     let category = strongSelf.classifyCloseCode(closeCode)
                     switch category {
@@ -496,7 +553,7 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                                "post-handshake terminal close (code=%{public}d) → emit disconnected + finish stream",
                                code)
                         // emit .disconnected 进 stream → vm 写 wsState = .disconnected
-                        strongSelf.emitConnectionState(.disconnected)
+                        strongSelf.emitConnectionStateIfCurrent(.disconnected, mySession: mySession)
                         // 同步清掉 reconnect 状态（terminal 不再重试）
                         strongSelf.lock.lock()
                         strongSelf.currentRoomId = nil
@@ -511,7 +568,7 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                                "post-handshake transient close (code=%{public}d) → schedule reconnect",
                                code)
                         // 关键：schedule reconnect + **不**finish stream（契约 5）
-                        strongSelf.scheduleReconnect()
+                        strongSelf.scheduleReconnectIfCurrent(mySession: mySession)
                         leaveStreamOpen = true
                         return
                     }
@@ -554,25 +611,61 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         }
     }
 
-    /// 内部接口：emit `.connectionStateChanged(...)` 进 currentContinuation.
-    /// reconnect 状态机 + public connect 的成功路径都用此接缝.
-    /// vm 通过 `messages` stream 透明感知（与契约 4 一致）.
-    private func emitConnectionState(_ state: WSConnectionState) {
+    // fix-review round 2 P1：原 `emitConnectionState(_:)` 已删除 —— 它**不**做 generation 校验，
+    // 留着会成为 race 复发隐患（任何新 callsite 不小心调它都会绕过 generation gate）.
+    // 所有 emit 走 `emitConnectionStateIfCurrent(_:mySession:)`.
+
+    /// fix-review round 2 P1：generation-gated emit —— 仅当 mySession == sessionGeneration 时 emit.
+    /// stale session（旧 receive-loop / cancelled reconnect-attempt 在新 session 已 swap 之后才跑）
+    /// 通过此接缝 silent drop，不污染新 stream 的状态序列.
+    private func emitConnectionStateIfCurrent(_ state: WSConnectionState, mySession: Int) {
         lock.lock()
+        guard sessionGeneration == mySession else {
+            lock.unlock()
+            os_log(.debug,
+                   log: WebSocketClientImpl.logger,
+                   "emitConnectionState dropped: stale mySession=%{public}d (current=%{public}d)",
+                   mySession, sessionGeneration)
+            return
+        }
         let cont = currentContinuation
         lock.unlock()
         cont.yield(.connectionStateChanged(state))
     }
 
+    /// fix-review round 2 P1：snapshot 校验当前 session generation —— 给 receive-loop catch 入口、
+    /// scheduleReconnect 的 sleep+retry 闭包入口、attemptReconnect 入口等地方做 cheap 早期 silent-drop 决策.
+    /// 注意：此函数返回 true 只代表"check 时一致"，后续 mutation 仍需在持锁内做最终一致性校验,
+    /// 防 check-then-act race（持锁块外两次校验中间 sessionGeneration 被 disconnect 翻动）.
+    private func isCurrentSession(_ mySession: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return sessionGeneration == mySession
+    }
+
     /// schedule 下一次 reconnect attempt（受 maxReconnectAttempts 上限保护）.
     /// 上限超出 → emit `.disconnected` + finish stream.
     /// 否则：emit `.reconnecting(attempt: N)` + 起 task sleep `backoffSequence[N-1]` 秒 → 调 attemptReconnect.
-    private func scheduleReconnect() {
+    ///
+    /// fix-review round 2 P1：所有 callsite 走 `scheduleReconnectIfCurrent(mySession:)` 包装，
+    /// 在持锁内做 generation 校验 + capture nextAttempt 决策；本函数只接受当前 session 的调用，
+    /// 内部启动的 sleep+retry 闭包再捕获自己的 `mySession` 让 disconnect/prepareForReconnect 后旧闭包 silent drop.
+    private func scheduleReconnect(mySession: Int) {
         // 上限校验（reconnectAttempt 是"上一次成功失败到的次数"；本次将尝试 attempt = +1）
+        // fix-review round 2 P1：在持锁内同时校验 mySession + 决策 nextAttempt —— 防 stale callsite 过 gate
+        // 之后再被新 session 写入打断
         let nextAttempt: Int
         let backoffSec: TimeInterval
         let exceeded: Bool
         lock.lock()
+        if sessionGeneration != mySession {
+            lock.unlock()
+            os_log(.debug,
+                   log: WebSocketClientImpl.logger,
+                   "scheduleReconnect dropped: stale session (mySession=%{public}d != current=%{public}d)",
+                   mySession, sessionGeneration)
+            return
+        }
         nextAttempt = reconnectAttempt + 1
         if nextAttempt > maxReconnectAttempts {
             exceeded = true
@@ -591,8 +684,13 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                    "reconnect exceeded maxAttempts (%{public}d) → emit disconnected + finish stream",
                    maxReconnectAttempts)
             // 终态：emit + finish stream + 清状态
-            emitConnectionState(.disconnected)
+            emitConnectionStateIfCurrent(.disconnected, mySession: mySession)
             lock.lock()
+            // 终态写入也走 generation 校验（防极端 race：上面 emit 之后正好被 disconnect 翻 gen）
+            guard sessionGeneration == mySession else {
+                lock.unlock()
+                return
+            }
             let cont = currentContinuation
             currentRoomId = nil
             reconnectAttempt = 0
@@ -603,24 +701,58 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         }
 
         // emit reconnecting(attempt: N) → vm 写 wsState = .reconnecting
-        emitConnectionState(.reconnecting(attempt: nextAttempt))
+        emitConnectionStateIfCurrent(.reconnecting(attempt: nextAttempt), mySession: mySession)
 
         let task = Task { [weak self] in
             // 用 Task.sleep（cancellation-aware）—— `disconnect()` / `prepareForReconnect()` cancel reconnectTask 后立即退出.
             try? await Task.sleep(nanoseconds: UInt64(backoffSec * 1_000_000_000))
             if Task.isCancelled { return }
             guard let self else { return }
-            await self.attemptReconnect(attempt: nextAttempt)
+            // fix-review round 2 P1：sleep+retry 闭包用 mySession 校验 —— disconnect / prepareForReconnect
+            // 翻 gen 后旧闭包不再 effective（即使 cancel 信号传播延迟也兜底）.
+            if !self.isCurrentSession(mySession) {
+                os_log(.debug,
+                       log: WebSocketClientImpl.logger,
+                       "reconnect sleep+retry closure dropped (stale mySession=%{public}d)",
+                       mySession)
+                return
+            }
+            await self.attemptReconnect(attempt: nextAttempt, mySession: mySession)
         }
         lock.lock()
+        // 写 reconnectTask 前再做一次 generation 校验，防 schedule 期间被 disconnect 抢
+        guard sessionGeneration == mySession else {
+            lock.unlock()
+            task.cancel()
+            return
+        }
         reconnectTask = task
         lock.unlock()
+    }
+
+    /// fix-review round 2 P1：scheduleReconnect 的 generation-gated 入口 —— 所有 callsite 走此包装.
+    private func scheduleReconnectIfCurrent(mySession: Int) {
+        scheduleReconnect(mySession: mySession)
     }
 
     /// 真正执行第 N 次 reconnect attempt：调 connectInternal（复用 currentRoomId）.
     /// 成功 → 重置 reconnectAttempt = 0 + emit `.connected`.
     /// 失败 → 累计 attempt + scheduleReconnect 再来一次（直到上限切 terminal）.
-    private func attemptReconnect(attempt: Int) async {
+    ///
+    /// fix-review round 2 P1：`mySession` 是 scheduleReconnect 启动 sleep+retry Task 时捕获的 session
+    /// generation —— 任何写共享状态 / 调 scheduleReconnect / emit / connectInternal 之前先做 generation 校验.
+    /// 这样即使 cancelled task 落入 catch（disconnect / prepareForReconnect 已经翻 gen 并 cancel 但
+    /// catch 还在 unwind），catch path 不会再 install 新 reconnectTask 或者 race 新 connection.
+    private func attemptReconnect(attempt: Int, mySession: Int) async {
+        // fix-review round 2 P1：gate at entry —— stale schedule（已被 disconnect / prepareForReconnect cancel）
+        // 即使 cancel 信号传播延迟，本函数也 silent return；不再走 connectInternal、不再 install reconnectTask.
+        if !isCurrentSession(mySession) {
+            os_log(.debug,
+                   log: WebSocketClientImpl.logger,
+                   "attemptReconnect dropped at entry (stale mySession=%{public}d)",
+                   mySession)
+            return
+        }
         let roomId: String?
         lock.lock()
         roomId = currentRoomId
@@ -636,7 +768,16 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
             try await connectInternal(roomId: roomId, isReconnect: true, attemptNumber: attempt)
             // 成功：重置计数；`.connected` 已由 receive loop 在 firstFrameReceived 时 emit（避免与 first frame yield 调度 race）.
             // server 自动重发 room.snapshot 作为第一帧（V1 §12.1.3）→ vm 接 snapshot 对齐 roster.
+            // fix-review round 2 P1：写共享状态前 generation 校验 —— 防 connectInternal 期间被 disconnect 抢.
             lock.lock()
+            guard sessionGeneration == mySession else {
+                lock.unlock()
+                os_log(.debug,
+                       log: WebSocketClientImpl.logger,
+                       "attemptReconnect success path dropped: stale mySession=%{public}d",
+                       mySession)
+                return
+            }
             reconnectAttempt = 0
             reconnectTask = nil
             lock.unlock()
@@ -664,6 +805,27 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                    attempt,
                    String(describing: error))
 
+            // fix-review round 2 P1：catch 入口先做 generation 校验 —— 解决 review 第二条 race：
+            //   cancelled task （disconnect / prepareForReconnect 后）仍然落到 catch；旧实装无 generation
+            //   check，stale catch 安装新 reconnectTask → fresh connect 与 stale retry race.
+            //   gate 后 stale catch silent return，不 emit / 不 schedule / 不写 reconnectTask.
+            if !isCurrentSession(mySession) {
+                os_log(.debug,
+                       log: WebSocketClientImpl.logger,
+                       "attemptReconnect catch dropped: stale mySession=%{public}d",
+                       mySession)
+                return
+            }
+            // 也兼顾 Task.isCancelled：caller 主动 cancel reconnectTask 时即使 generation 还没翻
+            // （极端时序 cancel 先于 disconnect 内的 sessionGeneration += 1），也应 silent return.
+            if Task.isCancelled {
+                os_log(.debug,
+                       log: WebSocketClientImpl.logger,
+                       "attemptReconnect catch dropped: Task.isCancelled (mySession=%{public}d)",
+                       mySession)
+                return
+            }
+
             // 提取 close code（仅 closedByServer error 携带；其它 error 视 .invalid → transient）
             let category: CloseCodeCategory
             if case let WSError.closedByServer(code, _) = error {
@@ -683,9 +845,13 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                        "reconnect terminal close (code=%{public}d) → stop retrying + emit disconnected",
                        code)
                 // emit `.disconnected` 让 vm 写 wsState = .disconnected → caller 触发 re-auth / room-error 处理
-                emitConnectionState(.disconnected)
-                // 清状态 + finish stream（终态）
+                emitConnectionStateIfCurrent(.disconnected, mySession: mySession)
+                // 清状态 + finish stream（终态）—— generation 校验防终态写期间被 disconnect 抢
                 lock.lock()
+                guard sessionGeneration == mySession else {
+                    lock.unlock()
+                    return
+                }
                 let cont = currentContinuation
                 currentRoomId = nil
                 reconnectAttempt = 0
@@ -694,10 +860,14 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                 cont.finish()
             case .transient:
                 lock.lock()
+                guard sessionGeneration == mySession else {
+                    lock.unlock()
+                    return
+                }
                 reconnectAttempt = attempt
                 reconnectTask = nil  // 当前 task 已结束；scheduleReconnect 会写新的
                 lock.unlock()
-                scheduleReconnect()
+                scheduleReconnectIfCurrent(mySession: mySession)
             }
         }
     }

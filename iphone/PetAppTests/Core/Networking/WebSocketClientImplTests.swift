@@ -723,6 +723,199 @@ final class WebSocketClientImplTests: XCTestCase {
                        "transient pre-handshake close → 应继续 retry 直到成功（1 + 5 = 6 次 makeTask）")
     }
 
+    // MARK: - case#R10..R12 fix-review round 2 P1: generation counter race tests
+
+    /// case#R10 fix-review round 2 P1：cancelled reconnect attempt 的 catch path 不再 schedule new retry.
+    ///
+    /// 触发：
+    ///   1. 第一次 connect 成功（snapshot 解 latch）→ transient close 4005 → schedule reconnect (attempt 1)
+    ///   2. attempt 1 的 makeTask 启动新 fake handle → 此 fake 的 receive() **永久 block** 模拟"在 connectInternal
+    ///      内卡住"
+    ///   3. caller 在 backoff sleep + makeTask 后立即 disconnect() —— 这会 cancel 当前 reconnectTask（已经在
+    ///      connectInternal 内 await receive()），翻 sessionGeneration += 1
+    ///   4. 被 cancel 的 receive() 抛 CancellationError → connectInternal throw → attemptReconnect catch
+    ///   5. 旧实装：catch 无 generation check → 把 cancellation 当 transient → schedule next retry → 第三次 makeTask
+    ///   6. 修复后：catch 入口看到 sessionGeneration 已被 disconnect 翻动 → silent return → makeTaskCallCount
+    ///      停在 2（首次 + reconnect attempt 1）
+    func test_reconnect_cancelledAttemptCatchDoesNotScheduleNewRetry() async throws {
+        let factory = FakeReconnectFactory()
+
+        // 首次连接：snapshot 解 latch → 立即 transient 4005 触发 reconnect
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        firstTask.errorAfterFrames = true
+        firstTask.stubbedCloseCode = .init(rawValue: 4005)!
+
+        // reconnect attempt 1：永久 block 在 receive() —— 模拟"已经在 connectInternal 内"
+        let attemptTask = factory.scheduleNewTask()
+        attemptTask.scriptedFrames = []
+        attemptTask.blockReceiveForever = true
+
+        // 防御兜底：如果旧实装 schedule 了第三次 makeTask（不该发生），让它快速 error
+        let bonusTask = factory.scheduleNewTask()
+        bonusTask.scriptedFrames = []
+        bonusTask.errorAfterFrames = true
+        bonusTask.stubbedCloseCode = .invalid
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        // 用极短 backoff 让 attempt 1 的 makeTask 快速发起
+        client.backoffSequence = [0.05, 0.05, 0.05, 0.05, 0.05]
+
+        try await client.connect(roomId: "RM01")
+
+        // 等到 attempt 1 的 makeTask 真的发起（即 makeTaskCallCount == 2）
+        let attemptStartedDeadline = Date().addingTimeInterval(2.0)
+        while factory.makeTaskCallCount < 2, Date() < attemptStartedDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(factory.makeTaskCallCount, 2, "reconnect attempt 1 应该真的发起 makeTask")
+
+        // 此刻 attempt 1 卡在 receive() 永久 block —— disconnect() cancel reconnectTask + 翻 generation
+        client.disconnect()
+
+        // 给 cancellation 充分传播 + catch path 跑完的时间
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+
+        XCTAssertEqual(factory.makeTaskCallCount, 2,
+                       "cancelled attempt 的 catch 在新 generation 下 silent drop → 不应 schedule next retry → makeTaskCallCount 不增")
+    }
+
+    /// case#R11 fix-review round 2 P1：prepareForReconnect 后旧 receive-loop 的 catch 不污染新 stream.
+    ///
+    /// 触发：
+    ///   1. 第一次 connect 成功（snapshot 解 latch）—— receive loop 卡在 second receive()
+    ///   2. caller 调 prepareForReconnect() —— swap 新 stream + 翻 sessionGeneration
+    ///   3. 旧 receive() 因 task.cancel(closeCode:) 抛错 → 走 catch path
+    ///   4. 旧实装：catch 用 `currentContinuation`（已是新 stream）emit `.disconnected` / schedule reconnect →
+    ///      新 stream 上出现 stale 状态事件
+    ///   5. 修复后：catch 看到 sessionGeneration 已被 prepareForReconnect 翻动 → silent return → 新 stream
+    ///      不应收到任何 stale connection-state event
+    func test_reconnect_staleReceiveLoopCatchDoesNotPolluteFreshStream() async throws {
+        let factory = FakeReconnectFactory()
+
+        // 首次连接：snapshot 解 latch + blockReceiveForever（让 receive loop 卡在 second receive）
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        firstTask.blockReceiveForever = true
+        // 注：firstTask 的 closeCode 默认 .invalid（rawValue=0）—— 旧实装会把它当 transient → schedule reconnect.
+        // 修复后：generation 校验 silent drop.
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.backoffSequence = [0.05, 0.05, 0.05, 0.05, 0.05]
+
+        try await client.connect(roomId: "RM01")
+
+        // prepareForReconnect → swap 新 stream + 翻 generation + cancel 旧 task
+        client.prepareForReconnect()
+        let freshStream = client.messages
+
+        // 收集新 stream 上 1 秒内 emit 的所有 connection-state 事件（应为 0：旧 receive-loop catch silent drop）
+        var pollutedStates: [WSConnectionState] = []
+        let collectExp = expectation(description: "collect on fresh stream (expecting NO state events)")
+        collectExp.isInverted = true  // 期望不被 fulfilled —— 任何 emit 都算污染
+        let collectTask = Task {
+            for await msg in freshStream {
+                if case .connectionStateChanged(let s) = msg {
+                    pollutedStates.append(s)
+                    collectExp.fulfill()  // emit 即失败
+                    return
+                }
+            }
+        }
+        await fulfillment(of: [collectExp], timeout: 1.0)
+        collectTask.cancel()
+
+        XCTAssertTrue(pollutedStates.isEmpty,
+                      "stale receive-loop catch 不应在 fresh stream 上 emit 任何 connection-state；实际 emit: \(pollutedStates)")
+
+        // 二次保险：旧实装会触发第二次 makeTask（schedule reconnect 后 sleep + attemptReconnect）—— 修复后不应
+        XCTAssertEqual(factory.makeTaskCallCount, 1,
+                       "stale receive-loop catch silent drop → 不应 schedule reconnect → 不应触发第二次 makeTask")
+    }
+
+    /// case#R12 fix-review round 2 P1：cancellation 后 fresh connect 不被 stale retry race.
+    ///
+    /// 触发：
+    ///   1. 第一次 connect 成功（snapshot）→ transient close 4005 → schedule reconnect (attempt 1)
+    ///   2. attempt 1 的 connectInternal 内卡住（永久 block）
+    ///   3. caller disconnect() cancel reconnectTask + 翻 generation
+    ///   4. caller 立即 fresh `connect(roomId: "ROOM_B")`（不同 roomId）—— 成功握手
+    ///   5. 旧实装：stale attempt 1 catch 跑 → schedule next retry on currentRoomId（旧 roomId 已被 disconnect 清；
+    ///      但成功 fresh connect 把 currentRoomId 写回 "ROOM_B"）→ stale retry 复用 ROOM_B 的 currentRoomId →
+    ///      makeTask call counts 莫名增加
+    ///   6. 修复后：stale catch silent drop；fresh connect 后 makeTaskCallCount == 2 (首次 RM01 + fresh ROOM_B)
+    func test_reconnect_freshConnectAfterCancellationNotRacedByStaleRetry() async throws {
+        let factory = FakeReconnectFactory()
+
+        // 首次 RM01：snapshot 解 latch + 立即 transient 4005
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        firstTask.errorAfterFrames = true
+        firstTask.stubbedCloseCode = .init(rawValue: 4005)!
+
+        // attempt 1（卡住）
+        let staleAttemptTask = factory.scheduleNewTask()
+        staleAttemptTask.scriptedFrames = []
+        staleAttemptTask.blockReceiveForever = true
+
+        // fresh connect ROOM_B：snapshot + block
+        let freshTask = factory.scheduleNewTask()
+        freshTask.scriptedFrames = [.string(Self.minimalSnapshotJSON)]
+        freshTask.blockReceiveForever = true
+
+        // 防御 bonus：stale retry 一旦 schedule 会消耗
+        let bonusTask = factory.scheduleNewTask()
+        bonusTask.scriptedFrames = []
+        bonusTask.errorAfterFrames = true
+        bonusTask.stubbedCloseCode = .invalid
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.backoffSequence = [0.05, 0.05, 0.05, 0.05, 0.05]
+
+        try await client.connect(roomId: "RM01")
+
+        // 等 attempt 1 makeTask 发起
+        let attemptStartedDeadline = Date().addingTimeInterval(2.0)
+        while factory.makeTaskCallCount < 2, Date() < attemptStartedDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(factory.makeTaskCallCount, 2)
+
+        // disconnect → cancel attempt 1 + 翻 gen
+        client.disconnect()
+
+        // fresh connect ROOM_B（不同 roomId）—— 应直接成功（snapshot 解 latch）
+        try await client.connect(roomId: "ROOM_B")
+
+        // fresh connect 后等 2 秒 —— 给 stale catch 充分时间跑（如果还会跑）
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+
+        // 关键断言：makeTaskCallCount == 3（RM01 + stale attempt 1 + fresh ROOM_B）
+        // 旧实装会 ≥ 4（stale catch 又 schedule next retry，消耗 bonus task）
+        XCTAssertEqual(factory.makeTaskCallCount, 3,
+                       "fresh connect 后 stale catch 应 silent drop；不应 schedule 后续 retry")
+
+        // fresh connect 的 URL 必须是 ROOM_B（最后一次 makeTask 拿的 request）
+        let lastRequest = factory.requests.last
+        let urlString = lastRequest?.url?.absoluteString ?? ""
+        XCTAssertTrue(urlString.contains("ROOM_B"),
+                      "fresh connect 应使用 ROOM_B URL；实际 last URL: \(urlString)")
+
+        client.disconnect()
+    }
+
     // MARK: - reconnect 测试 helpers
 
     /// 收集 stream 上的 connection state events 直到拿到指定数量（带超时）.
