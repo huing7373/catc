@@ -224,3 +224,4 @@
 | 2026-05-09 | [并发顺序保证：lock 必须在 caller 同步段获取；long-running side effect 不应持 serialization lock（11-8 r5）](2026-05-09-async-ordering-must-enqueue-in-caller-sync-section-11-8-r5.md) | 2 | architecture, concurrency | `<pending>` |
 | 2026-05-09 | [commit-order = causal-order 必须 commit-time per-key serialization；caller 同步段任何工作都会破坏顺序（11-8 r6）](2026-05-09-commit-time-per-key-serialization-required-for-causal-order-11-8-r6.md) | 1 | architecture, concurrency | `<pending>` |
 | 2026-05-09 | [post-commit hook 三象限：sync 段必须 instant ops；slow ops 进 fire-and-forget；ordering-sensitive ops 进 worker queue（11-8 r7）](2026-05-09-post-commit-three-quadrants-instant-vs-slow-vs-ordered-11-8-r7.md) | 1 | architecture, concurrency | `<pending>` |
+| 2026-05-09 | [per-room worker lifecycle defer 至 future story；MVP 节点 4 demo 阶段量化上界可控（11-8 r8）](2026-05-09-per-room-worker-lifecycle-defer-tech-debt-11-8-r8.md) | 1 (defer) | perf, architecture | `<pending>` |
