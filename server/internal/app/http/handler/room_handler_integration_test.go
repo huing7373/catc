@@ -942,3 +942,239 @@ func TestRoomHandlerIntegration_GetRoomDetail_UserNotInRoom_Returns6004(t *testi
 		t.Errorf("envelope.code = %d, want %d (6004)", env.Code, apperror.ErrUserNotInRoom)
 	}
 }
+
+// ============================================================
+// Story 11.9 集成测试 AC2.2：完整生命周期 HTTP E2E
+//
+// 跨 ≥9 次 HTTP 调用：A POST /rooms → B/C/D POST /rooms/{id}/join (×3) →
+// E POST /rooms/{id}/join 期望 6002 → A POST /rooms/{id}/leave →
+// A GET /rooms/current 期望 roomId=null →
+// B GET /rooms/{id} 期望 members 长度 = 3 不含 A →
+// B/C POST /rooms/{id}/leave (×2) → D POST /rooms/{id}/leave（最后一人）→
+// D GET /rooms/{id} 期望 6004（caller 已离开 closed 房间）+ DB 收尾断言 status=2。
+//
+// 验证 HTTP envelope schema 端到端正确性 + 跨接口 wire 一致性 + 业务码触发顺序。
+// ============================================================
+func TestRoomHandlerIntegration_FullLifecycle_E2E_HTTPCreateJoinLeaveDetail(t *testing.T) {
+	router, sqlDB, signer, cleanup := buildRoomHandlerIntegration(t)
+	defer cleanup()
+
+	const userA, userB, userC, userD, userE = uint64(1001), uint64(1002), uint64(1003), uint64(1004), uint64(1005)
+	roomIntegrationTestInsertUser(t, sqlDB, userA, "uid-e2e-a", "A")
+	roomIntegrationTestInsertUser(t, sqlDB, userB, "uid-e2e-b", "B")
+	roomIntegrationTestInsertUser(t, sqlDB, userC, "uid-e2e-c", "C")
+	roomIntegrationTestInsertUser(t, sqlDB, userD, "uid-e2e-d", "D")
+	roomIntegrationTestInsertUser(t, sqlDB, userE, "uid-e2e-e", "E")
+
+	tokenA := roomIntegrationTestSignToken(t, signer, userA)
+	tokenB := roomIntegrationTestSignToken(t, signer, userB)
+	tokenC := roomIntegrationTestSignToken(t, signer, userC)
+	tokenD := roomIntegrationTestSignToken(t, signer, userD)
+	tokenE := roomIntegrationTestSignToken(t, signer, userE)
+
+	// 1) A POST /rooms → envelope.code=0
+	roomIDStr := lifecycleCallCreateExpectingOK(t, router, tokenA)
+
+	// 2-4) B / C / D POST /rooms/{id}/join → envelope.code=0 (×3)
+	for _, tok := range []string{tokenB, tokenC, tokenD} {
+		lifecycleCallJoinExpectingOK(t, router, tok, roomIDStr)
+	}
+
+	// 5) E POST /rooms/{id}/join → envelope.code=6002
+	lifecycleCallJoinExpectingCode(t, router, tokenE, roomIDStr, apperror.ErrRoomFull)
+
+	// 6) A POST /rooms/{id}/leave → envelope.code=0
+	lifecycleCallLeaveExpectingOK(t, router, tokenA, roomIDStr)
+
+	// 7) A GET /rooms/current → envelope.data.roomId == nil
+	if got := lifecycleCallGetCurrentRoom(t, router, tokenA); got != nil {
+		t.Errorf("A current room after leave = %q, want nil", *got)
+	}
+
+	// 8) B GET /rooms/{id} → envelope.data.members 长度 = 3 不含 A
+	members := lifecycleCallGetRoomDetailExpectingOK(t, router, tokenB, roomIDStr)
+	if len(members) != 3 {
+		t.Errorf("len(members) = %d, want 3 (A leave 后剩 B/C/D)", len(members))
+	}
+	for _, m := range members {
+		if uid := m["userId"]; uid == "1001" {
+			t.Errorf("members 含 A (uid=1001)，应该已被 leave 移除")
+		}
+	}
+
+	// 9-10) B / C 依次 leave → envelope.code=0
+	lifecycleCallLeaveExpectingOK(t, router, tokenB, roomIDStr)
+	lifecycleCallLeaveExpectingOK(t, router, tokenC, roomIDStr)
+
+	// 11) D leave (最后一人) → envelope.code=0
+	lifecycleCallLeaveExpectingOK(t, router, tokenD, roomIDStr)
+
+	// 12) D GET /rooms/{id} → envelope.code=6004 (closed 房间 caller 已离开)
+	lifecycleCallGetRoomDetailExpectingCode(t, router, tokenD, roomIDStr, apperror.ErrUserNotInRoom)
+
+	// 收尾 DB 断言：rooms.status=2 + room_members 0 行
+	var roomIDInt uint64
+	if _, err := fmt.Sscan(roomIDStr, &roomIDInt); err != nil {
+		t.Fatalf("Sscan roomIDStr=%s: %v", roomIDStr, err)
+	}
+	var dbStatus int8
+	if err := sqlDB.QueryRow("SELECT status FROM rooms WHERE id = ?", roomIDInt).Scan(&dbStatus); err != nil {
+		t.Fatalf("query rooms.status: %v", err)
+	}
+	if dbStatus != 2 {
+		t.Errorf("DB rooms.status = %d, want 2 closed", dbStatus)
+	}
+	var memberCount int64
+	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM room_members WHERE room_id = ?", roomIDInt).Scan(&memberCount); err != nil {
+		t.Fatalf("query room_members count: %v", err)
+	}
+	if memberCount != 0 {
+		t.Errorf("DB room_members count = %d, want 0", memberCount)
+	}
+}
+
+// lifecycleCallCreateExpectingOK 调 POST /api/v1/rooms 期望 envelope.code=0；
+// 返 room.id (BIGINT 字符串)。
+func lifecycleCallCreateExpectingOK(t *testing.T, router *gin.Engine, token string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != 0 {
+		t.Fatalf("create envelope.code = %d, want 0; body=%s", env.Code, w.Body.String())
+	}
+	data, _ := env.Data.(map[string]any)
+	room, _ := data["room"].(map[string]any)
+	roomID, _ := room["id"].(string)
+	if roomID == "" {
+		t.Fatalf("room.id empty; body=%s", w.Body.String())
+	}
+	return roomID
+}
+
+// lifecycleCallJoinExpectingOK 调 POST /api/v1/rooms/{id}/join 期望 envelope.code=0。
+func lifecycleCallJoinExpectingOK(t *testing.T, router *gin.Engine, token, roomID string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+roomID+"/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("join status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != 0 {
+		t.Fatalf("join envelope.code = %d, want 0; body=%s", env.Code, w.Body.String())
+	}
+	// 间隔 15ms 让 joined_at ORDER 稳定（与 11.6 既有 case 同模式）
+	time.Sleep(15 * time.Millisecond)
+}
+
+// lifecycleCallJoinExpectingCode 调 POST /api/v1/rooms/{id}/join 期望 envelope.code=wantCode。
+func lifecycleCallJoinExpectingCode(t *testing.T, router *gin.Engine, token, roomID string, wantCode int) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+roomID+"/join", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("join status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != wantCode {
+		t.Fatalf("join envelope.code = %d, want %d; body=%s", env.Code, wantCode, w.Body.String())
+	}
+}
+
+// lifecycleCallLeaveExpectingOK 调 POST /api/v1/rooms/{id}/leave 期望 envelope.code=0。
+func lifecycleCallLeaveExpectingOK(t *testing.T, router *gin.Engine, token, roomID string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/"+roomID+"/leave", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("leave status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != 0 {
+		t.Fatalf("leave envelope.code = %d, want 0; body=%s", env.Code, w.Body.String())
+	}
+}
+
+// lifecycleCallGetCurrentRoom 调 GET /api/v1/rooms/current；返 *string（roomId 字段值）。
+// roomId 为 JSON null → 返 nil。
+func lifecycleCallGetCurrentRoom(t *testing.T, router *gin.Engine, token string) *string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/rooms/current", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get-current status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != 0 {
+		t.Fatalf("get-current envelope.code = %d, want 0; body=%s", env.Code, w.Body.String())
+	}
+	data, _ := env.Data.(map[string]any)
+	v, exists := data["roomId"]
+	if !exists {
+		t.Fatalf("data.roomId missing; body=%s", w.Body.String())
+	}
+	if v == nil {
+		return nil
+	}
+	s, _ := v.(string)
+	return &s
+}
+
+// lifecycleCallGetRoomDetailExpectingOK 调 GET /api/v1/rooms/{id} 期望 envelope.code=0；
+// 返 members 数组。
+func lifecycleCallGetRoomDetailExpectingOK(t *testing.T, router *gin.Engine, token, roomID string) []map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/rooms/"+roomID, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get-detail status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != 0 {
+		t.Fatalf("get-detail envelope.code = %d, want 0; body=%s", env.Code, w.Body.String())
+	}
+	data, _ := env.Data.(map[string]any)
+	rawMembers, _ := data["members"].([]any)
+	members := make([]map[string]any, 0, len(rawMembers))
+	for _, m := range rawMembers {
+		mm, _ := m.(map[string]any)
+		members = append(members, mm)
+	}
+	return members
+}
+
+// lifecycleCallGetRoomDetailExpectingCode 调 GET /api/v1/rooms/{id} 期望 envelope.code=wantCode。
+func lifecycleCallGetRoomDetailExpectingCode(t *testing.T, router *gin.Engine, token, roomID string, wantCode int) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/rooms/"+roomID, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get-detail status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomIntegrationEnvelope(t, w.Body.Bytes())
+	if env.Code != wantCode {
+		t.Fatalf("get-detail envelope.code = %d, want %d; body=%s", env.Code, wantCode, w.Body.String())
+	}
+}

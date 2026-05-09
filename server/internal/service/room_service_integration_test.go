@@ -30,14 +30,24 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	stderrors "errors"
+	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+	gormmysql "gorm.io/driver/mysql"
+	"gorm.io/gorm"
+
 	wsapp "github.com/huing/cat/server/internal/app/ws"
 	"github.com/huing/cat/server/internal/infra/config"
 	"github.com/huing/cat/server/internal/infra/db"
+	"github.com/huing/cat/server/internal/pkg/auth"
 	apperror "github.com/huing/cat/server/internal/pkg/errors"
 	"github.com/huing/cat/server/internal/repo/mysql"
 	"github.com/huing/cat/server/internal/repo/tx"
@@ -1392,4 +1402,845 @@ func TestRoomServiceIntegration_LeaveRoom_LastMember_StillBroadcasts(t *testing.
 	if got := capture.callCount(); got != 1 {
 		t.Errorf("broadcastFn call count = %d, want 1 (last member leave still broadcasts)", got)
 	}
+}
+
+// ============================================================
+// Story 11.9 集成测试：Layer 2 房间生命周期全流程（AC2 ~ AC10）
+//
+// 本段追加 ≥9 个新 case 覆盖 epics.md §Story 11.9 钦定的 10 类场景：
+//
+//	1. 完整生命周期 → AC2.1 TestRoomServiceIntegration_FullLifecycle_5UsersJoinFullLeaveAllClosed
+//	2. 回滚 1 (创建 room_members 失败) → AC3 TestRoomServiceIntegration_CreateRoom_FaultInjectionRoomMembersStep_RoomsAlsoRollback
+//	3. 回滚 2 (加入 users update 失败) → AC4 TestRoomServiceIntegration_JoinRoom_FaultInjectionUsersUpdate_RoomMembersAlsoRollback
+//	4. 回滚 3 (退出 users update 失败) → AC5 TestRoomServiceIntegration_LeaveRoom_FaultInjectionUsersUpdate_RoomMembersDeleteAlsoRollback
+//	5. 并发 1 (5 user 同时 join) → AC6 TestRoomServiceIntegration_JoinRoom_Concurrent5UsersIntoFullRoom_OnlyOneSucceeds
+//	6. 并发 2 (100 user create) → AC7 TestRoomServiceIntegration_CreateRoom_Concurrent100DifferentUsers_100RoomsCreated
+//	7. 边界 1 (A 在 X 创建新房间 → 6003) → 已被 11.3 TestRoomServiceIntegration_CreateRoom_AlreadyInRoom_PrecheckReturns6003 覆盖（不新增）
+//	8. 边界 2 (A 在 X 调 X/join → 6003) → AC10 TestRoomServiceIntegration_JoinRoom_UserAlreadyInSameRoom_Returns6003
+//	9. 边界 3 (closed 房间 join → 6005) → 已被 11.4 TestRoomServiceIntegration_JoinRoom_RoomClosed_Returns6005 覆盖（不新增）
+//	10. WS 联动 (B leave → A 收 member.left) → AC8 TestRoomServiceIntegration_LeaveRoom_RealWSSession_BroadcastsMemberLeftToOtherMembers
+//
+// fault injection wrapper 模式与 4.7 落地的 faultPetRepo / faultChestRepo / faultUserRepo
+// 同源（按方法包装真实 mysql repo + 在指定方法替换为 sentinel error，其他方法透传）。
+// ============================================================
+
+// faultRoomMemberRepo 包装真实 RoomMemberRepo，让 Create 抛 injectErr，其他方法透传。
+// 用于 AC3：回滚 1（创建房间 - room_members.Create 失败 → rooms 也回滚）。
+type faultRoomMemberRepo struct {
+	delegate  mysql.RoomMemberRepo
+	injectErr error
+}
+
+func (f *faultRoomMemberRepo) Create(ctx context.Context, m *mysql.RoomMember) error {
+	return f.injectErr
+}
+
+func (f *faultRoomMemberRepo) RoomExists(ctx context.Context, roomID uint64) (bool, error) {
+	return f.delegate.RoomExists(ctx, roomID)
+}
+
+func (f *faultRoomMemberRepo) IsUserInRoom(ctx context.Context, userID uint64, roomID uint64) (bool, error) {
+	return f.delegate.IsUserInRoom(ctx, userID, roomID)
+}
+
+func (f *faultRoomMemberRepo) ListMembers(ctx context.Context, roomID uint64) ([]uint64, error) {
+	return f.delegate.ListMembers(ctx, roomID)
+}
+
+func (f *faultRoomMemberRepo) CountByRoomID(ctx context.Context, roomID uint64) (int, error) {
+	return f.delegate.CountByRoomID(ctx, roomID)
+}
+
+func (f *faultRoomMemberRepo) DeleteByRoomAndUser(ctx context.Context, roomID, userID uint64) (int64, error) {
+	return f.delegate.DeleteByRoomAndUser(ctx, roomID, userID)
+}
+
+func (f *faultRoomMemberRepo) ExistsForShareByRoomAndUser(ctx context.Context, roomID, userID uint64) (bool, error) {
+	return f.delegate.ExistsForShareByRoomAndUser(ctx, roomID, userID)
+}
+
+func (f *faultRoomMemberRepo) ListRosterByRoomID(ctx context.Context, roomID uint64) ([]mysql.RosterRow, error) {
+	return f.delegate.ListRosterByRoomID(ctx, roomID)
+}
+
+// faultUserRepoForJoin 包装真实 UserRepo，让 UpdateCurrentRoomID 抛 injectErr，其他方法透传。
+// 用于 AC4：回滚 2（加入房间 - users.UpdateCurrentRoomID 失败 → room_members 也回滚）。
+type faultUserRepoForJoin struct {
+	delegate  mysql.UserRepo
+	injectErr error
+}
+
+func (f *faultUserRepoForJoin) Create(ctx context.Context, u *mysql.User) error {
+	return f.delegate.Create(ctx, u)
+}
+
+func (f *faultUserRepoForJoin) UpdateNickname(ctx context.Context, userID uint64, nickname string) error {
+	return f.delegate.UpdateNickname(ctx, userID, nickname)
+}
+
+func (f *faultUserRepoForJoin) FindByID(ctx context.Context, id uint64) (*mysql.User, error) {
+	return f.delegate.FindByID(ctx, id)
+}
+
+func (f *faultUserRepoForJoin) UpdateCurrentRoomID(ctx context.Context, userID uint64, roomID *uint64) error {
+	return f.injectErr
+}
+
+// faultUserRepoForLeave 包装真实 UserRepo，**仅在 leave 路径**（roomID == nil）抛 injectErr。
+// create 与 join 路径（roomID != nil）透传。用于 AC5：回滚 3（退出房间 -
+// users.UpdateCurrentRoomID(nil) 失败 → room_members 删除也回滚）。
+type faultUserRepoForLeave struct {
+	delegate  mysql.UserRepo
+	injectErr error
+}
+
+func (f *faultUserRepoForLeave) Create(ctx context.Context, u *mysql.User) error {
+	return f.delegate.Create(ctx, u)
+}
+
+func (f *faultUserRepoForLeave) UpdateNickname(ctx context.Context, userID uint64, nickname string) error {
+	return f.delegate.UpdateNickname(ctx, userID, nickname)
+}
+
+func (f *faultUserRepoForLeave) FindByID(ctx context.Context, id uint64) (*mysql.User, error) {
+	return f.delegate.FindByID(ctx, id)
+}
+
+func (f *faultUserRepoForLeave) UpdateCurrentRoomID(ctx context.Context, userID uint64, roomID *uint64) error {
+	if roomID == nil {
+		// leave 路径才注入 fault；create / join 路径透传以让 fixture 阶段成功
+		return f.injectErr
+	}
+	return f.delegate.UpdateCurrentRoomID(ctx, userID, roomID)
+}
+
+// buildRoomServiceWithCustomRepos 装配 RoomService 但允许 caller 注入自定义 repo
+// （用于 fault injection case）。返 (svc, sqlDB, wg, cleanup)。
+//
+// **关键**：noop sessionMgr / broadcastFn 与 buildRoomServiceIntegration 同；
+// 仅 user / room / roomMember repo 可被 caller 替换。
+func buildRoomServiceWithCustomRepos(
+	t *testing.T,
+	overrideUserRepo func(real mysql.UserRepo) mysql.UserRepo,
+	overrideRoomRepo func(real mysql.RoomRepo) mysql.RoomRepo,
+	overrideRoomMemberRepo func(real mysql.RoomMemberRepo) mysql.RoomMemberRepo,
+) (svc service.RoomService, sqlDB *sql.DB, wg *sync.WaitGroup, cleanup func()) {
+	t.Helper()
+
+	dsn, dockerCleanup := startMySQL(t)
+	runMigrations(t, dsn)
+
+	cfg := config.MySQLConfig{
+		DSN:                dsn,
+		MaxOpenConns:       10,
+		MaxIdleConns:       2,
+		ConnMaxLifetimeSec: 60,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	gormDB, err := db.Open(ctx, cfg)
+	if err != nil {
+		dockerCleanup()
+		t.Fatalf("db.Open: %v", err)
+	}
+
+	txMgr := tx.NewManager(gormDB)
+	realUserRepo := mysql.NewUserRepo(gormDB)
+	realRoomRepo := mysql.NewRoomRepo(gormDB)
+	realRoomMemberRepo := mysql.NewRoomMemberRepo(gormDB)
+	petRepo := mysql.NewPetRepo(gormDB)
+
+	userRepo := mysql.UserRepo(realUserRepo)
+	if overrideUserRepo != nil {
+		userRepo = overrideUserRepo(realUserRepo)
+	}
+	roomRepo := mysql.RoomRepo(realRoomRepo)
+	if overrideRoomRepo != nil {
+		roomRepo = overrideRoomRepo(realRoomRepo)
+	}
+	roomMemberRepo := mysql.RoomMemberRepo(realRoomMemberRepo)
+	if overrideRoomMemberRepo != nil {
+		roomMemberRepo = overrideRoomMemberRepo(realRoomMemberRepo)
+	}
+
+	noopSessionMgr := wsapp.NewSessionManager()
+	noopBroadcastFn := wsapp.BroadcastFn(func(ctx context.Context, roomID uint64, msg []byte) (int, error) { return 0, nil })
+	noopBroadcastExceptFn := wsapp.BroadcastExceptFn(func(ctx context.Context, roomID, excludeUserID uint64, msg []byte) (int, error) { return 0, nil })
+
+	svc = service.NewRoomService(txMgr, userRepo, roomRepo, roomMemberRepo, petRepo, noopSessionMgr, noopBroadcastFn, noopBroadcastExceptFn)
+	wg = &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
+
+	rawDB, err := gormDB.DB()
+	if err != nil {
+		dockerCleanup()
+		t.Fatalf("gormDB.DB(): %v", err)
+	}
+
+	cleanup = func() {
+		wg.Wait()
+		_ = rawDB.Close()
+		dockerCleanup()
+	}
+	return svc, rawDB, wg, cleanup
+}
+
+// AC2.1 完整生命周期: 跨 7 个事务 + 5 user + 跨 status transition
+// A 创建 → B/C/D 依次 join → E join 返 6002 → A leave → B/C/D 依次 leave →
+// 最后一人 leave 触发 status=2 closed。
+//
+// 每跨 1 个事务边界做 memberCount + status + users.current_room_id 三连断言。
+func TestRoomServiceIntegration_FullLifecycle_5UsersJoinFullLeaveAllClosed(t *testing.T) {
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	const userC = uint64(1003)
+	const userD = uint64(1004)
+	const userE = uint64(1005)
+	insertUser(t, sqlDB, userA, "uid-life-a", "A", "")
+	insertUser(t, sqlDB, userB, "uid-life-b", "B", "")
+	insertUser(t, sqlDB, userC, "uid-life-c", "C", "")
+	insertUser(t, sqlDB, userD, "uid-life-d", "D", "")
+	insertUser(t, sqlDB, userE, "uid-life-e", "E", "")
+
+	// 阶段 1: A 创建 → memberCount=1, status=1, A.current_room_id=roomID
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("CreateRoom A: %v", err)
+	}
+	roomID := createOut.RoomID
+	assertCount(t, sqlDB, "room_members WHERE room_id=?", []any{roomID}, 1, "after A create")
+	if got := fetchRoomStatus(t, sqlDB, roomID); got != 1 {
+		t.Errorf("after A create rooms.status = %d, want 1", got)
+	}
+	if got := fetchUserCurrentRoomID(t, sqlDB, userA); got == nil || *got != roomID {
+		t.Errorf("after A create A.current_room_id mismatch")
+	}
+
+	// 阶段 2-4: B / C / D 依次 join → memberCount 升到 4
+	for i, u := range []uint64{userB, userC, userD} {
+		if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: u, RoomID: roomID}); err != nil {
+			t.Fatalf("JoinRoom user=%d: %v", u, err)
+		}
+		wantCount := int64(2 + i)
+		assertCount(t, sqlDB, "room_members WHERE room_id=?", []any{roomID}, wantCount,
+			"after joiner #"+string(rune('B'+i)))
+		if got := fetchRoomStatus(t, sqlDB, roomID); got != 1 {
+			t.Errorf("after joiner %d rooms.status = %d, want 1", u, got)
+		}
+		if got := fetchUserCurrentRoomID(t, sqlDB, u); got == nil || *got != roomID {
+			t.Errorf("after joiner %d users.current_room_id mismatch", u)
+		}
+	}
+
+	// 阶段 5: E join → 6002 + memberCount 仍 4 + E.current_room_id 仍 nil
+	_, err = svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userE, RoomID: roomID})
+	if err == nil {
+		t.Fatalf("E join returned nil, want 6002")
+	}
+	ae, ok := apperror.As(err)
+	if !ok || ae.Code != apperror.ErrRoomFull {
+		t.Errorf("E join AppError = %v, want 6002 ErrRoomFull", err)
+	}
+	assertCount(t, sqlDB, "room_members WHERE room_id=?", []any{roomID}, 4, "after E rejected")
+	if got := fetchUserCurrentRoomID(t, sqlDB, userE); got != nil {
+		t.Errorf("after E reject E.current_room_id = %d, want nil", *got)
+	}
+
+	// 阶段 6-9: A / B / C / D 依次 leave → memberCount 4→3→2→1→0；最后一人 D leave 触发 status=2
+	leaveOrder := []uint64{userA, userB, userC, userD}
+	for i, u := range leaveOrder {
+		if _, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: u, RoomID: roomID}); err != nil {
+			t.Fatalf("LeaveRoom user=%d: %v", u, err)
+		}
+		wantCount := int64(3 - i)
+		wantStatus := int8(1)
+		if i == 3 {
+			wantStatus = 2 // 最后一人 leave → closed
+		}
+		assertCount(t, sqlDB, "room_members WHERE room_id=?", []any{roomID}, wantCount,
+			"after leaver #"+string(rune('A'+i)))
+		if got := fetchRoomStatus(t, sqlDB, roomID); got != wantStatus {
+			t.Errorf("after leaver %d rooms.status = %d, want %d", u, got, wantStatus)
+		}
+		if got := fetchUserCurrentRoomID(t, sqlDB, u); got != nil {
+			t.Errorf("after leaver %d users.current_room_id = %d, want nil", u, *got)
+		}
+	}
+
+	// 收尾断言：rooms.status=2 + room_members 0 行 + 5 user 全部 current_room_id=nil
+	if got := fetchRoomStatus(t, sqlDB, roomID); got != 2 {
+		t.Errorf("final rooms.status = %d, want 2 closed", got)
+	}
+	assertCount(t, sqlDB, "room_members WHERE room_id=?", []any{roomID}, 0, "final room_members empty")
+	for _, u := range []uint64{userA, userB, userC, userD, userE} {
+		if got := fetchUserCurrentRoomID(t, sqlDB, u); got != nil {
+			t.Errorf("final user %d current_room_id = %d, want nil", u, *got)
+		}
+	}
+}
+
+// AC3 回滚 1: room_members.Create 失败 → rooms / users.current_room_id 也回滚（DB 全空）
+//
+// 验证 InnoDB 真实 ROLLBACK：roomRepo.Create 已 INSERT 但被 undo log 撤销。
+func TestRoomServiceIntegration_CreateRoom_FaultInjectionRoomMembersStep_RoomsAlsoRollback(t *testing.T) {
+	syntheticErr := stderrors.New("synthetic room_members create failure")
+	svc, sqlDB, _, cleanup := buildRoomServiceWithCustomRepos(t,
+		nil, // user repo 用真实
+		nil, // room repo 用真实
+		func(real mysql.RoomMemberRepo) mysql.RoomMemberRepo {
+			return &faultRoomMemberRepo{delegate: real, injectErr: syntheticErr}
+		},
+	)
+	defer cleanup()
+
+	const userID = uint64(1001)
+	insertUser(t, sqlDB, userID, "uid-fault-rm", "user-fault-rm", "")
+
+	// 取事务前快照
+	roomCountBefore := fetchRoomCount(t, sqlDB)
+	memberCountBefore := fetchRoomMemberCount(t, sqlDB)
+
+	// CreateRoom：fn 内 roomRepo.Create 成功 → roomMemberRepo.Create 注入 error → tx 回滚
+	_, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userID})
+	if err == nil {
+		t.Fatalf("CreateRoom returned nil error, want 1009 ErrServiceBusy")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrServiceBusy {
+		t.Errorf("AppError.Code = %d, want %d (ErrServiceBusy 1009 - 注入 error 走 generic 兜底)", ae.Code, apperror.ErrServiceBusy)
+	}
+
+	// 核心断言：DB 回到事务前快照（rooms 表新插入的行被 InnoDB undo log 撤销）
+	if got := fetchRoomCount(t, sqlDB); got != roomCountBefore {
+		t.Errorf("post-rollback rooms count = %d, want %d (rolled back)", got, roomCountBefore)
+	}
+	if got := fetchRoomMemberCount(t, sqlDB); got != memberCountBefore {
+		t.Errorf("post-rollback room_members count = %d, want %d (none added)", got, memberCountBefore)
+	}
+	if got := fetchUserCurrentRoomID(t, sqlDB, userID); got != nil {
+		t.Errorf("users.current_room_id = %d, want nil (transaction rolled back)", *got)
+	}
+}
+
+// AC4 回滚 2: 加入房间 - users.UpdateCurrentRoomID 失败 → room_members.Create 也回滚
+//
+// fault wrapper 让任意 UpdateCurrentRoomID 调用都抛 error；fixture 用 raw SQL 直接造
+// （A 已在房间 + A.current_room_id = roomID），让 B.join 的事务内 step 2d
+// roomMemberRepo.Create(B) 已 INSERT 后，step 2e users.UpdateCurrentRoomID(B) 抛 error
+// → tx ROLLBACK → InnoDB 撤销 INSERT，B 不在 room_members + B.current_room_id 仍 nil。
+func TestRoomServiceIntegration_JoinRoom_FaultInjectionUsersUpdate_RoomMembersAlsoRollback(t *testing.T) {
+	syntheticErr := stderrors.New("synthetic users.UpdateCurrentRoomID failure")
+	svc, sqlDB, _, cleanup := buildRoomServiceWithCustomRepos(t,
+		func(real mysql.UserRepo) mysql.UserRepo {
+			return &faultUserRepoForJoin{delegate: real, injectErr: syntheticErr}
+		},
+		nil,
+		nil,
+	)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	insertUser(t, sqlDB, userA, "uid-fault-join-a", "A", "")
+	insertUser(t, sqlDB, userB, "uid-fault-join-b", "B", "")
+
+	// **fixture 用 raw SQL 直接造**（不能用 svc.CreateRoom —— fault wrapper 让 create
+	// 路径也抛 error）：rooms 1 行 + room_members 1 行（A is creator）+ A.current_room_id = roomID。
+	const fixtureRoomID uint64 = 7001
+	if _, err := sqlDB.Exec(`INSERT INTO rooms (id, creator_user_id, status, max_members) VALUES (?, ?, 1, 4)`,
+		fixtureRoomID, userA); err != nil {
+		t.Fatalf("fixture insert rooms: %v", err)
+	}
+	if _, err := sqlDB.Exec(`INSERT INTO room_members (room_id, user_id) VALUES (?, ?)`, fixtureRoomID, userA); err != nil {
+		t.Fatalf("fixture insert room_members A: %v", err)
+	}
+	if _, err := sqlDB.Exec(`UPDATE users SET current_room_id = ? WHERE id = ?`, fixtureRoomID, userA); err != nil {
+		t.Fatalf("fixture set A.current_room_id: %v", err)
+	}
+
+	// 取事务前快照
+	memberCountBefore := fetchRoomMemberCount(t, sqlDB)
+
+	// B.join：fault wrapper 让 UpdateCurrentRoomID 抛 error → tx ROLLBACK
+	_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userB, RoomID: fixtureRoomID})
+	if err == nil {
+		t.Fatalf("JoinRoom returned nil, want 1009 ErrServiceBusy")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrServiceBusy {
+		t.Errorf("AppError.Code = %d, want %d (1009 generic)", ae.Code, apperror.ErrServiceBusy)
+	}
+
+	// 核心断言：room_members 行数没变（B 那行被 rollback；A 仍在）
+	if got := fetchRoomMemberCount(t, sqlDB); got != memberCountBefore {
+		t.Errorf("post-rollback room_members count = %d, want %d", got, memberCountBefore)
+	}
+	assertCount(t, sqlDB, "room_members WHERE room_id=? AND user_id=?",
+		[]any{fixtureRoomID, userB}, 0, "B's row rolled back")
+	assertCount(t, sqlDB, "room_members WHERE room_id=? AND user_id=?",
+		[]any{fixtureRoomID, userA}, 1, "A's fixture row preserved")
+
+	// users.current_room_id (B) 仍 nil
+	if got := fetchUserCurrentRoomID(t, sqlDB, userB); got != nil {
+		t.Errorf("B.current_room_id = %d, want nil (rolled back)", *got)
+	}
+
+	// users.current_room_id (A) 仍 = fixtureRoomID
+	if got := fetchUserCurrentRoomID(t, sqlDB, userA); got == nil || *got != fixtureRoomID {
+		t.Errorf("A.current_room_id mismatch (fixture should be preserved)")
+	}
+}
+
+// AC5 回滚 3: 退出房间 - users.UpdateCurrentRoomID(nil) 失败 → room_members 删除也回滚
+//
+// fault wrapper 仅在 leave 路径（roomID == nil）注入 error；create / join 路径透传，
+// 让 fixture 阶段（A.create + B.join）正常完成，再让 A.leave 失败。
+//
+// 验证 DELETE room_members 已发生但被 rollback，A 仍在房间，rooms.status 仍 active。
+func TestRoomServiceIntegration_LeaveRoom_FaultInjectionUsersUpdate_RoomMembersDeleteAlsoRollback(t *testing.T) {
+	syntheticErr := stderrors.New("synthetic users.UpdateCurrentRoomID(nil) failure")
+	svc, sqlDB, _, cleanup := buildRoomServiceWithCustomRepos(t,
+		func(real mysql.UserRepo) mysql.UserRepo {
+			return &faultUserRepoForLeave{delegate: real, injectErr: syntheticErr}
+		},
+		nil,
+		nil,
+	)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	insertUser(t, sqlDB, userA, "uid-fault-leave-a", "A", "")
+	insertUser(t, sqlDB, userB, "uid-fault-leave-b", "B", "")
+
+	// fixture：A create + B join（fault wrapper 在 roomID != nil 路径透传 → fixture OK）
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("fixture CreateRoom A: %v", err)
+	}
+	roomID := createOut.RoomID
+	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userB, RoomID: roomID}); err != nil {
+		t.Fatalf("fixture JoinRoom B: %v", err)
+	}
+
+	// 取 leave 前快照
+	memberCountBefore := fetchRoomMemberCount(t, sqlDB)
+	if memberCountBefore != 2 {
+		t.Fatalf("fixture memberCount = %d, want 2", memberCountBefore)
+	}
+
+	// A.leave：fault wrapper 让 UpdateCurrentRoomID(nil) 抛 error → tx ROLLBACK
+	_, err = svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userA, RoomID: roomID})
+	if err == nil {
+		t.Fatalf("LeaveRoom returned nil, want 1009 ErrServiceBusy")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrServiceBusy {
+		t.Errorf("AppError.Code = %d, want %d (1009 generic)", ae.Code, apperror.ErrServiceBusy)
+	}
+
+	// 核心断言：room_members 删除也回滚（A 仍在房间）+ rooms.status 仍 active +
+	// A.current_room_id 仍 = roomID
+	if got := fetchRoomMemberCount(t, sqlDB); got != 2 {
+		t.Errorf("post-rollback room_members count = %d, want 2 (A's DELETE rolled back)", got)
+	}
+	assertCount(t, sqlDB, "room_members WHERE room_id=? AND user_id=?",
+		[]any{roomID, userA}, 1, "A's row preserved (DELETE rolled back)")
+	assertCount(t, sqlDB, "room_members WHERE room_id=? AND user_id=?",
+		[]any{roomID, userB}, 1, "B's row preserved")
+
+	if got := fetchRoomStatus(t, sqlDB, roomID); got != 1 {
+		t.Errorf("rooms.status = %d, want 1 active (no UPDATE happened)", got)
+	}
+	if got := fetchUserCurrentRoomID(t, sqlDB, userA); got == nil || *got != roomID {
+		t.Errorf("A.current_room_id mismatch (UPDATE rolled back)")
+	}
+}
+
+// AC6 并发 1: 5 个用户同时 join 同一房间（已有 3 人留 1 空位）→ 只 1 个成功
+//
+// barrier channel 让 5 goroutine 真同时起跑（避免 OS 调度顺序固定）；
+// FOR UPDATE 锁串行化让其中 1 个先 INSERT（count 4 满员），其他 4 个看到 count >= 4 → 6002。
+//
+// 不断言具体哪个 user 成功（取决于 OS 调度）；只断言收敛（恰好 1 / 恰好 4）+ DB 行数 = 4。
+func TestRoomServiceIntegration_JoinRoom_Concurrent5UsersIntoFullRoom_OnlyOneSucceeds(t *testing.T) {
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	// fixture: A + B + C 已在房间（3 人，剩 1 个空位）
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	const userC = uint64(1003)
+	insertUser(t, sqlDB, userA, "uid-c1-a", "A", "")
+	insertUser(t, sqlDB, userB, "uid-c1-b", "B", "")
+	insertUser(t, sqlDB, userC, "uid-c1-c", "C", "")
+
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("fixture create: %v", err)
+	}
+	roomID := createOut.RoomID
+	for _, u := range []uint64{userB, userC} {
+		if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: u, RoomID: roomID}); err != nil {
+			t.Fatalf("fixture JoinRoom %d: %v", u, err)
+		}
+	}
+
+	// 5 个新 user：D/E/F/G/H 同时 join
+	competitors := []uint64{1004, 1005, 1006, 1007, 1008}
+	for i, u := range competitors {
+		insertUser(t, sqlDB, u, "uid-c1-"+string(rune('D'+i)), string(rune('D'+i)), "")
+	}
+
+	var successCount, fullCount, otherErrCount atomic.Int32
+	var wg sync.WaitGroup
+	barrier := make(chan struct{})
+	for _, u := range competitors {
+		u := u
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-barrier // 5 goroutine 同时起跑
+			_, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: u, RoomID: roomID})
+			if err == nil {
+				successCount.Add(1)
+				return
+			}
+			ae, ok := apperror.As(err)
+			if !ok {
+				otherErrCount.Add(1)
+				return
+			}
+			if ae.Code == apperror.ErrRoomFull {
+				fullCount.Add(1)
+			} else {
+				otherErrCount.Add(1)
+			}
+		}()
+	}
+	close(barrier)
+	wg.Wait()
+
+	// 核心断言：恰好 1 成功 + 4 返 6002
+	if got := successCount.Load(); got != 1 {
+		t.Errorf("successCount = %d, want 1", got)
+	}
+	if got := fullCount.Load(); got != 4 {
+		t.Errorf("fullCount (6002) = %d, want 4", got)
+	}
+	if got := otherErrCount.Load(); got != 0 {
+		t.Errorf("otherErrCount = %d, want 0 (no unexpected errors)", got)
+	}
+
+	// DB 收尾断言：room_members.count = 4
+	assertCount(t, sqlDB, "room_members WHERE room_id=?", []any{roomID}, 4, "after concurrent join")
+	if got := fetchRoomStatus(t, sqlDB, roomID); got != 1 {
+		t.Errorf("rooms.status = %d, want 1 active", got)
+	}
+}
+
+// AC7 并发 2: 100 个不同用户同时 create 100 个不同房间 → 全部成功
+//
+// 与 4.7 _Concurrent100DifferentGuestUIDs_NoCrossData 同模式：不同 key 空间无冲突 →
+// 验证事务彼此独立 + 没有 race 把 user 串到别人房间。
+func TestRoomServiceIntegration_CreateRoom_Concurrent100DifferentUsers_100RoomsCreated(t *testing.T) {
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const N = 100
+	startUID := uint64(2001)
+	for i := 0; i < N; i++ {
+		uid := startUID + uint64(i)
+		insertUser(t, sqlDB, uid, "uid-c2-"+strconv.FormatUint(uid, 10), "u"+strconv.FormatUint(uid, 10), "")
+	}
+
+	type result struct {
+		userID uint64
+		roomID uint64
+		err    error
+	}
+	results := make(chan result, N)
+	var wg sync.WaitGroup
+	barrier := make(chan struct{})
+	for i := 0; i < N; i++ {
+		uid := startUID + uint64(i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-barrier
+			out, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: uid})
+			if err != nil {
+				results <- result{userID: uid, err: err}
+				return
+			}
+			results <- result{userID: uid, roomID: out.RoomID}
+		}()
+	}
+	close(barrier)
+	wg.Wait()
+	close(results)
+
+	// 收集结果：100 个全部成功
+	roomByUser := make(map[uint64]uint64, N)
+	successCount := 0
+	for r := range results {
+		if r.err != nil {
+			t.Errorf("user=%d CreateRoom err: %v", r.userID, r.err)
+			continue
+		}
+		successCount++
+		roomByUser[r.userID] = r.roomID
+	}
+	if successCount != N {
+		t.Errorf("successCount = %d, want %d", successCount, N)
+	}
+
+	// DB 收尾断言：rooms = 100 + room_members = 100
+	if got := fetchRoomCount(t, sqlDB); got != int64(N) {
+		t.Errorf("rooms count = %d, want %d", got, N)
+	}
+	if got := fetchRoomMemberCount(t, sqlDB); got != int64(N) {
+		t.Errorf("room_members count = %d, want %d", got, N)
+	}
+
+	// 串数据校验：每个 user 的 current_room_id 必须等于该 user 创建的 rooms.id
+	for i := 0; i < N; i++ {
+		uid := startUID + uint64(i)
+		gotRoomID := fetchUserCurrentRoomID(t, sqlDB, uid)
+		if gotRoomID == nil {
+			t.Errorf("user=%d current_room_id = nil, want %d", uid, roomByUser[uid])
+			continue
+		}
+		if *gotRoomID != roomByUser[uid] {
+			t.Errorf("user=%d current_room_id = %d, want %d (cross-data leak)", uid, *gotRoomID, roomByUser[uid])
+		}
+	}
+}
+
+// AC10 边界 2: A 在房间 X 调 X/join（加入自己已在的房间）→ 6003
+//
+// service 层步骤 1 预检 users.current_room_id != nil 即返 6003，不区分目标 roomID 是否同 X。
+func TestRoomServiceIntegration_JoinRoom_UserAlreadyInSameRoom_Returns6003(t *testing.T) {
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	insertUser(t, sqlDB, userA, "uid-bd2-a", "A", "")
+
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("CreateRoom A: %v", err)
+	}
+	roomID := createOut.RoomID
+
+	// A 试图加入自己已在的房间 X
+	_, err = svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userA, RoomID: roomID})
+	if err == nil {
+		t.Fatalf("JoinRoom A→X returned nil, want 6003")
+	}
+	ae, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err is not *AppError: %v", err)
+	}
+	if ae.Code != apperror.ErrUserAlreadyInRoom {
+		t.Errorf("AppError.Code = %d, want %d (ErrUserAlreadyInRoom 6003 - 预检 current_room_id != nil)", ae.Code, apperror.ErrUserAlreadyInRoom)
+	}
+
+	// DB 状态：room_members count 仍 = 1（A creator）+ rooms.status 仍 active +
+	// A.current_room_id 仍 = roomID（事务未开，无变化）
+	assertCount(t, sqlDB, "room_members WHERE room_id=?", []any{roomID}, 1, "no change after self-join attempt")
+	if got := fetchRoomStatus(t, sqlDB, roomID); got != 1 {
+		t.Errorf("rooms.status = %d, want 1", got)
+	}
+	if got := fetchUserCurrentRoomID(t, sqlDB, userA); got == nil || *got != roomID {
+		t.Errorf("A.current_room_id changed; want %d", roomID)
+	}
+}
+
+// AC8 WS 联动: A + B 在房间 → A 持有真实 SessionManager Session → B leave →
+// SessionManager 内 A 的 Session 仍存在 + capture broadcastFn 收到 member.left wire +
+// payload.userId == B
+//
+// 简化路径（按 AC8 钦定退化）：用 buildRoomServiceIntegrationWithCapture 的 capture
+// broadcastFn + 真实 SessionManager；通过 startGatewayForWSIntegration helper 起一个
+// 真实 WS gateway → A 真 Dial → A 的 Session 进 SessionManager → 验证 B leave 后
+// 1) ListSessionsByRoomID 仍含 A（B 未持 Session）；2) capture 收到 1 次 member.left。
+//
+// 关键差异 vs 11.8 case 14/15/16：本 case 让 A 真持有 Session 进 SessionManager（不是
+// 0 Session 的 no-op 路径），验证 leave 路径能正确**保留**其他成员 Session（同时验证
+// 11.8 的 close 4007 不会误中 A 的 Session）。
+func TestRoomServiceIntegration_LeaveRoom_RealWSSession_BroadcastsMemberLeftToOtherMembers(t *testing.T) {
+	svc, sqlDB, sessionMgr, capture, wg, cleanup := buildRoomServiceIntegrationWithCapture(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	insertUser(t, sqlDB, userA, "uid-ws-a", "A", "")
+	insertUser(t, sqlDB, userB, "uid-ws-b", "B", "")
+
+	// fixture: A create + B join
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom A: %v", err)
+	}
+	roomID := createOut.RoomID
+	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userB, RoomID: roomID}); err != nil {
+		t.Fatalf("JoinRoom B: %v", err)
+	}
+	// 等 join post-commit goroutine 完成，再清 capture
+	wg.Wait()
+	capture.mu.Lock()
+	capture.calls = nil
+	capture.mu.Unlock()
+
+	// **关键步骤**：让 A 真持有 SessionManager Session
+	//
+	// **简化路径**（AC8 钦定 fallback）：sessionMgr 是真实 wsapp.NewSessionManager()
+	// 实例（来自 buildRoomServiceIntegrationWithCapture），但 Session struct 构造私有 +
+	// Register 接受 *Session —— 跨 service_test 包无法直接构造 Session。改用真实 WS
+	// 拨号路径：起 gateway httptest server → A 用真 WS Dial → gateway.Handle 完成
+	// 握手 → SessionManager.Register A 的 Session。
+	wsURL, signer, gwSessionMgr, ts := startWSGatewayForLeaveCase(t, sqlDB, sessionMgr)
+	defer ts.Close()
+	_ = gwSessionMgr // gwSessionMgr 与 sessionMgr 同一实例（helper 会用 caller 传入的）
+
+	tokenA, err := signer.Sign(userA, 3600)
+	if err != nil {
+		t.Fatalf("Sign tokenA: %v", err)
+	}
+	wsConn, _, err := websocket.DefaultDialer.Dial(
+		wsURL+"/ws/rooms/"+strconv.FormatUint(roomID, 10)+"?token="+tokenA, nil)
+	if err != nil {
+		t.Fatalf("Dial WS: %v", err)
+	}
+	defer wsConn.Close()
+
+	// 接收 A 的 first message = room.snapshot（验证握手成功 + Session 已 Register）
+	_ = wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, snapshot, err := wsConn.ReadMessage()
+	if err != nil {
+		t.Fatalf("ReadMessage snapshot: %v", err)
+	}
+	var snapshotEnv integrationEnvelope
+	if err := json.Unmarshal(snapshot, &snapshotEnv); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	if snapshotEnv.Type != "room.snapshot" {
+		t.Errorf("first msg type = %q, want room.snapshot", snapshotEnv.Type)
+	}
+
+	// 验证 SessionManager 索引：A 的 Session 已 Register
+	sessions := sessionMgr.ListSessionsByRoomID(context.Background(), roomID)
+	if len(sessions) != 1 {
+		t.Fatalf("after A WS dial: ListSessionsByRoomID len = %d, want 1", len(sessions))
+	}
+	if sessions[0].UserID() != userA {
+		t.Errorf("A's session userID = %d, want %d", sessions[0].UserID(), userA)
+	}
+
+	// **关键路径**：B leave —— svc.LeaveRoom 触发 post-commit broadcastMemberLeft（capture）+
+	// SessionManager 内 B 的 Session 不存在（B 未拨号），Unregister 走 no-op；
+	// A 的 Session 必须保留（不被 close 4007 误中）
+	if _, err := svc.LeaveRoom(context.Background(), service.LeaveRoomInput{UserID: userB, RoomID: roomID}); err != nil {
+		t.Fatalf("LeaveRoom B: %v", err)
+	}
+	// 等 post-commit goroutine 完成
+	wg.Wait()
+
+	// 核心断言 1: A 的 Session 仍在 SessionManager
+	sessionsAfter := sessionMgr.ListSessionsByRoomID(context.Background(), roomID)
+	if len(sessionsAfter) != 1 {
+		t.Errorf("after B leave: ListSessionsByRoomID len = %d, want 1 (A's session preserved)", len(sessionsAfter))
+	} else if sessionsAfter[0].UserID() != userA {
+		t.Errorf("preserved session userID = %d, want %d", sessionsAfter[0].UserID(), userA)
+	}
+
+	// 核心断言 2: capture 收到 1 次 member.left wire + payload.userId = B
+	if got := capture.callCount(); got != 1 {
+		t.Fatalf("broadcast call count = %d, want 1 (member.left for B)", got)
+	}
+	call := capture.calls[0]
+	if call.roomID != roomID {
+		t.Errorf("call.roomID = %d, want %d", call.roomID, roomID)
+	}
+	if call.excludeUserID == nil || *call.excludeUserID != userB {
+		var got string
+		if call.excludeUserID == nil {
+			got = "nil"
+		} else {
+			got = strconv.FormatUint(*call.excludeUserID, 10)
+		}
+		t.Errorf("call.excludeUserID = %s, want %d (broadcastExceptFn excludes leaver)", got, userB)
+	}
+
+	var leftEnv integrationEnvelope
+	if err := json.Unmarshal(call.msg, &leftEnv); err != nil {
+		t.Fatalf("unmarshal leftEnv: %v", err)
+	}
+	if leftEnv.Type != "member.left" {
+		t.Errorf("leftEnv.type = %q, want member.left", leftEnv.Type)
+	}
+	var leftPayload struct {
+		UserID string `json:"userId"`
+	}
+	if err := json.Unmarshal(leftEnv.Payload, &leftPayload); err != nil {
+		t.Fatalf("unmarshal leftPayload: %v", err)
+	}
+	if leftPayload.UserID != strconv.FormatUint(userB, 10) {
+		t.Errorf("leftPayload.userId = %q, want %q", leftPayload.UserID, strconv.FormatUint(userB, 10))
+	}
+}
+
+// startWSGatewayForLeaveCase 装配最小 WS gateway httptest server，让 AC8 case 能真
+// Dial WS 把 A 的 Session 注入 SessionManager。
+//
+// **设计约束**：
+//   - 复用 caller 传入的 sessionMgr（与 svc 内部用同一实例 → broadcast 路径打通）
+//   - 复用 caller 的 sqlDB（用 gormmysql.New(Conn: sqlDB) 包成 GORM 实例）
+//   - 不抽到 cross-package testutil（与 ws_integration_test.go 的 startGatewayWithRealMySQL
+//     模式同源 —— 跨 package helper 不复用是 4.7 / 11.3 ~ 11.8 已建立的规范）
+//
+// 返 (wsURL, signer, sessionMgr, ts)。
+func startWSGatewayForLeaveCase(t *testing.T, sqlDB *sql.DB, sessionMgr wsapp.SessionManager) (string, *auth.Signer, wsapp.SessionManager, *httptest.Server) {
+	t.Helper()
+
+	signer, err := auth.New("integration-test-secret-32-bytes-min", 3600)
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+
+	// 复用 caller 的 *sql.DB 包成 GORM（与 mysql_test.go 的 sqlmock + GORM
+	// New(Conn:) 模式同源；不需要单独 dsn）。
+	gormDB, err := gorm.Open(gormmysql.New(gormmysql.Config{Conn: sqlDB}), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("gorm.Open with existing sqlDB: %v", err)
+	}
+
+	repo := mysql.NewRoomMemberRepo(gormDB)
+	cfg := config.WSConfig{
+		HeartbeatTimeoutSec: 60,
+		MaxMessageSizeBytes: 16384,
+		WriteTimeoutSec:     5,
+	}
+	builder := wsapp.NewPlaceholderSnapshotBuilder(repo)
+	gateway := wsapp.NewGateway(signer, sessionMgr, repo, cfg, "test", builder)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/ws/rooms/:roomId", gateway.Handle)
+	ts := httptest.NewServer(r)
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http")
+	return wsURL, signer, sessionMgr, ts
 }
