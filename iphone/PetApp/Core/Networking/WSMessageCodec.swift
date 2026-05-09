@@ -59,18 +59,36 @@ public enum WSMessageCodec {
             }
         case "member.joined":
             // Story 12.4：member.joined 路由（V1 §12.3 行 2003-2013 字段表）.
+            // fix-review r2 P2：required 字段语义校验 —— Decodable 只能挡 absent / type-mismatch；
+            // server 若推送 `userId == ""` 或 V1 §12.3 钦定非空的 `nickname == ""`，Decodable 仍会
+            // 成功解码出空字符串。codec 必须把这类语义无效 payload fallback 为 .unknown，
+            // 否则 RealRoomViewModel.applyMemberJoined 会用空 entry 污染 roster.
             do {
-                let payload = try makeDecoder().decode(MemberJoinedEnvelope.self, from: data).payload.toDomain()
-                return .memberJoined(payload)
+                let dto = try makeDecoder().decode(MemberJoinedEnvelope.self, from: data).payload
+                guard !dto.userId.isEmpty else {
+                    os_log(.error, log: logger, "member.joined rejected: empty userId")
+                    return .unknown(rawType: "member.joined")
+                }
+                guard !dto.nickname.isEmpty else {
+                    os_log(.error, log: logger, "member.joined rejected: empty nickname (V1 §12.3 钦定非空)")
+                    return .unknown(rawType: "member.joined")
+                }
+                return .memberJoined(dto.toDomain())
             } catch {
                 os_log(.error, log: logger, "member.joined payload decode failed: %{public}@", String(describing: error))
                 return .unknown(rawType: "member.joined")
             }
         case "member.left":
             // Story 12.4：member.left 路由（V1 §12.3 行 2073-2080 字段表）.
+            // fix-review r2 P2：同 member.joined 精神 —— `userId == ""` 是语义无效 payload，
+            // 即便 ViewModel.applyMemberLeft 因 userId 不存在会 ignore，codec 层先 fallback 更稳.
             do {
-                let payload = try makeDecoder().decode(MemberLeftEnvelope.self, from: data).payload.toDomain()
-                return .memberLeft(payload)
+                let dto = try makeDecoder().decode(MemberLeftEnvelope.self, from: data).payload
+                guard !dto.userId.isEmpty else {
+                    os_log(.error, log: logger, "member.left rejected: empty userId")
+                    return .unknown(rawType: "member.left")
+                }
+                return .memberLeft(dto.toDomain())
             } catch {
                 os_log(.error, log: logger, "member.left payload decode failed: %{public}@", String(describing: error))
                 return .unknown(rawType: "member.left")

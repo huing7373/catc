@@ -1389,6 +1389,95 @@ final class RealRoomViewModelTests: XCTestCase {
         XCTAssertEqual(vm.members.last?.isHost, false)
     }
 
+    // MARK: - Story 12.4 fix-review r2 P2: WSMessageCodec required-field semantic validation
+
+    /// fix-review r2 P2 baseline: 合法 member.joined payload 应正常 decode 为 .memberJoined.
+    /// 与下面 empty-userId / empty-nickname reject case 配对，锚定"reject 路径不会误伤合法 payload".
+    func testCodecMemberJoinedValidPayloadDecodesAsMemberJoined() {
+        let json = """
+        {
+          "type": "member.joined",
+          "requestId": "req_abc",
+          "payload": {
+            "userId": "u_alice",
+            "nickname": "Alice",
+            "avatarUrl": "https://cdn/x.png",
+            "pet": null
+          }
+        }
+        """
+        let result = WSMessageCodec.decode(json)
+        guard case .memberJoined(let payload) = result else {
+            return XCTFail("合法 member.joined payload 应 decode 为 .memberJoined，实际: \(result)")
+        }
+        XCTAssertEqual(payload.userId, "u_alice")
+        XCTAssertEqual(payload.nickname, "Alice")
+    }
+
+    /// fix-review r2 P2: server 推送 `userId == ""` 时 codec 必须 fallback 为 .unknown，
+    /// 不应构造 MemberJoinedPayload 让 RealRoomViewModel.applyMemberJoined 用空 entry 污染 roster.
+    func testCodecMemberJoinedEmptyUserIdFallsBackToUnknown() {
+        let json = """
+        {
+          "type": "member.joined",
+          "requestId": "req_x",
+          "payload": {
+            "userId": "",
+            "nickname": "SomeName",
+            "avatarUrl": "",
+            "pet": null
+          }
+        }
+        """
+        let result = WSMessageCodec.decode(json)
+        guard case .unknown(let rawType) = result else {
+            return XCTFail("empty userId 必须 fallback 为 .unknown(rawType: \"member.joined\")，实际: \(result)")
+        }
+        XCTAssertEqual(rawType, "member.joined",
+                       "rawType 必须是 \"member.joined\" 而非 \"\"（区分语义校验失败 vs envelope 解码失败）")
+    }
+
+    /// fix-review r2 P2: V1 §12.3 钦定 `nickname` 非空；server 推送 `nickname == ""` 时
+    /// codec 必须 fallback —— 防 placeholder "成员" 占位漏到真实 join 路径.
+    func testCodecMemberJoinedEmptyNicknameFallsBackToUnknown() {
+        let json = """
+        {
+          "type": "member.joined",
+          "requestId": "req_y",
+          "payload": {
+            "userId": "u_bob",
+            "nickname": "",
+            "avatarUrl": "",
+            "pet": null
+          }
+        }
+        """
+        let result = WSMessageCodec.decode(json)
+        guard case .unknown(let rawType) = result else {
+            return XCTFail("empty nickname 必须 fallback 为 .unknown(rawType: \"member.joined\")，实际: \(result)")
+        }
+        XCTAssertEqual(rawType, "member.joined")
+    }
+
+    /// fix-review r2 P2: member.left 同精神校验 `userId.isEmpty` —— 即便 ViewModel ignore
+    /// 路径在 userId 不匹配时不破坏，codec 层先 fallback 更稳（防未来 ViewModel 实装变更踩坑）.
+    func testCodecMemberLeftEmptyUserIdFallsBackToUnknown() {
+        let json = """
+        {
+          "type": "member.left",
+          "requestId": "req_z",
+          "payload": {
+            "userId": ""
+          }
+        }
+        """
+        let result = WSMessageCodec.decode(json)
+        guard case .unknown(let rawType) = result else {
+            return XCTFail("empty userId 必须 fallback 为 .unknown(rawType: \"member.left\")，实际: \(result)")
+        }
+        XCTAssertEqual(rawType, "member.left")
+    }
+
     // MARK: - helpers
 
     /// 等待 vm.members.count 达到预期值（最多等 1 秒；防 Task consumer 调度时机不确定）.
