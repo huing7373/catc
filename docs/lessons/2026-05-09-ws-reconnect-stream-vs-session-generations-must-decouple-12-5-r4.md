@@ -2,7 +2,7 @@
 date: 2026-05-09
 source_review: codex review (round 4) — Story 12.5 reconnect 状态机
 story: 12-5-自动重连
-commit: <pending>
+commit: 26b9541
 lesson_count: 1
 ---
 

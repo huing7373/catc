@@ -2,7 +2,7 @@
 date: 2026-05-09
 source_review: codex review --uncommitted（/tmp/epic-loop-review-12-5-r1.md，round 1）
 story: 12-5-自动重连
-commit: <pending>
+commit: 7898ade
 lesson_count: 2
 ---
 
