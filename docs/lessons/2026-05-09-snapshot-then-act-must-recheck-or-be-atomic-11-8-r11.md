@@ -2,7 +2,7 @@
 date: 2026-05-09
 source_review: codex review r11 of Story 11.8 (epic-loop fix-review round 11)
 story: 11-8-成员加入-离开-ws-广播
-commit: <pending>
+commit: 3f50b78
 lesson_count: 1
 ---
 

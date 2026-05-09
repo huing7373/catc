@@ -2,7 +2,7 @@
 date: 2026-05-09
 source_review: codex review r1 — /tmp/epic-loop-review-11-8-r1.md
 story: 11-8-成员加入-离开-ws-广播
-commit: <pending>
+commit: ada1773
 lesson_count: 1
 ---
 

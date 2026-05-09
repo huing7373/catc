@@ -2,7 +2,7 @@
 date: 2026-05-09
 source_review: /tmp/epic-loop-review-11-8-r5.md (codex review r5 of Story 11.8)
 story: 11-8-成员加入-离开-ws-广播
-commit: <pending>
+commit: f423c33
 lesson_count: 2
 ---
 

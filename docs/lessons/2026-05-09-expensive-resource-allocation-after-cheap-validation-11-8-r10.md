@@ -2,7 +2,7 @@
 date: 2026-05-09
 source_review: codex review r10 输出（/tmp/epic-loop-review-11-8-r10.md）
 story: 11-8-成员加入-离开-ws-广播
-commit: <pending>
+commit: d3080fc
 lesson_count: 1
 ---
 
