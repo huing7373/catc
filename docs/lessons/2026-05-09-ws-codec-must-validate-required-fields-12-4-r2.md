@@ -2,7 +2,7 @@
 date: 2026-05-09
 source_review: codex review (epic-loop round 2 for story 12-4) — file: /tmp/epic-loop-review-12-4-r2.md
 story: 12-4-成员加入-离开-ws-消息处理
-commit: <pending>
+commit: 7b4c0d2
 lesson_count: 1
 ---
 

@@ -2,7 +2,7 @@
 date: 2026-05-09
 source_review: codex review --uncommitted output（/tmp/epic-loop-review-12-4-r1.md round 1，最后一个 ^codex$ 段落 line 3989+）
 story: 12-4-成员加入-离开-ws-消息处理
-commit: <pending>
+commit: 8841b92
 lesson_count: 1
 ---
 
