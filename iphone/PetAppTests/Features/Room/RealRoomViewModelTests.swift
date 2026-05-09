@@ -543,6 +543,105 @@ final class RealRoomViewModelTests: XCTestCase {
                        + "applySnapshot 不应触碰它（host 字段下发后由 vm 单独派生）")
     }
 
+    // MARK: - case#12 fix-review round 5 P2: bind() 替换 client instance 必须 disconnect 旧 client
+
+    /// 验证 fix-review round 5 P2：vm 已 bound 且在房间中，再次调用 `bind(appState:webSocketClient:)` 传入
+    /// **不同的** WebSocketClient instance 时，旧 client 必须收到 `disconnect()`，旧 messageConsumerTask
+    /// 必须被 cancel —— 否则旧 socket 仍 subscribed → 资源泄漏 + 旧 stream 上的消息仍会被路由到 vm（duplicate traffic）.
+    /// 同 instance 重 bind 必须 no-op（不能误调 disconnect 把好 client 关掉）.
+    func testBindWithDifferentClientDisconnectsOldClient() async {
+        let appState = AppState()
+        let oldMockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: oldMockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. 进入房间，让 vm 进入 bound + in-room 状态
+        appState.setCurrentRoomId("room_xxx")
+        await Task.yield()
+        XCTAssertEqual(vm.wsState, .connected)
+        XCTAssertFalse(oldMockWS.didDisconnect, "进入房间阶段不应触发 oldMockWS.disconnect()")
+
+        // 2. baseline：oldMockWS 推 snapshot 让 members 有可观测值
+        let oldPayload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_old", nickname: "OldRoom", pet: nil)]
+        )
+        oldMockWS.emit(.roomSnapshot(oldPayload))
+        try? await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.members[0].name, "OldRoom")
+
+        // 3. 关键：rebind 传入**不同的** WebSocketClient instance（vm 已 bound + 在房间内）
+        let newMockWS = WebSocketClientMock()
+        vm.bind(appState: appState, webSocketClient: newMockWS)
+        await Task.yield()
+        await Task.yield()
+
+        // 4. 关键断言：旧 client 必须被 disconnect（避免 stream 仍 active deliver duplicate traffic）
+        XCTAssertTrue(oldMockWS.didDisconnect,
+                      "rebind 传入不同 client instance → 旧 client 必须收到 disconnect()（否则旧 socket 仍 subscribed → 资源泄漏 + duplicate traffic）")
+
+        // 5. 反向验证：旧 client 推消息**不**应再被路由到 vm（task 已被 cancel）
+        //    把 oldMockWS 上的 stream prepare 一下让 emit 不被 finish drop
+        oldMockWS.prepareForReconnect()
+        let staleOldPayload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_ghost_old", nickname: "GhostOld", pet: nil)]
+        )
+        oldMockWS.emit(.roomSnapshot(staleOldPayload))
+        // 给一点时间防 stale task 复活
+        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        await Task.yield()
+        await Task.yield()
+        XCTAssertNotEqual(vm.members.first?.name, "GhostOld",
+                          "旧 client 已被 disconnect + 旧 task 已 cancel → 旧 stream 消息不应再被处理")
+
+        // 6. 反向验证：新 client 推消息**应当**被路由到 vm（新 task 应已起来 / 经下次 roomId 切换起）
+        //    rebind 时 connectAlreadySubscribed=true + lastObservedRoomId != nil → bind 内主动起 task.
+        let newPayload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_xxx", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_new", nickname: "NewClient", pet: nil)]
+        )
+        newMockWS.emit(.roomSnapshot(newPayload))
+        try? await waitForMembersCount(vm: vm, expected: 1)
+        // 等到 members 包含的 id 切到新 client 的 u_new
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if vm.members.first?.id == "u_new" { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(vm.members.first?.id, "u_new",
+                       "新 client 推的 snapshot 应被新 consumer task 路由到 vm.members")
+    }
+
+    /// 验证 fix-review round 5 P2 同 instance 路径：rebind 传**同一** client instance 时
+    /// 不应误调 disconnect()（既无副作用也保留状态机）.
+    func testBindWithSameClientInstanceIsNoop() async {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 进入房间
+        appState.setCurrentRoomId("room_xxx")
+        await Task.yield()
+        XCTAssertEqual(vm.wsState, .connected)
+        XCTAssertFalse(mockWS.didDisconnect)
+
+        // 关键：rebind 传入**同一** instance
+        vm.bind(appState: appState, webSocketClient: mockWS)
+        await Task.yield()
+        await Task.yield()
+
+        // 不应误调 disconnect
+        XCTAssertFalse(mockWS.didDisconnect,
+                       "rebind 传同一 client instance → no-op（不应误调 disconnect 把好 client 关掉）")
+        XCTAssertEqual(vm.wsState, .connected, "同 instance rebind 不应改变 wsState")
+    }
+
     // MARK: - helpers
 
     /// 等待 vm.members.count 达到预期值（最多等 1 秒；防 Task consumer 调度时机不确定）.

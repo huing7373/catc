@@ -232,3 +232,4 @@
 | 2026-05-09 | [WebSocketClient 复用必须 prepareForReconnect 重置 stream & "空 roomId" 跨模块对齐 dispatcher（12-1 r2）](2026-05-09-ws-client-reuse-needs-stream-restart-and-empty-room-id-must-align-with-dispatcher-12-1-r2.md) | 2 | architecture | `<pending>` |
 | 2026-05-09 | [`room.snapshot` 必须按 room.id 校验丢弃 stale 消息（12-1 r3）](2026-05-09-stale-snapshot-discard-by-room-id-12-1-r3.md) | 1 | error-handling | `<pending>` |
 | 2026-05-09 | [`RoomMember.isHost` 不能用 snapshot 位置启发式推断（12-1 r4）](2026-05-09-snapshot-host-must-not-infer-from-position-12-1-r4.md) | 1 | other | `<pending>` |
+| 2026-05-09 | [bind() 替换 client instance 必须先 disconnect 旧 client + cancel 旧 task（12-1 r5）](2026-05-09-bind-replace-must-disconnect-old-client-12-1-r5.md) | 1 | architecture | `<pending>` |

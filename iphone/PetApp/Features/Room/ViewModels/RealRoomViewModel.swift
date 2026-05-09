@@ -99,17 +99,35 @@ public final class RealRoomViewModel: RoomViewModel {
     }
 
     /// AppState + WebSocketClient 异步注入入口（与 Story 37.8 bind 同模式扩展两路）.
+    ///
+    /// **fix-review round 5 P2**：bind 被以**不同的** webSocketClient instance 重新调用时
+    /// （vm 已 bound 且在房间中），必须先对旧 client 调 disconnect() + cancel 旧 messageConsumerTask
+    /// 再 swap，否则旧 socket 仍 subscribed → 资源泄漏 + 旧 client deliver duplicate room traffic.
+    /// 同 instance 重 bind 时 no-op（避免 redundant disconnect 把好 client 关掉）.
+    /// 用 `===` identity 比较（WebSocketClient protocol 已是 `: AnyObject, Sendable`，class-only）.
     public func bind(appState: AppState, webSocketClient: WebSocketClient? = nil) {
         let codeAlreadySubscribed = roomCodeSubscription != nil
         let connectAlreadySubscribed = roomIdConnectSubscription != nil
         self.appState = appState
-        if let client = webSocketClient {
-            self.webSocketClient = client
-            // fix-review round 1：bind 路径由 subscribeRoomIdConnect 起 task；同一 stream 多 iterator 是未定义行为.
-            // 但若 connectAlreadySubscribed=true 且当前已经在房间内，subscribeRoomIdConnect 不会再触发 sink；
-            // 那种情况下需要主动 startConsumingMessages 接上新 client. 详见下面分支.
-            _ = client
+
+        // fix-review round 5 P2：替换 client instance 前先 tear down 旧 client.
+        // - 同 instance 重 bind（=== true）：no-op（既不 disconnect 也不 cancel task）
+        // - 不同 instance 替换：disconnect 旧 client + cancel 旧 messageConsumerTask + swap
+        // - 旧 client = nil（首次注入）：仅 swap（无旧 client 可关）
+        if let newClient = webSocketClient {
+            if let oldClient = self.webSocketClient, oldClient === newClient {
+                // 同一 instance：do nothing（保留 wsState / task / subscription）
+            } else {
+                // 不同 instance（含旧 = nil 首次注入）：tear down 旧路径
+                if let oldClient = self.webSocketClient {
+                    oldClient.disconnect()
+                    self.messageConsumerTask?.cancel()
+                    self.messageConsumerTask = nil
+                }
+                self.webSocketClient = newClient
+            }
         }
+
         if !codeAlreadySubscribed {
             subscribeRoomCode(to: appState)
         }
@@ -117,8 +135,9 @@ public final class RealRoomViewModel: RoomViewModel {
             // 首次订阅：sink 同步 emit 会按 (nil, currentRoomId) 决定是否启 task.
             subscribeRoomIdConnect(to: appState)
         } else if webSocketClient != nil && lastObservedRoomId != nil {
-            // 已订阅 + 已在房间内 + 现在补注入 client → 主动起 task 接上 messages stream
+            // 已订阅 + 已在房间内 + 现在补注入 / 替换 client → 主动起 task 接上 messages stream
             // （否则 task 永远等不到下一次 currentRoomId 切换才起）.
+            // 注意：上面 tear-down 已 cancel 旧 task 并 swap webSocketClient；这里起的是新 client 的 task.
             if self.webSocketClient != nil {
                 self.wsState = .connected
             }
