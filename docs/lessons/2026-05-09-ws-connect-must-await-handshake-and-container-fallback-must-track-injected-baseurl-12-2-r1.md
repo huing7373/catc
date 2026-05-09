@@ -2,7 +2,7 @@
 date: 2026-05-09
 source_review: codex review --uncommitted (epic-loop round 1, /tmp/epic-loop-review-12-2-r1.md)
 story: 12-2-websocketclient-封装
-commit: <pending>
+commit: e9bcf77
 lesson_count: 2
 ---
 
