@@ -248,3 +248,4 @@
 | 2026-05-10 | [WS heartbeat lock-unlock 后必须 pre-send 重新校验 + 发送应使用 captured task 引用而非 re-read self.underlyingTask（12-6 r4）](2026-05-10-ws-heartbeat-unlock-window-pre-send-reverify-12-6-r4.md) | 1 | concurrency | `<pending>` |
 | 2026-05-10 | [WS heartbeat send catch 路径必须用 task identity 守护，仅靠 sessionGeneration 不够（12-6 r5）](2026-05-10-ws-heartbeat-send-catch-must-guard-by-task-identity-12-6-r5.md) | 1 | concurrency | `<pending>` |
 | 2026-05-10 | [WS heartbeat: terminal post-handshake close 必须与 transient 分支对齐 cancel heartbeat 子系统（12-6 r6）](2026-05-10-ws-heartbeat-terminal-close-must-also-cancel-heartbeat-state-12-6-r6.md) | 1 | architecture | `<pending>` |
+| 2026-05-10 | [WS heartbeat send catch 路径不能用 cancel(.goingAway) 注入 1001 覆盖 server 真实 close code（12-6 r7）](2026-05-10-ws-heartbeat-send-catch-preserve-server-close-code-12-6-r7.md) | 1 | architecture | `<pending>` |

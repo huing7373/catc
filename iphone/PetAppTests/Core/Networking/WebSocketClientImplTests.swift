@@ -1464,8 +1464,11 @@ final class WebSocketClientImplTests: XCTestCase {
         firstTask.blockReceiveForever = true
         // sendThrowsError 让 heartbeat 第一次 send(.ping) 立即抛错（snapshot 帧已 receive，handshake latch 已解）.
         firstTask.sendThrowsError = URLError(.notConnectedToInternet)
-        // cancel(.goingAway) 后 closeCode 必须 = .goingAway 让 receive-loop 走 transient (1001).
-        firstTask.stubbedCloseCode = .goingAway
+        // fix-review round 7 P1：stubbedCloseCode 保持默认 .invalid —— 模拟 "locally broken socket，
+        //   server 未发 close frame" 的真实场景。heartbeat catch 观测 closeCode == .invalid 才会
+        //   走 cancel(.goingAway) 路径；如果 pre-set .goingAway 会被 round 7 修复 silent-skip。
+        //   cancel(.goingAway) 后 receive-loop 抛错时 stubbedCloseCode 仍 = .invalid → classify 1006 transient
+        //   （V1 §12.1 钦定 1006 等价 transient），同样触发 reconnect 路径，断言仍 pass.
 
         // 第二个 task：reconnect attempt → 发 snapshot 让 .reconnecting → .connected 链跑通.
         let secondTask = factory.scheduleNewTask()
@@ -1962,6 +1965,79 @@ final class WebSocketClientImplTests: XCTestCase {
         let countAfter = factory.fakeTask.sentMessages.count
         XCTAssertEqual(countAfter, countBefore,
                        "terminal close 后 heartbeat task 必须停 → sentMessages 不再增长。before=\(countBefore) after=\(countAfter)")
+
+        client.disconnect()
+    }
+
+    /// fix-review round 7 P1：post-handshake server-initiated terminal close（如 4001 token 过期）
+    /// 与 heartbeat send 之间的 race —— heartbeat send catch **不能**用 cancel(.goingAway) 注入 1001
+    /// 覆盖 server 真实 close code，否则 receive-loop 拿到 1001 会 classify 为 transient → schedule
+    /// reconnect，而非走 terminal → emit .disconnected → 触发 caller 的 re-auth 路径，破坏 12.5
+    /// terminal-vs-transient contract.
+    ///
+    /// race 时序：
+    ///   T0   : connect → firstTask snapshot → heartbeat 启动
+    ///   T0+50: heartbeat 第一次 send 进入 fake.send（已 append sentMessages）
+    ///   send 内：beforeSendThrowHook 跑 → 模拟 server 发 4001 close frame:
+    ///           将 stubbedCloseCode 切到 4001（URLSessionWebSocketTask runtime 在收到 server close
+    ///           frame 时设置 closeCode 字段）.
+    ///   send 抛: fake throw URLError(.notConnectedToInternet) → catch 跑.
+    ///   catch  : 修复前无条件调 cancelUnderlyingTaskWithGoingAwayIfCurrent →
+    ///            firstTask.cancel(.goingAway) → lastCancelCloseCode = .goingAway → 测试断言失败.
+    ///            修复后先观测 activeTask.closeCode（= 4001 != .invalid）→ silent skip cancel →
+    ///            firstTask.lastCancelCloseCode 仍为 nil（heartbeat catch 没主动 cancel）.
+    ///
+    /// 断言：firstTask.lastCancelCloseCode != .goingAway（修复前 == .goingAway 即失败）.
+    /// 备注：本测试只关心"heartbeat catch 是否注入 1001"；不验证 receive-loop 后续 disconnect emit
+    /// 路径（被 blockReceiveForever 阻塞，且 stubbedCloseCode 切换不会主动唤醒 receive；那条链路
+    /// 由 round 6 测试覆盖）.
+    func test_heartbeat_sendCatchPreservesServerCloseCode_round7_P1() async throws {
+        let factory = FakeReconnectFactory()
+
+        // firstTask：发 snapshot 启 heartbeat → blockReceiveForever（receive 不会自然 catch）.
+        // sendThrowsError 让 heartbeat send 抛错 → catch 跑.
+        // beforeSendThrowHook 在 send 抛错前模拟 server 4001 close frame 到达（切 stubbedCloseCode）.
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.hbSnapshotJSON)]
+        firstTask.blockReceiveForever = true
+        firstTask.sendThrowsError = URLError(.notConnectedToInternet)
+        // 初始 closeCode = .invalid（默认；模拟 send 进入时 server close 还没到）.
+        // hook 内切到 4001（terminal）—— 模拟 "server 已发 close frame，task.closeCode 已被 runtime 设置".
+
+        let hookFired = SendableBox<Bool>(value: false)
+        firstTask.beforeSendThrowHook = { [hookFired, firstTask] in
+            if hookFired.value { return }
+            hookFired.set(true)
+            // 模拟 URLSessionWebSocketTask 收到 server 4001 close frame → runtime 设置 closeCode.
+            firstTask.stubbedCloseCode = .init(rawValue: 4001)!
+        }
+
+        // 不需要 secondTask —— 修复后 catch 不应触发 reconnect（terminal close 应走 receive-loop disconnect path）;
+        // 但保险起见：即使修复回归，也别让 reconnect 在测试内打转.
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.heartbeatInterval = 0.05
+        client.pongTimeout = 10.0  // 长 pongTimeout 排除 pong-timeout 路径干扰
+        client.backoffSequence = [10.0]  // 长 backoff 防 reconnect 在测试期间真跑（我们只断言 cancel 行为）
+
+        try await client.connect(roomId: "RM01")
+
+        // 等 ~T0+500ms：保证 heartbeat 第一次循环已跑 send → hook → swap closeCode → 抛错 → catch.
+        try await Task.sleep(nanoseconds: 500_000_000)
+
+        // 前置：hook 至少被调过一次（验证 race window 真的命中）.
+        XCTAssertTrue(hookFired.value,
+                      "前置：beforeSendThrowHook 必须至少被调过一次（模拟 server 4001 close frame 到达）")
+
+        // 修复前 race bug：catch 无条件 cancel(.goingAway) → firstTask.lastCancelCloseCode == .goingAway → 1001
+        //   覆盖 server 真实的 4001 close code → receive-loop classify transient → 错误 reconnect 路径.
+        // 修复后：catch 观测 activeTask.closeCode == 4001（!= .invalid）→ silent skip → 不调 cancel(.goingAway).
+        //   firstTask.lastCancelCloseCode 仍为 nil（无任何 cancel 注入）.
+        XCTAssertNotEqual(firstTask.lastCancelCloseCode, .goingAway,
+                          "修复前 race bug：heartbeat send catch 用 1001 覆盖 server 4001 terminal close；修复后必须 silent skip cancel 让 receive-loop 拿到真实 close code。actual=\(String(describing: firstTask.lastCancelCloseCode))")
 
         client.disconnect()
     }

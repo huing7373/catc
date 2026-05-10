@@ -1410,6 +1410,32 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                     //   已经把旧 heartbeatTask cancel + finish 旧 pongCont，新 task 不需要也不应该被旧 catch 干扰.
                     //
                     // latch cleanup 仍保留（已经持锁内做 sessionGeneration 守护，安全）.
+                    //
+                    // fix-review round 7 P1：另一类 race —— **post-handshake server-initiated terminal close**
+                    // 与 heartbeat send 之间的 race。
+                    //
+                    // 时序：
+                    //   T0  heartbeat send（在 socketA 上）suspended
+                    //   T1  server 发送 close frame（如 4001 token 过期）→ URLSessionWebSocketTask
+                    //       runtime 把 task.closeCode 设为 4001（read-only property，server close frame 到达时设置）
+                    //   T2  receive-loop 还没消费到 close（异步调度延迟）
+                    //   T3  T0 那个 send 终于抛错
+                    //   T4  catch 跑 → 旧实装无条件 cancel(.goingAway) → 把 task.closeCode **覆盖**为 1001
+                    //   T5  receive-loop 终于跑到 catch → 读 task.closeCode → 拿到 1001（已被 T4 覆盖）→
+                    //       classify 为 transient → schedule reconnect 而非 emit .disconnected → 破坏 12.5
+                    //       terminal-vs-transient contract（4001 应触发 re-auth，不应静默 retry）.
+                    //
+                    // 修复：catch 内先观测 activeTask.closeCode：
+                    //   - != .invalid → server 已发送 close frame（任意 close code）→ silent skip cancel；
+                    //     让 receive-loop 自然处理 server 发的真实 close code
+                    //     （正确分类 terminal vs transient，不被 1001 注入污染）.
+                    //   - == .invalid → 还没收到 close frame（locally broken socket / 底层 TCP 异常）→
+                    //     当前 transient reconnect 路径合理（receive 仍 blocked，需要主动 1001 唤醒它）.
+                    //
+                    // 注：此校验在 task identity 校验之前 —— task identity 只覆盖 "underlyingTask 已 swap"
+                    // 的 race；server-initiated close 的 race 中 underlyingTask 仍 === activeTask（receive-loop
+                    // 还没跑到 swap 路径），所以必须独立校验.
+                    let observedCloseCode = activeTask.closeCode
                     let underlyingStillSame: Bool
                     strongSelf.lock.lock()
                     underlyingStillSame = strongSelf.sessionGeneration == mySession
@@ -1429,9 +1455,20 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                         return
                     }
 
+                    // round 7 P1：server 已发送 terminal/transient close → silent skip cancel.
+                    // 不能用 1001 覆盖真实 server close code（4001/4002/4003/4004 等 terminal 必须传到 receive-loop
+                    // classify 走 .disconnected 而非 transient retry）.
+                    if observedCloseCode != .invalid {
+                        os_log(.info,
+                               log: WebSocketClientImpl.logger,
+                               "heartbeat send catch: server-initiated close already in flight (closeCode rawValue=%{public}d) — silent skip cancel; receive-loop will classify real close code",
+                               observedCloseCode.rawValue)
+                        return
+                    }
+
                     os_log(.info,
                            log: WebSocketClientImpl.logger,
-                           "heartbeat ping send failed → cancel underlying task with .goingAway (1001) → receive-loop catch transient → schedule reconnect")
+                           "heartbeat ping send failed (no server close observed) → cancel underlying task with .goingAway (1001) → receive-loop catch transient → schedule reconnect")
                     // 强制走 reconnect 路径（与 pong timeout 同一路径）
                     strongSelf.cancelUnderlyingTaskWithGoingAwayIfCurrent(mySession: mySession)
                     return
