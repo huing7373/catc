@@ -1458,6 +1458,15 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                     // round 7 P1：server 已发送 terminal/transient close → silent skip cancel.
                     // 不能用 1001 覆盖真实 server close code（4001/4002/4003/4004 等 terminal 必须传到 receive-loop
                     // classify 走 .disconnected 而非 transient retry）.
+                    //
+                    // round 8 P2：把"closeCode == .invalid 才 cancel"的 atomic check 折进 helper 内部.
+                    // 旧实装：catch 入口先读一次 `activeTask.closeCode`，**unlock 后**再调 cancel —— TOCTOU
+                    // race window：T_a 读 closeCode = .invalid → T_b server close frame 到达，runtime 设 4001
+                    // → T_c 仍走 cancel(.goingAway) 路径覆盖 4001 → terminal 被错分 transient → silent retry.
+                    //
+                    // 修复：把 closeCode re-check 移到 helper 持锁段内（与 sessionGeneration / underlying-task
+                    // identity 校验一起 atomic），消除中间 unlocked window. 即便 catch 入口 closeCode 为 .invalid,
+                    // 进 helper 之后 cancel 之前再读一次 —— 不是 .invalid → silent skip.
                     if observedCloseCode != .invalid {
                         os_log(.info,
                                log: WebSocketClientImpl.logger,
@@ -1468,9 +1477,12 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
 
                     os_log(.info,
                            log: WebSocketClientImpl.logger,
-                           "heartbeat ping send failed (no server close observed) → cancel underlying task with .goingAway (1001) → receive-loop catch transient → schedule reconnect")
-                    // 强制走 reconnect 路径（与 pong timeout 同一路径）
-                    strongSelf.cancelUnderlyingTaskWithGoingAwayIfCurrent(mySession: mySession)
+                           "heartbeat ping send failed (no server close observed at catch entry) → call helper with atomic closeCode re-check → cancel(.goingAway) only if still .invalid")
+                    // round 8 P2：传入 activeTask 让 helper 内做 closeCode atomic re-check.
+                    strongSelf.cancelUnderlyingTaskWithGoingAwayIfCurrent(
+                        mySession: mySession,
+                        activeTask: activeTask
+                    )
                     return
                 }
 
@@ -1500,7 +1512,14 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                     // 6. pong 超时 → cancel underlying task with .goingAway（1001 = transient）
                     //    → receive-loop catch 走 12.5 状态机 schedule reconnect.
                     //    **不**调 public disconnect()（那是 close 1000 = terminal 不重连）.
-                    strongSelf.cancelUnderlyingTaskWithGoingAwayIfCurrent(mySession: mySession)
+                    //
+                    // round 8 P2：pong-timeout 触发时 server 也可能已发送 terminal close（4001 等）.
+                    // 同样把 closeCode atomic check 折进 helper —— 不是 .invalid → silent skip 让 receive-loop
+                    // classify 真实 close code，不让 1001 覆盖.
+                    strongSelf.cancelUnderlyingTaskWithGoingAwayIfCurrent(
+                        mySession: mySession,
+                        activeTask: activeTask
+                    )
                     return
                 }
                 // 7. pong 正常到达 → continue 下一轮 sleep
@@ -1547,22 +1566,51 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
     /// Story 12.6：在 underlying URLSessionWebSocketTask 上 cancel(with: .goingAway) ——
     /// rawValue=1001 在 12.5 classifyCloseCode 是 transient → receive-loop catch → schedule reconnect.
     /// generation-gated：stale heartbeat task 不能 cancel 新 session 的 underlying task.
-    private func cancelUnderlyingTaskWithGoingAwayIfCurrent(mySession: Int) {
+    ///
+    /// fix-review round 8 P2：closeCode atomic re-check —— caller 传入 send / pong-timeout 当时 captured 的
+    /// `activeTask`，helper 在持锁段内重读 `activeTask.closeCode`：
+    ///   - != .invalid → server 已发送真实 close frame（任意 close code）→ silent skip cancel；让 receive-loop
+    ///     拿到真实 close code 走 classifier（避免 1001 覆盖 4001/4004 等 terminal close 导致 silent retry）.
+    ///   - == .invalid → 仍是 "locally broken socket / pong timeout" 路径 → 主动 cancel(.goingAway) 唤醒
+    ///     receive-loop 走 transient reconnect.
+    /// 同时校验 `underlyingTask === activeTask`：reconnect 透明续接保持同 generation 但会 swap underlyingTask;
+    /// 不一致 = "我捕获的那个 socket 已被新 session swap 走" → silent skip（与 send-catch task identity 校验同精神）.
+    /// 持锁内做这三个校验是 atomic 的关键 —— 消除"check 后、cancel 前"的 unlocked window 上的 TOCTOU race.
+    private func cancelUnderlyingTaskWithGoingAwayIfCurrent(mySession: Int, activeTask: WebSocketTaskHandle) {
         lock.lock()
         guard sessionGeneration == mySession else {
             lock.unlock()
             os_log(.debug,
                    log: WebSocketClientImpl.logger,
-                   "heartbeat pong timeout drop: stale mySession=%{public}d (current=%{public}d)",
+                   "cancelUnderlying drop: stale mySession=%{public}d (current=%{public}d)",
                    mySession, sessionGeneration)
+            return
+        }
+        guard underlyingTask === activeTask else {
+            lock.unlock()
+            os_log(.debug,
+                   log: WebSocketClientImpl.logger,
+                   "cancelUnderlying drop: underlyingTask was swapped (transparent reconnect installed new socket) — silent skip; new task owns its own reconnect path")
+            return
+        }
+        // round 8 P2：atomic closeCode re-check —— 在持锁段内、cancel 调用之前重读，消除 TOCTOU race window.
+        // server close frame 在 catch 入口与 cancel 之间到达时，runtime 已把 task.closeCode 设为真实值（如 4001）;
+        // 此时 silent skip，让 receive-loop 走真实 close code 的 classifier 路径.
+        let observedCloseCode = activeTask.closeCode
+        guard observedCloseCode == .invalid else {
+            lock.unlock()
+            os_log(.info,
+                   log: WebSocketClientImpl.logger,
+                   "cancelUnderlying atomic re-check: server-initiated close arrived inside lock window (closeCode rawValue=%{public}d) — silent skip cancel; receive-loop will classify real close code",
+                   observedCloseCode.rawValue)
             return
         }
         let task = underlyingTask
         lock.unlock()
         os_log(.info,
                log: WebSocketClientImpl.logger,
-               "heartbeat pong timeout (5s) → cancel underlying task with .goingAway (1001) → receive-loop catch transient")
-        task?.cancel(with: .goingAway, reason: "heartbeat pong timeout".data(using: .utf8))
+               "cancelUnderlying with .goingAway (1001) → receive-loop catch transient → schedule reconnect")
+        task?.cancel(with: .goingAway, reason: "heartbeat send/pong timeout".data(using: .utf8))
     }
 
     /// Story 12.6 fix-review round 1 P1：transient close 触发自动 reconnect 前**必须**显式

@@ -1413,9 +1413,11 @@ final class WebSocketClientImplTests: XCTestCase {
         let firstTask = factory.scheduleNewTask()
         firstTask.scriptedFrames = [.string(Self.hbSnapshotJSON)]
         firstTask.blockReceiveForever = true
-        // 注意：cancel(with:) 在 fake handle 内已记录 lastCancelCloseCode；但 closeCode getter 返回的是 stubbedCloseCode.
-        // 为了让 receive-loop 在 cancel 后抛错时拿到 1001 = .goingAway 走 transient，pre-set stubbedCloseCode.
-        firstTask.stubbedCloseCode = .goingAway
+        // round 8 P2：stubbedCloseCode 保持默认 .invalid —— pong-timeout helper 内 atomic re-check 看到
+        // .invalid 才会走 cancel(.goingAway) 分支。cancel 调用后 fake handle 自动把 stubbedCloseCode 对齐
+        // 为 .goingAway（对齐 URLSessionWebSocketTask production 行为）→ receive-loop 拿到 .goingAway 分类
+        // 为 transient (1001) → schedule reconnect.
+        // 旧实装 pre-set stubbedCloseCode = .goingAway 在 round 8 修复后会让 helper 提前 silent skip → 改用此模式.
 
         // 第二个 task：reconnect attempt → 发 snapshot 让 .reconnecting → .connected 链跑通.
         let secondTask = factory.scheduleNewTask()
@@ -1550,7 +1552,8 @@ final class WebSocketClientImplTests: XCTestCase {
         let firstTask = factory.scheduleNewTask()
         firstTask.scriptedFrames = [.string(Self.hbSnapshotJSON)]
         firstTask.blockReceiveForever = true
-        firstTask.stubbedCloseCode = .goingAway
+        // round 8 P2：保持默认 .invalid —— 让 helper 内 atomic re-check 看到 .invalid 走 cancel(.goingAway).
+        // cancel 之后 fake handle 自动把 stubbedCloseCode 对齐成 .goingAway → receive-loop classify transient.
 
         // 第二个 task（reconnect 后）：发 snapshot + pong（让 heartbeat 不再超时）.
         let secondTask = factory.scheduleNewTask()
@@ -2042,6 +2045,57 @@ final class WebSocketClientImplTests: XCTestCase {
         client.disconnect()
     }
 
+    /// fix-review round 8 P2：TOCTOU race —— round 7 修复在 catch 入口读一次 `activeTask.closeCode`,
+    /// 之后才调 `cancelUnderlyingTaskWithGoingAwayIfCurrent(...)`. 但 catch 入口 read 与 helper 内 cancel 之间
+    /// 仍存在 unlocked window —— 此时 server close frame（如 4001）可能到达，runtime 设 task.closeCode = 4001.
+    /// 旧实装：仍走 cancel(.goingAway) 路径覆盖 4001 → terminal 被错分 transient → silent retry.
+    ///
+    /// 修复：把 closeCode re-check 移到 helper 持锁段内（与 sessionGeneration / underlying-task identity 一起 atomic）,
+    /// 不是 .invalid → silent skip 让 receive-loop 拿到真实 close code.
+    ///
+    /// 测试设计：用 fake task `swapCloseCodeOnNthRead = (nthRead: 2, swapTo: 4001)` 模拟两次 closeCode read
+    /// 之间 server close 到达：
+    ///   - 1st read（catch 入口 line 1438）→ .invalid（不进 round 7 silent skip 分支，继续往下走 helper 调用）
+    ///   - 2nd read（helper 内 atomic re-check）→ 4001（被 round 8 修复 silent skip）
+    /// 修复前：helper 内不做 re-check → 直接 cancel(.goingAway) → lastCancelCloseCode == .goingAway → 失败.
+    /// 修复后：helper atomic re-check 看到 4001 → silent skip → lastCancelCloseCode 仍 nil.
+    func test_heartbeat_sendCatchAtomicCloseCodeReCheck_round8_P2() async throws {
+        let factory = FakeReconnectFactory()
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.hbSnapshotJSON)]
+        firstTask.blockReceiveForever = true
+        firstTask.sendThrowsError = URLError(.notConnectedToInternet)
+        // 初始 closeCode = .invalid（catch 入口第 1 次 read 拿到 .invalid，进入 cancel 分支）.
+        // 第 2 次 read（helper 内 atomic re-check）切换到 4001 —— 模拟 race window 内 server close 到达.
+        firstTask.swapCloseCodeOnNthRead = (nthRead: 2, swapTo: .init(rawValue: 4001)!)
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.heartbeatInterval = 0.05
+        client.pongTimeout = 10.0
+        client.backoffSequence = [10.0]
+
+        try await client.connect(roomId: "RM01")
+
+        // 等 ~500ms：保证 heartbeat 第一次循环已跑 send → 抛错 → catch → helper.
+        try await Task.sleep(nanoseconds: 500_000_000)
+
+        // 修复前 race bug：helper 内不做 closeCode re-check → 无条件 cancel(.goingAway) → 1001 覆盖
+        //   server 真实 4001 close code → receive-loop classify transient → silent retry.
+        // 修复后：helper 持锁段内 atomic re-check 看到 stubbedCloseCode 已变 4001 → silent skip cancel →
+        //   firstTask.lastCancelCloseCode 仍为 nil.
+        XCTAssertNotEqual(firstTask.lastCancelCloseCode, .goingAway,
+                          "round 8 race bug：helper 内未做 closeCode atomic re-check → 1001 覆盖 server 4001；修复后 helper 必须在持锁段内重读 closeCode 并 silent skip。actual=\(String(describing: firstTask.lastCancelCloseCode))")
+        // 进一步断言：closeCode 至少被 read 两次（catch 入口 + helper atomic re-check）.
+        XCTAssertGreaterThanOrEqual(firstTask.closeCodeReadCount, 2,
+                                    "前置：closeCode 必须被 read 至少两次（catch 入口 + helper atomic re-check）—— actual reads=\(firstTask.closeCodeReadCount)")
+
+        client.disconnect()
+    }
+
     // MARK: - reconnect 测试 helpers
 
     /// 收集 stream 上的 connection state events 直到拿到指定数量（带超时）.
@@ -2191,6 +2245,22 @@ final class FakeWebSocketTaskHandle: WebSocketTaskHandle, @unchecked Sendable {
     /// nil = 不 await（与原行为一致）.
     var beforeSendThrowHook: (@Sendable () async -> Void)?
 
+    /// Story 12.6 fix-review round 8 P2：cancel(with:reason:) 进入但写入 lastCancelCloseCode 之前
+    /// 调用此同步 closure —— 让测试在"helper 已穿过 generation/task-identity guard、closeCode atomic
+    /// re-check 之前"的窗口内主动改写 stubbedCloseCode，模拟 server close frame 在中间窗口到达的 TOCTOU race.
+    /// 注意：production helper 修复后会在 cancel 调用之前先做 atomic re-check —— 这个 hook 严格说不会被
+    /// 触发（因为 silent skip 不再调 cancel）；但保留它能帮我们 debug 如果回归.
+    /// nil = 不调（与原行为一致）.
+    var beforeCancelHook: (@Sendable () -> Void)?
+
+    /// Story 12.6 fix-review round 8 P2：模拟 "send catch 入口读 closeCode 时还是 .invalid，
+    /// helper 持锁段内重读时 server close frame 已到达"的 TOCTOU race window.
+    /// 当 closeCode getter 被读取的次数 == `nthRead` 时（含本次），将 stubbedCloseCode 切换到 `swapTo`.
+    /// 触发后**仅切换一次**，不会重复 trigger.
+    /// nil = 不模拟（与原行为一致）.
+    var swapCloseCodeOnNthRead: (nthRead: Int, swapTo: URLSessionWebSocketTask.CloseCode)?
+    var closeCodeReadCount: Int = 0
+
     private var receiveIndex: Int = 0
     private var isCancelled: Bool = false
     private let lock = NSLock()
@@ -2203,6 +2273,14 @@ final class FakeWebSocketTaskHandle: WebSocketTaskHandle, @unchecked Sendable {
     /// Story 12.5：暴露 stubbedCloseCode 让 reconnect 状态机分类决策.
     var closeCode: URLSessionWebSocketTask.CloseCode {
         lock.lock(); defer { lock.unlock() }
+        // round 8 P2：在第 N 次读时切换 stubbedCloseCode（模拟 server close frame 在两次 read 之间到达）.
+        closeCodeReadCount += 1
+        if let swap = swapCloseCodeOnNthRead, closeCodeReadCount == swap.nthRead {
+            stubbedCloseCode = swap.swapTo
+            // 只触发一次：清掉触发条件防再次切换（理论上 stubbedCloseCode 现在 != .invalid 就不会再被切了，
+            // 但严格起见也清空）.
+            swapCloseCodeOnNthRead = nil
+        }
         return stubbedCloseCode
     }
 
@@ -2213,10 +2291,23 @@ final class FakeWebSocketTaskHandle: WebSocketTaskHandle, @unchecked Sendable {
     }
 
     func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        // round 8 P2：先调 hook（不持锁，避免 hook 内试图改 stubbedCloseCode 时死锁），再写 lastCancelCloseCode.
+        let hook: (@Sendable () -> Void)?
+        lock.lock()
+        hook = beforeCancelHook
+        lock.unlock()
+        hook?()
         lock.lock()
         cancelCallCount += 1
         lastCancelCloseCode = closeCode
         isCancelled = true
+        // round 8 P2：模拟 URLSessionWebSocketTask 的 production 行为 —— cancel(with:) 之后 task.closeCode
+        // 被 runtime 设为 caller 传入的 closeCode；如果 stubbedCloseCode 还是 .invalid（未 pre-set 模拟 server
+        // close frame），则把它对齐成 caller 传入值，这样 receive-loop catch 后能正确 classify.
+        // 已 pre-set 的 stubbedCloseCode 不动（测试可能想模拟 "server close 已先到，再被 client cancel"的场景）.
+        if stubbedCloseCode == .invalid {
+            stubbedCloseCode = closeCode
+        }
         lock.unlock()
     }
 
