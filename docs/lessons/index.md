@@ -246,3 +246,4 @@
 | 2026-05-10 | [WS heartbeat .pong 必须按 requestId 配对当前 in-flight ping，不能无条件 ack 任意 pong（12-6 r2）](2026-05-10-ws-heartbeat-pong-requestid-correlation-12-6-r2.md) | 1 | error-handling | `<pending>` |
 | 2026-05-10 | [WS heartbeat ping send 抛错必须强制走与 pong timeout 相同的 reconnect 路径，不能 silent return（12-6 r3）](2026-05-10-ws-heartbeat-ping-send-error-must-force-reconnect-12-6-r3.md) | 1 | error-handling | `<pending>` |
 | 2026-05-10 | [WS heartbeat lock-unlock 后必须 pre-send 重新校验 + 发送应使用 captured task 引用而非 re-read self.underlyingTask（12-6 r4）](2026-05-10-ws-heartbeat-unlock-window-pre-send-reverify-12-6-r4.md) | 1 | concurrency | `<pending>` |
+| 2026-05-10 | [WS heartbeat send catch 路径必须用 task identity 守护，仅靠 sessionGeneration 不够（12-6 r5）](2026-05-10-ws-heartbeat-send-catch-must-guard-by-task-identity-12-6-r5.md) | 1 | concurrency | `<pending>` |

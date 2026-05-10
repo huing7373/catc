@@ -1823,6 +1823,92 @@ final class WebSocketClientImplTests: XCTestCase {
         client.disconnect()
     }
 
+    /// fix-review round 5 P1：heartbeat send 在 socketA 上 suspended →
+    /// receive-loop transient catch 跑 transparent reconnect（不翻 sessionGeneration）→
+    /// install 新 underlyingTask = socketB → 旧 send 才抛错 → catch 跑修复后逻辑.
+    ///
+    /// 修复前 bug：catch 仅靠 `sessionGeneration == mySession` 守护，但 reconnect 透明续接
+    /// 保留同 generation → `cancelUnderlyingTaskWithGoingAwayIfCurrent(mySession:)` 内
+    /// `self.underlyingTask` read 路径取到 socketB → cancel(.goingAway) → 错杀新 socket →
+    /// receive-loop 又 catch transient → self-sustaining reconnect loop.
+    ///
+    /// 修复后断言：catch 内多加 `self.underlyingTask === activeTask` 校验 → 不一致 silent skip
+    /// cancel（新 underlyingTask 已经由 receive-loop 的 reconnect 路径接管）→ socketB 不被错杀.
+    ///
+    /// 时序设计（heartbeatInterval=50ms）：
+    ///   T0     : connect(firstTask) → snapshot 解 latch → heartbeat 启动 + mySession=N
+    ///   T0+50  : heartbeat 第一次循环 → lock 内 install latch + activeTask=firstTask snapshot
+    ///            → lock.unlock() → beforeHeartbeatSendHook（no-op，单次门控让本测试 hook 不触发）
+    ///            → final pre-send 校验 OK（gen+task 都未变）→ activeTask.send（同步进入 fake）
+    ///   send 内: fake.beforeSendThrowHook 跑：模拟 receive-loop 的 transparent reconnect ——
+    ///            通过 `_simulateTransparentReconnectSwapForTest(newTask: secondTask)` 内部
+    ///            cancelHeartbeatStateForReconnectIfCurrent + swap underlyingTask = secondTask
+    ///            （sessionGeneration 不翻 ↔ reconnect 透明续接语义）
+    ///   send 抛: fake throw URLError(.notConnectedToInternet) → catch 跑.
+    ///   catch  : 修复前会调 cancelUnderlyingTaskWithGoingAwayIfCurrent → cancel secondTask；
+    ///            修复后先校验 underlyingTask === activeTask → 不等 → silent skip → secondTask 不被 cancel.
+    ///
+    /// 断言：secondTask.cancelCallCount == 0（修复后 secondTask 不被错杀）.
+    func test_heartbeat_sendCatchUsesTaskIdentityNotJustGeneration_round5_P1() async throws {
+        let factory = FakeReconnectFactory()
+
+        // firstTask：发 snapshot 启 heartbeat → blockReceiveForever → sendThrowsError + beforeSendThrowHook.
+        let firstTask = factory.scheduleNewTask()
+        firstTask.scriptedFrames = [.string(Self.hbSnapshotJSON)]
+        firstTask.blockReceiveForever = true
+        firstTask.sendThrowsError = URLError(.notConnectedToInternet)
+
+        // secondTask：transparent reconnect 后 swap 上去的新 socket.
+        // 修复后断言：secondTask.cancelCallCount == 0（catch 不应错杀它）.
+        let secondTask = factory.scheduleNewTask()
+        secondTask.scriptedFrames = []  // 不需要帧 —— 测试只断言 secondTask 不被 cancel
+        secondTask.blockReceiveForever = true
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.heartbeatInterval = 0.05
+        client.pongTimeout = 10.0  // 长 pongTimeout 防 pong timeout 路径干扰
+        client.backoffSequence = [0.05]
+
+        // beforeSendThrowHook 单次门控：第一次 send 才模拟 race；后续 send（如果有）no-op.
+        let hookFired = SendableBox<Bool>(value: false)
+        let weakClient = WeakRef(client)
+        firstTask.beforeSendThrowHook = { [hookFired, weakClient, secondTask] in
+            if hookFired.value { return }
+            hookFired.set(true)
+
+            guard let c = weakClient.value else { return }
+
+            // 模拟 receive-loop 的 transparent reconnect 路径：cancel 旧 heartbeat 状态 +
+            // swap underlyingTask = secondTask（不翻 sessionGeneration ↔ reconnect 透明续接）.
+            c._simulateTransparentReconnectSwapForTest(newTask: secondTask)
+
+            // 给 swap 一点时间扎根（理论上同步 swap 立即生效，但 await 让调度器有机会跑别的 task）.
+            try? await Task.sleep(nanoseconds: 5_000_000)  // 5ms
+        }
+
+        try await client.connect(roomId: "RM01")
+
+        // 等 ~T0+500ms：保证 heartbeat 第一次循环已跑 send → hook → swap → 抛错 → catch.
+        try await Task.sleep(nanoseconds: 500_000_000)
+
+        // 前置：hook 至少被调过一次（验证测试时序真的命中 race window）.
+        XCTAssertTrue(hookFired.value,
+                      "前置：beforeSendThrowHook 必须至少被调过一次（确认 send 真的进了 race window）")
+
+        // 修复前断言失败的核心检查：secondTask **不应**被 cancel —— 修复前 catch 调
+        // cancelUnderlyingTaskWithGoingAwayIfCurrent 会读 self.underlyingTask（已是 secondTask）
+        // 然后 cancel(.goingAway) → secondTask.cancelCallCount >= 1（错杀）.
+        // 修复后 catch 先校验 task identity，silent skip → secondTask.cancelCallCount == 0.
+        XCTAssertEqual(secondTask.cancelCallCount, 0,
+                       "修复前 race bug：catch 错杀新 underlyingTask（secondTask）；修复后 task identity 校验应让其 silent skip。actual=\(secondTask.cancelCallCount), lastCloseCode=\(String(describing: secondTask.lastCancelCloseCode))")
+
+        client.disconnect()
+    }
+
     // MARK: - reconnect 测试 helpers
 
     /// 收集 stream 上的 connection state events 直到拿到指定数量（带超时）.
@@ -1966,6 +2052,12 @@ final class FakeWebSocketTaskHandle: WebSocketTaskHandle, @unchecked Sendable {
     /// 默认 nil = 不抛（与原行为一致）；非 nil = 每次 send 都抛此错误.
     var sendThrowsError: Error?
 
+    /// Story 12.6 fix-review round 5 P1：send 路径在抛 `sendThrowsError` 之前 await 此 hook ——
+    /// 让测试在 "send 已 suspended 但还没抛错" 的 race window 内注入 reconnect swap，
+    /// 复现 round 5 P1 race（new underlyingTask 装上后旧 send 才抛错 → catch 错杀新 task）.
+    /// nil = 不 await（与原行为一致）.
+    var beforeSendThrowHook: (@Sendable () async -> Void)?
+
     private var receiveIndex: Int = 0
     private var isCancelled: Bool = false
     private let lock = NSLock()
@@ -1999,8 +2091,14 @@ final class FakeWebSocketTaskHandle: WebSocketTaskHandle, @unchecked Sendable {
         lock.lock()
         sentMessages.append(message)
         let throwErr = sendThrowsError
+        let hook = beforeSendThrowHook
         lock.unlock()
         if let throwErr = throwErr {
+            // round 5 P1：抛错前 await hook（仅当 sendThrowsError 已配置时），让测试模拟
+            // "send 已 suspended、reconnect 已 swap 新 underlyingTask、旧 send 才抛错" 的 race.
+            if let hook = hook {
+                await hook()
+            }
             // round 3 P1：先 append 再抛，让测试可以验证 "送出 ping 帧但 send 失败"路径.
             throw throwErr
         }
