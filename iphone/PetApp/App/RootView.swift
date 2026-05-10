@@ -240,12 +240,24 @@ struct RootView: View {
             // 复用现有 bind(appState:) 入口（idempotent；alreadySubscribed guard），不动 ViewModel 持有结构.
             // 详见 docs/lessons/2026-04-30-onappear-vs-task-sync-bind-before-first-paint.md.
             homeViewModel.bind(appState: appState)
+            // Story 12.7 AC8: 注入 CreateRoom / JoinRoom UseCase + ErrorPresenter 到 RealHomeViewModel.
+            // 让 onCreateTap / onJoinRoomConfirm override 走真实 server 路径（以前只 log + 直写 appState 占位）.
+            if let realHomeVM = homeViewModel as? RealHomeViewModel {
+                realHomeVM.bind(
+                    createRoomUseCase: container.makeCreateRoomUseCase(appState: appState),
+                    joinRoomUseCase: container.makeJoinRoomUseCase(appState: appState),
+                    errorPresenter: container.errorPresenter
+                )
+            }
             if let realRoomVM = roomViewModel as? RealRoomViewModel {
-                // Story 12.1 AC6：bind 签名扩到双参数（appState + webSocketClient）.
-                // 本 story 显式传 `webSocketClient: nil` —— 让 reader 一眼看出"WS 真实 client 由 Story 12.2 落地后再注入".
-                // Story 12.2 落地 WebSocketClientImpl + Story 12.7 落地 UseCase 后,
-                // 本处会改为传真实 client 实例（届时由 epic dev 改）.
-                realRoomVM.bind(appState: appState, webSocketClient: nil)
+                // Story 12.7 AC8 关键改动：webSocketClient 从 nil 升级为 container.webSocketClient（节点 4 真实 client 接通）.
+                // 同时注入 LeaveRoomUseCase + ErrorPresenter 让 onLeaveTap 走真实 server 路径（HTTP 200 / 6004 → setCurrentRoomId(nil)）.
+                realRoomVM.bind(
+                    appState: appState,
+                    webSocketClient: container.webSocketClient,
+                    leaveRoomUseCase: container.makeLeaveRoomUseCase(appState: appState),
+                    errorPresenter: container.errorPresenter
+                )
             }
             // Story 37.9 AC5 Task 5.4：与 RealRoomViewModel.bind 同精神，
             // `.onAppear` 同步路径让 RealWardrobeViewModel 在第一次 paint 之前持有 AppState 引用
@@ -256,8 +268,13 @@ struct RootView: View {
             // Story 37.10 AC5 Task 5.4：与 RealRoomViewModel.bind / RealWardrobeViewModel.bind 同精神，
             // `.onAppear` 同步路径让 RealFriendsViewModel 在第一次 paint 之前持有 AppState 引用
             // （按 Story 37.8 round 2 [P2] lesson 钦定路径，**不**放 `.task`）.
+            // Story 12.7 AC8: 同时注入 JoinRoomUseCase + ErrorPresenter 让 onJoinFriendTap 走真实 server 路径.
             if let realFriendsVM = friendsViewModel as? RealFriendsViewModel {
-                realFriendsVM.bind(appState: appState)
+                realFriendsVM.bind(
+                    appState: appState,
+                    joinRoomUseCase: container.makeJoinRoomUseCase(appState: appState),
+                    errorPresenter: container.errorPresenter
+                )
             }
             // Story 37.11 AC5 Task 5.4：与 RealRoomViewModel.bind / RealWardrobeViewModel.bind /
             // RealFriendsViewModel.bind 同精神，`.onAppear` 同步路径让 RealProfileViewModel 在

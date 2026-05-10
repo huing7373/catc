@@ -36,6 +36,12 @@ public final class RealFriendsViewModel: FriendsViewModel {
     /// 派生 state sink 句柄（防多次 bind 重订阅 + 持有 cancellable 让 sink 存活）.
     private var currentRoomIdSubscription: AnyCancellable?
 
+    /// Story 12.7 AC7: JoinRoomUseCase 注入（默认 nil；caller=RootView 通过 bind() 注入 container.makeJoinRoomUseCase）.
+    private var joinRoomUseCase: JoinRoomUseCaseProtocol?
+
+    /// Story 12.7 AC7: ErrorPresenter 注入（weak 引用避免循环）；caller=RootView 注入 container.errorPresenter.
+    private weak var errorPresenter: ErrorPresenter?
+
     /// parameterless init —— RootView `@StateObject` 老模式可用; AppState 通过 bind 异步注入.
     /// 按 Story 37.8 / 37.9 round 1 P2 lesson 预防性应用：seed `friends` / `selectedTab` 全部走 FriendsScaffoldDefaults,
     /// 让 launch / hydrate 前 / reset 后任何走 Real path 都立刻有 mock 好友列表占位.
@@ -62,9 +68,20 @@ public final class RealFriendsViewModel: FriendsViewModel {
     }
 
     /// AppState 异步注入入口（与 RealHomeViewModel / RealRoomViewModel.bind / RealWardrobeViewModel.bind 同模式）.
-    public func bind(appState: AppState) {
+    /// Story 12.7 AC7 扩展：可选注入 joinRoomUseCase + errorPresenter（默认 nil 让既有 caller / 测试 / Preview 不破）.
+    public func bind(
+        appState: AppState,
+        joinRoomUseCase: JoinRoomUseCaseProtocol? = nil,
+        errorPresenter: ErrorPresenter? = nil
+    ) {
         let alreadySubscribed = currentRoomIdSubscription != nil
         self.appState = appState
+        if let useCase = joinRoomUseCase {
+            self.joinRoomUseCase = useCase
+        }
+        if let presenter = errorPresenter {
+            self.errorPresenter = presenter
+        }
         guard !alreadySubscribed else { return }
         subscribeCurrentRoomId(to: appState)
     }
@@ -113,13 +130,48 @@ public final class RealFriendsViewModel: FriendsViewModel {
     ///   2) 成功后 server 真实加入 + WS room.snapshot 推送
     ///   3) appState.setCurrentRoomId 由 server 端权威态写入 + sink 派生
     public override func onJoinFriendTap(friend: Friend) {
-        os_log(.debug, "RealFriendsViewModel.onJoinFriendTap (Story 37.12 will wire JoinRoomUseCase) %{public}@", friend.id)
+        // Story 12.7 AC7: 调 JoinRoomUseCase（直接 join，不弹 modal —— spec line 4859 钦定 FriendsScreen 直接调）.
+        // 防御性兜底：friend.currentRoomId nil → toast "好友不在房间中"（理论不应发生；UI 仅在 friend.currentRoomId != nil 时显示"加入"按钮）.
         guard let targetRoomId = friend.currentRoomId, !targetRoomId.isEmpty else {
+            os_log(.debug, "RealFriendsViewModel.onJoinFriendTap friend.currentRoomId nil (defensive guard)")
             lastToastMessage = "好友不在房间中"
             return
         }
-        // 走规范入口：appState.setCurrentRoomId（与 Story 37.8 onLeaveTap 同精神；让 sink 派生）.
-        appState?.setCurrentRoomId(targetRoomId)
-        lastToastMessage = "加入 \(friend.name) 的房间 \(targetRoomId)"
+        guard let useCase = self.joinRoomUseCase else {
+            // fallback: 老 mock 行为兜底（让 RootView 老 wire / UITest 走 onJoinFriendTap 也能切到 inRoom）.
+            os_log(.debug, "RealFriendsViewModel.onJoinFriendTap (no JoinRoomUseCase wired; fallback) %{public}@", friend.id)
+            appState?.setCurrentRoomId(targetRoomId)
+            lastToastMessage = "加入 \(friend.name) 的房间 \(targetRoomId)"
+            return
+        }
+        let presenter = self.errorPresenter
+        Task { @MainActor [weak self] in
+            guard self != nil else { return }
+            do {
+                try await useCase.execute(roomId: targetRoomId)
+                // 成功 → no-op（UseCase 已写 appState.currentRoomId → HomeContainerView 自动切到 RoomView）.
+            } catch let APIError.business(code, _, _) {
+                // 错误映射与 RealHomeViewModel.onJoinRoomConfirm 一致.
+                let message: String? = {
+                    switch code {
+                    case 6001: return "房间不存在或已被解散"
+                    case 6002: return "房间已满（4/4）"
+                    case 6003: return "你已经在房间里了"
+                    case 6005: return "房间已关闭"
+                    case 1002: return "房间号格式不合法"
+                    default: return nil
+                    }
+                }()
+                if let message {
+                    presenter?.presentAlert(title: "提示", message: message)
+                } else {
+                    presenter?.present(APIError.business(code: code, message: "", requestId: ""))
+                }
+            } catch {
+                os_log(.error, "RealFriendsViewModel.onJoinFriendTap JoinRoomUseCase error: %{public}@",
+                       String(describing: error))
+                presenter?.present(error)
+            }
+        }
     }
 }

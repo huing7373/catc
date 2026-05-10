@@ -341,6 +341,35 @@ public final class AppContainer: ObservableObject {
         DefaultLoadHomeUseCase(repository: makeHomeRepository())
     }
 
+    // MARK: - Story 12.7 AC8: 房间 UseCase factory（CreateRoom / JoinRoom / LeaveRoom + RoomRepository）
+
+    /// Story 12.7 AC8: 构造 RoomRepository（每次调用返回新实例；apiClient 单例由 container 持有）.
+    /// 与 makeHomeRepository / makeAuthRepository 同模式（value type struct，构造廉价）.
+    public func makeRoomRepository() -> RoomRepositoryProtocol {
+        DefaultRoomRepository(apiClient: apiClient)
+    }
+
+    /// Story 12.7 AC8: 构造 CreateRoomUseCase.
+    /// 注入 appState 让 UseCase 写 setCurrentRoomId（spec AC1 钦定路径）.
+    /// caller=RootView 通过 .onAppear bind() 注入 RealHomeViewModel.
+    public func makeCreateRoomUseCase(appState: AppState) -> CreateRoomUseCaseProtocol {
+        DefaultCreateRoomUseCase(roomRepository: makeRoomRepository(), appState: appState)
+    }
+
+    /// Story 12.7 AC8: 构造 JoinRoomUseCase.
+    /// 注入 appState 让 UseCase 写 setCurrentRoomId.
+    /// caller=RootView 通过 .onAppear bind() 注入 RealHomeViewModel + RealFriendsViewModel（共享 UseCase 实例廉价；构造廉价）.
+    public func makeJoinRoomUseCase(appState: AppState) -> JoinRoomUseCaseProtocol {
+        DefaultJoinRoomUseCase(roomRepository: makeRoomRepository(), appState: appState)
+    }
+
+    /// Story 12.7 AC8: 构造 LeaveRoomUseCase.
+    /// 注入 appState 让 UseCase 读 currentRoomId + 写 setCurrentRoomId(nil).
+    /// caller=RootView 通过 .onAppear bind() 注入 RealRoomViewModel.
+    public func makeLeaveRoomUseCase(appState: AppState) -> LeaveRoomUseCaseProtocol {
+        DefaultLeaveRoomUseCase(roomRepository: makeRoomRepository(), appState: appState)
+    }
+
     // MARK: - Story 8.5 AC8: Step Sync 链路 factory
 
     /// Story 8.5 AC2: 构造 StepRepository（每次调用返回新实例；apiClient 单例由 container 持有）.

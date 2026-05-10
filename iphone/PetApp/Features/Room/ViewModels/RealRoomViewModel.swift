@@ -43,6 +43,12 @@ public final class RealRoomViewModel: RoomViewModel {
     /// Story 12.2 / 12.7 后由真实 UseCase 注入 `WebSocketClientImpl` 实例.
     private var webSocketClient: WebSocketClient?
 
+    /// Story 12.7 AC6: LeaveRoom UseCase 注入（默认 nil 让既有 caller / UITest 走 fallback 老 mock 行为）.
+    private var leaveRoomUseCase: LeaveRoomUseCaseProtocol?
+
+    /// Story 12.7 AC6: ErrorPresenter 注入（默认 nil；用于 onLeaveTap 错误兜底；caller=RootView 注入 container.errorPresenter）.
+    private weak var errorPresenter: ErrorPresenter?
+
     /// roomId 派生 getter —— 直接来自 appState.currentRoomId，**不**持本地副本.
     /// 避免与 appState 双 source of truth（防 codex BLOCKER 4 重复出现：详见 sprint-change-proposal-2026-04-29-v2.md §3）.
     public var roomId: String? {
@@ -116,10 +122,24 @@ public final class RealRoomViewModel: RoomViewModel {
     ///   - c) `oldClient == nil && newClient != nil`（first injection）→ startConsumingMessages
     ///        （**不**调 prepareForReconnect：mock 构造的是 fresh stream；production WebSocketClientImpl
     ///        首次也无需 reset）
-    public func bind(appState: AppState, webSocketClient: WebSocketClient? = nil) {
+    public func bind(
+        appState: AppState,
+        webSocketClient: WebSocketClient? = nil,
+        leaveRoomUseCase: LeaveRoomUseCaseProtocol? = nil,
+        errorPresenter: ErrorPresenter? = nil
+    ) {
         let codeAlreadySubscribed = roomCodeSubscription != nil
         let connectAlreadySubscribed = roomIdConnectSubscription != nil
         self.appState = appState
+
+        // Story 12.7 AC6: 若 caller 注入了 leaveRoomUseCase / errorPresenter，覆盖既有引用
+        // （RootView 只调一次 bind；老 caller 不传保留 nil 走 fallback 老 mock 行为）.
+        if let useCase = leaveRoomUseCase {
+            self.leaveRoomUseCase = useCase
+        }
+        if let presenter = errorPresenter {
+            self.errorPresenter = presenter
+        }
 
         // fix-review round 5 P2 + round 6 P2：替换 client instance 时分三种语义分类处理.
         // 跟踪是否为「真实的 client swap / first injection」—— 仅此情况才需重启 consumer task.
@@ -160,9 +180,34 @@ public final class RealRoomViewModel: RoomViewModel {
             //
             // 注意：上面 swap 分支已 cancel 旧 task；这里起的是新 client 的 task.
             if self.webSocketClient != nil {
+                // bind first-injection / swap 路径占位 .connected（与 sink 路径对称）.
                 self.wsState = .connected
             }
             startConsumingMessages()
+            // Story 12.7 AC6: bind first-injection / swap 路径也追加 connect 触发（与 sink 路径对称）.
+            // 让 RootView .onAppear 同步 bind 路径下既有 in-room session（restored 或 UITEST_FORCE_IN_ROOM）
+            // 也能真实拨号 WS（sink 路径 lastObservedRoomId 还没切，不会进 connect 分支）.
+            //
+            // **fix-review round 1 P2（Story 12.7）**：旧 `try?` 路径吞掉 sync failure（token 空 / URL
+            // 构造失败抛 WSError 不会 emit .connectionStateChanged → UI 卡死在"占位 .connected"）.
+            // 修复：do/catch await connect → 失败时纠正为 .disconnected + present.
+            if let roomId = self.lastObservedRoomId, !roomId.isEmpty {
+                let client = self.webSocketClient
+                let presenter = self.errorPresenter
+                Task { @MainActor [weak self, weak client] in
+                    guard let client else { return }
+                    do {
+                        try await client.connect(roomId: roomId)
+                        // 成功路径：占位 .connected 已 set，不重写.
+                    } catch {
+                        os_log(.error,
+                               "RealRoomViewModel.bind: connect(roomId:%{public}@) failed: %{public}@",
+                               roomId, String(describing: error))
+                        self?.wsState = .disconnected
+                        presenter?.present(error)
+                    }
+                }
+            }
         }
     }
 
@@ -233,9 +278,43 @@ public final class RealRoomViewModel: RoomViewModel {
                     //   也是安全的（mock no-cost；Story 12.2 后 production impl 是 idempotent）.
                     self.webSocketClient?.prepareForReconnect()
                     if self.webSocketClient != nil {
+                        // 占位 .connected（in-room scaffold UI 同步反映"用户已进房间"）；
+                        // 真实握手由后续 spawn Task 完成；失败 catch 路径会立即把它纠正为 .disconnected.
                         self.wsState = .connected
                     }
                     self.startConsumingMessages()
+                    // Story 12.7 AC6 关键改动：追加真实 WS 拨号触发（nil → A 进入房间）.
+                    // wrap in Task 让 sink 闭包不阻塞.
+                    // 空字符串路径（HomeRoomDispatcher 把 "" 当 in-room）下不真实拨号 ——
+                    //   server 端 roomId 路径校验对空字符串会 close 4002；这里 guard 让本地占位 "" 不打 server.
+                    //
+                    // **fix-review round 1 P2（Story 12.7）**：旧实装 `try?` 静默吞 sync failure（token
+                    // 空 / URL 构造失败抛 WSError 不会 emit .connectionStateChanged → UI 卡死在
+                    // "占位 .connected" 状态实际无 socket）.
+                    // 修复：do/catch await connect → 失败时把占位 `.connected` 纠正为 `.disconnected`
+                    // + 通过 errorPresenter 让用户看到连接失败.
+                    // 成功路径维持上面 sync-set 的 `.connected`（无需重设）；后续 server 推
+                    // `.connectionStateChanged(.connected)` reactive 路径也对齐（`handle(message:)` line 433-464）.
+                    if !roomId.isEmpty {
+                        let client = self.webSocketClient
+                        let presenter = self.errorPresenter
+                        Task { @MainActor [weak self, weak client] in
+                            guard let client else { return }
+                            do {
+                                try await client.connect(roomId: roomId)
+                                // 成功路径：占位 .connected 已 set；不重复写避免与 .connectionStateChanged
+                                // reactive 路径时序竞争（receive loop emit .connected 时已是真实信号）.
+                            } catch {
+                                os_log(.error,
+                                       "RealRoomViewModel: nil→A connect(roomId:%{public}@) failed: %{public}@",
+                                       roomId, String(describing: error))
+                                // **关键纠错**：旧实装 `try?` 在此处吞掉信号；新实装把占位
+                                // `.connected` 还原成真实 `.disconnected`，UI 不再卡在"假 connected".
+                                self?.wsState = .disconnected
+                                presenter?.present(error)
+                            }
+                        }
+                    }
                     os_log(.debug, "RealRoomViewModel: nil → %{public}@ (WS stream started)", roomId)
                 case (.some(let prev), .some(let next)):
                     // 分支 3：A → B，房间切换 —— 必须清空旧 roster + tear down 旧 stream + 取消旧 consumer task.
@@ -258,10 +337,35 @@ public final class RealRoomViewModel: RoomViewModel {
                     self.members = []
                     self.memberPetStates = [:]
                     self.webSocketClient?.prepareForReconnect()
+                    // **fix-review round 1 P2（Story 12.7）**：保持 wsState 上一态 `.connected`（room A
+                    // 阶段已 set；A→B 切换"用户仍在房间内"语义维持）—— 失败 catch 路径会把它纠正为
+                    // `.disconnected`，所以不存在"connect 失败仍卡 .connected"的 review 担心.
                     if self.webSocketClient != nil {
                         self.wsState = .connected
                     }
                     self.startConsumingMessages()
+                    // Story 12.7 AC6 关键改动：A → B 切换也追加 connect 触发新 room.
+                    // 与 (nil, A) 分支同精神；同样 wrap in Task；空字符串守护.
+                    // **fix-review round 1 P2（Story 12.7）**：旧 `try?` 路径吞掉 sync failure
+                    // → A→B 切换 connect 抛错时 wsState 卡 .connected 但实际无 socket；
+                    // 修复：do/catch → 失败时纠正为 .disconnected + present.
+                    if !next.isEmpty {
+                        let client = self.webSocketClient
+                        let presenter = self.errorPresenter
+                        Task { @MainActor [weak self, weak client] in
+                            guard let client else { return }
+                            do {
+                                try await client.connect(roomId: next)
+                                // 成功路径：占位 .connected 已 set，不重写.
+                            } catch {
+                                os_log(.error,
+                                       "RealRoomViewModel: A→B connect(roomId:%{public}@) failed: %{public}@",
+                                       next, String(describing: error))
+                                self?.wsState = .disconnected
+                                presenter?.present(error)
+                            }
+                        }
+                    }
                     os_log(.debug, "RealRoomViewModel: %{public}@ → %{public}@ (roster reset + stream restarted)", prev, next)
                 case (.some(let prev), nil):
                     // 分支 4：A → nil，离开房间.
@@ -557,11 +661,30 @@ public final class RealRoomViewModel: RoomViewModel {
     // MARK: - override abstract methods
 
     public override func onLeaveTap() {
-        os_log(.debug, "RealRoomViewModel.onLeaveTap (Story 12.7 will wire LeaveRoomUseCase)")
-        // 节点 4 占位：直接置 currentRoomId = nil（subscribeRoomIdConnect 自动触发 disconnect + members
-        // 清空 + wsState = .disconnected）.
-        // Story 12.7 落地 LeaveRoomUseCase 后改为：调 server POST /rooms/{id}/leave → 成功后再 setCurrentRoomId(nil).
-        self.appState?.setCurrentRoomId(nil)
+        // Story 12.7 AC6: 调 LeaveRoomUseCase（HTTP 200 / 6004 视同成功 → setCurrentRoomId(nil)）.
+        // fallback 路径：若 useCase == nil（RootView 老 wire / UITest 不注入），保留旧 mock 行为
+        //   `appState?.setCurrentRoomId(nil)` —— 让 onLeaveTap 在没有 server 的场景下仍能让 UI 切回 idle.
+        guard let useCase = self.leaveRoomUseCase else {
+            os_log(.debug, "RealRoomViewModel.onLeaveTap (fallback: no LeaveRoomUseCase, set currentRoomId nil directly)")
+            self.appState?.setCurrentRoomId(nil)
+            return
+        }
+        let presenter = self.errorPresenter
+        Task { @MainActor [weak self] in
+            guard self != nil else { return }
+            do {
+                try await useCase.execute()
+                // 成功路径 / 6004 视同成功：UseCase 已写 setCurrentRoomId(nil) → subscribeRoomIdConnect
+                // 的 A → nil 分支自动触发 disconnect + 清 roster + wsState = .disconnected →
+                // HomeContainerView 自动切回 HomeView.
+            } catch {
+                // 其他 APIError 透传给 ErrorPresenter（默认 mapper 路径，alert / retry）.
+                // appState 保留原值（用户仍在 RoomView 内可重试）.
+                os_log(.error, "RealRoomViewModel.onLeaveTap LeaveRoomUseCase error: %{public}@",
+                       String(describing: error))
+                presenter?.present(error)
+            }
+        }
     }
 
     public override func onCopyTap() {

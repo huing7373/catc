@@ -53,6 +53,15 @@ public final class RealHomeViewModel: HomeViewModel {
     /// 基类 self.appState 仅 base class 内部 applyHomeData / sink 用）.
     private var localAppState: AppState?
 
+    /// Story 12.7 AC5: CreateRoomUseCase 注入（默认 nil；caller=RootView 通过 bind() 注入 container.makeCreateRoomUseCase）.
+    private var createRoomUseCase: CreateRoomUseCaseProtocol?
+
+    /// Story 12.7 AC5: JoinRoomUseCase 注入（默认 nil；caller=RootView 通过 bind() 注入 container.makeJoinRoomUseCase）.
+    private var joinRoomUseCase: JoinRoomUseCaseProtocol?
+
+    /// Story 12.7 AC5: ErrorPresenter 注入（weak 引用避免循环）；caller=RootView 注入 container.errorPresenter.
+    private weak var localErrorPresenter: ErrorPresenter?
+
     /// Story 37.7 codex round 1 [P1] fix：parameterless init 让 RootView `@StateObject` 老模式可用.
     /// AppState 通过 `bind(appState:)` 在 `.task` 内异步注入（与 pingUseCase / loadHomeUseCase 同模式）.
     /// 不再持 `injectedAppState` 字段（基类已保 self.appState；本类无独立持有需求）.
@@ -78,6 +87,20 @@ public final class RealHomeViewModel: HomeViewModel {
         self.localAppState = appState   // Story 37.12: 异步注入路径也要更新子类持的引用
         guard !alreadySubscribed else { return }
         subscribeGreeting(to: appState)
+    }
+
+    /// Story 12.7 AC5: 注入 CreateRoom / JoinRoom UseCase + ErrorPresenter.
+    /// 与既有 bind(appState:) / bind(loadHomeUseCase:errorPresenter:) 同模式（独立入口，参数化注入）.
+    /// 幂等：caller=RootView .onAppear 只调一次；多次调用覆盖既有引用（生产路径无意义，仅防错重）.
+    /// **不**破坏基类 bind 的"first-time-only"约定：本入口不调 super 的任何 bind（不重订阅 publisher）.
+    public func bind(
+        createRoomUseCase: CreateRoomUseCaseProtocol,
+        joinRoomUseCase: JoinRoomUseCaseProtocol,
+        errorPresenter: ErrorPresenter
+    ) {
+        self.createRoomUseCase = createRoomUseCase
+        self.joinRoomUseCase = joinRoomUseCase
+        self.localErrorPresenter = errorPresenter
     }
 
     /// 订阅 appState.$currentPet —— 任何 hydrate / reset / 单独 mutate 都派生 greeting.
@@ -114,7 +137,28 @@ public final class RealHomeViewModel: HomeViewModel {
     // MARK: - override abstract methods（本 story 占位；Story 12.7 / 14.x 实装真实 UseCase 调用）
 
     public override func onCreateTap() {
-        os_log(.debug, "RealHomeViewModel.onCreateTap (Story 12.7 will wire CreateRoomUseCase)")
+        // Story 12.7 AC5: 调 CreateRoomUseCase（POST /rooms → 写 appState.currentRoomId → UI 自动切到 RoomView）.
+        // 失败路径：6003（已在房间）→ alert "你已经在房间里了"；其他错误走 ErrorPresenter 默认 mapper.
+        guard let useCase = self.createRoomUseCase else {
+            os_log(.debug, "RealHomeViewModel.onCreateTap (no CreateRoomUseCase wired; no-op)")
+            return
+        }
+        let presenter = self.localErrorPresenter
+        Task { @MainActor [weak self] in
+            guard self != nil else { return }
+            do {
+                _ = try await useCase.execute()
+                // 成功 → no-op：UseCase 已写 appState.currentRoomId → HomeContainerView 互斥状态机切 RoomView.
+            } catch let APIError.business(code, _, _) where code == 6003 {
+                // 6003 用户已在房间中：明确文案 alert（不附 onRetry —— 用户应主动 leave 再创建）.
+                presenter?.presentAlert(title: "提示", message: "你已经在房间里了")
+            } catch {
+                // 其他 APIError（network / unauthorized / 1009 / decoding 等）走默认 mapper（retry / alert）.
+                os_log(.error, "RealHomeViewModel.onCreateTap CreateRoomUseCase error: %{public}@",
+                       String(describing: error))
+                presenter?.present(error)
+            }
+        }
     }
 
     public override func onJoinTap() {
@@ -155,13 +199,53 @@ public final class RealHomeViewModel: HomeViewModel {
     ///   1) 调 JoinRoomUseCase.execute(roomId:)
     ///   2) 成功后 server 推送 WS room.snapshot → setCurrentRoomId 由 server 端权威态写入
     public override func onJoinRoomConfirm(roomId: String) {
-        os_log(
-            .debug,
-            "RealHomeViewModel.onJoinRoomConfirm %{public}@ (Story 12.7 will wire JoinRoomUseCase)",
-            roomId
-        )
+        // Story 12.7 AC5: mutation 顺序锁定（lesson 2026-04-30-real-viewmodel-override-placeholder-must-mutate-state.md）：
+        //   1) **先** showJoinModal = false（关 sheet —— 立即视觉反馈让 modal 退场）
+        //   2) **后** 起 Task 调 JoinRoomUseCase（异步路径在 sheet 关闭后才把 appState.currentRoomId 写入）
+        // 不可反序：若先调 UseCase（成功后才关 sheet），HomeContainerView 已切到 RoomView 但 modal 还在最上层 → 视觉错乱.
         showJoinModal = false
-        localAppState?.setCurrentRoomId(roomId)
+
+        // 删除老占位行为里 `localAppState?.setCurrentRoomId(roomId)` 那行（避免 UseCase + 直写双触发 sink）.
+        guard let useCase = self.joinRoomUseCase else {
+            os_log(
+                .debug,
+                "RealHomeViewModel.onJoinRoomConfirm %{public}@ (no JoinRoomUseCase wired; fallback: write appState directly)",
+                roomId
+            )
+            // fallback: 老 mock 行为兜底（让 RootView 老 wire / UITest 走 onJoinRoomConfirm 也能切到 inRoom）.
+            localAppState?.setCurrentRoomId(roomId)
+            return
+        }
+        let presenter = self.localErrorPresenter
+        Task { @MainActor [weak self] in
+            guard self != nil else { return }
+            do {
+                try await useCase.execute(roomId: roomId)
+                // 成功 → no-op：UseCase 已写 appState.currentRoomId.
+            } catch let APIError.business(code, _, _) {
+                // 业务错误码 case-by-case 文案（spec AC2 + V1 §10.4）：
+                let message: String? = {
+                    switch code {
+                    case 6001: return "房间不存在或已被解散"
+                    case 6002: return "房间已满（4/4）"
+                    case 6003: return "你已经在房间里了"
+                    case 6005: return "房间已关闭"
+                    case 1002: return "房间号格式不合法"
+                    default: return nil
+                    }
+                }()
+                if let message {
+                    presenter?.presentAlert(title: "提示", message: message)
+                } else {
+                    // 透传给 ErrorPresenter 默认 mapper（如 1009 → retry）.
+                    presenter?.present(APIError.business(code: code, message: "", requestId: ""))
+                }
+            } catch {
+                os_log(.error, "RealHomeViewModel.onJoinRoomConfirm JoinRoomUseCase error: %{public}@",
+                       String(describing: error))
+                presenter?.present(error)
+            }
+        }
     }
 
     // Story 37.7 codex round 4 [P3] fix：移除老 round 3 override applyHomeData(_:).

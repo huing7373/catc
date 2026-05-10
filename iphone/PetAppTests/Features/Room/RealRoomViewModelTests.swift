@@ -1680,4 +1680,240 @@ final class RealRoomViewModelTests: XCTestCase {
             try await Task.sleep(nanoseconds: 10_000_000) // 10ms
         }
     }
+
+    // MARK: - Story 12.7 AC6: onLeaveTap + connect 触发新增 case
+
+    /// case#story12-7-1 happy: onLeaveTap → mock LeaveRoomUseCase.execute() 调一次.
+    func testOnLeaveTapInvokesLeaveRoomUseCase() async throws {
+        let appState = AppState()
+        appState.setCurrentRoomId("3001")
+        let mockWS = WebSocketClientMock()
+        let mockLeave = MockLeaveRoomUseCaseRoom()
+        mockLeave.onExecute = { @MainActor in
+            appState.setCurrentRoomId(nil)
+        }
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+        vm.bind(
+            appState: appState,
+            webSocketClient: mockWS,
+            leaveRoomUseCase: mockLeave,
+            errorPresenter: presenter
+        )
+
+        await Task.yield()
+        await Task.yield()
+
+        vm.onLeaveTap()
+        try? await waitForCallCountStory12_7(mock: mockLeave, method: "execute()", expected: 1)
+
+        XCTAssertEqual(mockLeave.callCount(of: "execute()"), 1,
+                       "onLeaveTap 必须调 LeaveRoomUseCase.execute()")
+    }
+
+    /// case#story12-7-2 happy: LeaveRoomUseCase 成功 → A → nil 分支触发 → wsState=.disconnected + members=[] + memberPetStates=[:]
+    func testOnLeaveTapSuccessTriggersAToNilBranch() async throws {
+        let appState = AppState()
+        appState.setCurrentRoomId("3001")
+        let mockWS = WebSocketClientMock()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockLeave = MockLeaveRoomUseCaseRoom()
+        mockLeave.onExecute = { @MainActor in
+            appState.setCurrentRoomId(nil)
+        }
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+        vm.bind(
+            appState: appState,
+            webSocketClient: mockWS,
+            leaveRoomUseCase: mockLeave,
+            errorPresenter: presenter
+        )
+
+        await Task.yield()
+        await Task.yield()
+
+        // 先注入 1 成员让后续清空有可观测信号
+        let payload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "3001", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_solo", nickname: "Solo", pet: nil)]
+        )
+        mockWS.emit(.roomSnapshot(payload))
+        try await waitForMembersCount(vm: vm, expected: 1)
+
+        vm.onLeaveTap()
+        try await waitForWsState(vm: vm, expected: .disconnected)
+
+        XCTAssertEqual(vm.wsState, .disconnected)
+        XCTAssertEqual(vm.members, [], "成功路径 A → nil 分支应清空 members")
+        XCTAssertEqual(vm.memberPetStates, [:])
+        XCTAssertNil(appState.currentRoomId)
+    }
+
+    /// case#story12-7-3 edge: LeaveRoomUseCase throw 1009 → ErrorPresenter 收到 + appState 保留
+    func testOnLeaveTap1009RoutesToErrorPresenterAndPreservesAppState() async throws {
+        let appState = AppState()
+        appState.setCurrentRoomId("3001")
+        let mockWS = WebSocketClientMock()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockLeave = MockLeaveRoomUseCaseRoom()
+        mockLeave.executeStub = .failure(APIError.business(code: 1009, message: "服务繁忙", requestId: "req_x"))
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+        vm.bind(
+            appState: appState,
+            webSocketClient: mockWS,
+            leaveRoomUseCase: mockLeave,
+            errorPresenter: presenter
+        )
+
+        await Task.yield()
+        await Task.yield()
+
+        vm.onLeaveTap()
+        // 等 ErrorPresenter 接收到呈现态
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if presenter.current != nil { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertNotNil(presenter.current,
+                        "1009 路径必须把错误透传给 ErrorPresenter")
+        XCTAssertEqual(appState.currentRoomId, "3001",
+                       "1009 透传应保留 appState.currentRoomId（用户在 RoomView 内重试）")
+    }
+
+    /// case#story12-7-4 happy: subscribeRoomIdConnect nil → A → mock WebSocketClient.connect(roomId:) 被调用一次
+    func testSubscribeRoomIdConnectNilToATriggersConnect() async {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        // 注意：必须 strong 持 vm —— 否则 vm 立即释放后 sink cancellable 也 dealloc，setCurrentRoomId 不再触发 sink.
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        appState.setCurrentRoomId("room_A")
+        // 等 connect Task 跑完
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if !mockWS.connectCallArgs.isEmpty { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertGreaterThanOrEqual(mockWS.connectCallArgs.count, 1,
+                                    "nil → A 分支必须调 webSocketClient.connect(roomId:)")
+        XCTAssertEqual(mockWS.connectCallArgs.first, "room_A")
+        _ = vm  // 防止编译器优化
+    }
+
+    /// case#story12-7-5 happy: A → B → mock WebSocketClient.connect("B") 被调用 + 先 disconnect 旧 + members 清空
+    func testSubscribeRoomIdConnectAToBDisconnectsAndConnects() async throws {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        appState.setCurrentRoomId("room_A")
+        // 等 connect("room_A") 完成
+        let deadline1 = Date().addingTimeInterval(1.0)
+        while Date() < deadline1 {
+            if mockWS.connectCallArgs.contains("room_A") { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        // baseline 1 个成员
+        let payloadA = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_A", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_a", nickname: "A", pet: nil)]
+        )
+        mockWS.emit(.roomSnapshot(payloadA))
+        try await waitForMembersCount(vm: vm, expected: 1)
+
+        // 直接切 B
+        appState.setCurrentRoomId("room_B")
+        // 等 connect("room_B") 完成
+        let deadline2 = Date().addingTimeInterval(1.0)
+        while Date() < deadline2 {
+            if mockWS.connectCallArgs.contains("room_B") { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertTrue(mockWS.didDisconnect, "A → B 必须先 disconnect 旧 client")
+        XCTAssertTrue(mockWS.connectCallArgs.contains("room_B"),
+                      "A → B 必须调 connect(roomId: \"room_B\")，实际 connectCallArgs=\(mockWS.connectCallArgs)")
+        XCTAssertEqual(vm.members, [], "A → B 切换必须清空 members")
+    }
+
+    private func waitForCallCountStory12_7(mock: MockBase, method: String, expected: Int) async throws {
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if mock.callCount(of: method) >= expected { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    // MARK: - case#story12-7-r1-P2 fix-review round 1: connect failure 必须 NOT 让 wsState 卡在 .connected
+
+    /// 验证 fix-review round 1 P2#1：subscribeRoomIdConnect nil→A 分支当 client.connect(roomId:) 抛错
+    /// （token 缺失 / URL 构造失败 / DNS 等 sync failure 路径）—— wsState **不能**留在 .connected.
+    ///
+    /// 旧实装 bug：sink 同步设置 `wsState = .connected` 后再 `try? await client.connect(roomId:)`
+    /// 静默吞错 → 即使 connect 抛了 WSError.tokenMissing，UI 仍显示 connected 状态但实际无 socket.
+    ///
+    /// 新实装：先 await connect 成功 → wsState=.connected；失败 → wsState=.disconnected + present.
+    func testNilToAConnectFailureKeepsWsStateDisconnected() async throws {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        // 关键：让 connect 抛 WSError.tokenMissing（模拟 token 空 / URL 构造失败 sync failure）
+        mockWS.connectError = .tokenMissing
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 进入房间 → 触发 nil→A 分支 → spawn Task → await connect 抛错 → wsState 应保持 .disconnected
+        appState.setCurrentRoomId("room_failconnect")
+
+        // 等 connect Task 跑完（throw 路径也会立即返回；无需 wait stream）
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if !mockWS.connectCallArgs.isEmpty { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        // 再多 yield 几次让 catch 分支的 wsState=.disconnected 跑掉
+        await Task.yield()
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertGreaterThanOrEqual(mockWS.connectCallArgs.count, 1,
+                                    "nil→A 分支必须调用 connect(roomId:)（即使会抛错）")
+        // **关键断言**：sync connect failure 路径下 wsState 不能卡在 .connected
+        XCTAssertNotEqual(vm.wsState, .connected,
+                          "connect(roomId:) 抛错（如 WSError.tokenMissing）时 wsState **不能**保持 .connected"
+                          + "（旧实装 bug：sync 设置 .connected + try? 吞错 → UI 卡在错误的 connected 状态）")
+        XCTAssertEqual(vm.wsState, .disconnected,
+                       "connect 失败后 wsState 必须切回 .disconnected 让 UI 展示真实状态")
+    }
 }
+
+// MARK: - Inline mocks for Story 12.7
+
+#if DEBUG
+final class MockLeaveRoomUseCaseRoom: MockBase, LeaveRoomUseCaseProtocol, @unchecked Sendable {
+    var executeStub: Result<Void, Error> = .success(())
+    /// 测试 hook：让 mock UseCase 可以模拟 setCurrentRoomId 副作用（与生产 DefaultLeaveRoomUseCase 一致）.
+    var onExecute: (@MainActor @Sendable () -> Void)?
+
+    func execute() async throws {
+        record(method: "execute()")
+        if let hook = onExecute {
+            await MainActor.run {
+                hook()
+            }
+        }
+        try executeStub.get()
+    }
+}
+#endif

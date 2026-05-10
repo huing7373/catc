@@ -1,0 +1,233 @@
+// RealHomeViewModelTests.swift
+// Story 12.7 AC5: RealHomeViewModel.onCreateTap / onJoinRoomConfirm 升级版（接 UseCase）单测.
+//
+// 测试目标：
+//   - onCreateTap → CreateRoomUseCase.execute 调一次
+//   - onCreateTap 6003 → ErrorPresenter 收到 .alert 含"已经在房间"
+//   - onJoinRoomConfirm → showJoinModal 立即 false + JoinRoomUseCase.execute(roomId:) 调一次
+//   - onJoinRoomConfirm 6002 → ErrorPresenter 收到 .alert 含"房间已满"
+//   - onJoinRoomConfirm 1009 → ErrorPresenter 默认 mapper 路径
+//
+// 测试基础设施约束：
+//   - 仅 stdlib（XCTest + @testable import PetApp）
+//   - mock UseCase inline 定义（不入产品 target）+ MainActor scheduling helper
+
+import XCTest
+import Combine
+@testable import PetApp
+
+@MainActor
+final class RealHomeViewModelTests: XCTestCase {
+
+    // MARK: - case#1 happy: onCreateTap → mock CreateRoomUseCase.execute() 调一次 + 不弹 alert
+
+    func testOnCreateTapInvokesCreateRoomUseCase() async {
+        let appState = AppState()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockCreate = MockCreateRoomUseCase()
+        mockCreate.executeStub = .success("3001")
+        let mockJoin = MockJoinRoomUseCase()
+        let vm = RealHomeViewModel(appState: appState)
+        vm.bind(
+            createRoomUseCase: mockCreate,
+            joinRoomUseCase: mockJoin,
+            errorPresenter: presenter
+        )
+
+        vm.onCreateTap()
+
+        // 等异步 Task 跑完
+        try? await waitForCallCount(mock: mockCreate, method: "execute()", expected: 1)
+
+        XCTAssertEqual(mockCreate.callCount(of: "execute()"), 1, "onCreateTap 必须调 CreateRoomUseCase.execute()")
+        XCTAssertNil(presenter.current, "成功路径不应弹任何 alert")
+    }
+
+    // MARK: - case#2 edge: CreateRoomUseCase throw 6003 → ErrorPresenter 收到 .alert "你已经在房间里了"
+
+    func testOnCreateTap6003PresentsAlertAlreadyInRoom() async {
+        let appState = AppState()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockCreate = MockCreateRoomUseCase()
+        mockCreate.executeStub = .failure(APIError.business(code: 6003, message: "已在房间", requestId: "req_1"))
+        let mockJoin = MockJoinRoomUseCase()
+        let vm = RealHomeViewModel(appState: appState)
+        vm.bind(
+            createRoomUseCase: mockCreate,
+            joinRoomUseCase: mockJoin,
+            errorPresenter: presenter
+        )
+
+        vm.onCreateTap()
+        try? await waitForPresenterAlert(presenter: presenter)
+
+        guard case let .alert(title, message) = presenter.current else {
+            XCTFail("ErrorPresenter.current 应为 .alert，实际 \(String(describing: presenter.current))")
+            return
+        }
+        XCTAssertEqual(title, "提示")
+        XCTAssertTrue(message.contains("已经在房间"),
+                      "6003 alert message 应含'已经在房间'，实际 \(message)")
+    }
+
+    // MARK: - case#3 happy: onJoinRoomConfirm → showJoinModal 立即 false + JoinRoomUseCase.execute("3001") 调一次
+
+    func testOnJoinRoomConfirmInvokesJoinRoomUseCaseAndClosesModal() async {
+        let appState = AppState()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockCreate = MockCreateRoomUseCase()
+        let mockJoin = MockJoinRoomUseCase()
+        mockJoin.executeStub = .success(())
+        let vm = RealHomeViewModel(appState: appState)
+        vm.showJoinModal = true   // 模拟 modal 打开
+        vm.bind(
+            createRoomUseCase: mockCreate,
+            joinRoomUseCase: mockJoin,
+            errorPresenter: presenter
+        )
+
+        vm.onJoinRoomConfirm(roomId: "3001")
+
+        // showJoinModal 立即（同步）置 false（不等 Task）
+        XCTAssertFalse(vm.showJoinModal, "onJoinRoomConfirm 必须**先**关 modal（同步），再起 Task 调 UseCase")
+
+        try? await waitForCallCount(mock: mockJoin, method: "execute(roomId:)", expected: 1)
+
+        XCTAssertEqual(mockJoin.callCount(of: "execute(roomId:)"), 1)
+        XCTAssertEqual(mockJoin.lastArgumentsSnapshot().first as? String, "3001")
+    }
+
+    // MARK: - case#4 edge: JoinRoomUseCase throw 6002 → ErrorPresenter 收到 .alert "房间已满"
+
+    func testOnJoinRoomConfirm6002PresentsAlertRoomFull() async {
+        let appState = AppState()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockCreate = MockCreateRoomUseCase()
+        let mockJoin = MockJoinRoomUseCase()
+        mockJoin.executeStub = .failure(APIError.business(code: 6002, message: "房间已满", requestId: "req_x"))
+        let vm = RealHomeViewModel(appState: appState)
+        vm.bind(
+            createRoomUseCase: mockCreate,
+            joinRoomUseCase: mockJoin,
+            errorPresenter: presenter
+        )
+
+        vm.onJoinRoomConfirm(roomId: "3001")
+        try? await waitForPresenterAlert(presenter: presenter)
+
+        guard case let .alert(_, message) = presenter.current else {
+            XCTFail("ErrorPresenter.current 应为 .alert，实际 \(String(describing: presenter.current))")
+            return
+        }
+        XCTAssertTrue(message.contains("房间已满"),
+                      "6002 alert message 应含'房间已满'，实际 \(message)")
+    }
+
+    // MARK: - case#5 edge: JoinRoomUseCase throw 1009 → ErrorPresenter 收到呈现态（默认 mapper 路径）
+
+    /// 1009 转给 ErrorPresenter 默认 mapper（business 1009 → retry per AppErrorMapper）.
+    func testOnJoinRoomConfirm1009RoutesToErrorPresenterDefaultMapper() async {
+        let appState = AppState()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockCreate = MockCreateRoomUseCase()
+        let mockJoin = MockJoinRoomUseCase()
+        mockJoin.executeStub = .failure(APIError.business(code: 1009, message: "服务繁忙", requestId: "req_y"))
+        let vm = RealHomeViewModel(appState: appState)
+        vm.bind(
+            createRoomUseCase: mockCreate,
+            joinRoomUseCase: mockJoin,
+            errorPresenter: presenter
+        )
+
+        vm.onJoinRoomConfirm(roomId: "3001")
+        // 等到 presenter.current 非 nil（任意呈现态）
+        try? await waitForPresenterAlert(presenter: presenter)
+
+        XCTAssertNotNil(presenter.current,
+                        "1009 路径必须把错误透传给 ErrorPresenter（默认 mapper 决定 retry vs alert）")
+    }
+
+    // MARK: - case#6 happy: onJoinRoomConfirm 成功后 mock UseCase 收到 roomId
+
+    func testOnJoinRoomConfirmSuccessKeepsModalClosedAndAppStateWritten() async {
+        let appState = AppState()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockCreate = MockCreateRoomUseCase()
+        let mockJoin = MockJoinRoomUseCase()
+        // 让 mock JoinRoomUseCase 在 execute 时主动写 appState（与生产 DefaultJoinRoomUseCase 一致）
+        mockJoin.executeStub = .success(())
+        mockJoin.onExecute = { roomId in
+            Task { @MainActor in
+                appState.setCurrentRoomId(roomId)
+            }
+        }
+        let vm = RealHomeViewModel(appState: appState)
+        vm.showJoinModal = true
+        vm.bind(
+            createRoomUseCase: mockCreate,
+            joinRoomUseCase: mockJoin,
+            errorPresenter: presenter
+        )
+
+        vm.onJoinRoomConfirm(roomId: "3001")
+        try? await waitForCallCount(mock: mockJoin, method: "execute(roomId:)", expected: 1)
+        // 等 onExecute 副作用跑掉
+        try? await Task.sleep(nanoseconds: 30_000_000)
+
+        XCTAssertFalse(vm.showJoinModal)
+        XCTAssertEqual(mockJoin.lastArgumentsSnapshot().first as? String, "3001")
+    }
+
+    // MARK: - helpers
+
+    private func waitForCallCount(mock: MockBase, method: String, expected: Int) async throws {
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if mock.callCount(of: method) >= expected { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    private func waitForPresenterAlert(presenter: ErrorPresenter) async throws {
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if presenter.current != nil { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+}
+
+// MARK: - Inline mocks
+
+#if DEBUG
+final class MockCreateRoomUseCase: MockBase, CreateRoomUseCaseProtocol, @unchecked Sendable {
+    var executeStub: Result<String, Error> = .failure(MockError.notStubbed)
+
+    func execute() async throws -> String {
+        record(method: "execute()")
+        return try executeStub.get()
+    }
+}
+
+final class MockJoinRoomUseCase: MockBase, JoinRoomUseCaseProtocol, @unchecked Sendable {
+    var executeStub: Result<Void, Error> = .failure(MockError.notStubbed)
+    /// 副作用 hook：测试中需要让 mock UseCase 模拟 setCurrentRoomId 行为时用.
+    /// `@MainActor` 闭包让调用方可以安全 mutate AppState.
+    var onExecute: (@Sendable (String) -> Void)?
+
+    func execute(roomId: String) async throws {
+        record(method: "execute(roomId:)", arguments: [roomId])
+        onExecute?(roomId)
+        try executeStub.get()
+    }
+}
+
+final class MockLeaveRoomUseCase: MockBase, LeaveRoomUseCaseProtocol, @unchecked Sendable {
+    var executeStub: Result<Void, Error> = .success(())
+
+    func execute() async throws {
+        record(method: "execute()")
+        try executeStub.get()
+    }
+}
+#endif
