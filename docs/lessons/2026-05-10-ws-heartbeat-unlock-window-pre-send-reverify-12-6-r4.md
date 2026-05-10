@@ -2,7 +2,7 @@
 date: 2026-05-10
 source_review: codex review (epic-loop round 4) — /tmp/epic-loop-review-12-6-r4.md
 story: 12-6-心跳维护
-commit: <pending>
+commit: 8d32439
 lesson_count: 1
 ---
 
