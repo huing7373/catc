@@ -766,6 +766,17 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
                                log: WebSocketClientImpl.logger,
                                "post-handshake terminal close (code=%{public}d) → emit disconnected + finish stream",
                                code)
+                        // fix-review round 6 P2：terminal 分支也必须 cancel heartbeat 子系统 ——
+                        // 与 transient 分支对齐. 旧实装只把 client 切到 .disconnected，但 heartbeatTask +
+                        // pendingPongContinuation 仍 alive：
+                        //   - 旧 heartbeat task 仍在 sleep up to one interval（默认 30s）或 fire timeout path
+                        //   - 已 finish 的 stream 之后还产生 post-disconnect ping / timeout activity
+                        //   - leak 旧 heartbeat loop 直到 task 自己退出
+                        // helper 名虽含 "ForReconnect"（最初为 transient reconnect 设计），但内部逻辑就是
+                        // "cancel 旧 heartbeat task + finish pendingPong + 清字段"，对 terminal final
+                        // cleanup 路径同样适用 —— 没必要为单 callsite 抽新 helper（minimal-fix 纪律）.
+                        // **terminal 分支不会 reconnect**，cleanup 是最终态，不需要重启 heartbeat task.
+                        strongSelf.cancelHeartbeatStateForReconnectIfCurrent(mySession: mySession)
                         // emit .disconnected 进 stream → vm 写 wsState = .disconnected
                         strongSelf.emitConnectionStateIfCurrent(.disconnected, mySession: mySession)
                         // 同步清掉 reconnect 状态（terminal 不再重试）
@@ -1548,6 +1559,12 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
     ///   1. receive-loop catch path 的 transient close 分支，`scheduleReconnectIfCurrent` 之前
     ///   2. attemptReconnect 进入 `connectInternal` 之前（防御性双保险，覆盖 receive-loop 在
     ///      firstFrame 之前就 catch / 极端时序漏过 #1 的兜底）
+    ///   3. **fix-review round 6 P2**：receive-loop catch path 的 terminal close 分支
+    ///      （4001/4002/4003/4004/4006/4007/1000/未知 close code）—— terminal final cleanup,
+    ///      **不**重启 heartbeat. 与 transient 分支对齐：旧实装漏 cancel 导致 heartbeatTask +
+    ///      pendingPongContinuation 在 stream finish 之后仍 alive 一整个 interval. helper 名含
+    ///      "ForReconnect" 是历史包袱（最初为 reconnect 路径设计），但内部 reset 逻辑同样适用
+    ///      terminal 路径，故复用而非抽新 helper.
     ///
     /// generation-gated：仅当 `sessionGeneration == mySession` 才执行 reset；stale 调用 silent drop
     /// （防 stale receive-loop 的 catch path 在新 session swap 后才跑、把新 session 的 heartbeat 也清掉）.

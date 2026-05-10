@@ -1909,6 +1909,63 @@ final class WebSocketClientImplTests: XCTestCase {
         client.disconnect()
     }
 
+    /// fix-review round 6 P2：post-handshake terminal close（4001/4004 等）必须 cancel
+    /// heartbeat 子系统 —— 与 transient 分支对齐. 旧实装 terminal 路径只把 client 切到 .disconnected,
+    /// 但 heartbeatTask + pendingPongContinuation 仍 alive：
+    ///   - 旧 heartbeat task 仍在 sleep up to one interval 或 fire timeout path
+    ///   - 已 finish 的 stream 之后还产生 post-disconnect ping / timeout activity
+    ///   - leak 旧 heartbeat loop 直到 task 自己退出
+    ///
+    /// 时序设计（heartbeatInterval=50ms）：
+    ///   T0     : connect → firstTask snapshot → heartbeat task 启动（mySession=1）
+    ///   T0+50  : heartbeat 第一次 ping → sentMessages.count >= 1（前置确认）
+    ///   T0+150 : 主动 cancel firstTask(.init(rawValue:4001)) → receive-loop catch terminal
+    ///            → **修复点** cancelHeartbeatStateForReconnectIfCurrent → 旧 heartbeat task cancel
+    ///   T0+150~T0+650 : 5 个 heartbeatInterval 时间窗口
+    ///            修复未生效：heartbeat task 每 50ms 醒一次 → sendPing → sentMessages 持续增长
+    ///            修复生效：heartbeat task 已 cancel → sentMessages.count 不再增长
+    ///   T0+650 : 测试断言（保守留 ~2 个 interval 容时序抖动）
+    ///
+    /// 断言：terminal close 后 sentMessages.count 不增长（heartbeat task 已停）.
+    func test_heartbeat_terminalCloseStopsHeartbeatTaskNoMorePing_round6_P2() async throws {
+        let factory = FakeWebSocketTaskFactory()
+        // 仅第一帧 snapshot 解 latch + 启 heartbeat；之后 receive 阻塞，靠测试主动 cancel 触发 terminal.
+        factory.fakeTask.scriptedFrames = [.string(Self.hbSnapshotJSON)]
+        factory.fakeTask.blockReceiveForever = true
+        // stubbedCloseCode = 4001 → classifier terminal 路径（V1 §12.1 token 过期）.
+        factory.fakeTask.stubbedCloseCode = .init(rawValue: 4001)!
+
+        let client = WebSocketClientImpl(
+            baseURL: URL(string: "http://localhost:8080")!,
+            tokenProvider: { "tok" },
+            taskFactory: factory
+        )
+        client.heartbeatInterval = 0.05
+        client.pongTimeout = 10.0  // 长 pongTimeout 防 pong timeout 路径干扰
+        client.backoffSequence = [10.0]  // 防 reconnect 干扰（terminal 路径不应 reconnect，但保险起见）
+
+        try await client.connect(roomId: "RM01")
+
+        // T0+150：让 heartbeat 至少跑过一次 ping（前置）.
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let countBefore = factory.fakeTask.sentMessages.count
+        XCTAssertGreaterThanOrEqual(countBefore, 1,
+                                    "前置：terminal close 之前 heartbeat 应已发出至少一次 ping")
+
+        // 主动 cancel firstTask 模拟 server terminal close（rawValue 4001）.
+        // receive-loop catch → terminal → 修复点 cancelHeartbeatStateForReconnectIfCurrent → cancel heartbeat.
+        factory.fakeTask.cancel(with: .init(rawValue: 4001)!, reason: nil)
+
+        // 等 500ms（=10 个 heartbeatInterval）确认 heartbeat 不再发 ping.
+        try await Task.sleep(nanoseconds: 500_000_000)
+
+        let countAfter = factory.fakeTask.sentMessages.count
+        XCTAssertEqual(countAfter, countBefore,
+                       "terminal close 后 heartbeat task 必须停 → sentMessages 不再增长。before=\(countBefore) after=\(countAfter)")
+
+        client.disconnect()
+    }
+
     // MARK: - reconnect 测试 helpers
 
     /// 收集 stream 上的 connection state events 直到拿到指定数量（带超时）.
