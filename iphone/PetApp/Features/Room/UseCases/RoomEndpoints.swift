@@ -24,11 +24,12 @@ public enum RoomEndpoints {
     /// POST /api/v1/rooms/{roomId}/join —— 加入房间（V1 §10.4）.
     /// roomId 由 caller 传入（BIGINT 字符串化；长度 1..20）.
     ///
-    /// **fix-review round 1 P2（Story 12.7）**：roomId 必须 percent-encode 后再插入 path.
+    /// **fix-review round 1 + 7 P2（Story 12.7）**：roomId 必须 percent-encode 后再插入 path.
     /// join flow 容许任意输入依赖 server 返回 1002 "房间号格式不合法"；但若 raw input 含 URL reserved
-    /// 字符（`/` `?` `#` `..`）直接 string interpolate 会改变 request path/query，server-side 校验
-    /// 永远拿不到该输入 → 1002 业务错误处理路径走不通（client 看到的是 transport 错误 / 路由到错误 endpoint）.
-    /// 用 `roomIdPathAllowed` set（URLPathAllowed 减去 `/?#`）让所有 URL-meaningful 字符被 escape.
+    /// 字符（`/` `?` `#` `..`）或 pre-escaped 序列（如 `%2F`）直接 string interpolate 会改变 request
+    /// path/query，server-side 校验永远拿不到该输入 → 1002 业务错误处理路径走不通（client 看到的是
+    /// transport 错误 / 路由到错误 endpoint）.
+    /// 用 `roomIdPathAllowed` set（URLPathAllowed 减去 `/?#%`）让所有 URL-meaningful 字符被 escape.
     public static func joinRoom(roomId: String) -> Endpoint {
         Endpoint(
             path: "/api/v1/rooms/\(escapePathSegment(roomId))/join",
@@ -54,18 +55,27 @@ public enum RoomEndpoints {
 
     // MARK: - URL path encoding helper
 
-    /// percent-encode 单个 path segment：用 `urlPathAllowed` 减去 `/?#`（这三个字符在 path 内会改变
-    /// URL 语义 —— `/` 切 path、`?` 起 query、`#` 起 fragment；reserved 字符 `..` 是合法 path char
-    /// 但语义上做 path traversal —— `addingPercentEncoding` 不会自动处理 `..`，server 端必须自行
-    /// reject path traversal 输入；client 这里只负责保证 raw input 不被分隔字符 hijack）.
+    /// percent-encode 单个 path segment：用 `urlPathAllowed` 减去 `/?#%`（前三个在 path 内会改变
+    /// URL 语义 —— `/` 切 path、`?` 起 query、`#` 起 fragment；`%` 是 percent-encoding 引导符 ——
+    /// 若 raw input 已含 `%2F` / `%3F` 等 pre-escaped 序列，**不**显式 escape `%` 会让该序列原样
+    /// 透到 server → server decode 后得到 `/` `?` 等字符 → 路由错位绕过 1002 校验.
+    /// 把 `%` 一起 subtract，client 会把每个 `%` 转成 `%25`，server decode 后看到字面 `%2F` 字符串,
+    /// 转交 server-side 1002 校验.
+    ///
+    /// reserved 字符 `..` 是合法 path char 但语义上做 path traversal ——
+    /// `addingPercentEncoding` 不会自动处理 `..`，server 端必须自行 reject path traversal 输入；
+    /// client 这里只负责保证 raw input 不被分隔字符 hijack.
     ///
     /// fallback: encoding 失败（极小概率：surrogate pair 异常等）返回原值 ——
     /// 让 server 端正常返回 1002 business error 而不是 client 自己 panic.
     private static let roomIdPathAllowed: CharacterSet = {
         var allowed = CharacterSet.urlPathAllowed
         // urlPathAllowed 内**不**含 `?` `#`（这两个本就是 query/fragment 起始符 → percent-encoding
-        // 已生效），**含** `/` —— 必须显式 subtract，否则 raw input 含 `/` 时仍直通 path.
-        allowed.remove(charactersIn: "/")
+        // 已生效），**含** `/` 和 `%` —— 必须显式 subtract：
+        //   - `/` 不 subtract → raw input 含 `/` 时仍直通 path.
+        //   - `%` 不 subtract → pre-escaped 输入（如 `AA%2FBB`）原样透到 server, decode 后路由错位.
+        // fix-review round 7 P2（Story 12.7）锁定该行为.
+        allowed.remove(charactersIn: "/%")
         return allowed
     }()
 

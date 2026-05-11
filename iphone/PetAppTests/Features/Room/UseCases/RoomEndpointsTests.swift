@@ -75,4 +75,50 @@ final class RoomEndpointsTests: XCTestCase {
         XCTAssertEqual(RoomEndpoints.escapePathSegment(".."), "..",
                        "`..` 不被 client escape；server 端做 path traversal 校验（spec 约束）")
     }
+
+    // MARK: - fix-review round 7 P2: pre-escaped `%` 必须被进一步 escape 为 `%25`
+
+    /// 输入 `AA%2FBB` —— 若 `%` 不被 escape，path 直传 `AA%2FBB`，server URL decode 后看到 `AA/BB`
+    /// → 路由 hijack 到 `/api/v1/rooms/AA/BB/join` 错位 endpoint，绕过 1002 校验.
+    /// 修复后 `%` 被 escape 成 `%25`，path 是 `AA%252FBB`，server decode 一次后得到字面 `AA%2FBB`,
+    /// 转交 server-side 1002 校验路径.
+    func testEscapePathSegmentPercentEscapedSlash() {
+        let escaped = RoomEndpoints.escapePathSegment("AA%2FBB")
+        XCTAssertEqual(escaped, "AA%252FBB",
+                       "pre-escaped `%2F` 中的 `%` 必须被 escape 为 `%25` → 完整 path 为 `AA%252FBB`")
+        XCTAssertTrue(escaped.contains("%252F"),
+                      "output 必须含 `%252F`（双重 escape），不是 raw `%2F` 直通")
+        XCTAssertFalse(escaped.hasSuffix("%2FBB"),
+                       "output 不能以 raw `%2FBB` 结尾 —— 那意味着 `%` 没被 escape")
+    }
+
+    /// 输入 `1234%3Fevil=1` —— `%3F` 是 pre-escaped `?`. 不 escape `%` 时 server decode 后 path 变成
+    /// `/api/v1/rooms/1234` + query `evil=1`，请求被路由到 list-rooms 类 endpoint 而非 join, 1002 绕过.
+    func testEscapePathSegmentPercentEscapedQuestionMark() {
+        let escaped = RoomEndpoints.escapePathSegment("1234%3Fevil=1")
+        XCTAssertEqual(escaped, "1234%253Fevil=1",
+                       "pre-escaped `%3F` 中的 `%` 必须被 escape 为 `%25`")
+        XCTAssertTrue(escaped.contains("%253F"),
+                      "output 必须含 `%253F`，不是 raw `%3F`")
+    }
+
+    /// 多个 `%` 都要被 escape —— 防 `AA%2FBB%23CC` 这类混合 pre-escaped 输入仍能 bypass.
+    func testEscapePathSegmentMultiplePercentsAllEscaped() {
+        let escaped = RoomEndpoints.escapePathSegment("AA%2FBB%23CC")
+        XCTAssertEqual(escaped, "AA%252FBB%2523CC",
+                       "多个 `%` 都必须被 escape")
+    }
+
+    /// 既有合法输入 `1234567` 仍直通（不含 `%`）.
+    func testEscapePathSegmentNormalRoomIdStillPassesThrough() {
+        XCTAssertEqual(RoomEndpoints.escapePathSegment("1234567"), "1234567",
+                       "合法纯数字 roomId 不含 `%`，直通不变")
+    }
+
+    /// join endpoint 整体 path 在 pre-escaped 输入下也要锁住 —— 确保 escapePathSegment 修复传导到 endpoint factory.
+    func testJoinRoomPercentEscapedInputDoubleEscapesPath() {
+        let endpoint = RoomEndpoints.joinRoom(roomId: "AA%2FBB")
+        XCTAssertEqual(endpoint.path, "/api/v1/rooms/AA%252FBB/join",
+                       "pre-escaped 输入在完整 join path 中也必须被双重 escape")
+    }
 }
