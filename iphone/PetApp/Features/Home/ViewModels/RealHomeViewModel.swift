@@ -154,17 +154,15 @@ public final class RealHomeViewModel: HomeViewModel {
             return
         }
         let presenter = self.localErrorPresenter
-        // fix-review round 9 P2 (Story 12.7): catch-path stale guard.
+        // fix-review round 10 P2 (Story 12.7): catch-path stale guard 升级到 generation token.
         // 场景：user 点 Create CTA → createRoom() HTTP in-flight 时切到 friend tab → 通过 friend
-        // join room B（setCurrentRoomId("B")）→ create 路径 HTTP 抛错（network / 1009 / business）
-        // 迟到. 老实装无条件 `presenter?.present(error)` / `presentAlert(...)` → stale retry/alert
-        // overlay 弹在 room B 上，干扰新房间的交互.
-        // UseCase 内部已 guard stale **success**（r6 P1 fix）；catch 路径同精神补 entry==current
-        // guard：mismatch 则静默 skip + log debug，不调 ErrorPresenter.
-        // 与 RealRoomViewModel.onLeaveTap r5 P2 fix / RealFriendsViewModel.onJoinFriendTap r9 P2
-        // fix 同精神 —— "async + 写/读 shared state 的所有 callsite 都需 race-guard"，不止 success 路径.
-        // 详见 docs/lessons/2026-05-11-async-error-handler-must-stale-guard-room-id-and-client-identity-12-7-r9.md.
-        let entryRoomId = self.localAppState?.currentRoomId
+        // join room B → leave B 回 idle（currentRoomId nil → "B" → nil; gen 单调递增）→ create
+        // 路径 HTTP 抛错迟到.
+        // r9 旧实装用 currentRoomId equality 会被 ABA cycle 骗过（liveRoomId == nil == entryRoomId
+        // → guard 通过 → stale alert overlay 弹在 idle Home 上）.
+        // r10 升级到 `appState.roomNavigationGeneration` —— 单调计数器，A→B→A cycle 也 monotonic,
+        // 不会重合. 详见 docs/lessons/2026-05-11-room-navigation-generation-token-not-room-id-equality.md.
+        let entryGen = self.localAppState?.roomNavigationGeneration ?? 0
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -172,23 +170,22 @@ public final class RealHomeViewModel: HomeViewModel {
                 // 成功 → no-op：UseCase 已写 appState.currentRoomId → HomeContainerView 互斥状态机切 RoomView.
             } catch let APIError.business(code, _, _) where code == 6003 {
                 // 6003 用户已在房间中：明确文案 alert（不附 onRetry —— 用户应主动 leave 再创建）.
-                // 但仍需 stale guard：若 user 已切到 room B，旧 create 的 6003（属 stale room context）
-                // 不能弹 "你已经在房间里了" 干扰新 room B 的 UI.
-                let liveRoomId = self.localAppState?.currentRoomId
-                guard liveRoomId == entryRoomId else {
+                // 但仍需 generation guard：若 navigation cycle 已发生，旧 create 的 6003 alert 不能弹.
+                let liveGen = self.localAppState?.roomNavigationGeneration ?? 0
+                guard liveGen == entryGen else {
                     os_log(.debug,
-                           "RealHomeViewModel.onCreateTap: stale 6003 error (entry=%{public}@, current=%{public}@); skip alert to avoid overlay on unrelated room",
-                           entryRoomId ?? "<nil>", liveRoomId ?? "<nil>")
+                           "RealHomeViewModel.onCreateTap: stale 6003 error (entryGen=%{public}d, currentGen=%{public}d); skip alert to avoid overlay on unrelated navigation cycle",
+                           entryGen, liveGen)
                     return
                 }
                 presenter?.presentAlert(title: "提示", message: "你已经在房间里了")
             } catch {
                 // 其他 APIError（network / unauthorized / 1009 / decoding 等）走默认 mapper（retry / alert）.
-                let liveRoomId = self.localAppState?.currentRoomId
-                guard liveRoomId == entryRoomId else {
+                let liveGen = self.localAppState?.roomNavigationGeneration ?? 0
+                guard liveGen == entryGen else {
                     os_log(.debug,
-                           "RealHomeViewModel.onCreateTap: stale error (entry=%{public}@, current=%{public}@); skip errorPresenter",
-                           entryRoomId ?? "<nil>", liveRoomId ?? "<nil>")
+                           "RealHomeViewModel.onCreateTap: stale error (entryGen=%{public}d, currentGen=%{public}d); skip errorPresenter",
+                           entryGen, liveGen)
                     return
                 }
                 os_log(.error, "RealHomeViewModel.onCreateTap CreateRoomUseCase error: %{public}@",
@@ -254,24 +251,24 @@ public final class RealHomeViewModel: HomeViewModel {
             return
         }
         let presenter = self.localErrorPresenter
-        // fix-review round 9 P2 (Story 12.7): catch-path stale guard.
-        // 与 onCreateTap 同精神：user 点 "加入" → 输入 roomId A → joinRoom("A") HTTP in-flight 时
-        // 切 tab → 通过 friend join room B → A 的 HTTP 失败迟到 → 老实装无条件 present alert/error,
-        // stale overlay 弹在 room B 上.
-        // entry-capture appState.currentRoomId, catch 内 guard `current == entry` 才 present.
-        let entryRoomId = self.localAppState?.currentRoomId
+        // fix-review round 10 P2 (Story 12.7): catch-path stale guard 升级到 generation token.
+        // r9 旧 `currentRoomId` equality guard 会被 ABA cycle 骗（join A in-flight → join B → leave
+        // 回 idle → A error 迟到 → liveRoomId == nil == entryRoomId → stale alert 弹在 idle 上）.
+        // r10 升级到 `appState.roomNavigationGeneration` —— 单调计数器，不会重合.
+        // 详见 docs/lessons/2026-05-11-room-navigation-generation-token-not-room-id-equality.md.
+        let entryGen = self.localAppState?.roomNavigationGeneration ?? 0
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 try await useCase.execute(roomId: roomId)
                 // 成功 → no-op：UseCase 已写 appState.currentRoomId.
             } catch {
-                // r9 P2 stale guard: mismatch 则静默 skip + log debug，不调 ErrorPresenter.
-                let liveRoomId = self.localAppState?.currentRoomId
-                guard liveRoomId == entryRoomId else {
+                // r10 P2 stale guard: generation mismatch 则静默 skip + log debug，不调 ErrorPresenter.
+                let liveGen = self.localAppState?.roomNavigationGeneration ?? 0
+                guard liveGen == entryGen else {
                     os_log(.debug,
-                           "RealHomeViewModel.onJoinRoomConfirm: stale error (entry=%{public}@, current=%{public}@); skip errorPresenter to avoid overlay on unrelated room",
-                           entryRoomId ?? "<nil>", liveRoomId ?? "<nil>")
+                           "RealHomeViewModel.onJoinRoomConfirm: stale error (entryGen=%{public}d, currentGen=%{public}d); skip errorPresenter to avoid overlay on unrelated navigation cycle",
+                           entryGen, liveGen)
                     return
                 }
                 // r8 P2 lesson 2026-05-11-business-error-fallback-must-forward-original.md：

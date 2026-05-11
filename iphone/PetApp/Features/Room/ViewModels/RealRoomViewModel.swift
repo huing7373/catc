@@ -767,17 +767,18 @@ public final class RealRoomViewModel: RoomViewModel {
             return
         }
         let presenter = self.errorPresenter
-        // Story 12.7 r5 [P2] fix（codex review）：capture `target = appState.currentRoomId` 入口时刻 ——
-        // 用于 catch 块 guard `appState.currentRoomId == target` 防 stale-thrown-error 把不属于
-        // 当前房间的失败 overlay 弹到新房间之上.
+        // Story 12.7 r10 [P2] fix（codex review）：升级到 `roomNavigationGeneration` token ——
+        // r5 旧 `currentRoomId == target` guard 无法区分 ABA cycle（leave A in-flight → re-join A → A 的
+        // leave error 迟到 → liveRoomId == "A" == target → stale alert 弹在刚 rejoin 的 A 上）.
         //
-        // 场景可达：tab bar 仍可用 → 用户 leave A in-flight 时切 tab → join B → A 的 leave 抛 1009/network
-        // 迟到 → 老实装 catch 块**无条件** present global error → stale error overlay 出现在 room B.
+        // 场景可达：tab bar 仍可用 → 用户 leave A in-flight 时切 tab → join B → leave B → re-join A →
+        // 原 leave A 的 1009/network 抛错迟到 → 老实装 catch 块**无条件** present global error → stale
+        // error overlay 出现在新 A session 上.
         //
-        // `DefaultLeaveRoomUseCase` 已经 guard 200 / 6004 stale-response（r2 P2 fix）；thrown-error
-        // 路径同语义补齐 —— mismatch 时静默 skip + log debug，不抛错也不弹 UI.
-        // 详见 docs/lessons/2026-05-11-leave-room-thrown-error-also-needs-stale-guard.md.
-        let target = self.appState?.currentRoomId
+        // `DefaultLeaveRoomUseCase` 已经 guard 200 / 6004 stale-response（r10 P2 generation fix）；
+        // thrown-error 路径同语义补齐 —— generation mismatch 时静默 skip + log debug，不抛错也不弹 UI.
+        // 详见 docs/lessons/2026-05-11-room-navigation-generation-token-not-room-id-equality.md.
+        let entryGen = self.appState?.roomNavigationGeneration ?? 0
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -786,12 +787,12 @@ public final class RealRoomViewModel: RoomViewModel {
                 // 的 A → nil 分支自动触发 disconnect + 清 roster + wsState = .disconnected →
                 // HomeContainerView 自动切回 HomeView.
             } catch {
-                // r5 [P2] fix: guard target == current 防 stale 错误 overlay 弹到新房间之上.
-                let liveRoomId = self.appState?.currentRoomId
-                guard liveRoomId == target else {
+                // r10 [P2] fix: guard generation 一致 防 stale 错误 overlay 弹到新 navigation cycle 之上.
+                let liveGen = self.appState?.roomNavigationGeneration ?? 0
+                guard liveGen == entryGen else {
                     os_log(.info,
-                           "RealRoomViewModel.onLeaveTap: stale leave error (target=%{public}@, current=%{public}@); skip errorPresenter to avoid overlay on unrelated room",
-                           target ?? "nil", liveRoomId ?? "nil")
+                           "RealRoomViewModel.onLeaveTap: stale leave error (entryGen=%{public}d, currentGen=%{public}d); skip errorPresenter to avoid overlay on unrelated navigation cycle",
+                           entryGen, liveGen)
                     return
                 }
                 // 其他 APIError 透传给 ErrorPresenter（默认 mapper 路径，alert / retry）.

@@ -128,4 +128,35 @@ final class JoinRoomUseCaseTests: XCTestCase {
         XCTAssertEqual(appState.currentRoomId, "B",
                        "stale join HTTP-200 response 不得 wipe 用户已切的新房间 \"B\"（防 race）")
     }
+
+    // MARK: - Story 12.7 r10 [P2] fix: ABA race - generation token 不能被 nil→B→nil cycle 骗过
+
+    /// 场景（codex r10 P2）：entry == nil（idle Home join A, gen G0）→ joinRoom A await 期间 user
+    /// 短暂进入 B (gen G1) → leave B 回 idle (gen G2, currentRoomId nil) → join A HTTP 200 迟到.
+    /// 旧 `liveRoomId == entryRoomId == nil` 判断 → 校验通过 → setCurrentRoomId("A") → 用户被切到 stale A.
+    /// 新 generation 判断：entryGen == G0，liveGen == G2 → mismatch → 拒绝 setCurrentRoomId.
+    func testExecuteDoesNotWipeNewerRoomSelectionAcrossABAcycleViaGeneration() async throws {
+        let mock = MockRoomRepository()
+        mock.joinRoomStub = .success(JoinRoomResponse(roomId: "A", joined: true))
+        let appState = AppState()
+        // entryRoomId == nil
+        XCTAssertNil(appState.currentRoomId)
+        let initialGen = appState.roomNavigationGeneration
+        let useCase = DefaultJoinRoomUseCase(roomRepository: mock, appState: appState)
+
+        // 在 joinRoom await 期间模拟 ABA cycle: nil → "B" → nil（currentRoomId 回到原值，gen +2）.
+        mock.joinRoomBeforeReturn = { @Sendable in
+            await MainActor.run {
+                appState.setCurrentRoomId("B")
+                appState.setCurrentRoomId(nil)
+            }
+        }
+
+        try await useCase.execute(roomId: "A")
+
+        XCTAssertNil(appState.currentRoomId,
+                     "ABA cycle 后 stale join response 不得把 currentRoomId 切到 stale A（generation token guard）")
+        XCTAssertGreaterThan(appState.roomNavigationGeneration, initialGen,
+                             "navigation generation 必须严格单调")
+    }
 }

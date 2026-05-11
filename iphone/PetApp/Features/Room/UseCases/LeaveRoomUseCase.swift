@@ -40,31 +40,37 @@ public struct DefaultLeaveRoomUseCase: LeaveRoomUseCaseProtocol {
 
     public func execute() async throws {
         // 1. 早 return: appState.currentRoomId == nil（idempotent leave）.
-        // MainActor hop 读 currentRoomId，与 caller（ViewModel @MainActor）调用时机解耦.
-        let currentRoomId: String? = await MainActor.run { appState.currentRoomId }
+        // 同时 capture 入口 generation —— 即使 currentRoomId 非 nil 也要 capture（用于 await 返回后 guard）.
+        let (currentRoomId, entryGen): (String?, Int) = await MainActor.run {
+            (appState.currentRoomId, appState.roomNavigationGeneration)
+        }
         guard let roomId = currentRoomId else { return }
 
-        // Story 12.7 r2 [P2] fix（codex review）：记录调用入口时刻的 `targetRoomId`,
-        // 用于 await 返回后 guard `appState.currentRoomId == targetRoomId` —— 防止 stale-response
-        // 在用户已切到新房间（如 leave A → join B 序列）的场景下 wipe 新房间状态 + disconnect fresh session.
+        // Story 12.7 r10 [P2] fix（codex review）：用 `roomNavigationGeneration` token 而非 `currentRoomId == targetRoomId` ——
+        // r2 旧实装只 guard `liveRoomId == targetRoomId`，无法区分 "原 A session" vs "再次 join A 的新 session"：
+        //   1. user 在 room A（targetRoomId = "A", entryGen == G0）→ 点 leave → leaveRoom("A") HTTP in-flight
+        //   2. await 期间 user re-join A（currentRoomId 经历 "A" → nil → "A"; gen G0 → G1 → G2 → G3）
+        //   3. leave A HTTP 200 / 6004 迟到
+        //   4. 旧 guard: `liveRoomId == "A" == targetRoomId` → 校验通过 → setCurrentRoomId(nil) → 把用户从刚 rejoin
+        //      的 room A 踢出
+        //   5. 新 guard: `roomNavigationGeneration == G0` 但实际是 G3 → 拒绝 setCurrentRoomId(nil)
         //
         // 6004 兼用 "已离开" 和 "current_room_id != path roomId"（V1 §10.5 三种 race 场景），
-        // 任意一种迟到的 6004 response 都可能 wipe 后续状态. 因此 200 / 6004 两路都需要 guard.
+        // 任意一种迟到的 6004 response 都可能 wipe 后续状态. 因此 200 / 6004 两路都需要 generation guard.
         //
         // mismatch 时静默跳过 + log debug（不抛错，因为外层视角 leave 早已完成）.
-        // 详见 docs/lessons/2026-05-11-leave-room-guard-target-vs-current-against-stale-response.md.
-        let targetRoomId = roomId
+        // 详见 docs/lessons/2026-05-11-room-navigation-generation-token-not-room-id-equality.md.
 
         do {
             // 2. 调 leave HTTP API.
             _ = try await roomRepository.leaveRoom(roomId: roomId)
-            // 3. HTTP 200 = authoritative：guard target == current 后再 setCurrentRoomId(nil).
+            // 3. HTTP 200 = authoritative：guard generation 一致后再 setCurrentRoomId(nil).
             await MainActor.run {
-                let liveRoomId = appState.currentRoomId
-                guard liveRoomId == targetRoomId else {
+                let liveGen = appState.roomNavigationGeneration
+                guard liveGen == entryGen else {
                     os_log(.info,
-                           "LeaveRoomUseCase: stale leave HTTP-200 response (target=%{public}@, current=%{public}@); skip setCurrentRoomId(nil) to keep newer room selection",
-                           targetRoomId, liveRoomId ?? "nil")
+                           "LeaveRoomUseCase: stale leave HTTP-200 response (entryGen=%{public}d, currentGen=%{public}d, target=%{public}@); skip setCurrentRoomId(nil) to keep newer room selection",
+                           entryGen, liveGen, roomId)
                     return
                 }
                 appState.setCurrentRoomId(nil)
@@ -74,13 +80,13 @@ public struct DefaultLeaveRoomUseCase: LeaveRoomUseCaseProtocol {
             // dev-facing log 信号（spec Open Question §3 决议：暴露 console signal 让 dev 看到 race 频率，不弹 UI）.
             os_log(.info,
                    "LeaveRoomUseCase: received business 6004 (already left); treating as success path (leave-idempotent)")
-            // r2 [P2] fix：同样 guard target == current 防 6004 stale response wipe 新房间.
+            // r10 P2 fix：同样 guard generation 防 6004 stale response wipe 后续 navigation cycle.
             await MainActor.run {
-                let liveRoomId = appState.currentRoomId
-                guard liveRoomId == targetRoomId else {
+                let liveGen = appState.roomNavigationGeneration
+                guard liveGen == entryGen else {
                     os_log(.info,
-                           "LeaveRoomUseCase: stale leave 6004 response (target=%{public}@, current=%{public}@); skip setCurrentRoomId(nil) to keep newer room selection",
-                           targetRoomId, liveRoomId ?? "nil")
+                           "LeaveRoomUseCase: stale leave 6004 response (entryGen=%{public}d, currentGen=%{public}d, target=%{public}@); skip setCurrentRoomId(nil) to keep newer room selection",
+                           entryGen, liveGen, roomId)
                     return
                 }
                 appState.setCurrentRoomId(nil)

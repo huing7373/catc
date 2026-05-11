@@ -2,10 +2,10 @@
 // Story 12.7 AC1: 创建房间 UseCase（POST /api/v1/rooms → 写 appState.currentRoomId）.
 //
 // 流程：
-//   1. 调用入口 capture `entryRoomId = appState.currentRoomId`（典型为 nil —— 仅 idle Home 才允许 create）
+//   1. 调用入口 capture `entryGen = appState.roomNavigationGeneration`（monotonic 计数器，ABA-safe，r10 P2 fix）
 //   2. 调 roomRepository.createRoom() → CreateRoomResponse
 //   3. 取 response.room.id
-//   4. await MainActor.run { guard appState.currentRoomId == entryRoomId else skip; setCurrentRoomId(roomId) }
+//   4. await MainActor.run { guard appState.roomNavigationGeneration == entryGen else skip; setCurrentRoomId(roomId) }
 //   5. return roomId（让 caller 决定下一步 UI 流程）
 //
 // 顺序锁定（spec AC1）：先 set roomId，后 return —— 让 caller catch 路径不需自己再写 AppState；
@@ -40,15 +40,18 @@ public struct DefaultCreateRoomUseCase: CreateRoomUseCaseProtocol {
     }
 
     public func execute() async throws -> String {
-        // Story 12.7 r6 [P1] fix（codex review）：与 LeaveRoomUseCase r2 [P2] 同精神 ——
-        // capture 调用入口的 `entryRoomId`，await 返回后 guard `appState.currentRoomId == entryRoomId`
-        // 才 setCurrentRoomId. 防止 race：
-        //   1. user 在 idle Home 点 Create（entryRoomId == nil）
-        //   2. createRoom() HTTP in-flight 期间 user 切到 friend tab → join room B（currentRoomId 已是 "B"）
+        // Story 12.7 r10 [P2] fix（codex review）：用 `roomNavigationGeneration` token 而非 currentRoomId equality ——
+        // r6/r9 旧实装只 guard `currentRoomId == entryRoomId`，无法区分 ABA cycle：
+        //   1. user 在 idle Home 点 Create（entryRoomId == nil, entryGen == G0）
+        //   2. createRoom() HTTP in-flight 期间 user 切到 friend tab → join room B → leave B 回 idle
+        //      （currentRoomId 经历 nil → "B" → nil，但 generation 已 G0 → G1 → G2）
         //   3. createRoom() HTTP 200 迟到带回 newRoomId "A"
-        //   4. 旧实装无条件 setCurrentRoomId("A") → 强制把 user 带回 stale 新建房间 A
+        //   4. 旧 guard: `liveRoomId == nil == entryRoomId` → 校验通过 → user 被强制切到 stale 房间 A
+        //   5. 新 guard: `roomNavigationGeneration == G0` 但实际是 G2 → 拒绝 setCurrentRoomId
+        // generation 严格单调递增（即使 currentRoomId 回到原值），是 ABA-safe 的 navigation-cycle invariant.
         // mismatch 时静默 skip + dev-facing log（不抛错，因 server 端 room 已建好，但 client 已 move on）.
-        let entryRoomId: String? = await MainActor.run { appState.currentRoomId }
+        // 详见 docs/lessons/2026-05-11-room-navigation-generation-token-not-room-id-equality.md.
+        let entryGen: Int = await MainActor.run { appState.roomNavigationGeneration }
 
         let response = try await roomRepository.createRoom()
         let roomId = response.room.id
@@ -56,11 +59,11 @@ public struct DefaultCreateRoomUseCase: CreateRoomUseCaseProtocol {
         // UseCase 跑在 detached actor 调度（async function），需要显式 hop 到 MainActor 才能写 @Published.
         // spec Open Question §2 决议：先 set 后 return（让 RealRoomViewModel.subscribeRoomIdConnect 准备 stream）.
         await MainActor.run {
-            let liveRoomId = appState.currentRoomId
-            guard liveRoomId == entryRoomId else {
+            let liveGen = appState.roomNavigationGeneration
+            guard liveGen == entryGen else {
                 os_log(.info,
-                       "CreateRoomUseCase: stale create response (entry=%{public}@, current=%{public}@, newRoom=%{public}@); skip setCurrentRoomId to keep newer room selection",
-                       entryRoomId ?? "nil", liveRoomId ?? "nil", roomId)
+                       "CreateRoomUseCase: stale create response (entryGen=%{public}d, currentGen=%{public}d, newRoom=%{public}@); skip setCurrentRoomId to keep newer room selection",
+                       entryGen, liveGen, roomId)
                 return
             }
             appState.setCurrentRoomId(roomId)

@@ -127,4 +127,47 @@ final class CreateRoomUseCaseTests: XCTestCase {
         XCTAssertEqual(appState.currentRoomId, "B",
                        "stale create response 不得 wipe 用户已切的新房间 \"B\"（防 race）")
     }
+
+    // MARK: - Story 12.7 r10 [P2] fix: ABA race - generation token 不能被 nil→B→nil cycle 骗过
+
+    /// 场景（codex r10 P2）：entry == nil（idle Home, gen G0）→ createRoom await 期间用户 join B (gen G1) →
+    /// leave B 回 idle (gen G2, currentRoomId nil) → create A HTTP 200 迟到.
+    /// 旧 `currentRoomId == entryRoomId` 判断：liveRoomId == nil == entryRoomId → 校验通过 → setCurrentRoomId("A")
+    /// → user 被强制切到 stale 房间 A.
+    /// 新 generation 判断：entryGen == G0，liveGen == G2 → mismatch → 拒绝 setCurrentRoomId.
+    func testExecuteDoesNotWipeNewerRoomSelectionAcrossABAcycleViaGeneration() async throws {
+        let mock = MockRoomRepository()
+        mock.createRoomStub = .success(
+            CreateRoomResponse(
+                room: CreateRoomRoomDTO(
+                    id: "A",
+                    creatorUserId: "10001",
+                    maxMembers: 4,
+                    memberCount: 1,
+                    status: 1
+                )
+            )
+        )
+        let appState = AppState()
+        // entryRoomId == nil, entryGen == 0
+        XCTAssertNil(appState.currentRoomId)
+        let initialGen = appState.roomNavigationGeneration
+        let useCase = DefaultCreateRoomUseCase(roomRepository: mock, appState: appState)
+
+        // 在 createRoom await 期间模拟 ABA cycle: nil → "B" → nil（currentRoomId 回到原值，但 gen 已 +2）.
+        mock.createRoomBeforeReturn = { @Sendable in
+            await MainActor.run {
+                appState.setCurrentRoomId("B")
+                appState.setCurrentRoomId(nil)
+            }
+        }
+
+        let returned = try await useCase.execute()
+
+        XCTAssertEqual(returned, "A", "server 端已建好 room A；execute 仍返回 roomId")
+        XCTAssertNil(appState.currentRoomId,
+                     "ABA cycle 后 stale create response 不得把 currentRoomId 切到 stale A（generation token guard）")
+        XCTAssertGreaterThan(appState.roomNavigationGeneration, initialGen,
+                             "navigation generation 必须严格单调（ABA cycle 后已增长）")
+    }
 }

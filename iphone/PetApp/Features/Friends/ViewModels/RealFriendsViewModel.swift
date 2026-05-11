@@ -145,27 +145,25 @@ public final class RealFriendsViewModel: FriendsViewModel {
             return
         }
         let presenter = self.errorPresenter
-        // fix-review round 9 P2 (Story 12.7): catch-path stale guard.
-        // 场景：user 在 friends tab 点 join friend A 的 room "A" → join("A") HTTP in-flight 期间,
-        // user 通过另一路径（Home modal / 另一好友 inviting）切到 room "B"（setCurrentRoomId("B")）→
-        // join "A" HTTP 抛错（network / 1009 / 6002 等）迟到. 老实装无条件 present alert/error,
-        // stale overlay 弹在 room B 上.
-        // UseCase 内部已 guard stale **success**（r6 P1 fix）；catch 路径同精神补 entry==current
-        // guard. 与 RealHomeViewModel onCreateTap/onJoinRoomConfirm r9 P2 fix 同精神.
-        // 详见 docs/lessons/2026-05-11-async-error-handler-must-stale-guard-room-id-and-client-identity-12-7-r9.md.
-        let entryRoomId = self.appState?.currentRoomId
+        // fix-review round 10 P2 (Story 12.7): catch-path stale guard 升级到 generation token.
+        // r9 旧 `currentRoomId` equality guard 会被 ABA cycle 骗（join friend A in-flight → 切到
+        // 房间 B → leave B 回 idle → A error 迟到 → liveRoomId == nil == entryRoomId → stale alert
+        // 弹在 idle Friends tab 上）.
+        // r10 升级到 `appState.roomNavigationGeneration` —— 单调计数器，不会重合.
+        // 详见 docs/lessons/2026-05-11-room-navigation-generation-token-not-room-id-equality.md.
+        let entryGen = self.appState?.roomNavigationGeneration ?? 0
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 try await useCase.execute(roomId: targetRoomId)
                 // 成功 → no-op（UseCase 已写 appState.currentRoomId → HomeContainerView 自动切到 RoomView）.
             } catch {
-                // r9 P2 stale guard: mismatch 静默 skip + log debug，不调 ErrorPresenter.
-                let liveRoomId = self.appState?.currentRoomId
-                guard liveRoomId == entryRoomId else {
+                // r10 P2 stale guard: generation mismatch 静默 skip + log debug，不调 ErrorPresenter.
+                let liveGen = self.appState?.roomNavigationGeneration ?? 0
+                guard liveGen == entryGen else {
                     os_log(.debug,
-                           "RealFriendsViewModel.onJoinFriendTap: stale error (entry=%{public}@, current=%{public}@); skip errorPresenter to avoid overlay on unrelated room",
-                           entryRoomId ?? "<nil>", liveRoomId ?? "<nil>")
+                           "RealFriendsViewModel.onJoinFriendTap: stale error (entryGen=%{public}d, currentGen=%{public}d); skip errorPresenter to avoid overlay on unrelated navigation cycle",
+                           entryGen, liveGen)
                     return
                 }
                 // r8 P2 lesson 2026-05-11-business-error-fallback-must-forward-original.md：

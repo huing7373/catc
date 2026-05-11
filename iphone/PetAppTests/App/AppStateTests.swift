@@ -118,4 +118,40 @@ final class AppStateTests: XCTestCase {
         appState.updateMyPetState(.walk)  // 不应抛异常
         XCTAssertNil(appState.currentPet, "currentPet 仍为 nil（updateMyPetState 是 guard let pet noop）")
     }
+
+    // MARK: - Story 12.7 r10 [P2] fix: roomNavigationGeneration token 严格单调（ABA-safe）
+
+    /// roomNavigationGeneration 初始 0，每次 setCurrentRoomId 调用 +1（无论新值是否等于旧值）.
+    func testRoomNavigationGenerationStrictlyMonotonic() {
+        let appState = AppState()
+        XCTAssertEqual(appState.roomNavigationGeneration, 0, "初始 0")
+
+        appState.setCurrentRoomId("A")
+        let g1 = appState.roomNavigationGeneration
+        XCTAssertGreaterThan(g1, 0, "set value → +1")
+
+        appState.setCurrentRoomId(nil)
+        let g2 = appState.roomNavigationGeneration
+        XCTAssertGreaterThan(g2, g1, "set nil → +1")
+
+        appState.setCurrentRoomId("A")
+        let g3 = appState.roomNavigationGeneration
+        XCTAssertGreaterThan(g3, g2,
+                             "ABA cycle 关键：currentRoomId 经历 A → nil → A 后回到 A，但 generation 必须严格单调")
+        XCTAssertEqual(appState.currentRoomId, "A", "currentRoomId 回到 A 是 ABA 场景的核心特征")
+    }
+
+    /// applyHomeData 和 reset 也应 bump generation（防 in-flight stale response 跨 lifecycle 应用）.
+    func testRoomNavigationGenerationBumpsOnHydrateAndReset() {
+        let appState = AppState()
+        let g0 = appState.roomNavigationGeneration
+
+        appState.applyHomeData(makeSampleHomeData(currentRoomId: "X"))
+        let g1 = appState.roomNavigationGeneration
+        XCTAssertGreaterThan(g1, g0, "applyHomeData 也算 navigation cycle → +1")
+
+        appState.reset()
+        let g2 = appState.roomNavigationGeneration
+        XCTAssertGreaterThan(g2, g1, "reset 也算 navigation cycle → +1")
+    }
 }

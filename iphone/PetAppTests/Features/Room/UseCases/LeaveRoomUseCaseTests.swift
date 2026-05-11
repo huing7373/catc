@@ -142,4 +142,56 @@ final class LeaveRoomUseCaseTests: XCTestCase {
         XCTAssertEqual(appState.currentRoomId, "5005",
                        "stale leave 6004 response 不得 wipe 用户已切的新房间 \"5005\"（防 V1 §10.5 race 路径）")
     }
+
+    // MARK: - Story 12.7 r10 [P2] fix: ABA race - leave A → re-join A cycle 不能被 currentRoomId equality 骗
+
+    /// 场景（codex r10 P2）：target = "A" (gen G0) → execute leaveRoom("A") in-flight → user re-join A
+    /// (gen: G0 → G1 (set nil) → G2 (set "A"); currentRoomId 经历 "A" → nil → "A") → leave A HTTP 200 迟到.
+    /// 旧 `liveRoomId == "A" == targetRoomId` 判断 → 校验通过 → setCurrentRoomId(nil) → 用户从刚 rejoin 的 A 被踢出.
+    /// 新 generation 判断：entryGen == G0，liveGen == G2 → mismatch → 拒绝 setCurrentRoomId(nil).
+    func testExecuteHttp200DoesNotKickUserOutAfterRejoinSameRoomViaGeneration() async throws {
+        let mock = MockRoomRepository()
+        mock.leaveRoomStub = .success(LeaveRoomResponse(roomId: "A", left: true))
+        let appState = AppState()
+        appState.setCurrentRoomId("A")
+        let initialGen = appState.roomNavigationGeneration
+        let useCase = DefaultLeaveRoomUseCase(roomRepository: mock, appState: appState)
+
+        // 在 leaveRoom await 期间模拟 leave + re-join 同房间 A: "A" → nil → "A".
+        mock.leaveRoomBeforeReturn = { @Sendable in
+            await MainActor.run {
+                appState.setCurrentRoomId(nil)
+                appState.setCurrentRoomId("A")
+            }
+        }
+
+        try await useCase.execute()
+
+        XCTAssertEqual(appState.currentRoomId, "A",
+                       "ABA cycle 后 stale leave 200 不得把刚 rejoin 的 A session 踢出（generation token guard）")
+        XCTAssertGreaterThan(appState.roomNavigationGeneration, initialGen,
+                             "navigation generation 必须严格单调")
+    }
+
+    /// 6004 同场景 ABA-safe regression.
+    func testExecuteBusiness6004DoesNotKickUserOutAfterRejoinSameRoomViaGeneration() async throws {
+        let mock = MockRoomRepository()
+        mock.leaveRoomStub = .failure(APIError.business(code: 6004, message: "用户不在房间", requestId: "req_w"))
+        let appState = AppState()
+        appState.setCurrentRoomId("A")
+        let useCase = DefaultLeaveRoomUseCase(roomRepository: mock, appState: appState)
+
+        mock.leaveRoomBeforeReturn = { @Sendable in
+            await MainActor.run {
+                appState.setCurrentRoomId(nil)
+                appState.setCurrentRoomId("A")
+            }
+        }
+
+        // 6004 不应抛错（leave-idempotent）.
+        try await useCase.execute()
+
+        XCTAssertEqual(appState.currentRoomId, "A",
+                       "ABA cycle 后 stale leave 6004 不得把刚 rejoin 的 A session 踢出（generation token guard）")
+    }
 }

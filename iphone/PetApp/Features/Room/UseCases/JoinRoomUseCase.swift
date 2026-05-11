@@ -2,12 +2,11 @@
 // Story 12.7 AC2: 加入房间 UseCase（POST /api/v1/rooms/{roomId}/join → 校验 → 写 appState.currentRoomId）.
 //
 // 流程：
-//   1. 调用入口 capture `entryRoomId = appState.currentRoomId`（idle Home join 时为 nil；
-//      也可能其他场景已有值 —— guard 用 == entryRoomId 而非 == nil 保证语义一致）
+//   1. 调用入口 capture `entryGen = appState.roomNavigationGeneration`（monotonic 计数器，ABA-safe，r10 P2 fix）
 //   2. 调 roomRepository.joinRoom(roomId:) → JoinRoomResponse
 //   3. 校验 response.roomId == request roomId（防 server bug / proxy 改写 path —— 极小概率但成本极低）
 //   4. 不一致 → throw APIError.decoding(JoinRoomMismatchError(...))（让 ErrorPresenter 默认 mapper 走 .alert / .retry）
-//   5. await MainActor.run { guard appState.currentRoomId == entryRoomId else skip; setCurrentRoomId(roomId) }
+//   5. await MainActor.run { guard appState.roomNavigationGeneration == entryGen else skip; setCurrentRoomId(roomId) }
 //
 // 错误处理：APIError 原样透传（含 .business 全 case：6001 / 6002 / 6003 / 6005 / 1002 / 1009）.
 // caller 层（RealHomeViewModel.onJoinRoomConfirm / RealFriendsViewModel.onJoinFriendTap）case-by-case 弹对应 alert.
@@ -34,15 +33,16 @@ public struct DefaultJoinRoomUseCase: JoinRoomUseCaseProtocol {
     }
 
     public func execute(roomId: String) async throws {
-        // Story 12.7 r6 [P1] fix（codex review）：与 LeaveRoomUseCase r2 [P2] 同精神 ——
-        // capture 调用入口的 `entryRoomId`，await 返回后 guard `appState.currentRoomId == entryRoomId`
-        // 才 setCurrentRoomId. 防止 race：
-        //   1. user 从 idle Home join room A（entryRoomId == nil）
-        //   2. await 期间 user 切 tab → join room B（currentRoomId 已是 "B"）
+        // Story 12.7 r10 [P2] fix（codex review）：用 `roomNavigationGeneration` token 而非 currentRoomId equality ——
+        // r6/r9 旧实装只 guard `currentRoomId == entryRoomId`，无法区分 ABA cycle：
+        //   1. user 从 idle Home join room A（entryRoomId == nil, entryGen == G0）
+        //   2. await 期间 user 切 tab → join room B → leave B 回 idle（currentRoomId nil → "B" → nil; gen G0→G1→G2）
         //   3. join A HTTP 200 迟到
-        //   4. 旧实装无条件 setCurrentRoomId("A") → 静默把 user 切回 stale room A
+        //   4. 旧 guard: `liveRoomId == nil == entryRoomId` → 校验通过 → 静默把 user 切到 stale room A
+        //   5. 新 guard: `roomNavigationGeneration == G0` 但实际是 G2 → 拒绝 setCurrentRoomId
         // mismatch 时静默 skip + dev-facing log（不抛错，因为这是 race 不是逻辑错误）.
-        let entryRoomId: String? = await MainActor.run { appState.currentRoomId }
+        // 详见 docs/lessons/2026-05-11-room-navigation-generation-token-not-room-id-equality.md.
+        let entryGen: Int = await MainActor.run { appState.roomNavigationGeneration }
 
         let response = try await roomRepository.joinRoom(roomId: roomId)
         // mismatch 防御层（spec Open Question §4）：
@@ -55,11 +55,11 @@ public struct DefaultJoinRoomUseCase: JoinRoomUseCaseProtocol {
             ))
         }
         await MainActor.run {
-            let liveRoomId = appState.currentRoomId
-            guard liveRoomId == entryRoomId else {
+            let liveGen = appState.roomNavigationGeneration
+            guard liveGen == entryGen else {
                 os_log(.info,
-                       "JoinRoomUseCase: stale join response (entry=%{public}@, current=%{public}@, target=%{public}@); skip setCurrentRoomId to keep newer room selection",
-                       entryRoomId ?? "nil", liveRoomId ?? "nil", roomId)
+                       "JoinRoomUseCase: stale join response (entryGen=%{public}d, currentGen=%{public}d, target=%{public}@); skip setCurrentRoomId to keep newer room selection",
+                       entryGen, liveGen, roomId)
                 return
             }
             appState.setCurrentRoomId(roomId)
