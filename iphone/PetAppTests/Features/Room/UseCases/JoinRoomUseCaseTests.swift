@@ -104,4 +104,28 @@ final class JoinRoomUseCaseTests: XCTestCase {
         }
         XCTAssertNil(appState.currentRoomId)
     }
+
+    // MARK: - Story 12.7 r6 [P1] fix: stale join response 不能 wipe newer room selection
+
+    /// 场景：entryRoomId == nil（idle Home join room A）→ joinRoom await 期间用户切 tab + join room "B" →
+    /// join A HTTP 200 迟到. 旧实装无条件 setCurrentRoomId("A") 静默把 user 切回 stale room A;
+    /// 修复后 guard entry==current → "B" 必须保留.
+    func testExecuteDoesNotWipeNewerRoomSelectionWhenStaleResponseArrives() async throws {
+        let mock = MockRoomRepository()
+        mock.joinRoomStub = .success(JoinRoomResponse(roomId: "A", joined: true))
+        let appState = AppState()
+        // entryRoomId == nil（idle Home）
+        appState.setCurrentRoomId(nil)
+        let useCase = DefaultJoinRoomUseCase(roomRepository: mock, appState: appState)
+
+        // 在 joinRoom await 期间模拟用户切到新房间 B.
+        mock.joinRoomBeforeReturn = { @Sendable in
+            await MainActor.run { appState.setCurrentRoomId("B") }
+        }
+
+        try await useCase.execute(roomId: "A")
+
+        XCTAssertEqual(appState.currentRoomId, "B",
+                       "stale join HTTP-200 response 不得 wipe 用户已切的新房间 \"B\"（防 race）")
+    }
 }

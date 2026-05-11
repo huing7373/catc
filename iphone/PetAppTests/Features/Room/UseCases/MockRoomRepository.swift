@@ -19,13 +19,27 @@ final class MockRoomRepository: MockBase, RoomRepositoryProtocol, @unchecked Sen
     /// `nil` 时无副作用. 仅 Test target 使用.
     var leaveRoomBeforeReturn: (@Sendable () async -> Void)?
 
+    /// Story 12.7 r6 [P1] fix 测试基础设施：与 leaveRoomBeforeReturn 同模式 ——
+    /// 在 `createRoom` 进入但 return stub 之前回调，让 race 测试模拟 await 期间用户已切房间.
+    var createRoomBeforeReturn: (@Sendable () async -> Void)?
+
+    /// Story 12.7 r6 [P1] fix 测试基础设施：与 leaveRoomBeforeReturn 同模式 ——
+    /// 在 `joinRoom` 进入但 return stub 之前回调，让 race 测试模拟 await 期间用户已切房间.
+    var joinRoomBeforeReturn: (@Sendable () async -> Void)?
+
     func createRoom() async throws -> CreateRoomResponse {
         record(method: "createRoom()")
+        if let hook = createRoomBeforeReturn {
+            await hook()
+        }
         return try createRoomStub.get()
     }
 
     func joinRoom(roomId: String) async throws -> JoinRoomResponse {
         record(method: "joinRoom(roomId:)", arguments: [roomId])
+        if let hook = joinRoomBeforeReturn {
+            await hook()
+        }
         return try joinRoomStub.get()
     }
 

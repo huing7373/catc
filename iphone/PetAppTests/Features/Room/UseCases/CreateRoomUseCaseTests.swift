@@ -91,4 +91,40 @@ final class CreateRoomUseCaseTests: XCTestCase {
         }
         XCTAssertNil(appState.currentRoomId)
     }
+
+    // MARK: - Story 12.7 r6 [P1] fix: stale create response 不能 wipe newer room selection
+
+    /// 场景：entryRoomId == nil（idle Home 点 Create）→ createRoom await 期间用户切 tab + join room "B" →
+    /// create HTTP 200 带回 newRoomId "A". 旧实装无条件 setCurrentRoomId("A") 把 user 强制带回 stale room A;
+    /// 修复后 guard entry==current → "B" 必须保留.
+    func testExecuteDoesNotWipeNewerRoomSelectionWhenStaleResponseArrives() async throws {
+        let mock = MockRoomRepository()
+        mock.createRoomStub = .success(
+            CreateRoomResponse(
+                room: CreateRoomRoomDTO(
+                    id: "A",
+                    creatorUserId: "10001",
+                    maxMembers: 4,
+                    memberCount: 1,
+                    status: 1
+                )
+            )
+        )
+        let appState = AppState()
+        // entryRoomId == nil（idle Home）
+        appState.setCurrentRoomId(nil)
+        let useCase = DefaultCreateRoomUseCase(roomRepository: mock, appState: appState)
+
+        // 在 createRoom await 期间模拟用户切到新房间 B.
+        mock.createRoomBeforeReturn = { @Sendable in
+            await MainActor.run { appState.setCurrentRoomId("B") }
+        }
+
+        let returned = try await useCase.execute()
+
+        XCTAssertEqual(returned, "A",
+                       "execute() 仍返回 response.room.id (server 已建好 room A，caller 自行决定是否使用)")
+        XCTAssertEqual(appState.currentRoomId, "B",
+                       "stale create response 不得 wipe 用户已切的新房间 \"B\"（防 race）")
+    }
 }
