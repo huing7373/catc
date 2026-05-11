@@ -1820,6 +1820,78 @@ final class RealRoomViewModelTests: XCTestCase {
                        "appState.currentRoomId 应保留为新房间 room_B（不被 stale leave 失败回滚）")
     }
 
+    // MARK: - Story 12.7 r14 [P1] fix: LeaveRoomUseCase 抛 RoomNavigationStaleError → ViewModel 触发 home refresh
+
+    /// 验证 LeaveRoomUseCase 抛 RoomNavigationStaleError 时 ViewModel：
+    ///   1) 不调 errorPresenter（silent skip）
+    ///   2) 调一次 refreshHomeOnStaleNavigation closure（reconcile authoritative state）.
+    func testOnLeaveTapCaughtStaleErrorTriggersHomeRefresh() async throws {
+        let appState = AppState()
+        appState.setCurrentRoomId("3001")
+        let mockWS = WebSocketClientMock()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockLeave = MockLeaveRoomUseCaseRoom()
+        mockLeave.executeStub = .failure(RoomNavigationStaleError(source: .leaveRoom))
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        var refreshCallCount = 0
+        let refresh: @MainActor @Sendable () -> Void = { refreshCallCount += 1 }
+
+        vm.bind(
+            appState: appState,
+            webSocketClient: mockWS,
+            leaveRoomUseCase: mockLeave,
+            errorPresenter: presenter,
+            refreshHomeOnStaleNavigation: refresh
+        )
+
+        await Task.yield()
+        await Task.yield()
+
+        vm.onLeaveTap()
+        try? await waitForCallCountStory12_7(mock: mockLeave, method: "execute()", expected: 1)
+        for _ in 0..<5 { await Task.yield() }
+
+        XCTAssertEqual(refreshCallCount, 1,
+                       "RoomNavigationStaleError 必须触发 home refresh 一次")
+        XCTAssertNil(presenter.current,
+                     "stale error 是 race 信号，不应走 errorPresenter")
+    }
+
+    /// happy path 不应触发 refresh（negative assertion）.
+    func testOnLeaveTapHappyPathDoesNotTriggerHomeRefresh() async throws {
+        let appState = AppState()
+        appState.setCurrentRoomId("3001")
+        let mockWS = WebSocketClientMock()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockLeave = MockLeaveRoomUseCaseRoom()
+        mockLeave.onExecute = { @MainActor in
+            appState.setCurrentRoomId(nil)
+        }
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        var refreshCallCount = 0
+        let refresh: @MainActor @Sendable () -> Void = { refreshCallCount += 1 }
+
+        vm.bind(
+            appState: appState,
+            webSocketClient: mockWS,
+            leaveRoomUseCase: mockLeave,
+            errorPresenter: presenter,
+            refreshHomeOnStaleNavigation: refresh
+        )
+
+        await Task.yield()
+        await Task.yield()
+
+        vm.onLeaveTap()
+        try? await waitForCallCountStory12_7(mock: mockLeave, method: "execute()", expected: 1)
+        for _ in 0..<5 { await Task.yield() }
+
+        XCTAssertEqual(refreshCallCount, 0,
+                       "happy path 不应触发 home refresh（只有 stale error 才 refresh）")
+    }
+
     /// case#story12-7-4 happy: subscribeRoomIdConnect nil → A → mock WebSocketClient.connect(roomId:) 被调用一次
     func testSubscribeRoomIdConnectNilToATriggersConnect() async {
         let appState = AppState()

@@ -19,13 +19,20 @@
 //   HTTP 200 是 leave 完成的唯一 authoritative signal；
 //   WS close 4007 是 best-effort cleanup signal（server 端 fire-and-forget；client 可能完全收不到 / 比 HTTP 200 晚到 / leaver WS 早断）；
 //   等 4007 才推进 RoomView 退出 = 卡死风险.
+//
+// **r14 [P1] fix 同精神扩展**：stale path 改抛 `RoomNavigationStaleError`（同 Create / Join 修复
+// 一致语义）—— silent skip 让 server (已让用户离开 room) 与 client UI desync 风险扩展到 leave 路径
+// （用户已 re-join A，stale leave 迟到响应若 silent return，client 看似 leave 成功但 server 端用户
+// 现在所在 room 与 UI 不一致）. 抛 error 让 ViewModel 触发 home refresh 拿 authoritative state.
 
 import Foundation
 import os.log
 
 public protocol LeaveRoomUseCaseProtocol: Sendable {
     /// 调 POST /api/v1/rooms/{currentRoomId}/leave 退出房间.
-    /// - Throws: APIError（除 6004 视同成功；其他 .business / .network / .unauthorized 透传）.
+    /// - Throws: APIError（除 6004 视同成功；其他 .business / .network / .unauthorized 透传）/
+    ///   RoomNavigationStaleError（r14 P1 fix：navigation race 检测到 entryGen != liveGen 时抛此
+    ///   error → ViewModel silent skip + 触发 home refresh）.
     func execute() async throws
 }
 
@@ -61,19 +68,28 @@ public struct DefaultLeaveRoomUseCase: LeaveRoomUseCaseProtocol {
         // mismatch 时静默跳过 + log debug（不抛错，因为外层视角 leave 早已完成）.
         // 详见 docs/lessons/2026-05-11-room-navigation-generation-token-not-room-id-equality.md.
 
+        // r14 [P1] fix（codex review）：stale path 抛 RoomNavigationStaleError 而非 silent skip.
+        // 200 / 6004 两路在 server 端都表示"用户已不在 room A"；若 silent return,
+        // 用户已经 re-join A 的场景下，UI 仍在 A 但 client 端的 "用户离开了" 状态与 server "用户当前在 A"
+        // 飘移. 抛 error 让 ViewModel 触发 home refresh 拿 authoritative state.
+
         do {
             // 2. 调 leave HTTP API.
             _ = try await roomRepository.leaveRoom(roomId: roomId)
             // 3. HTTP 200 = authoritative：guard generation 一致后再 setCurrentRoomId(nil).
-            await MainActor.run {
+            let staleSignal: Bool = await MainActor.run {
                 let liveGen = appState.roomNavigationGeneration
                 guard liveGen == entryGen else {
                     os_log(.info,
-                           "LeaveRoomUseCase: stale leave HTTP-200 response (entryGen=%{public}d, currentGen=%{public}d, target=%{public}@); skip setCurrentRoomId(nil) to keep newer room selection",
+                           "LeaveRoomUseCase: stale leave HTTP-200 response (entryGen=%{public}d, currentGen=%{public}d, target=%{public}@); skip setCurrentRoomId(nil), will throw RoomNavigationStaleError so caller refreshes home",
                            entryGen, liveGen, roomId)
-                    return
+                    return true
                 }
                 appState.setCurrentRoomId(nil)
+                return false
+            }
+            if staleSignal {
+                throw RoomNavigationStaleError(source: .leaveRoom)
             }
         } catch let APIError.business(code, _, _) where code == 6004 {
             // 4. 6004 视同成功（leave-idempotent；spec Dev Note）.
@@ -81,18 +97,24 @@ public struct DefaultLeaveRoomUseCase: LeaveRoomUseCaseProtocol {
             os_log(.info,
                    "LeaveRoomUseCase: received business 6004 (already left); treating as success path (leave-idempotent)")
             // r10 P2 fix：同样 guard generation 防 6004 stale response wipe 后续 navigation cycle.
-            await MainActor.run {
+            let staleSignal: Bool = await MainActor.run {
                 let liveGen = appState.roomNavigationGeneration
                 guard liveGen == entryGen else {
                     os_log(.info,
-                           "LeaveRoomUseCase: stale leave 6004 response (entryGen=%{public}d, currentGen=%{public}d, target=%{public}@); skip setCurrentRoomId(nil) to keep newer room selection",
+                           "LeaveRoomUseCase: stale leave 6004 response (entryGen=%{public}d, currentGen=%{public}d, target=%{public}@); skip setCurrentRoomId(nil), will throw RoomNavigationStaleError so caller refreshes home",
                            entryGen, liveGen, roomId)
-                    return
+                    return true
                 }
                 appState.setCurrentRoomId(nil)
+                return false
+            }
+            if staleSignal {
+                throw RoomNavigationStaleError(source: .leaveRoom)
             }
         } catch {
-            // 5. 其他 APIError 透传（保留 in-room UI 让用户重试）.
+            // 5. 其他错误透传：APIError（保留 in-room UI 让用户重试）+ RoomNavigationStaleError
+            // （HTTP 200 path 内部 throw 出来后，先穿过 APIError.business(6004) catch（不匹配）,
+            //   再被这里 catch 然后 rethrow — ViewModel catch 决定 silent skip + refresh home）.
             throw error
         }
     }

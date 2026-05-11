@@ -97,7 +97,10 @@ final class CreateRoomUseCaseTests: XCTestCase {
     /// 场景：entryRoomId == nil（idle Home 点 Create）→ createRoom await 期间用户切 tab + join room "B" →
     /// create HTTP 200 带回 newRoomId "A". 旧实装无条件 setCurrentRoomId("A") 把 user 强制带回 stale room A;
     /// 修复后 guard entry==current → "B" 必须保留.
-    func testExecuteDoesNotWipeNewerRoomSelectionWhenStaleResponseArrives() async throws {
+    ///
+    /// **r14 [P1] 变更**：stale path 现在抛 `RoomNavigationStaleError` 而非 silent success ——
+    /// 让 ViewModel 触发 home refresh 拿 authoritative state，避免 server/client desync.
+    func testExecuteThrowsStaleErrorAndDoesNotWipeNewerRoomSelectionWhenStaleResponseArrives() async throws {
         let mock = MockRoomRepository()
         mock.createRoomStub = .success(
             CreateRoomResponse(
@@ -120,10 +123,15 @@ final class CreateRoomUseCaseTests: XCTestCase {
             await MainActor.run { appState.setCurrentRoomId("B") }
         }
 
-        let returned = try await useCase.execute()
-
-        XCTAssertEqual(returned, "A",
-                       "execute() 仍返回 response.room.id (server 已建好 room A，caller 自行决定是否使用)")
+        do {
+            _ = try await useCase.execute()
+            XCTFail("stale path 应抛 RoomNavigationStaleError")
+        } catch let staleError as RoomNavigationStaleError {
+            XCTAssertEqual(staleError.source, .createRoom,
+                           "stale signal 必须标注 source=createRoom")
+        } catch {
+            XCTFail("意外错误：\(error)")
+        }
         XCTAssertEqual(appState.currentRoomId, "B",
                        "stale create response 不得 wipe 用户已切的新房间 \"B\"（防 race）")
     }
@@ -135,7 +143,9 @@ final class CreateRoomUseCaseTests: XCTestCase {
     /// 旧 `currentRoomId == entryRoomId` 判断：liveRoomId == nil == entryRoomId → 校验通过 → setCurrentRoomId("A")
     /// → user 被强制切到 stale 房间 A.
     /// 新 generation 判断：entryGen == G0，liveGen == G2 → mismatch → 拒绝 setCurrentRoomId.
-    func testExecuteDoesNotWipeNewerRoomSelectionAcrossABAcycleViaGeneration() async throws {
+    ///
+    /// **r14 [P1] 变更**：stale path 现在抛 `RoomNavigationStaleError` 而非 silent success.
+    func testExecuteThrowsStaleErrorAcrossABAcycleViaGeneration() async throws {
         let mock = MockRoomRepository()
         mock.createRoomStub = .success(
             CreateRoomResponse(
@@ -162,12 +172,49 @@ final class CreateRoomUseCaseTests: XCTestCase {
             }
         }
 
-        let returned = try await useCase.execute()
-
-        XCTAssertEqual(returned, "A", "server 端已建好 room A；execute 仍返回 roomId")
+        do {
+            _ = try await useCase.execute()
+            XCTFail("ABA cycle 后 stale path 必须抛 RoomNavigationStaleError")
+        } catch let staleError as RoomNavigationStaleError {
+            XCTAssertEqual(staleError.source, .createRoom)
+        } catch {
+            XCTFail("意外错误：\(error)")
+        }
         XCTAssertNil(appState.currentRoomId,
                      "ABA cycle 后 stale create response 不得把 currentRoomId 切到 stale A（generation token guard）")
         XCTAssertGreaterThan(appState.roomNavigationGeneration, initialGen,
                              "navigation generation 必须严格单调（ABA cycle 后已增长）")
+    }
+
+    // MARK: - Story 12.7 r14 [P1] fix: happy path 不抛 RoomNavigationStaleError（防回归）
+
+    /// 验证非 stale 场景的 happy path 不会误抛 stale error —— 与 case#1 互补,
+    /// 显式 assert "happy 路径下抛 stale 错误" 不是任何代码可达分支.
+    func testExecuteHappyPathDoesNotThrowStaleError() async throws {
+        let mock = MockRoomRepository()
+        mock.createRoomStub = .success(
+            CreateRoomResponse(
+                room: CreateRoomRoomDTO(
+                    id: "5001",
+                    creatorUserId: "10001",
+                    maxMembers: 4,
+                    memberCount: 1,
+                    status: 1
+                )
+            )
+        )
+        let appState = AppState()
+        let useCase = DefaultCreateRoomUseCase(roomRepository: mock, appState: appState)
+
+        // 没有 createRoomBeforeReturn —— navigation gen 不变.
+        do {
+            let returned = try await useCase.execute()
+            XCTAssertEqual(returned, "5001", "happy path 必须正常 return roomId")
+        } catch is RoomNavigationStaleError {
+            XCTFail("happy path 不应抛 RoomNavigationStaleError（generation 未变）")
+        } catch {
+            XCTFail("意外错误：\(error)")
+        }
+        XCTAssertEqual(appState.currentRoomId, "5001")
     }
 }

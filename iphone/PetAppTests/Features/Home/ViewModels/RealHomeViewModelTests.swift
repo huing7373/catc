@@ -291,6 +291,95 @@ final class RealHomeViewModelTests: XCTestCase {
                      "currentRoomId 已切到 B，stale 6002 错误不应弹到新 room B")
     }
 
+    // MARK: - Story 12.7 r14 [P1] fix: stale UseCase 抛 RoomNavigationStaleError → ViewModel 触发 home refresh
+
+    /// 验证 CreateRoomUseCase 抛 RoomNavigationStaleError 时 ViewModel：
+    ///   1) 不调 errorPresenter（silent skip）
+    ///   2) 调一次 refreshHomeOnStaleNavigation closure（reconcile authoritative state）.
+    func testOnCreateTapCaughtStaleErrorTriggersHomeRefresh() async {
+        let appState = AppState()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockCreate = MockCreateRoomUseCase()
+        mockCreate.executeStub = .failure(RoomNavigationStaleError(source: .createRoom))
+        let mockJoin = MockJoinRoomUseCase()
+        let vm = RealHomeViewModel(appState: appState)
+
+        var refreshCallCount = 0
+        let refresh: @MainActor @Sendable () -> Void = { refreshCallCount += 1 }
+
+        vm.bind(
+            createRoomUseCase: mockCreate,
+            joinRoomUseCase: mockJoin,
+            errorPresenter: presenter,
+            refreshHomeOnStaleNavigation: refresh
+        )
+
+        vm.onCreateTap()
+        try? await waitForCallCount(mock: mockCreate, method: "execute()", expected: 1)
+        try? await Task.sleep(nanoseconds: 60_000_000)
+
+        XCTAssertEqual(refreshCallCount, 1,
+                       "RoomNavigationStaleError 必须触发 home refresh 一次")
+        XCTAssertNil(presenter.current,
+                     "stale error 是 race 信号，**不**走 errorPresenter（用户视角下没出错）")
+    }
+
+    /// 同上 join 路径.
+    func testOnJoinRoomConfirmCaughtStaleErrorTriggersHomeRefresh() async {
+        let appState = AppState()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockCreate = MockCreateRoomUseCase()
+        let mockJoin = MockJoinRoomUseCase()
+        mockJoin.executeStub = .failure(RoomNavigationStaleError(source: .joinRoom))
+        let vm = RealHomeViewModel(appState: appState)
+
+        var refreshCallCount = 0
+        let refresh: @MainActor @Sendable () -> Void = { refreshCallCount += 1 }
+
+        vm.bind(
+            createRoomUseCase: mockCreate,
+            joinRoomUseCase: mockJoin,
+            errorPresenter: presenter,
+            refreshHomeOnStaleNavigation: refresh
+        )
+
+        vm.onJoinRoomConfirm(roomId: "A")
+        try? await waitForCallCount(mock: mockJoin, method: "execute(roomId:)", expected: 1)
+        try? await Task.sleep(nanoseconds: 60_000_000)
+
+        XCTAssertEqual(refreshCallCount, 1,
+                       "RoomNavigationStaleError 必须触发 home refresh 一次")
+        XCTAssertNil(presenter.current,
+                     "stale error 是 race 信号，**不**走 errorPresenter")
+    }
+
+    /// happy path 不应触发 refresh —— 与上面两个 case 互补的 negative assertion.
+    func testOnCreateTapHappyPathDoesNotTriggerHomeRefresh() async {
+        let appState = AppState()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockCreate = MockCreateRoomUseCase()
+        mockCreate.executeStub = .success("9001")
+        let mockJoin = MockJoinRoomUseCase()
+        let vm = RealHomeViewModel(appState: appState)
+
+        var refreshCallCount = 0
+        let refresh: @MainActor @Sendable () -> Void = { refreshCallCount += 1 }
+
+        vm.bind(
+            createRoomUseCase: mockCreate,
+            joinRoomUseCase: mockJoin,
+            errorPresenter: presenter,
+            refreshHomeOnStaleNavigation: refresh
+        )
+
+        vm.onCreateTap()
+        try? await waitForCallCount(mock: mockCreate, method: "execute()", expected: 1)
+        try? await Task.sleep(nanoseconds: 60_000_000)
+
+        XCTAssertEqual(refreshCallCount, 0,
+                       "happy path 不应触发 home refresh（只有 stale error 才 refresh）")
+    }
+
     // MARK: - case#story12-7-r5-P3 regression: onCreateTap useCase nil fallback 必须 mutate appState
 
     /// useCase nil（UITEST_SKIP_GUEST_LOGIN=1 / RootView 老 wire / preview）下点 Create CTA

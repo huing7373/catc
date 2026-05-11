@@ -14,6 +14,12 @@
 // 错误处理：APIError 原样透传（含 .business(6003 / 1009 / ...) / .network / .unauthorized / .decoding）.
 // caller 层（RealHomeViewModel.onCreateTap）负责映射到 ErrorPresenter（6003 → alert "你已经在房间里了"；其他走默认 mapper）.
 //
+// **r14 [P1] fix（codex review）**：stale-success path 改抛 `RoomNavigationStaleError`（之前 silent
+// return roomId）—— silent success 让 server (已建好 room) 与 client UI (仍 idle) 短暂 desync,
+// 后续 create/join 会拿 6003 直到 /home 重新 hydrate. 抛 error 让 ViewModel 显式知道发生 race
+// → silent skip errorPresenter + 触发 home refresh 拿 authoritative state.
+// 详见 docs/lessons/2026-05-11-stale-usecase-success-must-refresh-not-silently-return.md.
+//
 // 不在本 story 范围（设计选择）：
 //   - 不调 webSocketClient.connect（WS lifecycle 由 RealRoomViewModel.subscribeRoomIdConnect 唯一管；
 //     UseCase 只写 AppState；详见 spec Dev Note "connect 触发的责任划分"）
@@ -26,7 +32,8 @@ import os.log
 public protocol CreateRoomUseCaseProtocol: Sendable {
     /// 调 POST /api/v1/rooms 创建房间 → 写 appState.currentRoomId → 返回 roomId.
     /// - Returns: 新建房间的 BIGINT roomId（字符串化）
-    /// - Throws: APIError（全部 case 原样透传）
+    /// - Throws: APIError（全部 case 原样透传）/ RoomNavigationStaleError（r14 P1 fix：navigation
+    ///   race 检测到 entryGen != liveGen 时抛此 error，让 ViewModel silent skip + 触发 home refresh）
     func execute() async throws -> String
 }
 
@@ -58,15 +65,24 @@ public struct DefaultCreateRoomUseCase: CreateRoomUseCaseProtocol {
         // AppState 是 @MainActor + ObservableObject + @Published；
         // UseCase 跑在 detached actor 调度（async function），需要显式 hop 到 MainActor 才能写 @Published.
         // spec Open Question §2 决议：先 set 后 return（让 RealRoomViewModel.subscribeRoomIdConnect 准备 stream）.
-        await MainActor.run {
+        //
+        // r14 [P1] fix（codex review）：stale path 抛 RoomNavigationStaleError 而非 silent skip + return.
+        // silent return 让 server (已 commit 用户进 room A) 与 client UI (因 stale 仍 idle) desync,
+        // 后续 create/join 会拿到 6003（已在房间）直到下次 /home hydrate. 抛 error 让 ViewModel
+        // 收到信号 → silent skip errorPresenter + 触发 home refresh 拿 authoritative state.
+        let staleSignal: Bool = await MainActor.run {
             let liveGen = appState.roomNavigationGeneration
             guard liveGen == entryGen else {
                 os_log(.info,
-                       "CreateRoomUseCase: stale create response (entryGen=%{public}d, currentGen=%{public}d, newRoom=%{public}@); skip setCurrentRoomId to keep newer room selection",
+                       "CreateRoomUseCase: stale create response (entryGen=%{public}d, currentGen=%{public}d, newRoom=%{public}@); skip setCurrentRoomId, will throw RoomNavigationStaleError so caller refreshes home",
                        entryGen, liveGen, roomId)
-                return
+                return true
             }
             appState.setCurrentRoomId(roomId)
+            return false
+        }
+        if staleSignal {
+            throw RoomNavigationStaleError(source: .createRoom)
         }
         return roomId
     }

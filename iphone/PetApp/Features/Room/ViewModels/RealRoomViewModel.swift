@@ -49,6 +49,12 @@ public final class RealRoomViewModel: RoomViewModel {
     /// Story 12.7 AC6: ErrorPresenter 注入（默认 nil；用于 onLeaveTap 错误兜底；caller=RootView 注入 container.errorPresenter）.
     private weak var errorPresenter: ErrorPresenter?
 
+    /// Story 12.7 r14 [P1] fix（codex review）：home refresh hook（同 RealHomeViewModel 模式）.
+    /// 触发条件：LeaveRoomUseCase 抛 RoomNavigationStaleError —— server 端已让用户离开 room 但
+    /// client UI 因 navigation race 没写 currentRoomId=nil（且用户可能已 rejoin）.
+    /// 调 closure 让 RootView 重拉 /home 拿 authoritative state，client/server 收敛.
+    private var refreshHomeOnStaleNavigation: (@MainActor @Sendable () -> Void)?
+
     /// roomId 派生 getter —— 直接来自 appState.currentRoomId，**不**持本地副本.
     /// 避免与 appState 双 source of truth（防 codex BLOCKER 4 重复出现：详见 sprint-change-proposal-2026-04-29-v2.md §3）.
     public var roomId: String? {
@@ -126,7 +132,8 @@ public final class RealRoomViewModel: RoomViewModel {
         appState: AppState,
         webSocketClient: WebSocketClient? = nil,
         leaveRoomUseCase: LeaveRoomUseCaseProtocol? = nil,
-        errorPresenter: ErrorPresenter? = nil
+        errorPresenter: ErrorPresenter? = nil,
+        refreshHomeOnStaleNavigation: (@MainActor @Sendable () -> Void)? = nil
     ) {
         let codeAlreadySubscribed = roomCodeSubscription != nil
         let connectAlreadySubscribed = roomIdConnectSubscription != nil
@@ -139,6 +146,10 @@ public final class RealRoomViewModel: RoomViewModel {
         }
         if let presenter = errorPresenter {
             self.errorPresenter = presenter
+        }
+        // r14 [P1] fix: 注入 refresh hook（caller 不传时保留 nil 让 UITEST / preview 路径不触发）.
+        if let refresh = refreshHomeOnStaleNavigation {
+            self.refreshHomeOnStaleNavigation = refresh
         }
 
         // fix-review round 5 P2 + round 6 P2：替换 client instance 时分三种语义分类处理.
@@ -809,6 +820,7 @@ public final class RealRoomViewModel: RoomViewModel {
         // thrown-error 路径同语义补齐 —— generation mismatch 时静默 skip + log debug，不抛错也不弹 UI.
         // 详见 docs/lessons/2026-05-11-room-navigation-generation-token-not-room-id-equality.md.
         let entryGen = self.appState?.roomNavigationGeneration ?? 0
+        let refreshHome = self.refreshHomeOnStaleNavigation
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -816,6 +828,13 @@ public final class RealRoomViewModel: RoomViewModel {
                 // 成功路径 / 6004 视同成功：UseCase 已写 setCurrentRoomId(nil) → subscribeRoomIdConnect
                 // 的 A → nil 分支自动触发 disconnect + 清 roster + wsState = .disconnected →
                 // HomeContainerView 自动切回 HomeView.
+            } catch is RoomNavigationStaleError {
+                // r14 [P1] fix（codex review）：UseCase 检测到 navigation race（server 端已让用户离开 room 但
+                // client UI 因 stale guard 没写 nil；用户可能已 rejoin 同房或切到别处）→ silent skip +
+                // 触发 home refresh 拿 authoritative state.
+                os_log(.info,
+                       "RealRoomViewModel.onLeaveTap: caught RoomNavigationStaleError; trigger home refresh to reconcile authoritative state")
+                refreshHome?()
             } catch {
                 // r10 [P2] fix: guard generation 一致 防 stale 错误 overlay 弹到新 navigation cycle 之上.
                 let liveGen = self.appState?.roomNavigationGeneration ?? 0

@@ -42,6 +42,12 @@ public final class RealFriendsViewModel: FriendsViewModel {
     /// Story 12.7 AC7: ErrorPresenter 注入（weak 引用避免循环）；caller=RootView 注入 container.errorPresenter.
     private weak var errorPresenter: ErrorPresenter?
 
+    /// Story 12.7 r14 [P1] fix（codex review）：home refresh hook（同 RealHomeViewModel 模式）.
+    /// 触发条件：JoinRoomUseCase 抛 RoomNavigationStaleError —— server 端已让用户加入 room 但
+    /// client UI 因 navigation race 没切到 RoomView. 调 closure 让 RootView 重拉 /home 拿
+    /// authoritative state.
+    private var refreshHomeOnStaleNavigation: (@MainActor @Sendable () -> Void)?
+
     /// parameterless init —— RootView `@StateObject` 老模式可用; AppState 通过 bind 异步注入.
     /// 按 Story 37.8 / 37.9 round 1 P2 lesson 预防性应用：seed `friends` / `selectedTab` 全部走 FriendsScaffoldDefaults,
     /// 让 launch / hydrate 前 / reset 后任何走 Real path 都立刻有 mock 好友列表占位.
@@ -72,7 +78,8 @@ public final class RealFriendsViewModel: FriendsViewModel {
     public func bind(
         appState: AppState,
         joinRoomUseCase: JoinRoomUseCaseProtocol? = nil,
-        errorPresenter: ErrorPresenter? = nil
+        errorPresenter: ErrorPresenter? = nil,
+        refreshHomeOnStaleNavigation: (@MainActor @Sendable () -> Void)? = nil
     ) {
         let alreadySubscribed = currentRoomIdSubscription != nil
         self.appState = appState
@@ -81,6 +88,10 @@ public final class RealFriendsViewModel: FriendsViewModel {
         }
         if let presenter = errorPresenter {
             self.errorPresenter = presenter
+        }
+        // r14 [P1] fix: 注入 refresh hook（caller 不传时保留 nil 让 UITEST / preview 路径不触发）.
+        if let refresh = refreshHomeOnStaleNavigation {
+            self.refreshHomeOnStaleNavigation = refresh
         }
         guard !alreadySubscribed else { return }
         subscribeCurrentRoomId(to: appState)
@@ -152,11 +163,18 @@ public final class RealFriendsViewModel: FriendsViewModel {
         // r10 升级到 `appState.roomNavigationGeneration` —— 单调计数器，不会重合.
         // 详见 docs/lessons/2026-05-11-room-navigation-generation-token-not-room-id-equality.md.
         let entryGen = self.appState?.roomNavigationGeneration ?? 0
+        let refreshHome = self.refreshHomeOnStaleNavigation
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 try await useCase.execute(roomId: targetRoomId)
                 // 成功 → no-op（UseCase 已写 appState.currentRoomId → HomeContainerView 自动切到 RoomView）.
+            } catch is RoomNavigationStaleError {
+                // r14 [P1] fix（codex review）：UseCase 检测到 navigation race（server 端已让用户加入 room 但
+                // client UI 因 stale guard 没写 currentRoomId）→ silent skip + 触发 home refresh.
+                os_log(.info,
+                       "RealFriendsViewModel.onJoinFriendTap: caught RoomNavigationStaleError; trigger home refresh to reconcile authoritative state")
+                refreshHome?()
             } catch {
                 // r10 P2 stale guard: generation mismatch 静默 skip + log debug，不调 ErrorPresenter.
                 let liveGen = self.appState?.roomNavigationGeneration ?? 0

@@ -12,6 +12,11 @@
 // caller 层（RealHomeViewModel.onJoinRoomConfirm / RealFriendsViewModel.onJoinFriendTap）case-by-case 弹对应 alert.
 //
 // spec Open Question §4 决议：mismatch 检查保留 —— 一行 == 比较成本极低 + 让 dev 看到 server bug 信号.
+//
+// **r14 [P1] fix（codex review）**：stale-success path 改抛 `RoomNavigationStaleError`（之前 silent
+// return）—— silent success 让 server (已加入 room) 与 client UI (仍旧状态) desync，后续 room actions
+// 会拿到 6003 / membership mismatch 直到 /home 重新 hydrate. 抛 error 让 ViewModel 触发 home refresh
+// 重新拿 authoritative state. 详见 docs/lessons/2026-05-11-stale-usecase-success-must-refresh-not-silently-return.md.
 
 import Foundation
 import os.log
@@ -19,7 +24,9 @@ import os.log
 public protocol JoinRoomUseCaseProtocol: Sendable {
     /// 调 POST /api/v1/rooms/{roomId}/join 加入房间 → 校验 response.roomId 一致 → 写 appState.currentRoomId.
     /// - Parameter roomId: 目标房间号（caller 传入 —— 来自 modal 输入 / 好友卡片 currentRoomId）
-    /// - Throws: APIError（含 .decoding 包装 JoinRoomMismatchError）
+    /// - Throws: APIError（含 .decoding 包装 JoinRoomMismatchError）/ RoomNavigationStaleError
+    ///   （r14 P1 fix：navigation race 检测到 entryGen != liveGen 时抛此 error → ViewModel silent
+    ///   skip + 触发 home refresh）
     func execute(roomId: String) async throws
 }
 
@@ -54,15 +61,23 @@ public struct DefaultJoinRoomUseCase: JoinRoomUseCaseProtocol {
                 received: response.roomId
             ))
         }
-        await MainActor.run {
+        // r14 [P1] fix（codex review）：stale path 抛 RoomNavigationStaleError 而非 silent skip + return.
+        // silent return 让 server (已 join room) 与 client UI (旧 idle 状态) desync,
+        // 后续 room actions 命中 6003 / membership mismatch 直到 /home re-hydrate.
+        // 抛 error 让 ViewModel 触发 home refresh 拿 authoritative state.
+        let staleSignal: Bool = await MainActor.run {
             let liveGen = appState.roomNavigationGeneration
             guard liveGen == entryGen else {
                 os_log(.info,
-                       "JoinRoomUseCase: stale join response (entryGen=%{public}d, currentGen=%{public}d, target=%{public}@); skip setCurrentRoomId to keep newer room selection",
+                       "JoinRoomUseCase: stale join response (entryGen=%{public}d, currentGen=%{public}d, target=%{public}@); skip setCurrentRoomId, will throw RoomNavigationStaleError so caller refreshes home",
                        entryGen, liveGen, roomId)
-                return
+                return true
             }
             appState.setCurrentRoomId(roomId)
+            return false
+        }
+        if staleSignal {
+            throw RoomNavigationStaleError(source: .joinRoom)
         }
     }
 }

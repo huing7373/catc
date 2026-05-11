@@ -62,6 +62,14 @@ public final class RealHomeViewModel: HomeViewModel {
     /// Story 12.7 AC5: ErrorPresenter 注入（weak 引用避免循环）；caller=RootView 注入 container.errorPresenter.
     private weak var localErrorPresenter: ErrorPresenter?
 
+    /// Story 12.7 r14 [P1] fix（codex review）：home refresh hook.
+    /// 触发条件：CreateRoom / JoinRoom UseCase 抛 RoomNavigationStaleError —— server 已 commit
+    /// 用户进 room 但 client UI 因 navigation race 没写 currentRoomId；需重拉 /home 拿 authoritative
+    /// state 让 client/server 收敛.
+    /// caller=RootView 注入一个调 `homeViewModel.resetLoadHomeForRetry()` + `await homeViewModel.loadHome()` 的 closure.
+    /// 默认 nil：UITEST / fallback / preview 路径下不触发 refresh（保持现状 silent behavior）.
+    private var refreshHomeOnStaleNavigation: (@MainActor @Sendable () -> Void)?
+
     /// Story 37.7 codex round 1 [P1] fix：parameterless init 让 RootView `@StateObject` 老模式可用.
     /// AppState 通过 `bind(appState:)` 在 `.task` 内异步注入（与 pingUseCase / loadHomeUseCase 同模式）.
     /// 不再持 `injectedAppState` 字段（基类已保 self.appState；本类无独立持有需求）.
@@ -96,11 +104,14 @@ public final class RealHomeViewModel: HomeViewModel {
     public func bind(
         createRoomUseCase: CreateRoomUseCaseProtocol,
         joinRoomUseCase: JoinRoomUseCaseProtocol,
-        errorPresenter: ErrorPresenter
+        errorPresenter: ErrorPresenter,
+        refreshHomeOnStaleNavigation: (@MainActor @Sendable () -> Void)? = nil
     ) {
         self.createRoomUseCase = createRoomUseCase
         self.joinRoomUseCase = joinRoomUseCase
         self.localErrorPresenter = errorPresenter
+        // r14 [P1] fix: closure 用 default-nil 让 UITEST / preview / 测试不传时保持向后兼容.
+        self.refreshHomeOnStaleNavigation = refreshHomeOnStaleNavigation
     }
 
     /// 订阅 appState.$currentPet —— 任何 hydrate / reset / 单独 mutate 都派生 greeting.
@@ -163,11 +174,20 @@ public final class RealHomeViewModel: HomeViewModel {
         // r10 升级到 `appState.roomNavigationGeneration` —— 单调计数器，A→B→A cycle 也 monotonic,
         // 不会重合. 详见 docs/lessons/2026-05-11-room-navigation-generation-token-not-room-id-equality.md.
         let entryGen = self.localAppState?.roomNavigationGeneration ?? 0
+        let refreshHome = self.refreshHomeOnStaleNavigation
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 _ = try await useCase.execute()
                 // 成功 → no-op：UseCase 已写 appState.currentRoomId → HomeContainerView 互斥状态机切 RoomView.
+            } catch is RoomNavigationStaleError {
+                // r14 [P1] fix（codex review）：UseCase 检测到 navigation race（entryGen != liveGen 但 server 已 commit）.
+                // server 端用户已进 room → client UI 没切（仍 idle）→ 后续 create/join 会拿 6003.
+                // 解：silent skip errorPresenter（用户视角下没出错）+ 触发 home refresh 拿 authoritative state.
+                // 详见 docs/lessons/2026-05-11-stale-usecase-success-must-refresh-not-silently-return.md.
+                os_log(.info,
+                       "RealHomeViewModel.onCreateTap: caught RoomNavigationStaleError; trigger home refresh to reconcile authoritative state")
+                refreshHome?()
             } catch let APIError.business(code, _, _) where code == 6003 {
                 // 6003 用户已在房间中：明确文案 alert（不附 onRetry —— 用户应主动 leave 再创建）.
                 // 但仍需 generation guard：若 navigation cycle 已发生，旧 create 的 6003 alert 不能弹.
@@ -257,11 +277,18 @@ public final class RealHomeViewModel: HomeViewModel {
         // r10 升级到 `appState.roomNavigationGeneration` —— 单调计数器，不会重合.
         // 详见 docs/lessons/2026-05-11-room-navigation-generation-token-not-room-id-equality.md.
         let entryGen = self.localAppState?.roomNavigationGeneration ?? 0
+        let refreshHome = self.refreshHomeOnStaleNavigation
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 try await useCase.execute(roomId: roomId)
                 // 成功 → no-op：UseCase 已写 appState.currentRoomId.
+            } catch is RoomNavigationStaleError {
+                // r14 [P1] fix（codex review）：UseCase 检测到 navigation race（server 已让用户加入 room 但
+                // client UI 因 stale guard 没写 currentRoomId）→ silent skip + 触发 home refresh.
+                os_log(.info,
+                       "RealHomeViewModel.onJoinRoomConfirm: caught RoomNavigationStaleError; trigger home refresh to reconcile authoritative state")
+                refreshHome?()
             } catch {
                 // r10 P2 stale guard: generation mismatch 则静默 skip + log debug，不调 ErrorPresenter.
                 let liveGen = self.localAppState?.roomNavigationGeneration ?? 0

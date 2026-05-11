@@ -110,7 +110,9 @@ final class JoinRoomUseCaseTests: XCTestCase {
     /// 场景：entryRoomId == nil（idle Home join room A）→ joinRoom await 期间用户切 tab + join room "B" →
     /// join A HTTP 200 迟到. 旧实装无条件 setCurrentRoomId("A") 静默把 user 切回 stale room A;
     /// 修复后 guard entry==current → "B" 必须保留.
-    func testExecuteDoesNotWipeNewerRoomSelectionWhenStaleResponseArrives() async throws {
+    ///
+    /// **r14 [P1] 变更**：stale path 现在抛 `RoomNavigationStaleError` 而非 silent success.
+    func testExecuteThrowsStaleErrorAndDoesNotWipeNewerRoomSelectionWhenStaleResponseArrives() async throws {
         let mock = MockRoomRepository()
         mock.joinRoomStub = .success(JoinRoomResponse(roomId: "A", joined: true))
         let appState = AppState()
@@ -123,7 +125,15 @@ final class JoinRoomUseCaseTests: XCTestCase {
             await MainActor.run { appState.setCurrentRoomId("B") }
         }
 
-        try await useCase.execute(roomId: "A")
+        do {
+            try await useCase.execute(roomId: "A")
+            XCTFail("stale path 应抛 RoomNavigationStaleError")
+        } catch let staleError as RoomNavigationStaleError {
+            XCTAssertEqual(staleError.source, .joinRoom,
+                           "stale signal 必须标注 source=joinRoom")
+        } catch {
+            XCTFail("意外错误：\(error)")
+        }
 
         XCTAssertEqual(appState.currentRoomId, "B",
                        "stale join HTTP-200 response 不得 wipe 用户已切的新房间 \"B\"（防 race）")
@@ -135,7 +145,9 @@ final class JoinRoomUseCaseTests: XCTestCase {
     /// 短暂进入 B (gen G1) → leave B 回 idle (gen G2, currentRoomId nil) → join A HTTP 200 迟到.
     /// 旧 `liveRoomId == entryRoomId == nil` 判断 → 校验通过 → setCurrentRoomId("A") → 用户被切到 stale A.
     /// 新 generation 判断：entryGen == G0，liveGen == G2 → mismatch → 拒绝 setCurrentRoomId.
-    func testExecuteDoesNotWipeNewerRoomSelectionAcrossABAcycleViaGeneration() async throws {
+    ///
+    /// **r14 [P1] 变更**：stale path 现在抛 `RoomNavigationStaleError` 而非 silent success.
+    func testExecuteThrowsStaleErrorAcrossABAcycleViaGeneration() async throws {
         let mock = MockRoomRepository()
         mock.joinRoomStub = .success(JoinRoomResponse(roomId: "A", joined: true))
         let appState = AppState()
@@ -152,11 +164,36 @@ final class JoinRoomUseCaseTests: XCTestCase {
             }
         }
 
-        try await useCase.execute(roomId: "A")
+        do {
+            try await useCase.execute(roomId: "A")
+            XCTFail("ABA cycle 后 stale path 必须抛 RoomNavigationStaleError")
+        } catch let staleError as RoomNavigationStaleError {
+            XCTAssertEqual(staleError.source, .joinRoom)
+        } catch {
+            XCTFail("意外错误：\(error)")
+        }
 
         XCTAssertNil(appState.currentRoomId,
                      "ABA cycle 后 stale join response 不得把 currentRoomId 切到 stale A（generation token guard）")
         XCTAssertGreaterThan(appState.roomNavigationGeneration, initialGen,
                              "navigation generation 必须严格单调")
+    }
+
+    // MARK: - Story 12.7 r14 [P1] fix: happy path 不抛 RoomNavigationStaleError（防回归）
+
+    func testExecuteHappyPathDoesNotThrowStaleError() async throws {
+        let mock = MockRoomRepository()
+        mock.joinRoomStub = .success(JoinRoomResponse(roomId: "7777", joined: true))
+        let appState = AppState()
+        let useCase = DefaultJoinRoomUseCase(roomRepository: mock, appState: appState)
+
+        do {
+            try await useCase.execute(roomId: "7777")
+        } catch is RoomNavigationStaleError {
+            XCTFail("happy path 不应抛 RoomNavigationStaleError（generation 未变）")
+        } catch {
+            XCTFail("意外错误：\(error)")
+        }
+        XCTAssertEqual(appState.currentRoomId, "7777")
     }
 }

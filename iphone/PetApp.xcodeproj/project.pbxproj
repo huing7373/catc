@@ -214,6 +214,7 @@
 		EC716FE06068EC426ED0CED1 /* RealHomeViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB0FA1241723FAAED3D62FBD /* RealHomeViewModelTests.swift */; };
 		EC7FCA68FDB01B4503E9608A /* ProfileScaffoldView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B95E336C14AB7A785FA850D0 /* ProfileScaffoldView.swift */; };
 		ECDA86FD49864614D23DEE01 /* ResetIdentityButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = B39E94DF59D63BB7B44DACA0 /* ResetIdentityButton.swift */; };
+		ED4F0E8DA18589F17119067A /* RoomNavigationStaleError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97B137D0A0E1889736F6187F /* RoomNavigationStaleError.swift */; };
 		EF9908E1EB1E59EF864FC483 /* RoomUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E81BAD870B6698393539A53 /* RoomUITests.swift */; };
 		EFB027DD0BA0861082297980 /* StepRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DA210F434F9C5277B8FC5E1 /* StepRepository.swift */; };
 		F04B34644FFF56D66C2CD75E /* LoadHomeUseCase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85E5B3C72E4F48EB18246EBF /* LoadHomeUseCase.swift */; };
@@ -383,6 +384,7 @@
 		957C9EDB0A4633D7C206BF28 /* RoomEndpointDTO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomEndpointDTO.swift; sourceTree = "<group>"; };
 		9671FE72F72308AF3D2862A5 /* LaunchingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchingView.swift; sourceTree = "<group>"; };
 		972FF916F8DB2CCEF03FB42C /* RoomViewScaffoldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomViewScaffoldTests.swift; sourceTree = "<group>"; };
+		97B137D0A0E1889736F6187F /* RoomNavigationStaleError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomNavigationStaleError.swift; sourceTree = "<group>"; };
 		984CDC446336AD099BC8219E /* RoomRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomRepositoryTests.swift; sourceTree = "<group>"; };
 		998C34BD14F4C0B81C495080 /* PingStubURLProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PingStubURLProtocol.swift; sourceTree = "<group>"; };
 		9A12FDBB2E4C09B1DEAFF51B /* SampleViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleViewModelTests.swift; sourceTree = "<group>"; };
@@ -1058,6 +1060,7 @@
 				0284ED9AF0302AAB120343E4 /* JoinRoomUseCase.swift */,
 				D9AFCA8F9706391EC6F1493E /* LeaveRoomUseCase.swift */,
 				1AFFBC70D51EF0C753AF1588 /* RoomEndpoints.swift */,
+				97B137D0A0E1889736F6187F /* RoomNavigationStaleError.swift */,
 			);
 			path = UseCases;
 			sourceTree = "<group>";
@@ -1766,6 +1769,7 @@
 				A0F2DF91DB67F8EABCAD684D /* RoomEndpointDTO.swift in Sources */,
 				B3981E19A0361A3285242BE4 /* RoomEndpoints.swift in Sources */,
 				58363A2ADA22DCBFBE7DC1BA /* RoomMember.swift in Sources */,
+				ED4F0E8DA18589F17119067A /* RoomNavigationStaleError.swift in Sources */,
 				406186F0D2F99A6D0216AABB /* RoomRepository.swift in Sources */,
 				DECAA7C709C77D94B9719A89 /* RoomScaffoldDefaults.swift in Sources */,
 				9F2044C04FB1BB8F35ADC85A /* RoomScaffoldView.swift in Sources */,

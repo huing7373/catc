@@ -269,11 +269,24 @@ struct RootView: View {
                 return false
                 #endif
             }()
+            // Story 12.7 r14 [P1] fix（codex review）：home refresh closure 共享给 RealHomeViewModel /
+            // RealRoomViewModel / RealFriendsViewModel —— UseCase 抛 RoomNavigationStaleError 时让
+            // /home 重新 hydrate 拿 authoritative state. UITEST 路径仍传 nil 让 stale path silent skip.
+            // 提取为局部 binding 避免在 body 内 inline 三次造成 type-checker 复杂度爆炸（Swift 编译器
+            // failed to produce diagnostic）.
+            // 详见 docs/lessons/2026-05-11-stale-usecase-success-must-refresh-not-silently-return.md.
+            let refreshHomeClosure: @MainActor @Sendable () -> Void = { [weak homeViewModel] in
+                homeViewModel?.resetLoadHomeForRetry()
+                Task { @MainActor [weak homeViewModel] in
+                    await homeViewModel?.loadHome()
+                }
+            }
             if let realHomeVM = homeViewModel as? RealHomeViewModel, !isUITestSkipGuestLogin {
                 realHomeVM.bind(
                     createRoomUseCase: container.makeCreateRoomUseCase(appState: appState),
                     joinRoomUseCase: container.makeJoinRoomUseCase(appState: appState),
-                    errorPresenter: container.errorPresenter
+                    errorPresenter: container.errorPresenter,
+                    refreshHomeOnStaleNavigation: refreshHomeClosure
                 )
             }
             if let realRoomVM = roomViewModel as? RealRoomViewModel {
@@ -288,11 +301,14 @@ struct RootView: View {
                 // 让 vm 完全走 nil-fallback 路径（wsState 保持 .disconnected；RoomScaffoldView 仍渲染）.
                 // 与 RealHomeViewModel.bind / RealFriendsViewModel.bind 的 UITEST gate 同精神.
                 // 详见 docs/lessons/2026-05-11-uitest-skip-real-ws-and-error-presenter-wiring.md.
+                // Story 12.7 r14 [P1] fix：注入 home refresh closure（onLeaveTap stale path 触发）.
+                // UITEST 路径下传 nil（与 leaveRoomUseCase / webSocketClient / errorPresenter 同 gate）.
                 realRoomVM.bind(
                     appState: appState,
                     webSocketClient: isUITestSkipGuestLogin ? nil : container.webSocketClient,
                     leaveRoomUseCase: isUITestSkipGuestLogin ? nil : container.makeLeaveRoomUseCase(appState: appState),
-                    errorPresenter: isUITestSkipGuestLogin ? nil : container.errorPresenter
+                    errorPresenter: isUITestSkipGuestLogin ? nil : container.errorPresenter,
+                    refreshHomeOnStaleNavigation: isUITestSkipGuestLogin ? nil : refreshHomeClosure
                 )
             }
             // Story 37.9 AC5 Task 5.4：与 RealRoomViewModel.bind 同精神，
@@ -309,10 +325,12 @@ struct RootView: View {
             // Story 12.7 r2 [P1] fix：与 RealHomeViewModel.bind 同精神 —— UITEST 路径下 `joinRoomUseCase`
             // 传 nil → onJoinFriendTap 走老 fallback 直写 appState.setCurrentRoomId(...).
             if let realFriendsVM = friendsViewModel as? RealFriendsViewModel {
+                // Story 12.7 r14 [P1] fix：注入 home refresh closure（onJoinFriendTap stale path 触发）.
                 realFriendsVM.bind(
                     appState: appState,
                     joinRoomUseCase: isUITestSkipGuestLogin ? nil : container.makeJoinRoomUseCase(appState: appState),
-                    errorPresenter: container.errorPresenter
+                    errorPresenter: container.errorPresenter,
+                    refreshHomeOnStaleNavigation: isUITestSkipGuestLogin ? nil : refreshHomeClosure
                 )
             }
             // Story 37.11 AC5 Task 5.4：与 RealRoomViewModel.bind / RealWardrobeViewModel.bind /
