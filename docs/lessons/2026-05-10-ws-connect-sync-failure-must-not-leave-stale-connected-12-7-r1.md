@@ -2,7 +2,7 @@
 date: 2026-05-10
 source_review: "file: /tmp/epic-loop-review-12-7-r1.md (codex --uncommitted, Story 12.7 round 1)"
 story: 12-7-创建-加入-退出-use-case-主界面入口完善
-commit: <pending>
+commit: 0e631e8
 lesson_count: 2
 ---
 

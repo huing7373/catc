@@ -2,7 +2,7 @@
 date: 2026-05-11
 source_review: codex review --base 3dc6584（Story 12.7 round 11 P2）
 story: 12-7-创建-加入-退出-use-case-主界面入口完善
-commit: <pending>
+commit: b9f9510
 lesson_count: 1
 ---
 

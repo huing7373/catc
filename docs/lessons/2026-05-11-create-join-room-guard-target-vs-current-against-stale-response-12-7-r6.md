@@ -2,7 +2,7 @@
 date: 2026-05-11
 source_review: /tmp/epic-loop-review-12-7-r6.md (codex review, Story 12-7 round 6)
 story: 12-7-创建-加入-退出-use-case-主界面入口完善
-commit: <pending>
+commit: 2b59361
 lesson_count: 1
 ---
 

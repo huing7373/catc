@@ -2,7 +2,7 @@
 date: 2026-05-11
 source_review: codex review (epic-loop r7) file:/tmp/epic-loop-review-12-7-r7.md
 story: 12-7-创建-加入-退出-use-case-主界面入口完善
-commit: <pending>
+commit: c97cd05
 lesson_count: 1
 ---
 
