@@ -98,4 +98,48 @@ final class LeaveRoomUseCaseTests: XCTestCase {
         XCTAssertEqual(appState.currentRoomId, "3001",
                        "network 透传时应保留 appState.currentRoomId 让用户重试")
     }
+
+    // MARK: - Story 12.7 r2 [P2] fix: stale leave response 不能 wipe newer room selection
+
+    /// 场景：start at room "3001" → execute leaveRoom("3001") 异步进行中 → 用户已切到 "5005"
+    /// → leave HTTP 200 返回. 旧实装无条件 setCurrentRoomId(nil) 会 wipe "5005";
+    /// 修复后 guard target==current → "5005" 必须保留.
+    func testExecuteHttp200DoesNotWipeNewerRoomSelection() async throws {
+        let mock = MockRoomRepository()
+        mock.leaveRoomStub = .success(LeaveRoomResponse(roomId: "3001", left: true))
+        let appState = AppState()
+        appState.setCurrentRoomId("3001")
+        let useCase = DefaultLeaveRoomUseCase(roomRepository: mock, appState: appState)
+
+        // 在 leaveRoom await 期间模拟用户切到新房间.
+        mock.leaveRoomBeforeReturn = { @Sendable in
+            await MainActor.run { appState.setCurrentRoomId("5005") }
+        }
+
+        try await useCase.execute()
+
+        XCTAssertEqual(appState.currentRoomId, "5005",
+                       "stale leave HTTP-200 response 不得 wipe 用户已切的新房间 \"5005\"（防 race）")
+    }
+
+    /// 场景：start at room "3001" → execute leaveRoom("3001") 异步进行中 → 用户已切到 "5005"
+    /// → leave HTTP 抛 business 6004（含 V1 §10.5 race "current_room_id != path roomId" 路径）.
+    /// 旧实装无条件 setCurrentRoomId(nil) 会 wipe "5005"; 修复后 guard target==current → "5005" 必须保留.
+    func testExecuteBusiness6004DoesNotWipeNewerRoomSelection() async throws {
+        let mock = MockRoomRepository()
+        mock.leaveRoomStub = .failure(APIError.business(code: 6004, message: "用户不在房间", requestId: "req_z"))
+        let appState = AppState()
+        appState.setCurrentRoomId("3001")
+        let useCase = DefaultLeaveRoomUseCase(roomRepository: mock, appState: appState)
+
+        mock.leaveRoomBeforeReturn = { @Sendable in
+            await MainActor.run { appState.setCurrentRoomId("5005") }
+        }
+
+        // 6004 不应抛错（leave-idempotent）.
+        try await useCase.execute()
+
+        XCTAssertEqual(appState.currentRoomId, "5005",
+                       "stale leave 6004 response 不得 wipe 用户已切的新房间 \"5005\"（防 V1 §10.5 race 路径）")
+    }
 }

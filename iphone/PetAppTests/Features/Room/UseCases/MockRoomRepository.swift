@@ -14,6 +14,11 @@ final class MockRoomRepository: MockBase, RoomRepositoryProtocol, @unchecked Sen
     var joinRoomStub: Result<JoinRoomResponse, Error> = .failure(MockError.notStubbed)
     var leaveRoomStub: Result<LeaveRoomResponse, Error> = .failure(MockError.notStubbed)
 
+    /// Story 12.7 r2 [P2] fix 测试基础设施：在 `leaveRoom` 进入但 return stub 之前回调,
+    /// 让 race 测试能在 await 返回之前 mutate `appState.currentRoomId`（模拟用户已切到新房间）.
+    /// `nil` 时无副作用. 仅 Test target 使用.
+    var leaveRoomBeforeReturn: (@Sendable () async -> Void)?
+
     func createRoom() async throws -> CreateRoomResponse {
         record(method: "createRoom()")
         return try createRoomStub.get()
@@ -26,6 +31,9 @@ final class MockRoomRepository: MockBase, RoomRepositoryProtocol, @unchecked Sen
 
     func leaveRoom(roomId: String) async throws -> LeaveRoomResponse {
         record(method: "leaveRoom(roomId:)", arguments: [roomId])
+        if let hook = leaveRoomBeforeReturn {
+            await hook()
+        }
         return try leaveRoomStub.get()
     }
 }

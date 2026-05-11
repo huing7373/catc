@@ -242,7 +242,27 @@ struct RootView: View {
             homeViewModel.bind(appState: appState)
             // Story 12.7 AC8: 注入 CreateRoom / JoinRoom UseCase + ErrorPresenter 到 RealHomeViewModel.
             // 让 onCreateTap / onJoinRoomConfirm override 走真实 server 路径（以前只 log + 直写 appState 占位）.
-            if let realHomeVM = homeViewModel as? RealHomeViewModel {
+            //
+            // Story 12.7 r2 [P1] fix（codex review）：UITEST_SKIP_GUEST_LOGIN=1 路径下**不**注入 real
+            // CreateRoom / JoinRoom / LeaveRoom UseCase —— 让 ViewModel override 走既有 nil-fallback path
+            // （直接 `appState.setCurrentRoomId(...)`），不调真实 HTTP. 否则 UITest 路径无 token /
+            // 无 backend → HTTP 失败 → `RoomScaffoldView` 永远不出现 → `testJoinRoomModalCrossScreenJoinFlow`
+            // 等依赖 fallback 的回归用例持续 broken.
+            //
+            // 仅排除 UseCase 注入；其他 bind（appState / webSocketClient 等）保持原路径不动 ——
+            // UITest 路径下 webSocketClient 注入是无害的（无 token / 不 connect 即可，subscribeRoomIdConnect
+            // 内 startConsumingMessages 在 currentRoomId 为 nil 时不启 task；UITEST_FORCE_IN_ROOM 写入
+            // currentRoomId 后会启动，但 WebSocketClientImpl 没 token 会 fail-fast，不影响 UI scaffold 验证）.
+            //
+            // 详见 docs/lessons/2026-05-11-uitest-launch-path-must-preserve-usecase-nil-fallback.md.
+            let isUITestSkipGuestLogin: Bool = {
+                #if DEBUG
+                return ProcessInfo.processInfo.environment["UITEST_SKIP_GUEST_LOGIN"] == "1"
+                #else
+                return false
+                #endif
+            }()
+            if let realHomeVM = homeViewModel as? RealHomeViewModel, !isUITestSkipGuestLogin {
                 realHomeVM.bind(
                     createRoomUseCase: container.makeCreateRoomUseCase(appState: appState),
                     joinRoomUseCase: container.makeJoinRoomUseCase(appState: appState),
@@ -252,10 +272,13 @@ struct RootView: View {
             if let realRoomVM = roomViewModel as? RealRoomViewModel {
                 // Story 12.7 AC8 关键改动：webSocketClient 从 nil 升级为 container.webSocketClient（节点 4 真实 client 接通）.
                 // 同时注入 LeaveRoomUseCase + ErrorPresenter 让 onLeaveTap 走真实 server 路径（HTTP 200 / 6004 → setCurrentRoomId(nil)）.
+                //
+                // Story 12.7 r2 [P1] fix：UITEST 路径下 `leaveRoomUseCase` 传 nil → onLeaveTap 走老 fallback
+                // 直写 appState.setCurrentRoomId(nil)（与 UITEST_FORCE_IN_ROOM 路径配套；让 leave 不走 HTTP）.
                 realRoomVM.bind(
                     appState: appState,
                     webSocketClient: container.webSocketClient,
-                    leaveRoomUseCase: container.makeLeaveRoomUseCase(appState: appState),
+                    leaveRoomUseCase: isUITestSkipGuestLogin ? nil : container.makeLeaveRoomUseCase(appState: appState),
                     errorPresenter: container.errorPresenter
                 )
             }
@@ -269,10 +292,13 @@ struct RootView: View {
             // `.onAppear` 同步路径让 RealFriendsViewModel 在第一次 paint 之前持有 AppState 引用
             // （按 Story 37.8 round 2 [P2] lesson 钦定路径，**不**放 `.task`）.
             // Story 12.7 AC8: 同时注入 JoinRoomUseCase + ErrorPresenter 让 onJoinFriendTap 走真实 server 路径.
+            //
+            // Story 12.7 r2 [P1] fix：与 RealHomeViewModel.bind 同精神 —— UITEST 路径下 `joinRoomUseCase`
+            // 传 nil → onJoinFriendTap 走老 fallback 直写 appState.setCurrentRoomId(...).
             if let realFriendsVM = friendsViewModel as? RealFriendsViewModel {
                 realFriendsVM.bind(
                     appState: appState,
-                    joinRoomUseCase: container.makeJoinRoomUseCase(appState: appState),
+                    joinRoomUseCase: isUITestSkipGuestLogin ? nil : container.makeJoinRoomUseCase(appState: appState),
                     errorPresenter: container.errorPresenter
                 )
             }

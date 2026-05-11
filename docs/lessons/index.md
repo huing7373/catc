@@ -251,3 +251,4 @@
 | 2026-05-10 | [WS heartbeat send catch 路径不能用 cancel(.goingAway) 注入 1001 覆盖 server 真实 close code（12-6 r7）](2026-05-10-ws-heartbeat-send-catch-preserve-server-close-code-12-6-r7.md) | 1 | architecture | `7f46907` |
 | 2026-05-10 | [WS heartbeat closeCode TOCTOU re-check 必须 atomic 折进 helper 内部，catch 入口先读 + helper 内 cancel 是 race window（12-6 r8）](2026-05-10-ws-heartbeat-toctou-recheck-must-be-atomic-in-helper-12-6-r8.md) | 1 | architecture / concurrency | `218639b` |
 | 2026-05-10 | [WS connect 同步抛错与 URL path roomId 注入风险（12-7 r1）](2026-05-10-ws-connect-sync-failure-must-not-leave-stale-connected-12-7-r1.md) | 2 | error-handling, security | `<pending>` |
+| 2026-05-11 | [UITEST 启动路径必须保留 UseCase nil-fallback + LeaveRoom 必须 guard target==current 防 stale-response 抹掉新房间（12-7 r2）](2026-05-11-uitest-fallback-and-leave-room-stale-response-guard.md) | 2 | testing, architecture | `<pending>` |

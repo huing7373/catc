@@ -44,11 +44,29 @@ public struct DefaultLeaveRoomUseCase: LeaveRoomUseCaseProtocol {
         let currentRoomId: String? = await MainActor.run { appState.currentRoomId }
         guard let roomId = currentRoomId else { return }
 
+        // Story 12.7 r2 [P2] fix（codex review）：记录调用入口时刻的 `targetRoomId`,
+        // 用于 await 返回后 guard `appState.currentRoomId == targetRoomId` —— 防止 stale-response
+        // 在用户已切到新房间（如 leave A → join B 序列）的场景下 wipe 新房间状态 + disconnect fresh session.
+        //
+        // 6004 兼用 "已离开" 和 "current_room_id != path roomId"（V1 §10.5 三种 race 场景），
+        // 任意一种迟到的 6004 response 都可能 wipe 后续状态. 因此 200 / 6004 两路都需要 guard.
+        //
+        // mismatch 时静默跳过 + log debug（不抛错，因为外层视角 leave 早已完成）.
+        // 详见 docs/lessons/2026-05-11-leave-room-guard-target-vs-current-against-stale-response.md.
+        let targetRoomId = roomId
+
         do {
             // 2. 调 leave HTTP API.
             _ = try await roomRepository.leaveRoom(roomId: roomId)
-            // 3. HTTP 200 = authoritative：立即 setCurrentRoomId(nil).
+            // 3. HTTP 200 = authoritative：guard target == current 后再 setCurrentRoomId(nil).
             await MainActor.run {
+                let liveRoomId = appState.currentRoomId
+                guard liveRoomId == targetRoomId else {
+                    os_log(.info,
+                           "LeaveRoomUseCase: stale leave HTTP-200 response (target=%{public}@, current=%{public}@); skip setCurrentRoomId(nil) to keep newer room selection",
+                           targetRoomId, liveRoomId ?? "nil")
+                    return
+                }
                 appState.setCurrentRoomId(nil)
             }
         } catch let APIError.business(code, _, _) where code == 6004 {
@@ -56,7 +74,15 @@ public struct DefaultLeaveRoomUseCase: LeaveRoomUseCaseProtocol {
             // dev-facing log 信号（spec Open Question §3 决议：暴露 console signal 让 dev 看到 race 频率，不弹 UI）.
             os_log(.info,
                    "LeaveRoomUseCase: received business 6004 (already left); treating as success path (leave-idempotent)")
+            // r2 [P2] fix：同样 guard target == current 防 6004 stale response wipe 新房间.
             await MainActor.run {
+                let liveRoomId = appState.currentRoomId
+                guard liveRoomId == targetRoomId else {
+                    os_log(.info,
+                           "LeaveRoomUseCase: stale leave 6004 response (target=%{public}@, current=%{public}@); skip setCurrentRoomId(nil) to keep newer room selection",
+                           targetRoomId, liveRoomId ?? "nil")
+                    return
+                }
                 appState.setCurrentRoomId(nil)
             }
         } catch {
