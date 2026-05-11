@@ -315,9 +315,21 @@ public final class RealRoomViewModel: RoomViewModel {
                     // 才被 applySnapshot 覆盖；若 connect(roomId:) 抛错（token 缺失 / server down /
                     // handshake error）→ snapshot 永远不到 → 假成员**永久残留**.
                     // A→B 分支已 reset roster（line 407-408），nil→A 分支必须同语义对齐.
-                    // 详见 docs/lessons/2026-05-11-room-entry-must-clear-scaffold-roster-before-connect.md.
-                    self.members = []
-                    self.memberPetStates = [:]
+                    //
+                    // **fix-review round 13 P1（Story 12.7）**：reset 必须**条件化** —— 仅当
+                    // `webSocketClient != nil` 时清，nil-client 路径下保留 RoomScaffoldDefaults seed.
+                    // 理由：UITEST_SKIP_GUEST_LOGIN=1 + UITEST_FORCE_IN_ROOM=1（r3 P1 引入的 launch path）
+                    //   下 RootView 显式把 `webSocketClient` 传 nil（见 RootView.swift:293）；vm 既不会
+                    //   `prepareForReconnect()`、也不会拨号 connect、永远没有 `room.snapshot` 到达 ——
+                    //   此时 unconditional clear 会让 `RoomScaffoldView` 永久失去 seeded 4 成员 →
+                    //   `testJoinRoomModalCrossScreenJoinFlow` 等断言 `roomMember_0/1/2` 出现的 UITest 全 break.
+                    // production path（webSocketClient ≠ nil）保持 r11 语义：snapshot 抵达前不残留假成员.
+                    // 详见 docs/lessons/2026-05-11-room-entry-must-clear-scaffold-roster-before-connect.md
+                    // 与 docs/lessons/2026-05-11-uitest-nil-ws-client-must-preserve-scaffold-roster.md.
+                    if self.webSocketClient != nil {
+                        self.members = []
+                        self.memberPetStates = [:]
+                    }
                     //
                     // **fix-review round 2 P1**：若 client 之前被 disconnect 过（leave-rejoin 路径：
                     //   A → nil → A'），其 `messages` stream 已被 finish；必须先调 `prepareForReconnect()`
@@ -413,9 +425,17 @@ public final class RealRoomViewModel: RoomViewModel {
                     //   ⑤ cancel 并重启 consumer task（读 `client.messages` 拿新 stream）.
                     // Story 12.2 后此分支在 `prepareForReconnect()` 后再调 `webSocketClient.connect(roomId: next)`
                     // 完成真实重连.
+                    //
+                    // **fix-review round 13 P1（Story 12.7）**：roster reset 与 nil→A 分支同精神，
+                    // 仅当 `webSocketClient != nil` 时清；nil-client 路径下保留 scaffold seed roster.
+                    // 虽然 A→B 在当前 UITEST_FORCE_IN_ROOM 路径下不易触发（UITEST 只写一次 currentRoomId），
+                    // 但语义对齐避免未来 UITest 扩展时再次破坏 scaffold 兜底.
+                    // 详见 docs/lessons/2026-05-11-uitest-nil-ws-client-must-preserve-scaffold-roster.md.
                     self.webSocketClient?.disconnect()
-                    self.members = []
-                    self.memberPetStates = [:]
+                    if self.webSocketClient != nil {
+                        self.members = []
+                        self.memberPetStates = [:]
+                    }
                     self.webSocketClient?.prepareForReconnect()
                     // **fix-review round 1 P2（Story 12.7）**：保持 wsState 上一态 `.connected`（room A
                     // 阶段已 set；A→B 切换"用户仍在房间内"语义维持）—— 失败 catch 路径会把它纠正为

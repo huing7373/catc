@@ -262,3 +262,4 @@
 | 2026-05-11 | [Room navigation 用 monotonic generation token 而非 currentRoomId equality（ABA race 根治）（12-7 r10）](2026-05-11-room-navigation-generation-token-not-room-id-equality-12-7-r10.md) | 1 | architecture | `<pending>` |
 | 2026-05-11 | [Room 进入路径必须先清 scaffold roster 再 connect（nil→A 与 A→B 分支同语义）（12-7 r11）](2026-05-11-room-entry-must-clear-scaffold-roster-before-connect-12-7-r11.md) | 1 | architecture | `<pending>` |
 | 2026-05-11 | [`applyHomeData(_:)` 仅在 currentRoomId 实际变更时 bump generation token（防 hydrate refresh 误伤 in-flight room request）（12-7 r12）](2026-05-11-apply-home-data-bump-only-on-room-id-change-12-7-r12.md) | 1 | architecture | `<pending>` |
+| 2026-05-11 | [UITEST nil-WS-client 路径 nil→A 必须保留 RoomScaffoldDefaults seed roster（r11 unconditional clear 的精化）（12-7 r13）](2026-05-11-uitest-nil-ws-client-must-preserve-scaffold-roster-12-7-r13.md) | 1 | testing | `<pending>` |

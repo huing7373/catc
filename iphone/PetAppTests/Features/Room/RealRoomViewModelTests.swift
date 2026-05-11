@@ -2290,6 +2290,88 @@ final class RealRoomViewModelTests: XCTestCase {
         XCTAssertEqual(vm.wsState, .disconnected,
                        "connect 抛错时 wsState 应被纠正为 .disconnected（fix-review round 1 P2 不回退）")
     }
+
+    // MARK: - case#fix-review round 13 P1: nil-client 路径必须保留 scaffold roster
+
+    /// **fix-review round 13 P1 回归 #1**：UITEST_SKIP_GUEST_LOGIN=1 + UITEST_FORCE_IN_ROOM=1 路径下,
+    /// RootView 显式把 `webSocketClient` 传 nil 给 RealRoomViewModel.bind(...). 在 nil-client + 写入
+    /// currentRoomId 触发 nil→A 分支时，**不能**清空 RoomScaffoldDefaults seed 的 4 成员
+    /// —— 否则 `RoomScaffoldView` 永久失去 roster，break `testJoinRoomModalCrossScreenJoinFlow`
+    /// 等断言 `roomMember_0/1/2` 出现的 UITest.
+    ///
+    /// 修复语义：nil→A 分支的 `members = []` / `memberPetStates = [:]` 用 `webSocketClient != nil` gate；
+    /// nil-client 路径下保留 seed roster.
+    ///
+    /// 详见 docs/lessons/2026-05-11-uitest-nil-ws-client-must-preserve-scaffold-roster.md.
+    func testNilToAPreservesScaffoldRosterWhenClientIsNil() async throws {
+        let appState = AppState()
+        // **关键**：不注入 webSocketClient（默认 nil）—— 模拟 UITEST_SKIP_GUEST_LOGIN=1 路径
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: nil)
+
+        // baseline: vm.init() 应 seed RoomScaffoldDefaults 的 4 成员
+        XCTAssertEqual(vm.members.count, RoomScaffoldDefaults.members.count,
+                       "baseline：nil-client vm 应 seed RoomScaffoldDefaults.members 作为占位")
+        XCTAssertEqual(vm.members.first?.id, "u1",
+                       "baseline 首成员应是 RoomScaffoldDefaults seed 的 u1")
+
+        await Task.yield()
+        await Task.yield()
+
+        // 触发 nil → A 切换（模拟 UITEST_FORCE_IN_ROOM 路径写 currentRoomId）
+        appState.setCurrentRoomId("room_uitest")
+
+        // 多 yield 让 sink 跑完所有同步副作用 + 任何可能起的 Task
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+
+        // **关键断言**：nil-client 路径下 RoomScaffoldDefaults seed 必须**保留**（不被清空）
+        XCTAssertEqual(vm.members.count, RoomScaffoldDefaults.members.count,
+                       "nil-client + nil→A 路径必须保留 RoomScaffoldDefaults seed roster"
+                       + "（否则 RoomScaffoldView UITest 断言 roomMember_0/1/2 全失败）")
+        XCTAssertEqual(vm.members.first?.id, "u1",
+                       "首成员仍是 RoomScaffoldDefaults seed 的 u1")
+        XCTAssertEqual(vm.roomId, "room_uitest",
+                       "vm.roomId 应反映新 currentRoomId（派生自 appState）")
+    }
+
+    /// **fix-review round 13 P1 回归 #2**：production path（webSocketClient ≠ nil）下行为不变 ——
+    /// 仍立即清空 roster（与 r11 测试 `testNilToAClearsScaffoldRosterBeforeConnect` 同精神）.
+    /// 本测试与 r11 测试是对照组：同一切换，仅 client 是否 nil 决定 reset / preserve.
+    func testNilToAClearsRosterWhenClientIsNotNil() async throws {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        mockWS.connectShouldGate = true  // gate connect 让我们能在 snapshot 之前断言
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        // baseline: seed 4 成员
+        XCTAssertEqual(vm.members.count, 4, "baseline members 应是 4 个 RoomScaffoldDefaults seed")
+
+        await Task.yield()
+        await Task.yield()
+
+        // 触发 nil → A
+        appState.setCurrentRoomId("room_prod")
+
+        // 等 connect 被调（confirm sink 同步路径已跑完）
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if !mockWS.connectCallArgs.isEmpty { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(mockWS.connectCallArgs, ["room_prod"],
+                       "production path nil→A 仍调 connect(roomId:)")
+
+        // **关键断言**：production path 立即清空 roster（与 r11 语义一致）
+        XCTAssertEqual(vm.members, [],
+                       "production path（webSocketClient ≠ nil）nil→A 必须立即清空 roster")
+        XCTAssertEqual(vm.memberPetStates, [:],
+                       "production path 同时清 memberPetStates")
+    }
 }
 
 // MARK: - Inline mocks for Story 12.7
