@@ -150,27 +150,34 @@ public final class RealFriendsViewModel: FriendsViewModel {
             do {
                 try await useCase.execute(roomId: targetRoomId)
                 // 成功 → no-op（UseCase 已写 appState.currentRoomId → HomeContainerView 自动切到 RoomView）.
-            } catch let APIError.business(code, _, _) {
-                // 错误映射与 RealHomeViewModel.onJoinRoomConfirm 一致.
-                let message: String? = {
-                    switch code {
-                    case 6001: return "房间不存在或已被解散"
-                    case 6002: return "房间已满（4/4）"
-                    case 6003: return "你已经在房间里了"
-                    case 6005: return "房间已关闭"
-                    case 1002: return "房间号格式不合法"
-                    default: return nil
-                    }
-                }()
-                if let message {
-                    presenter?.presentAlert(title: "提示", message: message)
-                } else {
-                    presenter?.present(APIError.business(code: code, message: "", requestId: ""))
-                }
             } catch {
-                os_log(.error, "RealFriendsViewModel.onJoinFriendTap JoinRoomUseCase error: %{public}@",
-                       String(describing: error))
-                presenter?.present(error)
+                // r8 P2 lesson 2026-05-11-business-error-fallback-must-forward-original.md：
+                // unrecognized business code 必须 forward 原 error（保留 server message +
+                // requestId），不能合成空 APIError.business（会让 AppErrorMapper fallback 到
+                // generic "操作失败，请稍后重试" 并丢失 server 解释）. 与 RealHomeViewModel
+                // 同精神。
+                if case let APIError.business(code, _, _) = error {
+                    let message: String? = {
+                        switch code {
+                        case 6001: return "房间不存在或已被解散"
+                        case 6002: return "房间已满（4/4）"
+                        case 6003: return "你已经在房间里了"
+                        case 6005: return "房间已关闭"
+                        case 1002: return "房间号格式不合法"
+                        default: return nil
+                        }
+                    }()
+                    if let message {
+                        presenter?.presentAlert(title: "提示", message: message)
+                    } else {
+                        // 透传**原** error（不 rewrap），让 AppErrorMapper 拿到 server message.
+                        presenter?.present(error)
+                    }
+                } else {
+                    os_log(.error, "RealFriendsViewModel.onJoinFriendTap JoinRoomUseCase error: %{public}@",
+                           String(describing: error))
+                    presenter?.present(error)
+                }
             }
         }
     }

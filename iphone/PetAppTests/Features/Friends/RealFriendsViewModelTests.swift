@@ -109,6 +109,47 @@ final class RealFriendsViewModelTests: XCTestCase {
         XCTAssertTrue(message.contains("房间已满"), "6002 alert message 应含'房间已满'，实际 \(message)")
     }
 
+    // MARK: - case#3b r8 P2 regression: unrecognized business code 必须 forward 原 error
+    //
+    // 与 RealHomeViewModelTests.testOnJoinRoomConfirmUnknownBusinessCodeForwardsServerMessage 同精神 —
+    // r8 P2 钦定 onJoinFriendTap 也犯同样 lossy rewrap，修复后必须把 server message 透传给 ErrorPresenter.
+    func testOnJoinFriendTapUnknownBusinessCodeForwardsServerMessage() async throws {
+        let appState = AppState()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockJoin = MockJoinRoomUseCaseFriends()
+        mockJoin.executeStub = .failure(APIError.business(
+            code: 9999,
+            message: "Server-defined message",
+            requestId: "req-abc"
+        ))
+        let vm = RealFriendsViewModel(appState: appState)
+        vm.bind(
+            appState: appState,
+            joinRoomUseCase: mockJoin,
+            errorPresenter: presenter
+        )
+
+        let friend = Friend(
+            id: "fX",
+            name: "Mocha",
+            online: true,
+            status: .inRoom,
+            statusText: "在房间 3001",
+            currentRoomId: "3001",
+            color: nil
+        )
+
+        vm.onJoinFriendTap(friend: friend)
+        try? await waitForPresenterAlert(presenter: presenter)
+
+        guard case let .alert(_, message) = presenter.current else {
+            XCTFail("9999 应走 alert（permanent class），实际 \(String(describing: presenter.current))")
+            return
+        }
+        XCTAssertEqual(message, "Server-defined message",
+                       "unrecognized business code 必须 forward server-provided message（不能 rewrap 成空串走 generic fallback '操作失败，请稍后重试'）")
+    }
+
     // MARK: - helpers
 
     private func waitForCallCount(mock: MockBase, method: String, expected: Int) async throws {

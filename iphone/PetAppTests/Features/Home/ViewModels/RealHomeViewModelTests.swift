@@ -147,6 +147,53 @@ final class RealHomeViewModelTests: XCTestCase {
                         "1009 路径必须把错误透传给 ErrorPresenter（默认 mapper 决定 retry vs alert）")
     }
 
+    // MARK: - case#5b r8 P2 regression: unrecognized business code 必须 forward 原 error（不丢 server message）
+    //
+    // r8 review 钦定 lesson 2026-05-11-business-error-fallback-must-forward-original.md：
+    //   原实现 catch 内 `catch let APIError.business(code, _, _)` 解构丢了 message+requestId,
+    //   fallback 分支合成 `APIError.business(code:, message: "", requestId: "")` 给 presenter →
+    //   AppErrorMapper.localizedMessage 未知 code 9999 走 default 分支 `fallback.isEmpty ?
+    //   "操作失败，请稍后重试" : fallback` —— fallback 是空串 → 用户看到 generic 文案,
+    //   丢失 server 真实解释 + telemetry requestId。
+    //
+    // 修复后：catch 全 error → if case let APIError.business 解构 code（不消费 error）→
+    //   unrecognized → present(error)（原 error 含原 message + requestId）→ AppErrorMapper
+    //   localizedMessage 拿到 server message "Server-defined message" 作 fallback.
+    //
+    // 本测试通过 ErrorPresenter.current（ErrorPresentation）的 message 字段是否含 server 真实 message
+    // 间接断言（presenter 不暴露 raw error；AppErrorMapper.localizedMessage default 分支
+    // 直接 return fallback message）。
+    func testOnJoinRoomConfirmUnknownBusinessCodeForwardsServerMessage() async {
+        let appState = AppState()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockCreate = MockCreateRoomUseCase()
+        let mockJoin = MockJoinRoomUseCase()
+        mockJoin.executeStub = .failure(APIError.business(
+            code: 9999,
+            message: "Server-defined message",
+            requestId: "req-abc"
+        ))
+        let vm = RealHomeViewModel(appState: appState)
+        vm.bind(
+            createRoomUseCase: mockCreate,
+            joinRoomUseCase: mockJoin,
+            errorPresenter: presenter
+        )
+
+        vm.onJoinRoomConfirm(roomId: "3001")
+        try? await waitForPresenterAlert(presenter: presenter)
+
+        // unknown business code 9999 既不在 hardcoded mapping，也不在 transientBusinessCodes →
+        // AppErrorMapper.presentation 走 `.alert(title: "提示", message: localizedMessage(9999, fallback))` →
+        // localizedMessage default → fallback "Server-defined message"（非空）。
+        guard case let .alert(_, message) = presenter.current else {
+            XCTFail("9999 应走 alert（permanent class），实际 \(String(describing: presenter.current))")
+            return
+        }
+        XCTAssertEqual(message, "Server-defined message",
+                       "unrecognized business code 必须 forward server-provided message（不能 rewrap 成空串走 generic fallback '操作失败，请稍后重试'）")
+    }
+
     // MARK: - case#6 happy: onJoinRoomConfirm 成功后 mock UseCase 收到 roomId
 
     func testOnJoinRoomConfirmSuccessKeepsModalClosedAndAppStateWritten() async {

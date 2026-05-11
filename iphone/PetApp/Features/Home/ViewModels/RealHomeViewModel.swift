@@ -232,28 +232,37 @@ public final class RealHomeViewModel: HomeViewModel {
             do {
                 try await useCase.execute(roomId: roomId)
                 // 成功 → no-op：UseCase 已写 appState.currentRoomId.
-            } catch let APIError.business(code, _, _) {
-                // 业务错误码 case-by-case 文案（spec AC2 + V1 §10.4）：
-                let message: String? = {
-                    switch code {
-                    case 6001: return "房间不存在或已被解散"
-                    case 6002: return "房间已满（4/4）"
-                    case 6003: return "你已经在房间里了"
-                    case 6005: return "房间已关闭"
-                    case 1002: return "房间号格式不合法"
-                    default: return nil
-                    }
-                }()
-                if let message {
-                    presenter?.presentAlert(title: "提示", message: message)
-                } else {
-                    // 透传给 ErrorPresenter 默认 mapper（如 1009 → retry）.
-                    presenter?.present(APIError.business(code: code, message: "", requestId: ""))
-                }
             } catch {
-                os_log(.error, "RealHomeViewModel.onJoinRoomConfirm JoinRoomUseCase error: %{public}@",
-                       String(describing: error))
-                presenter?.present(error)
+                // r8 P2 lesson 2026-05-11-business-error-fallback-must-forward-original.md：
+                // catch 内对 business 做 case-by-case 文案 mapping；unrecognized code 必须
+                // **forward 原 error**（保留 server message + requestId），**不**能合成新的
+                // APIError.business(message: "", requestId: "") —— 那会让 ErrorPresenter
+                // 默认 mapper 走 fallback `"操作失败，请稍后重试"`，丢失 server 解释 & telemetry。
+                if case let APIError.business(code, _, _) = error {
+                    // 业务错误码 case-by-case 文案（spec AC2 + V1 §10.4）：
+                    let message: String? = {
+                        switch code {
+                        case 6001: return "房间不存在或已被解散"
+                        case 6002: return "房间已满（4/4）"
+                        case 6003: return "你已经在房间里了"
+                        case 6005: return "房间已关闭"
+                        case 1002: return "房间号格式不合法"
+                        default: return nil
+                        }
+                    }()
+                    if let message {
+                        presenter?.presentAlert(title: "提示", message: message)
+                    } else {
+                        // 透传**原** error 给 ErrorPresenter 默认 mapper（如 1009 → retry）.
+                        // 不 rewrap：原 APIError.business 已含 server message + requestId,
+                        // AppErrorMapper.localizedMessage 在未知 code 时 fallback 用 server message.
+                        presenter?.present(error)
+                    }
+                } else {
+                    os_log(.error, "RealHomeViewModel.onJoinRoomConfirm JoinRoomUseCase error: %{public}@",
+                           String(describing: error))
+                    presenter?.present(error)
+                }
             }
         }
     }
