@@ -190,10 +190,18 @@ public final class RealRoomViewModel: RoomViewModel {
             //
             // **fix-review round 1 P2（Story 12.7）**：旧 `try?` 路径吞掉 sync failure（token 空 / URL
             // 构造失败抛 WSError 不会 emit .connectionStateChanged → UI 卡死在"占位 .connected"）.
-            // 修复：do/catch await connect → 失败时纠正为 .disconnected + present.
+            // 修复：do/catch await connect → 失败时纠正为 .disconnected.
+            //
+            // **fix-review round 3 P1（Story 12.7）**：catch 路径**不**调 `errorPresenter.present(error)`.
+            // WS connect failure 是后台 transient 状态（server down / network flap / handshake error），
+            // **不**是用户主动操作的同步错误；通过 `errorPresenter` 走全屏 `.retry` overlay 会 block 整个 app
+            // 的 hit-testing 而不是仅反映 room 的 disconnected/reconnecting 状态.
+            // 正确语义：wsState=.disconnected 由 RoomScaffoldView 内的 wsStateLabel 反映给用户；
+            // 重连状态机后续自动尝试 reconnect（Story 12.6 已实装）.
+            // 只保留日志 / wsState=.disconnected，不弹 modal overlay.
+            // 详见 docs/lessons/2026-05-11-ws-connect-failure-must-not-use-error-presenter.md.
             if let roomId = self.lastObservedRoomId, !roomId.isEmpty {
                 let client = self.webSocketClient
-                let presenter = self.errorPresenter
                 Task { @MainActor [weak self, weak client] in
                     guard let client else { return }
                     do {
@@ -204,7 +212,6 @@ public final class RealRoomViewModel: RoomViewModel {
                                "RealRoomViewModel.bind: connect(roomId:%{public}@) failed: %{public}@",
                                roomId, String(describing: error))
                         self?.wsState = .disconnected
-                        presenter?.present(error)
                     }
                 }
             }
@@ -291,13 +298,20 @@ public final class RealRoomViewModel: RoomViewModel {
                     // **fix-review round 1 P2（Story 12.7）**：旧实装 `try?` 静默吞 sync failure（token
                     // 空 / URL 构造失败抛 WSError 不会 emit .connectionStateChanged → UI 卡死在
                     // "占位 .connected" 状态实际无 socket）.
-                    // 修复：do/catch await connect → 失败时把占位 `.connected` 纠正为 `.disconnected`
-                    // + 通过 errorPresenter 让用户看到连接失败.
+                    // 修复：do/catch await connect → 失败时把占位 `.connected` 纠正为 `.disconnected`.
+                    //
+                    // **fix-review round 3 P1（Story 12.7）**：catch 路径**不**调 `errorPresenter.present(error)`.
+                    // WS connect failure 是后台 transient 状态（server down / network flap / handshake error），
+                    // **不**是用户主动操作的同步错误；通过 `errorPresenter` 走全屏 `.retry` overlay 会 block
+                    // 整个 app 的 hit-testing 而不是仅反映 room 的 disconnected/reconnecting 状态.
+                    // 正确语义：wsState=.disconnected 由 RoomScaffoldView 内的 wsStateLabel 反映给用户；
+                    // 重连状态机后续自动尝试 reconnect.
+                    // 详见 docs/lessons/2026-05-11-ws-connect-failure-must-not-use-error-presenter.md.
+                    //
                     // 成功路径维持上面 sync-set 的 `.connected`（无需重设）；后续 server 推
                     // `.connectionStateChanged(.connected)` reactive 路径也对齐（`handle(message:)` line 433-464）.
                     if !roomId.isEmpty {
                         let client = self.webSocketClient
-                        let presenter = self.errorPresenter
                         Task { @MainActor [weak self, weak client] in
                             guard let client else { return }
                             do {
@@ -311,7 +325,6 @@ public final class RealRoomViewModel: RoomViewModel {
                                 // **关键纠错**：旧实装 `try?` 在此处吞掉信号；新实装把占位
                                 // `.connected` 还原成真实 `.disconnected`，UI 不再卡在"假 connected".
                                 self?.wsState = .disconnected
-                                presenter?.present(error)
                             }
                         }
                     }
@@ -348,10 +361,14 @@ public final class RealRoomViewModel: RoomViewModel {
                     // 与 (nil, A) 分支同精神；同样 wrap in Task；空字符串守护.
                     // **fix-review round 1 P2（Story 12.7）**：旧 `try?` 路径吞掉 sync failure
                     // → A→B 切换 connect 抛错时 wsState 卡 .connected 但实际无 socket；
-                    // 修复：do/catch → 失败时纠正为 .disconnected + present.
+                    // 修复：do/catch → 失败时纠正为 .disconnected.
+                    //
+                    // **fix-review round 3 P1（Story 12.7）**：catch 路径**不**调 `errorPresenter.present(error)`.
+                    // 同 nil→A 分支注释；WS connect failure 是后台 transient 状态，不应走全屏 retry overlay
+                    // block 整个 app hit-testing.
+                    // 详见 docs/lessons/2026-05-11-ws-connect-failure-must-not-use-error-presenter.md.
                     if !next.isEmpty {
                         let client = self.webSocketClient
-                        let presenter = self.errorPresenter
                         Task { @MainActor [weak self, weak client] in
                             guard let client else { return }
                             do {
@@ -362,7 +379,6 @@ public final class RealRoomViewModel: RoomViewModel {
                                        "RealRoomViewModel: A→B connect(roomId:%{public}@) failed: %{public}@",
                                        next, String(describing: error))
                                 self?.wsState = .disconnected
-                                presenter?.present(error)
                             }
                         }
                     }

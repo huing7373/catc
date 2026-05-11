@@ -1896,6 +1896,60 @@ final class RealRoomViewModelTests: XCTestCase {
         XCTAssertEqual(vm.wsState, .disconnected,
                        "connect 失败后 wsState 必须切回 .disconnected 让 UI 展示真实状态")
     }
+
+    // MARK: - case#story12-7-r3-P1 fix-review round 3: WS connect failure 必须 NOT 走 errorPresenter
+
+    /// 验证 fix-review round 3 P1#1：nil→A 分支当 client.connect(roomId:) 抛错时，
+    /// **不**应调 `errorPresenter.present(error)`.
+    ///
+    /// 背景（review 命中）：r1 的修复路径在 catch 内调 `presenter?.present(error)`. `WSError` 在
+    /// `AppErrorMapper` 没特殊映射 → fallback 到全屏 `.retry` overlay → `errorPresentationHost`
+    /// 禁用整个 app 的 hit-testing. transient WS 故障（server down / network flap / handshake
+    /// 错误）变成 block 整个 UI 的 modal，而不是仅反映 room 的 disconnected/reconnecting 状态.
+    ///
+    /// 正确语义：WS connect failure 通过 `wsState=.disconnected` 让 RoomScaffoldView 的 wsStateLabel
+    /// 展示给用户 + 重连状态机后续自动尝试 reconnect；**不**走全屏 retry overlay.
+    /// `errorPresenter` 仅用于"用户主动操作"的同步错误（如 onLeaveTap LeaveRoomUseCase 1009 → 仍走）.
+    ///
+    /// 详见 docs/lessons/2026-05-11-ws-connect-failure-must-not-use-error-presenter.md.
+    func testNilToAConnectFailureDoesNotInvokeErrorPresenter() async throws {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        mockWS.connectError = .tokenMissing
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+        // 显式注入 errorPresenter（与生产 RootView.bind 一致），但 WS connect failure 路径**不**应触达它.
+        vm.bind(
+            appState: appState,
+            webSocketClient: mockWS,
+            errorPresenter: presenter
+        )
+
+        await Task.yield()
+        await Task.yield()
+
+        // 进入房间 → 触发 nil→A 分支 → spawn Task → await connect 抛错 → wsState 应保持 .disconnected
+        appState.setCurrentRoomId("room_failconnect_r3")
+
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if !mockWS.connectCallArgs.isEmpty { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        await Task.yield()
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertGreaterThanOrEqual(mockWS.connectCallArgs.count, 1,
+                                    "nil→A 分支必须调用 connect(roomId:)（即使会抛错）")
+        XCTAssertEqual(vm.wsState, .disconnected,
+                       "connect 失败后 wsState 必须切回 .disconnected（r1 修复，保留）")
+        // **关键断言**（r3 P1#1）：errorPresenter **不**应被 WS connect failure 触发
+        XCTAssertNil(presenter.current,
+                     "WS connect failure 是后台 transient 状态，**禁止**走 errorPresenter 路径"
+                     + "（防 regression：r1 误把 presenter.present(error) 加进 catch → AppErrorMapper "
+                     + "fallback 到全屏 .retry overlay block 整个 app hit-testing）")
+    }
 }
 
 // MARK: - Inline mocks for Story 12.7

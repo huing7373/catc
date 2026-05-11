@@ -249,12 +249,19 @@ struct RootView: View {
             // 无 backend → HTTP 失败 → `RoomScaffoldView` 永远不出现 → `testJoinRoomModalCrossScreenJoinFlow`
             // 等依赖 fallback 的回归用例持续 broken.
             //
-            // 仅排除 UseCase 注入；其他 bind（appState / webSocketClient 等）保持原路径不动 ——
-            // UITest 路径下 webSocketClient 注入是无害的（无 token / 不 connect 即可，subscribeRoomIdConnect
-            // 内 startConsumingMessages 在 currentRoomId 为 nil 时不启 task；UITEST_FORCE_IN_ROOM 写入
-            // currentRoomId 后会启动，但 WebSocketClientImpl 没 token 会 fail-fast，不影响 UI scaffold 验证）.
+            // **Story 12.7 r3 [P1] fix**（codex review）：扩展上一轮 r2 gate 的精神 —— UITEST_SKIP_GUEST_LOGIN
+            // 路径下 `webSocketClient` 与 `errorPresenter` 同样**不**注入：
+            //   · `webSocketClient`：UITEST_FORCE_IN_ROOM 写 currentRoomId 后 `subscribeRoomIdConnect`
+            //     nil→A 分支会尝试 real `connect(roomId:)`；UITEST 无 token → 抛 `WSError.tokenMissing`.
+            //     即使 WS connect failure 现已不走 errorPresenter（r3 P1#1 修），仍会触发额外背景
+            //     Task 与日志噪声，且 UITest 验证 RoomScaffoldView 直接渲染时无需真实 WS.
+            //   · `errorPresenter`：UITEST 路径下若 onLeaveTap 走 fallback 已不需要 presenter；
+            //     业务 onCreateTap / onJoinTap 也走 fallback（无 UseCase）→ 注入 presenter 亦无用途.
+            //     保留 nil 让 vm 完全脱离 errorPresentationHost 路径，避免 UITest 期间任何透传
+            //     至 modal retry overlay 的可能性（防回归）.
             //
-            // 详见 docs/lessons/2026-05-11-uitest-launch-path-must-preserve-usecase-nil-fallback.md.
+            // 详见 docs/lessons/2026-05-11-uitest-launch-path-must-preserve-usecase-nil-fallback.md
+            // 与 docs/lessons/2026-05-11-uitest-skip-real-ws-and-error-presenter-wiring.md.
             let isUITestSkipGuestLogin: Bool = {
                 #if DEBUG
                 return ProcessInfo.processInfo.environment["UITEST_SKIP_GUEST_LOGIN"] == "1"
@@ -275,11 +282,17 @@ struct RootView: View {
                 //
                 // Story 12.7 r2 [P1] fix：UITEST 路径下 `leaveRoomUseCase` 传 nil → onLeaveTap 走老 fallback
                 // 直写 appState.setCurrentRoomId(nil)（与 UITEST_FORCE_IN_ROOM 路径配套；让 leave 不走 HTTP）.
+                //
+                // Story 12.7 r3 [P1] fix：UITEST 路径下 `webSocketClient` 与 `errorPresenter` 同样传 nil ——
+                // 防止 UITEST_FORCE_IN_ROOM 触发 nil→A `connect(roomId:)` 抛 WSError.tokenMissing,
+                // 让 vm 完全走 nil-fallback 路径（wsState 保持 .disconnected；RoomScaffoldView 仍渲染）.
+                // 与 RealHomeViewModel.bind / RealFriendsViewModel.bind 的 UITEST gate 同精神.
+                // 详见 docs/lessons/2026-05-11-uitest-skip-real-ws-and-error-presenter-wiring.md.
                 realRoomVM.bind(
                     appState: appState,
-                    webSocketClient: container.webSocketClient,
+                    webSocketClient: isUITestSkipGuestLogin ? nil : container.webSocketClient,
                     leaveRoomUseCase: isUITestSkipGuestLogin ? nil : container.makeLeaveRoomUseCase(appState: appState),
-                    errorPresenter: container.errorPresenter
+                    errorPresenter: isUITestSkipGuestLogin ? nil : container.errorPresenter
                 )
             }
             // Story 37.9 AC5 Task 5.4：与 RealRoomViewModel.bind 同精神，
