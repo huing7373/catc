@@ -202,15 +202,31 @@ public final class RealRoomViewModel: RoomViewModel {
             // 详见 docs/lessons/2026-05-11-ws-connect-failure-must-not-use-error-presenter.md.
             if let roomId = self.lastObservedRoomId, !roomId.isEmpty {
                 let client = self.webSocketClient
+                let connectingRoomId = roomId
                 Task { @MainActor [weak self, weak client] in
                     guard let client else { return }
                     do {
-                        try await client.connect(roomId: roomId)
+                        try await client.connect(roomId: connectingRoomId)
                         // 成功路径：占位 .connected 已 set，不重写.
                     } catch {
+                        // **fix-review round 4 P2（Story 12.7）**：stale connect failure 守护.
+                        // 旧实装在 catch 内**无条件** set `wsState = .disconnected`. 但用户在 connect
+                        // 还 await 时切换房间 / 离开（A→B / A→nil）会先调 disconnect()/prepareForReconnect()
+                        // 让旧 connect throw later —— 此 throw 属于 stale room A 的失败，**不**应覆盖
+                        // 当前 room B 的 wsState（可能 .connected / .reconnecting）.
+                        // 守护语义：捕获 connect 调用时的 connectingRoomId，await 返回后比对
+                        //   `lastObservedRoomId == connectingRoomId`，不匹配则丢弃信号 + log debug.
+                        // 与 12.4 r1 P1 `streamRoomId` 守护同精神：stale event 不能覆盖当前 room state.
+                        guard self?.lastObservedRoomId == connectingRoomId else {
+                            os_log(.debug,
+                                   "RealRoomViewModel.bind: discard stale connect failure (connectingRoomId=%{public}@, current=%{public}@)",
+                                   connectingRoomId,
+                                   self?.lastObservedRoomId ?? "<nil>")
+                            return
+                        }
                         os_log(.error,
                                "RealRoomViewModel.bind: connect(roomId:%{public}@) failed: %{public}@",
-                               roomId, String(describing: error))
+                               connectingRoomId, String(describing: error))
                         self?.wsState = .disconnected
                     }
                 }
@@ -312,16 +328,30 @@ public final class RealRoomViewModel: RoomViewModel {
                     // `.connectionStateChanged(.connected)` reactive 路径也对齐（`handle(message:)` line 433-464）.
                     if !roomId.isEmpty {
                         let client = self.webSocketClient
+                        let connectingRoomId = roomId
                         Task { @MainActor [weak self, weak client] in
                             guard let client else { return }
                             do {
-                                try await client.connect(roomId: roomId)
+                                try await client.connect(roomId: connectingRoomId)
                                 // 成功路径：占位 .connected 已 set；不重复写避免与 .connectionStateChanged
                                 // reactive 路径时序竞争（receive loop emit .connected 时已是真实信号）.
                             } catch {
+                                // **fix-review round 4 P2（Story 12.7）**：stale connect failure 守护.
+                                // 详见 docs/lessons/2026-05-11-ws-stale-connect-failure-must-be-gated-on-room-id.md.
+                                // 用户在 connect await 中切换房间（A→B）/ 离开（A→nil）会先调
+                                // disconnect()/prepareForReconnect() 让旧 connect throw later —— 此
+                                // throw 属于 stale room A 的失败，**不**应覆盖当前 room B 的 wsState.
+                                // 守护：比对 `lastObservedRoomId == connectingRoomId`，不匹配则丢弃.
+                                guard self?.lastObservedRoomId == connectingRoomId else {
+                                    os_log(.debug,
+                                           "RealRoomViewModel: discard stale nil→A connect failure (connectingRoomId=%{public}@, current=%{public}@)",
+                                           connectingRoomId,
+                                           self?.lastObservedRoomId ?? "<nil>")
+                                    return
+                                }
                                 os_log(.error,
                                        "RealRoomViewModel: nil→A connect(roomId:%{public}@) failed: %{public}@",
-                                       roomId, String(describing: error))
+                                       connectingRoomId, String(describing: error))
                                 // **关键纠错**：旧实装 `try?` 在此处吞掉信号；新实装把占位
                                 // `.connected` 还原成真实 `.disconnected`，UI 不再卡在"假 connected".
                                 self?.wsState = .disconnected
@@ -369,15 +399,28 @@ public final class RealRoomViewModel: RoomViewModel {
                     // 详见 docs/lessons/2026-05-11-ws-connect-failure-must-not-use-error-presenter.md.
                     if !next.isEmpty {
                         let client = self.webSocketClient
+                        let connectingRoomId = next
                         Task { @MainActor [weak self, weak client] in
                             guard let client else { return }
                             do {
-                                try await client.connect(roomId: next)
+                                try await client.connect(roomId: connectingRoomId)
                                 // 成功路径：占位 .connected 已 set，不重写.
                             } catch {
+                                // **fix-review round 4 P2（Story 12.7）**：stale connect failure 守护.
+                                // 详见 docs/lessons/2026-05-11-ws-stale-connect-failure-must-be-gated-on-room-id.md.
+                                // A→B 切换 connect 还在 await 时用户再切到 C 或离开 → 旧 disconnect()
+                                // 让本 connect throw later. 此 throw 属于 stale room B 的失败，
+                                // 不应覆盖当前 room C 的 wsState.
+                                guard self?.lastObservedRoomId == connectingRoomId else {
+                                    os_log(.debug,
+                                           "RealRoomViewModel: discard stale A→B connect failure (connectingRoomId=%{public}@, current=%{public}@)",
+                                           connectingRoomId,
+                                           self?.lastObservedRoomId ?? "<nil>")
+                                    return
+                                }
                                 os_log(.error,
                                        "RealRoomViewModel: A→B connect(roomId:%{public}@) failed: %{public}@",
-                                       next, String(describing: error))
+                                       connectingRoomId, String(describing: error))
                                 self?.wsState = .disconnected
                             }
                         }

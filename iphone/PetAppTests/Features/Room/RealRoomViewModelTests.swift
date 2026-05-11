@@ -1950,6 +1950,135 @@ final class RealRoomViewModelTests: XCTestCase {
                      + "（防 regression：r1 误把 presenter.present(error) 加进 catch → AppErrorMapper "
                      + "fallback 到全屏 .retry overlay block 整个 app hit-testing）")
     }
+
+    // MARK: - case#story12-7-r4-P2 fix-review round 4: stale connect failure 不能覆盖当前 room 的 wsState
+
+    /// 验证 fix-review round 4 P2：用户在 connect(roomId:) 还 await 时切换房间（A→B），
+    /// 旧 connect 因 disconnect()/prepareForReconnect() throw later —— 此 throw 是 stale
+    /// room A 的失败，**不**应覆盖当前 room B 的 wsState（可能是 .connected 占位 / .reconnecting）.
+    ///
+    /// 旧实装 bug：catch 内无条件 `self?.wsState = .disconnected` → stale failure for room A
+    /// 覆盖 current room B 的 .connected → RoomScaffoldView 显示错误的连接状态.
+    ///
+    /// 新实装：catch 内 guard `lastObservedRoomId == connectingRoomId` 守护，不匹配丢弃 + log.
+    /// 与 Story 12.4 r1 P1 `streamRoomId` 守护同精神 —— stale event 不能覆盖当前 room state.
+    func testStaleConnectFailureDoesNotOverwriteCurrentRoomWsState() async throws {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        // 关键：开启 gate，让 connect 调用 await 不立即返回，让我们能在 mid-flight 切换 room
+        mockWS.connectShouldGate = true
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. 进入 room_A → 触发 nil→A 分支 spawn Task：appState/sink → connect(roomId: "room_A")
+        //    本 connect 调用因 gate 而 await 卡住 —— vm 已 sync set wsState = .connected 占位.
+        appState.setCurrentRoomId("room_A")
+
+        // 等 connect 被调（gate 卡在 await）
+        let deadline1 = Date().addingTimeInterval(1.0)
+        while Date() < deadline1 {
+            if !mockWS.connectCallArgs.isEmpty { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(mockWS.connectCallArgs, ["room_A"], "connect 应被调一次 with room_A")
+        XCTAssertEqual(vm.wsState, .connected, "nil→A 占位 wsState 应为 .connected")
+
+        // 2. 用户在 room_A connect mid-flight 切到 room_B —— sink 走 A→B 分支：
+        //    disconnect(旧) + prepareForReconnect + 新 connect(roomId: "room_B")（也走 gate）.
+        //    此时 lastObservedRoomId 已经是 "room_B"；占位 wsState 仍 .connected.
+        appState.setCurrentRoomId("room_B")
+        await Task.yield()
+        await Task.yield()
+
+        // 等 room_B 的 connect 被调
+        let deadline2 = Date().addingTimeInterval(1.0)
+        while Date() < deadline2 {
+            if mockWS.connectCallArgs.count >= 2 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(mockWS.connectCallArgs, ["room_A", "room_B"],
+                       "A→B 切换后应有 room_A + room_B 两次 connect 调用")
+        XCTAssertEqual(vm.wsState, .connected, "A→B 切换占位 wsState 仍应为 .connected")
+
+        // 3. 释放 room_A 的 connect with throwing —— 模拟 disconnect 触发的 stale failure.
+        //    旧实装：catch 无条件 `wsState = .disconnected` → 覆盖 room_B 的 .connected → bug.
+        //    新实装：guard `lastObservedRoomId == "room_A"` 失败（current = "room_B"）→ 丢弃信号.
+        mockWS.releaseConnect(at: 0, throwing: true)
+
+        // 让 catch 跑掉
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+
+        // **关键断言**：stale room_A connect 失败**不**应覆盖 room_B 的 wsState.
+        XCTAssertEqual(vm.wsState, .connected,
+                       "stale room_A connect failure 不能覆盖 current room_B 的 wsState（旧实装 bug：catch 无条件 set .disconnected 让 RoomScaffoldView 显示错误连接状态）")
+        XCTAssertEqual(vm.roomId, "room_B", "vm.roomId 仍应是 room_B")
+
+        // 4. 反向断言：room_B 的 connect 失败仍**应**正常更新 wsState（守护只挡 stale 不误伤当前 room）.
+        mockWS.releaseConnect(at: 1, throwing: true)
+
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(vm.wsState, .disconnected,
+                       "current room_B 的 connect 失败应正常切到 .disconnected（守护只挡 stale，不误伤）")
+    }
+
+    /// 验证 fix-review round 4 P2：用户在 connect mid-flight 直接离开房间（A→nil），
+    /// 旧 connect throw later —— stale failure 不应在已离开房间时覆盖 wsState（lastObservedRoomId == nil）.
+    /// 离开路径 A→nil 由 sink 直接 set wsState = .disconnected，stale connect failure 不应改 wsState（已经是 .disconnected 了就保持）.
+    /// 本断言核心：捕获守护语义在 lastObservedRoomId == nil 时也成立（不抛错、不 race log）.
+    func testStaleConnectFailureAfterLeaveDoesNotMutateWsState() async throws {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        mockWS.connectShouldGate = true
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. 进入 room_A → connect await 卡在 gate
+        appState.setCurrentRoomId("room_A")
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if !mockWS.connectCallArgs.isEmpty { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(vm.wsState, .connected)
+
+        // 2. 用户离开（A→nil）—— sink 走 A→nil 分支：disconnect + 清空 + wsState = .disconnected
+        appState.setCurrentRoomId(nil)
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(vm.wsState, .disconnected, "A→nil 离开应同步 set wsState = .disconnected")
+
+        // 3. 释放 room_A 的 connect with throwing —— stale failure.
+        //    守护：lastObservedRoomId (nil) != "room_A" → 丢弃，不改 wsState.
+        mockWS.releaseConnect(at: 0, throwing: true)
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(vm.wsState, .disconnected,
+                       "离开后 stale connect failure 不应再 mutate wsState（保持 .disconnected；守护层丢弃信号）")
+        XCTAssertNil(vm.roomId, "vm.roomId 应仍为 nil")
+    }
 }
 
 // MARK: - Inline mocks for Story 12.7

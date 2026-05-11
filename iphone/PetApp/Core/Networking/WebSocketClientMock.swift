@@ -37,10 +37,34 @@ public final class WebSocketClientMock: WebSocketClient, @unchecked Sendable {
     public var connectError: WSError?
     public var sendError: WSError?
 
+    /// fix-review round 4 P2（Story 12.7）测试用：让 `connect(roomId:)` await 一个外部 gate
+    /// 才完成，模拟"用户在 connect mid-flight 切换房间"的 race 时序.
+    /// 默认 nil = 不 gate（connect 立即返回 / 立即抛 connectError）；
+    /// non-nil = 每次 connect 调用追加一个 continuation；测试调 `releaseConnect(at:)` 触发完成.
+    /// 与现有 `connectError` 的协作：gate 释放后再判 `connectError` 是否抛错 ——
+    ///   gateContinuations resume → 检查 connectError → throw / return.
+    private var gateContinuations: [CheckedContinuation<Void, Error>] = []
+
+    /// 开启 connect gate（async）—— 启用后 connect 调用会 await 直到 releaseConnect.
+    public var connectShouldGate: Bool = false
+
     public init() {
         let (stream, cont) = AsyncStream<WSMessage>.makeStream()
         self.currentStream = stream
         self.currentContinuation = cont
+    }
+
+    /// fix-review round 4 P2 测试用：释放第 `index` 个 gate（按 connect 调用顺序）.
+    /// `throwing` = true → 让 await 端 throw stub error（模拟 disconnect 触发的 stale failure）；
+    /// false → 正常完成（成功 connect）.
+    public func releaseConnect(at index: Int, throwing: Bool = false) {
+        guard index < gateContinuations.count else { return }
+        let cont = gateContinuations[index]
+        if throwing {
+            cont.resume(throwing: WSError.connectionFailed(underlyingDescription: "MockStaleClose"))
+        } else {
+            cont.resume()
+        }
     }
 
     /// 测试用：手动 yield 消息驱动 RealRoomViewModel 解析路径.
@@ -56,8 +80,15 @@ public final class WebSocketClientMock: WebSocketClient, @unchecked Sendable {
     }
 
     /// Story 12.2 AC6：mock connect —— 不真实拨号，只记录调用 + 可选抛错.
+    /// fix-review round 4 P2：可选 gate 模式 —— `connectShouldGate = true` 时本调用 await
+    /// 直到 `releaseConnect(at:)` 触发；让单测能在 connect mid-flight 切换房间.
     public func connect(roomId: String) async throws {
         connectCallArgs.append(roomId)
+        if connectShouldGate {
+            try await withCheckedThrowingContinuation { cont in
+                self.gateContinuations.append(cont)
+            }
+        }
         if let err = connectError { throw err }
     }
 
