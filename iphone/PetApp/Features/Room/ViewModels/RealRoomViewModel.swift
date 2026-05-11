@@ -309,6 +309,16 @@ public final class RealRoomViewModel: RoomViewModel {
                 case (nil, .some(let roomId)):
                     // 分支 2：nil → A，进入房间.
                     //
+                    // **fix-review round 11 P2（Story 12.7）**：先 reset roster（与 A→B 分支对齐）.
+                    // 旧实装在 nil→A 切换时**不**清空 members / memberPetStates → UI 切到 RoomView 后
+                    // 仍展示 RoomScaffoldDefaults seed 的 4 个假成员，直到第一个 `room.snapshot` 到达
+                    // 才被 applySnapshot 覆盖；若 connect(roomId:) 抛错（token 缺失 / server down /
+                    // handshake error）→ snapshot 永远不到 → 假成员**永久残留**.
+                    // A→B 分支已 reset roster（line 407-408），nil→A 分支必须同语义对齐.
+                    // 详见 docs/lessons/2026-05-11-room-entry-must-clear-scaffold-roster-before-connect.md.
+                    self.members = []
+                    self.memberPetStates = [:]
+                    //
                     // **fix-review round 2 P1**：若 client 之前被 disconnect 过（leave-rejoin 路径：
                     //   A → nil → A'），其 `messages` stream 已被 finish；必须先调 `prepareForReconnect()`
                     //   重置 stream，否则新 consumer task 接到的是已 finish 的 stream，subsequent

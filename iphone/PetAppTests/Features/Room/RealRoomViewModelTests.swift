@@ -2182,6 +2182,114 @@ final class RealRoomViewModelTests: XCTestCase {
         XCTAssertEqual(vm.wsState, .connected,
                        "stale connect failure from replaced clientA 不应覆盖 current clientB 的 wsState（旧实装仅 gate on roomId → 同 roomId match → flip 回 .disconnected）")
     }
+
+    // MARK: - case#story12-7-r11-P2 fix-review round 11: nil→A must clear scaffold roster before connect
+
+    /// 验证 fix-review round 11 P2：subscribeRoomIdConnect 的 `nil → A` 分支必须在 connect 之前
+    /// **立即**清空 `members` / `memberPetStates`，与 `A → B` 分支 reset 行为对齐.
+    ///
+    /// 旧实装 bug：vm.init() 用 RoomScaffoldDefaults seed 了 4 个 mock 成员；当 currentRoomId 从 nil 切到 A
+    /// 时 sink 走 nil→A 分支**不**清空 roster → UI 立即切到 RoomView 但 `members` 仍是 scaffold 4 个假成员，
+    /// 直到第一个 `room.snapshot` 到达才被 applySnapshot 覆盖.
+    ///
+    /// 场景影响：
+    ///   - 首个 snapshot delayed → 用户短暂看到 4 个假成员（accuracy regression）
+    ///   - 若 `connect(roomId:)` 失败（token missing / server down / handshake error）→ snapshot 永远不到 →
+    ///     假成员**永久残留**直到用户离开房间
+    ///
+    /// 新实装：sink 内进入 nil→A 分支后**立即**（在 `prepareForReconnect()` / connect Task 起之前）
+    /// `members = []` + `memberPetStates = [:]`，与 A→B 分支同语义.
+    ///
+    /// 详见 docs/lessons/2026-05-11-room-entry-must-clear-scaffold-roster-before-connect.md.
+    func testNilToAClearsScaffoldRosterBeforeConnect() async throws {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        // gate connect 让我们能在 connect 之前 / 期间断言 members 状态（snapshot 一定不会到）
+        mockWS.connectShouldGate = true
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        // baseline: vm.members 应被 init() 用 RoomScaffoldDefaults 4 个假成员 seed
+        XCTAssertEqual(vm.members.count, RoomScaffoldDefaults.members.count,
+                       "vm.init() 应 seed RoomScaffoldDefaults.members 作为占位")
+        XCTAssertEqual(vm.members.first?.id, "u1",
+                       "baseline 首成员应是 RoomScaffoldDefaults seed 的 u1")
+
+        // 提前往 memberPetStates 写一个 entry（模拟 Epic 14 后真实状态；本 story 不会写入，但防御性测试）
+        // —— 让我们能验证 nil→A 分支同时清空了 memberPetStates.
+        // 注：vm.memberPetStates 是 @Published 字段，可以从外部 mutate.
+        vm.memberPetStates = ["seedKey": .rest]
+        XCTAssertEqual(vm.memberPetStates.count, 1, "baseline memberPetStates 应有 1 条")
+
+        await Task.yield()
+        await Task.yield()
+
+        // 触发 nil → A 切换
+        appState.setCurrentRoomId("room_fresh")
+
+        // 等 connect 被调（confirm sink 已跑完 nil→A 分支同步部分）
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if !mockWS.connectCallArgs.isEmpty { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(mockWS.connectCallArgs, ["room_fresh"],
+                       "nil→A 分支必须调 connect(roomId:)（gate 卡在 await）")
+
+        // **关键断言**：sink 同步路径已跑完（connect 调用证明此点），members / memberPetStates
+        // 必须**立即**清空 —— **不**等 snapshot 到达，**不**等 connect 完成.
+        XCTAssertEqual(vm.members, [],
+                       "nil→A 分支必须立即清空 members（与 A→B 分支对齐）；"
+                       + "否则 connect 失败时 RoomScaffoldDefaults seed 假成员会永久残留")
+        XCTAssertEqual(vm.memberPetStates, [:],
+                       "nil→A 分支必须立即清空 memberPetStates（与 A→B 分支对齐）")
+
+        // 反向断言：占位 wsState 仍为 .connected（与既有 nil→A 语义一致；nil→A 同步 set .connected）
+        XCTAssertEqual(vm.wsState, .connected,
+                       "nil→A 同步 set wsState=.connected 不受 roster reset 影响")
+        XCTAssertEqual(vm.roomId, "room_fresh",
+                       "vm.roomId 派生自 appState.currentRoomId 仍为新房间")
+    }
+
+    /// 配套验证：上面 nil→A reset 测试的"connect 失败"等价路径 —— 即使 connect 抛错，
+    /// roster 也应在 connect 调用前**已经**被 reset（不依赖 snapshot 到达）.
+    /// 验证 review 命中的"connect 失败 → 假成员永久残留"场景被根治.
+    func testNilToAClearsRosterEvenWhenConnectFails() async throws {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        // 让 connect 抛错（模拟 token missing / server down）—— snapshot 永远不会到达
+        mockWS.connectError = .tokenMissing
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        // baseline: seed scaffold 4 成员
+        XCTAssertEqual(vm.members.count, 4, "baseline members 应是 4 个 RoomScaffoldDefaults seed")
+
+        await Task.yield()
+        await Task.yield()
+
+        // 触发 nil → A → connect 抛错
+        appState.setCurrentRoomId("room_failconnect")
+
+        // 等 connect 被调（即使抛错也会被记入 connectCallArgs）
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if !mockWS.connectCallArgs.isEmpty { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        // 多 yield 让 catch 路径跑完（wsState=.disconnected）
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+
+        // **关键断言**：即使 connect 失败 → snapshot 永远不会到 → members 必须保持空，不能残留 scaffold seed.
+        XCTAssertEqual(vm.members, [],
+                       "connect 失败时 snapshot 永远不到达；nil→A 分支提前 reset roster 保证假成员不残留")
+        XCTAssertEqual(vm.wsState, .disconnected,
+                       "connect 抛错时 wsState 应被纠正为 .disconnected（fix-review round 1 P2 不回退）")
+    }
 }
 
 // MARK: - Inline mocks for Story 12.7

@@ -260,3 +260,4 @@
 | 2026-05-11 | [业务错误码 fallback 必须 forward 原 error（禁止 rewrap 成空 message/requestId）（12-7 r8）](2026-05-11-business-error-fallback-must-forward-original-12-7-r8.md) | 1 | error-handling | `<pending>` |
 | 2026-05-11 | [异步 error catch 必须做 stale-guard：roomId 以及 client identity 两层都要看（12-7 r9）](2026-05-11-async-error-handler-must-stale-guard-room-id-and-client-identity-12-7-r9.md) | 1 | error-handling | `<pending>` |
 | 2026-05-11 | [Room navigation 用 monotonic generation token 而非 currentRoomId equality（ABA race 根治）（12-7 r10）](2026-05-11-room-navigation-generation-token-not-room-id-equality-12-7-r10.md) | 1 | architecture | `<pending>` |
+| 2026-05-11 | [Room 进入路径必须先清 scaffold roster 再 connect（nil→A 与 A→B 分支同语义）（12-7 r11）](2026-05-11-room-entry-must-clear-scaffold-roster-before-connect-12-7-r11.md) | 1 | architecture | `<pending>` |
