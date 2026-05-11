@@ -140,7 +140,17 @@ public final class RealHomeViewModel: HomeViewModel {
         // Story 12.7 AC5: 调 CreateRoomUseCase（POST /rooms → 写 appState.currentRoomId → UI 自动切到 RoomView）.
         // 失败路径：6003（已在房间）→ alert "你已经在房间里了"；其他错误走 ErrorPresenter 默认 mapper.
         guard let useCase = self.createRoomUseCase else {
-            os_log(.debug, "RealHomeViewModel.onCreateTap (no CreateRoomUseCase wired; no-op)")
+            // Story 12.7 r5 [P3] fix（codex review）：useCase nil fallback —— 保留 UITEST_SKIP_GUEST_LOGIN=1
+            // 启动模式下 / RootView 老 wire 路径下点 Create CTA 仍能切到 RoomView 的视觉行为.
+            //
+            // 与 onJoinRoomConfirm 的 fallback 同精神（直接 `localAppState?.setCurrentRoomId(roomId)`）：
+            // 无 backend 的 UI tests / previews 下用户仍应看到 RoomView 进入动画 + RoomScaffoldView,
+            // 否则 create CTA 变成 hard no-op（join / leave / friend-join 都还保留 fallback —— 只有 create 漏了）.
+            //
+            // 占位 roomId 用 "1234567"（与 MockHomeViewModel.onCreateTap 同精神 placeholder).
+            // 详见 docs/lessons/2026-05-11-create-room-nil-fallback-must-mutate-state.md.
+            os_log(.debug, "RealHomeViewModel.onCreateTap (fallback: no CreateRoomUseCase wired; write appState.currentRoomId placeholder directly)")
+            self.localAppState?.setCurrentRoomId("1234567")
             return
         }
         let presenter = self.localErrorPresenter

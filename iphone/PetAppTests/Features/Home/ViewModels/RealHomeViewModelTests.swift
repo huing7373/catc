@@ -178,6 +178,29 @@ final class RealHomeViewModelTests: XCTestCase {
         XCTAssertEqual(mockJoin.lastArgumentsSnapshot().first as? String, "3001")
     }
 
+    // MARK: - case#story12-7-r5-P3 regression: onCreateTap useCase nil fallback 必须 mutate appState
+
+    /// useCase nil（UITEST_SKIP_GUEST_LOGIN=1 / RootView 老 wire / preview）下点 Create CTA
+    /// 必须仍写 appState.currentRoomId 到 placeholder —— 让 HomeContainerView 切到 RoomView,
+    /// 与 onJoinRoomConfirm / leaveRoomUseCase nil fallback 同精神（不能是 hard no-op）.
+    /// 对应 lesson 2026-05-11-create-room-nil-fallback-must-mutate-state.md.
+    func testOnCreateTapWithNilUseCaseFallsBackToPlaceholderRoomId() async {
+        let appState = AppState()
+        let vm = RealHomeViewModel(appState: appState)
+        // 不调 bind() —— 模拟 UITEST_SKIP_GUEST_LOGIN=1 / RootView 老 wire 路径下 createRoomUseCase 仍为 nil.
+        XCTAssertNil(appState.currentRoomId, "前置条件：未点 CTA 前 currentRoomId 应为 nil")
+
+        vm.onCreateTap()
+        // fallback 是同步路径（直接 localAppState?.setCurrentRoomId）—— 不需要等 Task.
+        // 但为防未来重构改成异步，给 1 tick 缓冲.
+        await Task.yield()
+
+        XCTAssertNotNil(appState.currentRoomId,
+                        "useCase nil fallback 必须 mutate appState.currentRoomId —— 否则 create CTA 在 UITEST / preview 路径下变成 hard no-op")
+        XCTAssertEqual(appState.currentRoomId, "1234567",
+                       "placeholder roomId 应为 '1234567'（与 MockHomeViewModel.onCreateTap fallback 一致精神）")
+    }
+
     // MARK: - helpers
 
     private func waitForCallCount(mock: MockBase, method: String, expected: Int) async throws {

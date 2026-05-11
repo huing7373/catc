@@ -729,14 +729,33 @@ public final class RealRoomViewModel: RoomViewModel {
             return
         }
         let presenter = self.errorPresenter
+        // Story 12.7 r5 [P2] fix（codex review）：capture `target = appState.currentRoomId` 入口时刻 ——
+        // 用于 catch 块 guard `appState.currentRoomId == target` 防 stale-thrown-error 把不属于
+        // 当前房间的失败 overlay 弹到新房间之上.
+        //
+        // 场景可达：tab bar 仍可用 → 用户 leave A in-flight 时切 tab → join B → A 的 leave 抛 1009/network
+        // 迟到 → 老实装 catch 块**无条件** present global error → stale error overlay 出现在 room B.
+        //
+        // `DefaultLeaveRoomUseCase` 已经 guard 200 / 6004 stale-response（r2 P2 fix）；thrown-error
+        // 路径同语义补齐 —— mismatch 时静默 skip + log debug，不抛错也不弹 UI.
+        // 详见 docs/lessons/2026-05-11-leave-room-thrown-error-also-needs-stale-guard.md.
+        let target = self.appState?.currentRoomId
         Task { @MainActor [weak self] in
-            guard self != nil else { return }
+            guard let self else { return }
             do {
                 try await useCase.execute()
                 // 成功路径 / 6004 视同成功：UseCase 已写 setCurrentRoomId(nil) → subscribeRoomIdConnect
                 // 的 A → nil 分支自动触发 disconnect + 清 roster + wsState = .disconnected →
                 // HomeContainerView 自动切回 HomeView.
             } catch {
+                // r5 [P2] fix: guard target == current 防 stale 错误 overlay 弹到新房间之上.
+                let liveRoomId = self.appState?.currentRoomId
+                guard liveRoomId == target else {
+                    os_log(.info,
+                           "RealRoomViewModel.onLeaveTap: stale leave error (target=%{public}@, current=%{public}@); skip errorPresenter to avoid overlay on unrelated room",
+                           target ?? "nil", liveRoomId ?? "nil")
+                    return
+                }
                 // 其他 APIError 透传给 ErrorPresenter（默认 mapper 路径，alert / retry）.
                 // appState 保留原值（用户仍在 RoomView 内可重试）.
                 os_log(.error, "RealRoomViewModel.onLeaveTap LeaveRoomUseCase error: %{public}@",

@@ -1782,6 +1782,44 @@ final class RealRoomViewModelTests: XCTestCase {
                        "1009 透传应保留 appState.currentRoomId（用户在 RoomView 内重试）")
     }
 
+    /// case#story12-7-r5-P2 regression: leave A in-flight 期间用户切到 room B → A 的 useCase 抛 1009 →
+    /// **不**应 present errorPresenter（不让 stale error overlay 弹到 room B 之上）.
+    /// 与 lesson 2026-05-11-leave-room-thrown-error-also-needs-stale-guard.md 对应.
+    func testOnLeaveTapStaleThrownErrorAfterRoomSwitchSkipsErrorPresenter() async throws {
+        let appState = AppState()
+        appState.setCurrentRoomId("room_A")
+        let mockWS = WebSocketClientMock()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockLeave = MockLeaveRoomUseCaseRoom()
+        // mock 在 execute() 内**先**模拟用户切到 room_B，再抛 1009 模拟迟到的网络错误.
+        // 这与生产场景对齐：HTTP request in-flight 期间 tab 切 + join B → A 的 leave 后抛 1009 → catch 块读 current 已是 B.
+        mockLeave.onExecute = { @MainActor in
+            appState.setCurrentRoomId("room_B")
+        }
+        mockLeave.executeStub = .failure(APIError.business(code: 1009, message: "服务繁忙", requestId: "req_stale"))
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+        vm.bind(
+            appState: appState,
+            webSocketClient: mockWS,
+            leaveRoomUseCase: mockLeave,
+            errorPresenter: presenter
+        )
+
+        await Task.yield()
+        await Task.yield()
+
+        vm.onLeaveTap()
+        // 等 useCase 调用完成（execute 被记一次后 catch block 已跑过）.
+        try? await waitForCallCountStory12_7(mock: mockLeave, method: "execute()", expected: 1)
+        // 多一个 runloop tick 让 catch block 内的 MainActor 调度落地.
+        for _ in 0..<5 { await Task.yield() }
+
+        XCTAssertNil(presenter.current,
+                     "stale thrown error（appState 已切到 room_B）必须 skip errorPresenter —— 不让 stale overlay 弹到新房间之上")
+        XCTAssertEqual(appState.currentRoomId, "room_B",
+                       "appState.currentRoomId 应保留为新房间 room_B（不被 stale leave 失败回滚）")
+    }
+
     /// case#story12-7-4 happy: subscribeRoomIdConnect nil → A → mock WebSocketClient.connect(roomId:) 被调用一次
     func testSubscribeRoomIdConnectNilToATriggersConnect() async {
         let appState = AppState()

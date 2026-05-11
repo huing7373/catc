@@ -254,3 +254,4 @@
 | 2026-05-11 | [UITEST 启动路径必须保留 UseCase nil-fallback + LeaveRoom 必须 guard target==current 防 stale-response 抹掉新房间（12-7 r2）](2026-05-11-uitest-fallback-and-leave-room-stale-response-guard.md) | 2 | testing, architecture | `<pending>` |
 | 2026-05-11 | [WS connect 失败不走 errorPresenter & UITEST 路径必须跳过 real WS / errorPresenter wiring（12-7 r3）](2026-05-11-ws-connect-failure-and-uitest-real-ws-wiring-12-7-r3.md) | 2 | error-handling, testing | `<pending>` |
 | 2026-05-11 | [stale connect(roomId:) failure 必须 gated on lastObservedRoomId（12-7 r4）](2026-05-11-ws-stale-connect-failure-must-be-gated-on-room-id-12-7-r4.md) | 1 | architecture | `<pending>` |
+| 2026-05-11 | [leave thrown-error 也要 stale guard + create useCase nil 不能 hard no-op（12-7 r5）](2026-05-11-leave-thrown-error-stale-guard-and-create-nil-fallback-12-7-r5.md) | 2 | architecture | `<pending>` |
