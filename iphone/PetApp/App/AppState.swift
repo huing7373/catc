@@ -52,7 +52,13 @@ public final class AppState: ObservableObject {
     /// 用于解决 currentRoomId equality 无法区分的 ABA race（detail 见 lesson
     /// `2026-05-11-room-navigation-generation-token-not-room-id-equality.md`）.
     ///
-    /// 不变量：`setCurrentRoomId(_:)` 每次调用（无论新值是否等于旧值）都 +1.
+    /// 不变量（bump 入口，**仅以下三个**）：
+    ///   1. `setCurrentRoomId(_:)` 每次调用（无论新值是否等于旧值）都 +1（room flow 显式入口）.
+    ///   2. `applyHomeData(_:)` 仅当 `data.room.currentRoomId` 与现状 `self.currentRoomId` **不一致**
+    ///      时才 +1（Story 12.7 r12 [P2] fix —— 防 HomeViewModel.loadHome() retry / bootstrap
+    ///      hydrate 等非 navigation refresh 误伤 in-flight room request 的 stale-guard）.
+    ///   3. `reset()` 每次调用都 +1（用户登出 / 切身份是显式 navigation event）.
+    ///
     /// 用法（UseCase / ViewModel catch-path）：
     ///   - 入口 capture `let entryGen = appState.roomNavigationGeneration`
     ///   - async await 返回后 guard `appState.roomNavigationGeneration == entryGen`
@@ -81,10 +87,22 @@ public final class AppState: ObservableObject {
         self.currentPet = data.pet
         self.currentStepAccount = data.stepAccount
         self.currentChest = data.chest
-        // Story 12.7 r10 [P2] fix: hydrate 也算一次 room navigation cycle —— 任何启动 / 重登陆
-        // 后的 in-flight stale create/join/leave response 都必须被新 generation 拒绝.
+        // Story 12.7 r12 [P2] fix（codex review r12）：仅当 `currentRoomId` **实际变更** 时才 bump
+        // generation token. 早 r10 实装无条件 bump → HomeViewModel.loadHome() retry 或 RootView
+        // bootstrap/cold-start hydrate（与 room navigation 无关的 user/pet/step/chest 更新）会让
+        // generation +1 → in-flight create/join/leave response 的 exact-equality stale-guard 失败 →
+        // 合法 response 被误判 stale 而丢弃（即使用户从未离开 room flow）.
+        //
+        // 修复后语义：只有 `data.room.currentRoomId` 与现状不一致（如启动 hydrate 从 nil → "X" 或
+        // 服务端推送显示房间被踢出 "X" → nil）才算 navigation cycle. user/pet/stepAccount/chest 等
+        // 其他字段的常规 hydrate refresh 不再误伤 room flow in-flight 请求.
+        //
+        // 详见 lesson `2026-05-11-apply-home-data-bump-only-on-room-id-change.md`.
+        let oldCurrentRoomId = self.currentRoomId
         self.currentRoomId = data.room.currentRoomId
-        self.roomNavigationGeneration &+= 1
+        if data.room.currentRoomId != oldCurrentRoomId {
+            self.roomNavigationGeneration &+= 1
+        }
     }
 
     /// Reset 流程（ADR-0010 §3.7）：用户主动登出 / 重置身份时清空全部 domain state.

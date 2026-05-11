@@ -141,17 +141,78 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(appState.currentRoomId, "A", "currentRoomId 回到 A 是 ABA 场景的核心特征")
     }
 
-    /// applyHomeData 和 reset 也应 bump generation（防 in-flight stale response 跨 lifecycle 应用）.
-    func testRoomNavigationGenerationBumpsOnHydrateAndReset() {
+    /// reset 也应 bump generation（防 in-flight stale response 跨 lifecycle 应用）.
+    /// Story 12.7 r12 [P2] fix（codex review r12）：applyHomeData 已改为**仅当 currentRoomId
+    /// 实际变更时** bump（区别测试见下方 5 个 applyHomeData* 用例）.
+    func testRoomNavigationGenerationBumpsOnReset() {
         let appState = AppState()
-        let g0 = appState.roomNavigationGeneration
-
         appState.applyHomeData(makeSampleHomeData(currentRoomId: "X"))
         let g1 = appState.roomNavigationGeneration
-        XCTAssertGreaterThan(g1, g0, "applyHomeData 也算 navigation cycle → +1")
 
         appState.reset()
         let g2 = appState.roomNavigationGeneration
         XCTAssertGreaterThan(g2, g1, "reset 也算 navigation cycle → +1")
+    }
+
+    // MARK: - Story 12.7 r12 [P2] fix（codex review r12）: applyHomeData 仅在 currentRoomId 实际变更时 bump
+
+    /// applyHomeData 不变 currentRoomId 时 **不** bump generation —— 防 HomeViewModel.loadHome()
+    /// retry 或 RootView bootstrap/cold-start path 的 home hydrate 误伤 in-flight room flow request.
+    func testApplyHomeDataDoesNotBumpWhenRoomIdUnchanged() {
+        let appState = AppState()
+        // 先 hydrate 一次进 room "X"，generation 从 0 → 1（nil → "X"）.
+        appState.applyHomeData(makeSampleHomeData(currentRoomId: "X"))
+        let gAfterFirstHydrate = appState.roomNavigationGeneration
+
+        // 再次 hydrate 同一 currentRoomId（典型场景：HomeViewModel.loadHome() retry）
+        // → generation 不应 bump.
+        appState.applyHomeData(makeSampleHomeData(currentRoomId: "X"))
+        XCTAssertEqual(appState.roomNavigationGeneration, gAfterFirstHydrate,
+                       "currentRoomId 不变（X → X）→ generation 不变（防误伤 in-flight room request）")
+    }
+
+    /// applyHomeData currentRoomId 从 nil → "X" 时 bump generation（启动 / 首次 hydrate 是真实 navigation event）.
+    func testApplyHomeDataBumpsWhenRoomIdChangesFromNilToValue() {
+        let appState = AppState()
+        XCTAssertNil(appState.currentRoomId, "前置：currentRoomId 默认 nil")
+        let g0 = appState.roomNavigationGeneration
+
+        appState.applyHomeData(makeSampleHomeData(currentRoomId: "X"))
+        XCTAssertGreaterThan(appState.roomNavigationGeneration, g0,
+                             "currentRoomId nil → X（首次进 room）→ generation +1")
+    }
+
+    /// applyHomeData currentRoomId 从 "X" → nil 时 bump generation（server 推送显示用户被踢出 room）.
+    func testApplyHomeDataBumpsWhenRoomIdChangesFromValueToNil() {
+        let appState = AppState()
+        appState.applyHomeData(makeSampleHomeData(currentRoomId: "X"))
+        let g1 = appState.roomNavigationGeneration
+
+        appState.applyHomeData(makeSampleHomeData(currentRoomId: nil))
+        XCTAssertGreaterThan(appState.roomNavigationGeneration, g1,
+                             "currentRoomId X → nil（被踢出 / leave hydrate）→ generation +1")
+    }
+
+    /// applyHomeData currentRoomId 从 nil → nil 时 **不** bump generation —— 未登录 / 无房间用户
+    /// 周期性 hydrate 不应触发 navigation cycle.
+    func testApplyHomeDataDoesNotBumpWhenRoomIdStaysNil() {
+        let appState = AppState()
+        XCTAssertNil(appState.currentRoomId)
+        let g0 = appState.roomNavigationGeneration
+
+        appState.applyHomeData(makeSampleHomeData(currentRoomId: nil))
+        XCTAssertEqual(appState.roomNavigationGeneration, g0,
+                       "currentRoomId nil → nil（未在 room 的 hydrate）→ generation 不变")
+    }
+
+    /// applyHomeData currentRoomId 从 "X" → "Y" 时 bump generation（罕见，但 server 推送换 room 算 navigation event）.
+    func testApplyHomeDataBumpsWhenRoomIdChangesBetweenValues() {
+        let appState = AppState()
+        appState.applyHomeData(makeSampleHomeData(currentRoomId: "X"))
+        let g1 = appState.roomNavigationGeneration
+
+        appState.applyHomeData(makeSampleHomeData(currentRoomId: "Y"))
+        XCTAssertGreaterThan(appState.roomNavigationGeneration, g1,
+                             "currentRoomId X → Y（换 room hydrate）→ generation +1")
     }
 }
