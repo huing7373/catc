@@ -145,12 +145,29 @@ public final class RealFriendsViewModel: FriendsViewModel {
             return
         }
         let presenter = self.errorPresenter
+        // fix-review round 9 P2 (Story 12.7): catch-path stale guard.
+        // 场景：user 在 friends tab 点 join friend A 的 room "A" → join("A") HTTP in-flight 期间,
+        // user 通过另一路径（Home modal / 另一好友 inviting）切到 room "B"（setCurrentRoomId("B")）→
+        // join "A" HTTP 抛错（network / 1009 / 6002 等）迟到. 老实装无条件 present alert/error,
+        // stale overlay 弹在 room B 上.
+        // UseCase 内部已 guard stale **success**（r6 P1 fix）；catch 路径同精神补 entry==current
+        // guard. 与 RealHomeViewModel onCreateTap/onJoinRoomConfirm r9 P2 fix 同精神.
+        // 详见 docs/lessons/2026-05-11-async-error-handler-must-stale-guard-room-id-and-client-identity-12-7-r9.md.
+        let entryRoomId = self.appState?.currentRoomId
         Task { @MainActor [weak self] in
-            guard self != nil else { return }
+            guard let self else { return }
             do {
                 try await useCase.execute(roomId: targetRoomId)
                 // 成功 → no-op（UseCase 已写 appState.currentRoomId → HomeContainerView 自动切到 RoomView）.
             } catch {
+                // r9 P2 stale guard: mismatch 静默 skip + log debug，不调 ErrorPresenter.
+                let liveRoomId = self.appState?.currentRoomId
+                guard liveRoomId == entryRoomId else {
+                    os_log(.debug,
+                           "RealFriendsViewModel.onJoinFriendTap: stale error (entry=%{public}@, current=%{public}@); skip errorPresenter to avoid overlay on unrelated room",
+                           entryRoomId ?? "<nil>", liveRoomId ?? "<nil>")
+                    return
+                }
                 // r8 P2 lesson 2026-05-11-business-error-fallback-must-forward-original.md：
                 // unrecognized business code 必须 forward 原 error（保留 server message +
                 // requestId），不能合成空 APIError.business（会让 AppErrorMapper fallback 到

@@ -203,6 +203,7 @@ public final class RealRoomViewModel: RoomViewModel {
             if let roomId = self.lastObservedRoomId, !roomId.isEmpty {
                 let client = self.webSocketClient
                 let connectingRoomId = roomId
+                let connectingClient = client
                 Task { @MainActor [weak self, weak client] in
                     guard let client else { return }
                     do {
@@ -222,6 +223,20 @@ public final class RealRoomViewModel: RoomViewModel {
                                    "RealRoomViewModel.bind: discard stale connect failure (connectingRoomId=%{public}@, current=%{public}@)",
                                    connectingRoomId,
                                    self?.lastObservedRoomId ?? "<nil>")
+                            return
+                        }
+                        // **fix-review round 9 P2（Story 12.7）**：client-identity 守护.
+                        // 仅 lastObservedRoomId 校验不够 —— 若 bind 在同 roomId 下 swap 出新 client
+                        // instance（同房间内 token 刷新 / 测试场景），旧 client 的 in-flight connect
+                        // 因 swap-path 触发 disconnect 而 throw later. 此时 lastObservedRoomId 仍是
+                        // 同 roomId（match），但 wsState 已被新 client 切到 .connected → 老 catch 路径
+                        // 会错误 flip 回 .disconnected. 增加 client === capturedClient identity 校验,
+                        // mismatch 时丢弃失败信号.
+                        // 详见 docs/lessons/2026-05-11-async-error-handler-must-stale-guard-room-id-and-client-identity-12-7-r9.md.
+                        guard self?.webSocketClient === connectingClient else {
+                            os_log(.debug,
+                                   "RealRoomViewModel.bind: discard stale connect failure from replaced client (connectingRoomId=%{public}@)",
+                                   connectingRoomId)
                             return
                         }
                         os_log(.error,
@@ -329,6 +344,7 @@ public final class RealRoomViewModel: RoomViewModel {
                     if !roomId.isEmpty {
                         let client = self.webSocketClient
                         let connectingRoomId = roomId
+                        let connectingClient = client
                         Task { @MainActor [weak self, weak client] in
                             guard let client else { return }
                             do {
@@ -347,6 +363,17 @@ public final class RealRoomViewModel: RoomViewModel {
                                            "RealRoomViewModel: discard stale nil→A connect failure (connectingRoomId=%{public}@, current=%{public}@)",
                                            connectingRoomId,
                                            self?.lastObservedRoomId ?? "<nil>")
+                                    return
+                                }
+                                // **fix-review round 9 P2（Story 12.7）**：client-identity 守护.
+                                // 若 bind swap webSocketClient instance 但保持同 roomId, 旧 client 的
+                                // in-flight connect 因 swap-path disconnect() 而 throw later. 仅 roomId
+                                // 校验过不掉这种 race —— 增加 `webSocketClient === connectingClient`
+                                // identity 校验. 详见 docs/lessons/2026-05-11-async-error-handler-must-stale-guard-room-id-and-client-identity-12-7-r9.md.
+                                guard self?.webSocketClient === connectingClient else {
+                                    os_log(.debug,
+                                           "RealRoomViewModel: discard stale nil→A connect failure from replaced client (connectingRoomId=%{public}@)",
+                                           connectingRoomId)
                                     return
                                 }
                                 os_log(.error,
@@ -400,6 +427,7 @@ public final class RealRoomViewModel: RoomViewModel {
                     if !next.isEmpty {
                         let client = self.webSocketClient
                         let connectingRoomId = next
+                        let connectingClient = client
                         Task { @MainActor [weak self, weak client] in
                             guard let client else { return }
                             do {
@@ -416,6 +444,16 @@ public final class RealRoomViewModel: RoomViewModel {
                                            "RealRoomViewModel: discard stale A→B connect failure (connectingRoomId=%{public}@, current=%{public}@)",
                                            connectingRoomId,
                                            self?.lastObservedRoomId ?? "<nil>")
+                                    return
+                                }
+                                // **fix-review round 9 P2（Story 12.7）**：client-identity 守护.
+                                // 同 nil→A 分支：bind swap webSocketClient instance 但保持同 roomId 时,
+                                // 旧 client connect throw later 仍会通过 roomId 校验; 必须额外校验
+                                // `webSocketClient === connectingClient`. 详见 docs/lessons/2026-05-11-async-error-handler-must-stale-guard-room-id-and-client-identity-12-7-r9.md.
+                                guard self?.webSocketClient === connectingClient else {
+                                    os_log(.debug,
+                                           "RealRoomViewModel: discard stale A→B connect failure from replaced client (connectingRoomId=%{public}@)",
+                                           connectingRoomId)
                                     return
                                 }
                                 os_log(.error,

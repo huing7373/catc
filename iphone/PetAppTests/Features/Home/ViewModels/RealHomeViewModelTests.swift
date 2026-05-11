@@ -225,6 +225,72 @@ final class RealHomeViewModelTests: XCTestCase {
         XCTAssertEqual(mockJoin.lastArgumentsSnapshot().first as? String, "3001")
     }
 
+    // MARK: - case#r9-P2 regression: onCreateTap catch 必须 stale-guard 不能 present alert 到新 room
+
+    /// fix-review round 9 P2: user 点 Create CTA → createRoom HTTP in-flight 中 currentRoomId 切到 "B"
+    /// （模拟通过 friend 加入 room B）→ create 路径抛 6003 错 → 老实装会无条件 presentAlert("你已经在房间")
+    /// 弹在 room B 上. 新实装 entry==current guard → mismatch 不 present.
+    /// 对应 lesson 2026-05-11-async-error-handler-must-stale-guard-room-id-and-client-identity-12-7-r9.md.
+    func testOnCreateTapStaleErrorAfterRoomSwitchSkipsPresenter() async {
+        let appState = AppState()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockCreate = MockCreateRoomUseCase()
+        // 让 mock 在执行时把 currentRoomId 切到 "B"，再抛 6003 错
+        mockCreate.executeStub = .failure(APIError.business(code: 6003, message: "已在房间", requestId: "req_stale"))
+        mockCreate.onExecute = { @Sendable in
+            // mid-await 切换 currentRoomId（在 stub.get throw 之前）—— 模拟用户切到 room B
+            await MainActor.run { appState.setCurrentRoomId("B") }
+        }
+        let mockJoin = MockJoinRoomUseCase()
+        let vm = RealHomeViewModel(appState: appState)
+        vm.bind(
+            createRoomUseCase: mockCreate,
+            joinRoomUseCase: mockJoin,
+            errorPresenter: presenter
+        )
+
+        XCTAssertNil(appState.currentRoomId, "前置：entry currentRoomId 必须 nil")
+
+        vm.onCreateTap()
+        // 等 Task 跑完
+        try? await waitForCallCount(mock: mockCreate, method: "execute()", expected: 1)
+        try? await Task.sleep(nanoseconds: 60_000_000)
+
+        XCTAssertEqual(appState.currentRoomId, "B",
+                       "执行过程中应切到 'B' 模拟用户切换")
+        XCTAssertNil(presenter.current,
+                     "currentRoomId 已切到 B（entry=nil → current=B），stale 6003 错误不应弹到新 room B")
+    }
+
+    /// fix-review round 9 P2 同精神：onJoinRoomConfirm 路径下 stale-guard.
+    func testOnJoinRoomConfirmStaleErrorAfterRoomSwitchSkipsPresenter() async {
+        let appState = AppState()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockCreate = MockCreateRoomUseCase()
+        let mockJoin = MockJoinRoomUseCase()
+        // 让 mock 在执行时把 currentRoomId 切到 "B"（确定性 await），再抛 6002 错
+        mockJoin.executeStub = .failure(APIError.business(code: 6002, message: "房间已满", requestId: "req_stale2"))
+        mockJoin.onExecuteAsync = { @Sendable _ in
+            await MainActor.run { appState.setCurrentRoomId("B") }
+        }
+        let vm = RealHomeViewModel(appState: appState)
+        vm.bind(
+            createRoomUseCase: mockCreate,
+            joinRoomUseCase: mockJoin,
+            errorPresenter: presenter
+        )
+
+        XCTAssertNil(appState.currentRoomId)
+
+        vm.onJoinRoomConfirm(roomId: "A")
+        try? await waitForCallCount(mock: mockJoin, method: "execute(roomId:)", expected: 1)
+        try? await Task.sleep(nanoseconds: 60_000_000)
+
+        XCTAssertEqual(appState.currentRoomId, "B")
+        XCTAssertNil(presenter.current,
+                     "currentRoomId 已切到 B，stale 6002 错误不应弹到新 room B")
+    }
+
     // MARK: - case#story12-7-r5-P3 regression: onCreateTap useCase nil fallback 必须 mutate appState
 
     /// useCase nil（UITEST_SKIP_GUEST_LOGIN=1 / RootView 老 wire / preview）下点 Create CTA
@@ -272,9 +338,13 @@ final class RealHomeViewModelTests: XCTestCase {
 #if DEBUG
 final class MockCreateRoomUseCase: MockBase, CreateRoomUseCaseProtocol, @unchecked Sendable {
     var executeStub: Result<String, Error> = .failure(MockError.notStubbed)
+    /// fix-review round 9 P2 测试用：模拟"执行时副作用"（如 mid-await 切换 currentRoomId）.
+    /// 用 async closure 让测试在副作用前后控制顺序；await 完成后才走 stub.get（throw 或 return）.
+    var onExecute: (@Sendable () async -> Void)?
 
     func execute() async throws -> String {
         record(method: "execute()")
+        if let onExecute = onExecute { await onExecute() }
         return try executeStub.get()
     }
 }
@@ -283,11 +353,16 @@ final class MockJoinRoomUseCase: MockBase, JoinRoomUseCaseProtocol, @unchecked S
     var executeStub: Result<Void, Error> = .failure(MockError.notStubbed)
     /// 副作用 hook：测试中需要让 mock UseCase 模拟 setCurrentRoomId 行为时用.
     /// `@MainActor` 闭包让调用方可以安全 mutate AppState.
+    /// fire-and-forget 版本（保留旧测试兼容）.
     var onExecute: (@Sendable (String) -> Void)?
+    /// fix-review round 9 P2 新增：async 版本 hook，让 stale-guard 回归测试能在 stub.get throw
+    /// **之前**确定性地 await 完成 setCurrentRoomId（避免 Task fire-and-forget 与 catch 路径 race）.
+    var onExecuteAsync: (@Sendable (String) async -> Void)?
 
     func execute(roomId: String) async throws {
         record(method: "execute(roomId:)", arguments: [roomId])
         onExecute?(roomId)
+        if let onExecuteAsync = onExecuteAsync { await onExecuteAsync(roomId) }
         try executeStub.get()
     }
 }

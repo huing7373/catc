@@ -258,3 +258,4 @@
 | 2026-05-11 | [CreateRoom / JoinRoom UseCase 必须 guard entry==current 防 stale-response 抹掉新房间（12-7 r6）](2026-05-11-create-join-room-guard-target-vs-current-against-stale-response-12-7-r6.md) | 1 | architecture | `<pending>` |
 | 2026-05-11 | [RoomEndpoints percent-encode pre-escaped 输入也要 escape `%`（12-7 r7）](2026-05-11-room-endpoint-percent-escape-pre-encoded-12-7-r7.md) | 1 | security | `<pending>` |
 | 2026-05-11 | [业务错误码 fallback 必须 forward 原 error（禁止 rewrap 成空 message/requestId）（12-7 r8）](2026-05-11-business-error-fallback-must-forward-original-12-7-r8.md) | 1 | error-handling | `<pending>` |
+| 2026-05-11 | [异步 error catch 必须做 stale-guard：roomId 以及 client identity 两层都要看（12-7 r9）](2026-05-11-async-error-handler-must-stale-guard-room-id-and-client-identity-12-7-r9.md) | 1 | error-handling | `<pending>` |

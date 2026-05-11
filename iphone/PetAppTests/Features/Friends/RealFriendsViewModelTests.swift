@@ -150,6 +150,49 @@ final class RealFriendsViewModelTests: XCTestCase {
                        "unrecognized business code 必须 forward server-provided message（不能 rewrap 成空串走 generic fallback '操作失败，请稍后重试'）")
     }
 
+    // MARK: - case#r9-P2 regression: onJoinFriendTap catch 必须 stale-guard 不能 present alert 到新 room
+
+    /// fix-review round 9 P2: user 在 friends tab 点 join friend A 的 room "A" → join HTTP in-flight
+    /// 期间用户通过其他路径切到 room "B" → join "A" 路径抛 6002 错 → 老实装会无条件 presentAlert("房间已满")
+    /// 弹在 room B 上. 新实装 entry==current guard → mismatch 不 present.
+    /// 对应 lesson 2026-05-11-async-error-handler-must-stale-guard-room-id-and-client-identity-12-7-r9.md.
+    func testOnJoinFriendTapStaleErrorAfterRoomSwitchSkipsPresenter() async throws {
+        let appState = AppState()
+        let presenter = ErrorPresenter(toastDuration: 0.05)
+        let mockJoin = MockJoinRoomUseCaseFriends()
+        // 让 mock 在 execute 中把 currentRoomId 切到 "B"（mid-await 模拟用户切换），再抛 6002 错
+        mockJoin.executeStub = .failure(APIError.business(code: 6002, message: "房间已满", requestId: "req_stale_friend"))
+        mockJoin.onExecuteAsync = { @Sendable _ in
+            await MainActor.run { appState.setCurrentRoomId("B") }
+        }
+        let vm = RealFriendsViewModel(appState: appState)
+        vm.bind(
+            appState: appState,
+            joinRoomUseCase: mockJoin,
+            errorPresenter: presenter
+        )
+
+        XCTAssertNil(appState.currentRoomId, "前置：entry currentRoomId 必须 nil")
+
+        let friend = Friend(
+            id: "f_stale",
+            name: "Stale",
+            online: true,
+            status: .inRoom,
+            statusText: "在房间 A",
+            currentRoomId: "A",
+            color: nil
+        )
+        vm.onJoinFriendTap(friend: friend)
+        try? await waitForCallCount(mock: mockJoin, method: "execute(roomId:)", expected: 1)
+        try? await Task.sleep(nanoseconds: 60_000_000)
+
+        XCTAssertEqual(appState.currentRoomId, "B",
+                       "执行过程中应已切到 'B' 模拟用户切换")
+        XCTAssertNil(presenter.current,
+                     "currentRoomId 已切到 B（entry=nil → current=B），stale 6002 错误不应弹到新 room B")
+    }
+
     // MARK: - helpers
 
     private func waitForCallCount(mock: MockBase, method: String, expected: Int) async throws {
@@ -176,9 +219,13 @@ final class RealFriendsViewModelTests: XCTestCase {
 /// 类名需在 target 内全局唯一；用 `*Friends` 后缀避免 collision.
 final class MockJoinRoomUseCaseFriends: MockBase, JoinRoomUseCaseProtocol, @unchecked Sendable {
     var executeStub: Result<Void, Error> = .failure(MockError.notStubbed)
+    /// fix-review round 9 P2 新增：async hook，让 stale-guard 回归测试能在 stub.get throw **之前**
+    /// 确定性 await 完成 setCurrentRoomId（与 RealHomeViewModelTests.MockJoinRoomUseCase 同模式）.
+    var onExecuteAsync: (@Sendable (String) async -> Void)?
 
     func execute(roomId: String) async throws {
         record(method: "execute(roomId:)", arguments: [roomId])
+        if let onExecuteAsync = onExecuteAsync { await onExecuteAsync(roomId) }
         try executeStub.get()
     }
 }

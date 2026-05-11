@@ -2117,6 +2117,71 @@ final class RealRoomViewModelTests: XCTestCase {
                        "离开后 stale connect failure 不应再 mutate wsState（保持 .disconnected；守护层丢弃信号）")
         XCTAssertNil(vm.roomId, "vm.roomId 应仍为 nil")
     }
+
+    // MARK: - case#story12-7-r9-P2 fix-review round 9: stale connect failure from replaced client 守护
+
+    /// 验证 fix-review round 9 P2：bind swap WebSocketClient instance 但保持同 roomId 时,
+    /// 旧 client 的 in-flight connect 因 disconnect() 而 throw later —— 此 throw 属于旧 client
+    /// 的失败. 老实装仅 gate on `lastObservedRoomId == connectingRoomId`，同 roomId match → flip
+    /// wsState 回 .disconnected，即使新 client 已 connect.
+    ///
+    /// 新实装：catch 内额外校验 `webSocketClient === connectingClient` —— mismatch 丢弃.
+    /// 对应 lesson 2026-05-11-async-error-handler-must-stale-guard-room-id-and-client-identity-12-7-r9.md.
+    func testStaleConnectFailureFromReplacedClientDoesNotOverwriteWsState() async throws {
+        let appState = AppState()
+        appState.setCurrentRoomId("room_A")   // 同 roomId 全程不变
+
+        let clientA = WebSocketClientMock()
+        clientA.connectShouldGate = true       // clientA 的 connect 卡在 gate，让我们能 mid-flight swap
+
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: clientA)
+
+        // 等 connect(roomId: "room_A") 被调（clientA 卡在 gate）
+        await Task.yield()
+        await Task.yield()
+        let deadline1 = Date().addingTimeInterval(1.0)
+        while Date() < deadline1 {
+            if !clientA.connectCallArgs.isEmpty { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(clientA.connectCallArgs, ["room_A"], "clientA.connect 应已被调（gate 卡住）")
+        XCTAssertEqual(vm.wsState, .connected, "占位 wsState 应为 .connected")
+
+        // bind swap：注入新 clientB（同 roomId 不变）.
+        // bind 路径会：disconnect(clientA) → cancel 旧 consumer task → swap → prepareForReconnect(clientB)
+        //   → startConsumingMessages → 因 clientChanged && lastObservedRoomId != nil → 起新 connect(clientB)
+        let clientB = WebSocketClientMock()
+        vm.bind(appState: appState, webSocketClient: clientB)
+
+        // 等 clientB.connect 被调
+        let deadline2 = Date().addingTimeInterval(1.0)
+        while Date() < deadline2 {
+            if !clientB.connectCallArgs.isEmpty { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(clientB.connectCallArgs, ["room_A"], "swap 后 clientB.connect 也应被调（同 roomId）")
+        XCTAssertTrue(clientA.didDisconnect, "swap 后旧 clientA 应被 disconnect")
+        XCTAssertEqual(vm.wsState, .connected, "swap 后占位 wsState 应保持 .connected")
+
+        // 关键：释放 clientA 的 gate with throwing —— stale failure from replaced client.
+        // 旧实装 bug：catch 仅 gate on lastObservedRoomId（== "room_A" 匹配）→ flip wsState .disconnected,
+        //   即使新 clientB 已 connect.
+        // 新实装：catch 额外 `webSocketClient === connectingClient`（clientA）失败（current 是 clientB）→ 丢弃.
+        clientA.releaseConnect(at: 0, throwing: true)
+
+        // 等 catch 路径跑掉
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        try await Task.sleep(nanoseconds: 80_000_000)
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+
+        // 关键断言：stale clientA failure 不能覆盖当前 clientB 的 wsState.
+        XCTAssertEqual(vm.wsState, .connected,
+                       "stale connect failure from replaced clientA 不应覆盖 current clientB 的 wsState（旧实装仅 gate on roomId → 同 roomId match → flip 回 .disconnected）")
+    }
 }
 
 // MARK: - Inline mocks for Story 12.7
