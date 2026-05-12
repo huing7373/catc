@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -820,6 +821,113 @@ func TestBuildMemberLeftEnvelope_PayloadShapeIsExactlyOneField(t *testing.T) {
 	for _, forbidden := range []string{"nickname", "avatarUrl", "pet"} {
 		if _, ok := asMap[forbidden]; ok {
 			t.Errorf("payload should NOT contain %q (V1 §12.3 leave payload 精简钦定): %v", forbidden, asMap)
+		}
+	}
+}
+
+// ============================================================================
+// Story 14.4 — BuildPetStateChangedEnvelope helper 单测
+// ============================================================================
+
+// case BPS1: happy 路径 → 验证 envelope.Type / RequestID / Ts + payload
+// 字段全部正确（含 currentState=2 + ts 在合理范围）
+func TestBuildPetStateChangedEnvelope_Happy_FullPayload(t *testing.T) {
+	payload := wsapp.PetStateChangedPayload{
+		UserID:       "10",
+		PetID:        "100",
+		CurrentState: 2,
+	}
+	before := time.Now().UnixMilli()
+	bs, err := wsapp.BuildPetStateChangedEnvelope(payload)
+	if err != nil {
+		t.Fatalf("BuildPetStateChangedEnvelope: %v", err)
+	}
+	after := time.Now().UnixMilli()
+
+	var env snapEnvelopeForTest
+	if err := json.Unmarshal(bs, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != "pet.state.changed" {
+		t.Errorf("env.Type = %q, want \"pet.state.changed\"", env.Type)
+	}
+	if env.RequestID != "" {
+		t.Errorf("env.RequestID = %q, want \"\" (主动推送类固定 \"\")", env.RequestID)
+	}
+	if env.Ts < before || env.Ts > after {
+		t.Errorf("env.Ts = %d, expected in [%d, %d]", env.Ts, before, after)
+	}
+
+	var got wsapp.PetStateChangedPayload
+	if err := json.Unmarshal(env.Payload, &got); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if got.UserID != payload.UserID {
+		t.Errorf("payload.userId round-trip: got %q, want %q", got.UserID, payload.UserID)
+	}
+	if got.PetID != payload.PetID {
+		t.Errorf("payload.petId round-trip: got %q, want %q", got.PetID, payload.PetID)
+	}
+	if got.CurrentState != payload.CurrentState {
+		t.Errorf("payload.currentState round-trip: got %d, want %d", got.CurrentState, payload.CurrentState)
+	}
+}
+
+// case BPS2: currentState=1 / currentState=3 边界值都正确序列化（覆盖 enum 全范围）
+func TestBuildPetStateChangedEnvelope_StateBoundaryValues(t *testing.T) {
+	for _, st := range []int{1, 3} {
+		st := st
+		t.Run(fmt.Sprintf("state=%d", st), func(t *testing.T) {
+			payload := wsapp.PetStateChangedPayload{
+				UserID:       "10",
+				PetID:        "100",
+				CurrentState: st,
+			}
+			bs, err := wsapp.BuildPetStateChangedEnvelope(payload)
+			if err != nil {
+				t.Fatalf("BuildPetStateChangedEnvelope: %v", err)
+			}
+			want := fmt.Sprintf(`"currentState":%d`, st)
+			if !strings.Contains(string(bs), want) {
+				t.Errorf("wire should contain %q; got: %s", want, string(bs))
+			}
+		})
+	}
+}
+
+// case BPS3: payload 字段集合严格 3 字段（V1 §12.3 line 2257 future fields 注 +
+// 范围红线钦定 —— 仅 userId / petId / currentState，**不**含 nickname /
+// avatarUrl / equips 等任何其他字段）
+func TestBuildPetStateChangedEnvelope_PayloadShapeIsExactlyThreeFields(t *testing.T) {
+	payload := wsapp.PetStateChangedPayload{
+		UserID:       "10",
+		PetID:        "100",
+		CurrentState: 2,
+	}
+	bs, err := wsapp.BuildPetStateChangedEnvelope(payload)
+	if err != nil {
+		t.Fatalf("BuildPetStateChangedEnvelope: %v", err)
+	}
+
+	var env snapEnvelopeForTest
+	if err := json.Unmarshal(bs, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	var asMap map[string]interface{}
+	if err := json.Unmarshal(env.Payload, &asMap); err != nil {
+		t.Fatalf("unmarshal payload as map: %v", err)
+	}
+	if len(asMap) != 3 {
+		t.Errorf("payload field count = %d, want 3 (userId/petId/currentState); got fields: %v", len(asMap), asMap)
+	}
+	for _, want := range []string{"userId", "petId", "currentState"} {
+		if _, ok := asMap[want]; !ok {
+			t.Errorf("payload missing %q: %v", want, asMap)
+		}
+	}
+	for _, forbidden := range []string{"nickname", "avatarUrl", "pet", "equips"} {
+		if _, ok := asMap[forbidden]; ok {
+			t.Errorf("payload should NOT contain %q (V1 §12.3 future fields 注 + 范围红线): %v", forbidden, asMap)
 		}
 	}
 }

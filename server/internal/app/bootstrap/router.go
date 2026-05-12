@@ -402,17 +402,44 @@ func NewRouter(deps Deps) *gin.Engine {
 		roomSvc := service.NewRoomService(deps.TxMgr, userRepo, roomRepo, roomMemberRepo, petRepo, deps.SessionMgr, roomBroadcastFn, roomBroadcastExceptFn)
 		roomHandler := handler.NewRoomHandler(roomSvc)
 
+		// Story 14.4 加：pet.state.changed 广播 closure（与 roomBroadcastFn 同模式
+		// nil-tolerant + 同样调 wsapp.BroadcastToRoom）。
+		//
+		// **关键差异**（与 roomBroadcastFn 同实现，但语义独立）：
+		//   - roomBroadcastFn / roomBroadcastExceptFn 用于 member.joined / member.left
+		//     广播路径（11.8）—— member 事件的"广播范围排除发起者自己"语义由 service
+		//     层显式调 broadcastExceptFn 实现
+		//   - petBroadcastFn 用于 pet.state.changed 广播路径（Story 14.4）—— pet 事件的
+		//     "广播范围包含发起者自己"语义（V1 §12.3 line 2249 钦定）由 service 层
+		//     直接调 broadcastFn 无需 except 路径
+		//
+		// **不**复用 roomBroadcastFn closure：14.2 范围红线已钦定"逻辑独立，本 story
+		// 直接传 nil 让 14.4 灵活决定"；本 story 决定**独立**新建 closure 而非复用 ——
+		// 让 broadcast 语义边界清晰（"pet 广播 vs room 广播"在 router wire 层就分离）+
+		// future 任一路径需要差异化时（如本路径未来需要 metric / log 前缀差异）不影响另一路径。
+		//
+		// 实装与 roomBroadcastFn 完全一致（nil-tolerant + wsapp.BroadcastToRoom 直调）。
+		petBroadcastFn := wsapp.BroadcastFn(func(ctx context.Context, roomID uint64, msg []byte) (int, error) {
+			if deps.SessionMgr == nil {
+				return 0, nil
+			}
+			return wsapp.BroadcastToRoom(ctx, deps.SessionMgr, roomID, msg)
+		})
+
 		// Story 14.2 加：pet service + handler（POST /pets/current/state-sync；
 		// 单 UPDATE 不开事务）。复用上面构造的 petRepo / userRepo 实例。
 		//
-		// **sessionMgr / broadcastFn 字段 14.4 预留**：本 story service 不广播；router.go
-		// wire 时**先**传 nil（与 11.3 落地时未挂广播但 11.8 才挂的模式一致 —— 当时
-		// service struct 字段也是先 nil 注入）。14.4 落地仅需在该位置补真实实例 + 在
-		// pet_service.go SyncCurrentState 末尾加 fire-and-forget 调用。
+		// **sessionMgr / broadcastFn 自 Story 14.4 起注入真实实例**：14.2 阶段
+		// service struct 字段 sessionMgr / broadcastFn 预留 nil 注入；14.4 落地后
+		// 替换为 deps.SessionMgr + petBroadcastFn closure，让 SyncCurrentState UPDATE
+		// 成功路径触发 pet.state.changed 广播给同房间全员（**含**发起者自己，V1 §12.3
+		// line 2249 钦定）。
 		//
-		// **不**用 roomBroadcastFn 闭包**复用** —— 14.4 envelope 是 pet.state.changed
-		// 而非 member.joined / member.left，逻辑独立；本 story 直接传 nil 让 14.4 灵活决定。
-		petSvc := service.NewPetService(petRepo, userRepo, nil, nil)
+		// **deps.SessionMgr 可能为 nil**（HTTP-only 部署 / 测试 fixture）：service 层
+		// broadcastPetStateChanged 直接调 broadcastFn 不需要 sessionMgr，sessionMgr 字段
+		// 是"防御性预留"。petBroadcastFn closure 内部 `if deps.SessionMgr == nil
+		// { return 0, nil }` no-op 兜底，单测 / HTTP-only 部署不会 panic。
+		petSvc := service.NewPetService(petRepo, userRepo, deps.SessionMgr, petBroadcastFn)
 		petsHandler := handler.NewPetsHandler(petSvc)
 
 		api := r.Group("/api/v1")

@@ -27,7 +27,9 @@ package service_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	stderrors "errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -240,4 +242,155 @@ func TestPetService_SyncCurrentState_Integration_PetLess_Noop(t *testing.T) {
 	if c := countPetsByUserID(t, sqlDB, userID); c != 0 {
 		t.Errorf("after pet-less noop: pets count = %d, want 0 (service 不应重新创建 pet)", c)
 	}
+}
+
+// ============================================================
+// case 4: Story 14.4 — ws-end-to-end broadcastFn 被触发（用户在房间）
+//
+// 场景：建 user A + 默认 pet（current_state=1）+ room X + insert room_members 行 +
+// UPDATE users.current_room_id = X → 注入 captured-call mockBroadcastFn 构造
+// PetService → 调 SyncCurrentState({UserID: A, State: 2}) → 等 broadcast goroutine
+// 完成 → 验证：
+//   - SyncCurrentStateOutput.State == 2
+//   - DB pets.current_state = 2（既有 14.2 集成测试同模式断言）
+//   - broadcastFn 调用次数 1 + roomID == X
+//   - unmarshal msg bytes 后 envelope.type="pet.state.changed" +
+//     payload.userId="<A.id>" + payload.petId="<A.pet.id>" + payload.currentState=2 +
+//     ts != 0
+//
+// **fixture 区别值**（14-3 r1 lesson 钦定）：state=2（不用 default 1）让 wire
+// 上的 payload.currentState=2 能与 hardcoded placeholder 区分开。
+// ============================================================
+func TestPetService_SyncCurrentState_Integration_Story144_BroadcastFnTriggered(t *testing.T) {
+	dsn, dockerCleanup := startMySQL(t)
+	defer dockerCleanup()
+	runMigrations(t, dsn)
+
+	cfg := config.MySQLConfig{
+		DSN:                dsn,
+		MaxOpenConns:       10,
+		MaxIdleConns:       2,
+		ConnMaxLifetimeSec: 60,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	gormDB, err := db.Open(ctx, cfg)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	rawDB, err := gormDB.DB()
+	if err != nil {
+		t.Fatalf("gormDB.DB(): %v", err)
+	}
+	defer rawDB.Close()
+
+	// fixture: user A + pet + room X + room_members + users.current_room_id = X
+	userID, petID := fixturePetIntegrationCreateUserPet(t, rawDB)
+
+	// 直接 INSERT rooms（max_members=4, status=1=active, creator=userID）
+	res, err := rawDB.Exec(`INSERT INTO rooms (creator_user_id, status, max_members) VALUES (?, 1, 4)`, userID)
+	if err != nil {
+		t.Fatalf("INSERT rooms: %v", err)
+	}
+	rid, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("rooms LastInsertId: %v", err)
+	}
+	roomID := uint64(rid)
+
+	// INSERT room_members + UPDATE users.current_room_id
+	if _, err := rawDB.Exec(`INSERT INTO room_members (room_id, user_id) VALUES (?, ?)`, roomID, userID); err != nil {
+		t.Fatalf("INSERT room_members: %v", err)
+	}
+	if _, err := rawDB.Exec(`UPDATE users SET current_room_id = ? WHERE id = ?`, roomID, userID); err != nil {
+		t.Fatalf("UPDATE users.current_room_id: %v", err)
+	}
+
+	// 构造 captured-call mockBroadcastFn（与 case 7 单测模式同）
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	bcast := &broadcastRecorder{wg: wg, returnSent: 1}
+
+	petRepo := mysql.NewPetRepo(gormDB)
+	userRepo := mysql.NewUserRepo(gormDB)
+	svc := service.NewPetService(petRepo, userRepo, nil, bcast.fn)
+
+	// 调 SyncCurrentState({UserID: A, State: 2})
+	out, err := svc.SyncCurrentState(context.Background(), service.SyncCurrentStateInput{
+		UserID: userID,
+		State:  2,
+	})
+	if err != nil {
+		t.Fatalf("SyncCurrentState: %v", err)
+	}
+	if out == nil || out.State != 2 {
+		t.Errorf("output = %+v, want &{State:2}", out)
+	}
+
+	// 等 broadcast goroutine 跑完
+	waitWithTimeout(t, wg, 5*time.Second, "broadcast goroutine did not complete")
+
+	// DB 校验：pets.current_state 已写为 2
+	got, _ := fetchPetCurrentStateAndUpdatedAt(t, rawDB, userID)
+	if got != 2 {
+		t.Errorf("DB pets.current_state = %d, want 2", got)
+	}
+
+	// broadcastFn 调用次数 + roomID
+	if c := bcast.callCount(); c != 1 {
+		t.Fatalf("broadcastFn callCount = %d, want 1", c)
+	}
+	last, _ := bcast.lastCall()
+	if last.roomID != roomID {
+		t.Errorf("broadcast roomID = %d, want %d", last.roomID, roomID)
+	}
+
+	// envelope + payload 完整断言
+	var env petEnvelopeForTest
+	if err := json.Unmarshal(last.msg, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v; msg=%s", err, string(last.msg))
+	}
+	if env.Type != "pet.state.changed" {
+		t.Errorf("envelope.Type = %q, want \"pet.state.changed\"", env.Type)
+	}
+	if env.RequestID != "" {
+		t.Errorf("envelope.RequestID = %q, want \"\"", env.RequestID)
+	}
+	if env.Ts <= 0 {
+		t.Errorf("envelope.Ts = %d, want > 0", env.Ts)
+	}
+
+	var p petStateChangedPayloadForTest
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	wantUserID := uint64ToString(userID)
+	wantPetID := uint64ToString(petID)
+	if p.UserID != wantUserID {
+		t.Errorf("payload.userId = %q, want %q", p.UserID, wantUserID)
+	}
+	if p.PetID != wantPetID {
+		t.Errorf("payload.petId = %q, want %q", p.PetID, wantPetID)
+	}
+	if p.CurrentState != 2 {
+		t.Errorf("payload.currentState = %d, want 2", p.CurrentState)
+	}
+}
+
+// uint64ToString 工具：避免在集成测试里 import "strconv" 多写一遍
+func uint64ToString(v uint64) string {
+	// 与 service 层 strconv.FormatUint 同形态；不引入新 import
+	const digits = "0123456789"
+	if v == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for v > 0 {
+		i--
+		buf[i] = digits[v%10]
+		v /= 10
+	}
+	return string(buf[i:])
 }

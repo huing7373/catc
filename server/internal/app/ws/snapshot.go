@@ -472,7 +472,7 @@ func BuildMemberJoinedEnvelope(payload MemberJoinedPayload) ([]byte, error) {
 }
 
 // BuildMemberLeftEnvelope wrap MemberLeftPayload 进 serverEnvelope + json.Marshal
-// 返 ([]byte, error)（Story 11.8 引入；与 BuildMemberJoinedEnvelope 同模式，
+// 返 ([]byte, error)（Story 11.8 引入；与 BuildMemberJoinedEnvelope 同模式,
 // Type = "member.left"）。
 //
 // envelope 字段值（V1 §12.3 通用信封）：
@@ -490,6 +490,71 @@ func BuildMemberLeftEnvelope(payload MemberLeftPayload) ([]byte, error) {
 	bytes, err := json.Marshal(env)
 	if err != nil {
 		return nil, fmt.Errorf("ws envelope: marshal member.left: %w", err)
+	}
+	return bytes, nil
+}
+
+// ============================================================================
+// Story 14.4 — pet.state.changed payload + envelope helper
+// ============================================================================
+
+// PetStateChangedPayload 是 pet.state.changed 消息的 payload（Story 14.4 引入）。
+//
+// 与 V1 §12.3 `### 宠物状态变更（pet.state.changed）` 字段表完全 1:1 对齐
+// （V1 line 2223-2230 字段表）：
+//   - UserID:       BIGINT 字符串化（V1 §2.5 全局约定）；状态变更的 user 主键，
+//     来自 POST /pets/current/state-sync 当前 user.id
+//   - PetID:        BIGINT 字符串化（V1 §2.5 全局约定）；状态变更的 pet 主键，
+//     来自 service 层 FindDefaultByUserID 查到的 pets.id
+//   - CurrentState: number (int) 必填；变更后宠物当前状态枚举（1=rest / 2=walk
+//     / 3=run，与数据库 §6.4 pets.current_state 同义；与 §10.3 / §12.3 room.snapshot
+//     / §12.3 member.joined 同语义；与 §5.2 request state 等价 —— 都是入参回显）
+//
+// **payload 字段集合严格只 3 字段**（V1 §12.3 行 2257 future fields 注 +
+// 本 story 范围红线钦定）：不含 nickname / avatarUrl / equips / equips[].renderConfig
+// 等任何其他字段；装备变更广播由独立路径（Epic 27 / 30 等）触发，**不**扩展本 payload。
+//
+// **关键约束**（V1 §12.3 line 2250 钦定）：3 字段都必填（**禁止** payload 为 `{}`
+// 或缺任一字段）；缺字段视为契约违反，client 解析层走"安全忽略 + log warn"路径。
+// Go struct 层不显式 omitempty（与 SnapshotMember / MemberJoinedPayload 同模式），
+// 所有字段一律 JSON marshal 输出。
+type PetStateChangedPayload struct {
+	UserID       string `json:"userId"`
+	PetID        string `json:"petId"`
+	CurrentState int    `json:"currentState"`
+}
+
+// BuildPetStateChangedEnvelope wrap PetStateChangedPayload 进 serverEnvelope +
+// json.Marshal 返 ([]byte, error)（Story 14.4 引入；与 BuildMemberJoinedEnvelope
+// / BuildMemberLeftEnvelope 同模式）。
+//
+// 用途：service 层 PetService.SyncCurrentState 在 UPDATE pets.current_state
+// 成功后调用本 helper 拿到 []byte 后调 BroadcastFn 推送给该房间内所有在线
+// Session（**包含**发起者自己 —— 与 member.joined / member.left 排除发起者不同
+// 语义，详见 V1 §12.3 line 2249 "广播范围"段）；隐藏 ws 包内部 serverEnvelope
+// struct，让 service 层只 import payload 类型 + helper 函数。
+//
+// envelope 字段值（V1 §12.3 通用信封 + 行 2225-2230 钦定）：
+//   - Type:      "pet.state.changed"
+//   - RequestID: ""（主动推送类消息固定 ""）
+//   - Payload:   入参 payload
+//   - Ts:        time.Now().UnixMilli()（服务端发送时间戳 ms；与 member.joined /
+//     member.left ts 字段语义一致 —— 仅作日志关联 + UI 辅助展示，**禁止**用作业务
+//     排序 / 状态新旧判定，V1 §12.3 line 2255 + line 1961 钦定）
+//
+// 错误：json.Marshal 在 marshalable struct 下不可能失败；防御性 wrap（与
+// SendRoomSnapshot / BuildMemberJoinedEnvelope 同模式）。caller 收到 error 时
+// log warn 不重试（与 broadcast 失败同 fire-and-forget 语义，V1 §12.3 line 2254）。
+func BuildPetStateChangedEnvelope(payload PetStateChangedPayload) ([]byte, error) {
+	env := serverEnvelope{
+		Type:      "pet.state.changed",
+		RequestID: "", // V1 §12.3 主动推送类消息固定 ""
+		Payload:   payload,
+		Ts:        time.Now().UnixMilli(),
+	}
+	bytes, err := json.Marshal(env)
+	if err != nil {
+		return nil, fmt.Errorf("ws envelope: marshal pet.state.changed: %w", err)
 	}
 	return bytes, nil
 }
