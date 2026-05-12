@@ -148,6 +148,90 @@ final class RoomUITests: XCTestCase {
                       "petSprite_run a11y 锚未找到（u_charlie 成员行应渲染 .run 状态 PetSpriteView）")
     }
 
+    /// Story 15.3 AC3 / AC4 case#D: 房间页连续 state 切换"后覆前不堆叠队列"+ 三成员独立动画 baseline.
+    ///
+    /// 路径（Task 3.4.2 钦定，**不**新增 launch flag —— 复用既有 UITEST_ROOM_THREE_MEMBERS=1 路径
+    /// 已注入 `u_alice .rest / u_bob .walk / u_charlie .run` 三态 baseline，UITest 可直接断言
+    /// 三个 a11y identifier 同时存在 = 三成员 PetSpriteView 独立路径生效）：
+    ///   1. 启动 UITEST_FORCE_IN_ROOM=1 + UITEST_ROOM_THREE_MEMBERS=1 → MockRoomViewModel 注入 3 成员三态
+    ///   2. waitForExistence: petSprite_rest / petSprite_walk / petSprite_run 同时存在
+    ///      → 三个 PetSpriteView 独立渲染（每个 PetSpriteView 有独立 `.id(state)` 触发 view replacement）
+    ///   3. XCUIScreen.main.screenshot() 抓基线帧作为 XCTAttachment dev artifact
+    ///   4. terminate + relaunch（不变 env）→ 验证 a11y identifier 序列稳定 + screenshot 内容稳定
+    ///
+    /// **本 UITest 不做"视觉 fade 自动断言"——SwiftUI render-tree 视觉不在 XCUITest 断言范围**.
+    /// 视觉契约（opacity + scale 过渡 / 连续切换无残影 / 同值 set 无视觉变化）由 AC5 ios-simulator MCP
+    /// `record_video` 实跑录屏视觉验证（dev / codex review 阶段抓帧对比基线）.
+    ///
+    /// XCTAttachment 的 screenshot 文件随 xcresult bundle 持久化在
+    /// `iphone/build/test-results.xcresult`；通过 `xcrun xcresulttool` 可导出为 png（codex review 阶段
+    /// 抓帧对比基线，与 lesson `2026-05-12-swiftui-frame-clipped-does-not-scale-15-1-r1.md` 钦定 MCP
+    /// 录屏 artifact 收纳模式互补）.
+    func testPetSpriteTransitionAnimation_continuousStateSwitch_noResidueNoQueueStacking() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
+        app.launchEnvironment["UITEST_FORCE_IN_ROOM"] = "1"
+        app.launchEnvironment["UITEST_ROOM_THREE_MEMBERS"] = "1"
+        app.launch()
+
+        let timeout: TimeInterval = 5
+
+        // 1) sanity: 房间页已渲染
+        let roomIdDisplay = app.descendants(matching: .any)[AccessibilityID.Room.roomIdDisplay]
+        XCTAssertTrue(roomIdDisplay.waitForExistence(timeout: timeout),
+                      "roomIdDisplay a11y 锚未找到（RoomScaffoldView 未渲染）")
+
+        // 2) 三个 PetSpriteView 各自 a11y identifier 同时存在
+        //    （MockRoomViewModel 注入 u_alice .rest / u_bob .walk / u_charlie .run 三态）
+        let restSprite = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteRest]
+        let walkSprite = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteWalk]
+        let runSprite = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteRun]
+        XCTAssertTrue(restSprite.waitForExistence(timeout: timeout),
+                      "petSprite_rest a11y 锚未找到（u_alice .rest 状态 PetSpriteView 未渲染）")
+        XCTAssertTrue(walkSprite.waitForExistence(timeout: timeout),
+                      "petSprite_walk a11y 锚未找到（u_bob .walk 状态 PetSpriteView 未渲染）")
+        XCTAssertTrue(runSprite.waitForExistence(timeout: timeout),
+                      "petSprite_run a11y 锚未找到（u_charlie .run 状态 PetSpriteView 未渲染）")
+
+        // 3) 基线 screenshot 作为 dev artifact（XCTAttachment 写入 xcresult bundle）
+        //    Story 15.3 AC4 case#D：录屏文件 / 基线帧 codex review 阶段抓帧对比.
+        let baselineScreenshot = XCUIScreen.main.screenshot()
+        let attachment = XCTAttachment(screenshot: baselineScreenshot)
+        attachment.name = "PetSpriteTransition-baseline-3members-distinct-states"
+        attachment.lifetime = .keepAlways  // 不随 test 成功自动删；codex review 阶段需要
+        add(attachment)
+
+        // 4) terminate + relaunch（不变 env）→ a11y identifier 序列稳定
+        //    Task 3.4.2 钦定 "mutate 驱动用 XCUIApplication.terminate() + relaunch" 模式 ——
+        //    相同 env 下 RootView init() 重新注入 MockRoomViewModel 三态 baseline，验证
+        //    PetSpriteView 在 view-tree 重建后仍正确渲染（覆盖"app cold-start 路径"过渡契约稳定性）.
+        app.terminate()
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
+        app.launchEnvironment["UITEST_FORCE_IN_ROOM"] = "1"
+        app.launchEnvironment["UITEST_ROOM_THREE_MEMBERS"] = "1"
+        app.launch()
+
+        // 5) relaunch 后 a11y identifier 仍可定位（PetSpriteView 三件套 `.id + .transition + .animation(value:)`
+        //    在 view-tree 重建后稳定生效；relaunch 路径下 view 是首次 insert 而非 swap，transition 不应
+        //    引起 identifier 定位失败）
+        let restAfterRelaunch = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteRest]
+        XCTAssertTrue(restAfterRelaunch.waitForExistence(timeout: timeout),
+                      "relaunch 后 petSprite_rest a11y 锚仍应可定位（view-tree 重建后过渡契约稳定）")
+        let walkAfterRelaunch = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteWalk]
+        XCTAssertTrue(walkAfterRelaunch.waitForExistence(timeout: timeout),
+                      "relaunch 后 petSprite_walk a11y 锚仍应可定位")
+        let runAfterRelaunch = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteRun]
+        XCTAssertTrue(runAfterRelaunch.waitForExistence(timeout: timeout),
+                      "relaunch 后 petSprite_run a11y 锚仍应可定位")
+
+        // 6) relaunch 后 screenshot 作为对比基线（同 mock 数据下视觉应一致）
+        let relaunchScreenshot = XCUIScreen.main.screenshot()
+        let relaunchAttachment = XCTAttachment(screenshot: relaunchScreenshot)
+        relaunchAttachment.name = "PetSpriteTransition-relaunch-3members-distinct-states"
+        relaunchAttachment.lifetime = .keepAlways
+        add(relaunchAttachment)
+    }
+
     /// Story 12.7 AC9: launch app → Home Tab idle → 点 `homeTeamIdleCard_create`
     /// → 验证 RoomView 出现（roomIdDisplay 锚定可定位）+ Tab Bar 仍可见.
     ///

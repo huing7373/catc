@@ -95,6 +95,7 @@
 		61474321497228B33F7A59C3 /* ThemeColors.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCB3D2DC7A6B14D3E65C41F1 /* ThemeColors.swift */; };
 		62083E4560B002E597915359 /* ProfileScaffoldDefaults.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7925FCB304E09F51D4EB31C1 /* ProfileScaffoldDefaults.swift */; };
 		62C62BDA8ED703EBC3C6962E /* AppLaunchStateMachine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08CA4F6139E7A05AAF87C850 /* AppLaunchStateMachine.swift */; };
+		6385A11BA76BD67FF05DA97A /* PetSpriteViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDE055F3BD3FC2B2FB628B13 /* PetSpriteViewTests.swift */; };
 		6428DEB3D7C6776E8D94E3CE /* HomeViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B99F81C6A99E03E5B645882 /* HomeViewTests.swift */; };
 		654C383E384953C748D9835D /* APIClientIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C035C9148668E8C176D32620 /* APIClientIntegrationTests.swift */; };
 		67F46E9CFA2C919F85254AF6 /* MotionProviderImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52C39B4B9C296B052B9EC5E4 /* MotionProviderImpl.swift */; };
@@ -460,6 +461,7 @@
 		EC6DF1BC39D846CADDD73E6D /* AccessibilityIDTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityIDTests.swift; sourceTree = "<group>"; };
 		ED72DADDDB0B456143DA3A6E /* DateProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DateProvider.swift; sourceTree = "<group>"; };
 		EDA2E8B7A5F4EC9870C190A7 /* HealthProviderProbeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthProviderProbeView.swift; sourceTree = "<group>"; };
+		EDE055F3BD3FC2B2FB628B13 /* PetSpriteViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetSpriteViewTests.swift; sourceTree = "<group>"; };
 		F05CB847053EF404BADB71EF /* FriendsScaffoldView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FriendsScaffoldView.swift; sourceTree = "<group>"; };
 		F271EF28052AB189832E77D0 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F34F82C20EA4745D4A744162 /* WebSocketClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketClient.swift; sourceTree = "<group>"; };
@@ -802,6 +804,7 @@
 				DA1977CDDD9C74BB79FC1D4B /* HomeViewModelTests.swift */,
 				A2EFB35C4DA2A1B759C5FB9A /* HomeViewScaffoldTests.swift */,
 				4B99F81C6A99E03E5B645882 /* HomeViewTests.swift */,
+				EDE055F3BD3FC2B2FB628B13 /* PetSpriteViewTests.swift */,
 				AA8055F45C00D333D0A12274 /* Models */,
 				B5F4B02E68221BA81BED1CB8 /* Repositories */,
 				3BD648D79A777FEAC6304617 /* Services */,
@@ -1621,6 +1624,7 @@
 				70FBF4905D77D838BFEA9C00 /* MockURLSession.swift in Sources */,
 				2CCACE2F631BD551DB5CE8F1 /* MotionProviderMockTests.swift in Sources */,
 				D13E4CDCC53154AF352EDBDC /* MotionStateMapperTests.swift in Sources */,
+				6385A11BA76BD67FF05DA97A /* PetSpriteViewTests.swift in Sources */,
 				293098F699F6FD8D8840EAB8 /* PingStubURLProtocol.swift in Sources */,
 				AF73DA276AD359BD78E1CD94 /* PingUseCaseIntegrationTests.swift in Sources */,
 				464399591B61E13F5171051A /* PingUseCaseTests.swift in Sources */,

@@ -2318,6 +2318,74 @@ final class RealRoomViewModelTests: XCTestCase {
                        "streamRoomId=nil 时任何 pet.state.changed 应被丢弃")
     }
 
+    // MARK: - Story 15.3 case#E：连续 mutate memberPetStates 后覆前不堆叠队列
+
+    /// Story 15.3 AC3 case#E：连续 mutate `vm.memberPetStates["u_alice"]` (.rest → .walk → .rest) →
+    /// `await Task.yield()` × N 后断言：(i) 仅最后一次 mutate 反映为最终值（无 pending side-effect）；
+    /// (ii) `members` 字段未被改写（mutate 仅触发 `@Published memberPetStates` invalidate，不影响 roster）；
+    /// (iii) 连续 emit 3 条 pet.state.changed 不引入"队列堆叠"——后一条直接覆盖前一条最终 state.
+    ///
+    /// SwiftUI implicit animation 行为（lesson `2026-05-04-swiftui-content-swap-needs-id-and-transition.md` +
+    /// `2026-04-30-swiftui-onchange-equatable-and-stale-task-cancel.md`）天然保证：
+    ///   - `.animation(_:value:)` 用 Equatable diff 判定是否触发；同值 mutate 走 SwiftUI 内部 short-circuit；
+    ///   - `.id(state)` view replacement 是"覆盖语义"——连续 mutate 不堆叠队列，后一个直接覆盖.
+    ///
+    /// 本 case 在 ViewModel 层锁定"连续 mutate 路径不堆叠"——render-tree 视觉过渡由 AC5 ios-simulator MCP
+    /// 录屏视觉验证（XCTest 不能断 SwiftUI render-tree 行为）.
+    func testPetStateChangedConsecutiveMutatesAreNotQueuedAndLastWins() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_15_3_E")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // snapshot 1 成员 baseline（currentState=1 → .rest）
+        let snap = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_15_3_E", maxMembers: 4, memberCount: 1),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice",
+                                   pet: RoomSnapshotPet(petId: "p_a", currentState: 1)),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(snap))
+        try await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .rest,
+                       "baseline: u_alice currentState=1 → .rest")
+
+        // 连续 emit 3 条 pet.state.changed：.rest → .walk → .rest（间隔 < 100ms 即"瞬时连续"）
+        mockWS.emit(.petStateChanged(PetStateChangedPayload(
+            userId: "u_alice", petId: "p_a", currentState: 1)))  // .rest
+        mockWS.emit(.petStateChanged(PetStateChangedPayload(
+            userId: "u_alice", petId: "p_a", currentState: 2)))  // .walk
+        mockWS.emit(.petStateChanged(PetStateChangedPayload(
+            userId: "u_alice", petId: "p_a", currentState: 1)))  // .rest
+
+        // 等最后一次 mutate 反映（waitForMemberPetState 内部循环 ≤1s）
+        try await waitForMemberPetState(vm: vm, userId: "u_alice", expected: .rest)
+
+        // 多 yield 确保所有 pending side-effect drain（防"队列堆叠"潜伏）
+        for _ in 0..<10 { await Task.yield() }
+
+        // 关键断言：(i) 最后一次 mutate 反映为最终 state（.rest）
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .rest,
+                       "连续 mutate 后 vm.memberPetStates 应反映最后一次 mutate 值；"
+                       + "若堆叠队列则可能停留在中间值 .walk")
+
+        // (ii) members 字段未被改写（仅 memberPetStates @Published 触发；roster 不变）
+        XCTAssertEqual(vm.members.count, 1, "连续 pet.state.changed mutate 不应改写 members.count")
+        XCTAssertEqual(vm.members.first?.id, "u_alice", "u_alice 仍是唯一 member")
+        XCTAssertEqual(vm.members.first?.name, "Alice", "name 字段不变")
+
+        // (iii) 再 emit 同值 .rest → 不应"再次"切换（SwiftUI Equatable diff short-circuit；
+        //      在 ViewModel 层验证 mutate 后值仍为 .rest 即可，view 层 short-circuit 由 SwiftUI 内置保证）
+        mockWS.emit(.petStateChanged(PetStateChangedPayload(
+            userId: "u_alice", petId: "p_a", currentState: 1)))
+        for _ in 0..<5 { await Task.yield() }
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .rest,
+                       "同值 mutate 后 vm.memberPetStates 仍为 .rest（Equatable diff short-circuit）")
+    }
+
     // MARK: - Story 15.2 codec 测试（WSMessageCodec.decode `case "pet.state.changed"`）
 
     /// Story 15.2 case#G happy：codec 解析合法 pet.state.changed envelope.

@@ -4,7 +4,9 @@
 // 设计基线：
 // - generic struct + @Binding-free（接 MotionState 直接 read-only 入参）
 // - 三态分支：rest / walk / run 各自独立的 SwiftUI 子视图（占位 SF Symbol 或简单几何形状）
-// - 200ms 平滑过渡（淡入淡出）：用 `.animation(.easeInOut(duration: 0.2), value: state)`
+// - 250ms 平滑过渡（淡入淡出 + 微缩放）：用 `.animation(.easeInOut(duration: 0.25), value: state)`
+//   + `.transition(.opacity.combined(with: .scale))` —— Story 15.3 把过渡从纯 opacity 升级为
+//   opacity+scale 组合，duration 上调到 250ms（仍处于 epics.md §15.3 行 2418 钦定 200-300ms 区间）.
 // - accessibility identifier：state 切换时同步换 "petSprite_rest" / "petSprite_walk" / "petSprite_run"
 //   ── UITest 通过 identifier 切换断言判定状态机是否真的驱动 sprite 渲染.
 // - 占位 sprite 资产（节点 3 阶段美术资产不阻塞）：rest / walk / run 各用一个 SF Symbol + 颜色区分.
@@ -48,9 +50,11 @@ public struct PetSpriteView: View {
         // 设计要点（review round 2 P2 fix；详见 docs/lessons/2026-05-04-swiftui-content-swap-needs-id-and-transition.md）：
         //   · `.id(state)`：让 SwiftUI 在 state 改变时把当前 view tree 视为新 view（旧 view 移除 / 新 view 插入），
         //     而不是仅 mutate modifier；这是 .transition() 生效的前提.
-        //   · `.transition(.opacity)`：声明 view 加入 / 移除时走 opacity 过渡（替代默认的瞬时切换）.
-        //   · `.animation(.easeInOut(duration: 0.2), value: state)`：声明 transition 的 timing curve
-        //     与 200ms duration（epics.md AC 行 1539 钦定）.
+        //   · `.transition(.opacity.combined(with: .scale))`：声明 view 加入 / 移除时走 opacity + scale 组合过渡
+        //     —— Story 15.3 在 8.4 原始纯 opacity 基础上加 scale 维度（epics.md §15.3 行 2418 钦定）.
+        //   · `.animation(.easeInOut(duration: 0.25), value: state)`：声明 transition 的 timing curve
+        //     与 250ms duration —— Story 15.3 把 duration 从 8.4 的 200ms 上调到 250ms，
+        //     仍处于 epics.md §15.3 行 2418 钦定 200-300ms 区间，给 scale 动效留可感知时间.
         //   · 三者缺一不可；.animation(value:) 单独使用只会动画化"已存在 modifier"的 value 变化，
         //     不会让 view body 内 switch 分支 swap 触发 fade.
         spriteImage(
@@ -58,8 +62,8 @@ public struct PetSpriteView: View {
             tintColor: spriteTintColor(for: state)
         )
         .id(state)
-        .transition(.opacity)
-        .animation(.easeInOut(duration: 0.2), value: state)
+        .transition(.opacity.combined(with: .scale))
+        .animation(.easeInOut(duration: 0.25), value: state)
         // 把 PetSpriteView 整体收成 a11y 叶子节点；children: .ignore 让内部 SF Symbol 不被另算成 a11y 子节点.
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(accessibilityLabel))
