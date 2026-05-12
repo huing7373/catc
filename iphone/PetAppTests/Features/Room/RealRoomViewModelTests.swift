@@ -1461,6 +1461,87 @@ final class RealRoomViewModelTests: XCTestCase {
         // baseline pet.currentState=nil（pet=nil 的成员），不重复断言.
     }
 
+    /// Story 15.2 fix-review round 3 P2：same-room rejoin stale **roomSnapshot** 必须被 generation gate 丢弃 ——
+    /// codex r3 指出 round 2 的 generation gate 漏盖 `.roomSnapshot`，是同根问题更严重的 vector：
+    /// snapshot 是**整体覆盖**（applySnapshot 重写 members + memberPetStates），same-room rejoin
+    /// 路径下旧 stream 的 stale snapshot 会一次性把新 stream 已 apply 的 roster + pet state 全部回滚.
+    ///
+    /// 复现策略：
+    ///   1. 进入 room_A baseline（snapshot v1，u_alice + u_bob）
+    ///   2. mock client.prepareForReconnect() → streamGeneration 翻新 G0 → G1
+    ///   3. 模拟新 stream（G1）的 fresh snapshot v2 已 apply（u_alice + u_charlie，pet currentState=2）
+    ///   4. 直接调 handle(message: .roomSnapshot(v1), streamRoomId: "room_A", streamGeneration: G0)
+    ///      模拟"旧 task 持有 G0、新 stream 已是 G1"瞬间的 stale snapshot 投递
+    ///   5. 关键断言：旧 snapshot 不被 apply —— roster 仍是 v2（u_alice + u_charlie），
+    ///      memberPetStates 仍是 v2 的 .walk 状态
+    ///
+    /// 注意 payload.room.id 全部是 "room_A"（same-room），原 payload-level guard 会放行；
+    /// 必须依赖 generation gate 拦下.
+    func testSameRoomRejoinRoomSnapshotFromOldGenerationIsDiscarded() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_A")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. baseline snapshot v1：u_alice (pet rest) + u_bob (pet rest)
+        let v1 = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_A", maxMembers: 4, memberCount: 2),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice",
+                                   pet: RoomSnapshotPet(petId: "p_a", currentState: 1)),
+                RoomSnapshotMember(userId: "u_bob", nickname: "Bob",
+                                   pet: RoomSnapshotPet(petId: "p_b", currentState: 1)),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(v1))
+        try await waitForMembersCount(vm: vm, expected: 2)
+        XCTAssertEqual(Set(vm.members.map { $0.id }), ["u_alice", "u_bob"])
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .rest)
+
+        // 2. 翻 generation：模拟 same-room reconnect（A→A leave-rejoin / 心跳超时 reconnect）
+        let oldGen = mockWS.streamGeneration
+        mockWS.prepareForReconnect()
+        let newGen = mockWS.streamGeneration
+        XCTAssertEqual(newGen, oldGen + 1, "prepareForReconnect 必须翻 streamGeneration")
+
+        // 3. 新 stream（G1）的 fresh snapshot v2：roster 变成 u_alice + u_charlie，pet 状态升到 .walk
+        // 直接调 handle(...) with newGen 模拟 fresh stream 的 task 投递（也可以走 mockWS.emit；
+        // 但 mock emit 走 stream 路径会捕获新 generation，效果等价）.
+        let v2 = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_A", maxMembers: 4, memberCount: 2),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice",
+                                   pet: RoomSnapshotPet(petId: "p_a", currentState: 2)),
+                RoomSnapshotMember(userId: "u_charlie", nickname: "Charlie",
+                                   pet: RoomSnapshotPet(petId: "p_c", currentState: 2)),
+            ]
+        )
+        vm.handle(message: .roomSnapshot(v2), streamRoomId: "room_A", streamGeneration: newGen)
+        XCTAssertEqual(Set(vm.members.map { $0.id }), ["u_alice", "u_charlie"],
+                       "新 stream（gen=\(newGen)）的 fresh snapshot 应正常 apply → roster 变成 alice+charlie")
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .walk)
+        XCTAssertEqual(vm.memberPetStates["u_charlie"], .walk)
+        XCTAssertNil(vm.memberPetStates["u_bob"], "u_bob 已被新 snapshot 裁掉")
+
+        // 4. 关键复现：旧 stream（gen=oldGen）late-delivered v1 snapshot
+        //    payload.room.id == lastObservedRoomId（都是 "room_A"），原 payload-level guard 会放行；
+        //    必须靠 generation gate 拦下，否则 applySnapshot 会把 roster 整体回滚到 [alice, bob].
+        vm.handle(message: .roomSnapshot(v1), streamRoomId: "room_A", streamGeneration: oldGen)
+
+        // 5. 关键断言：旧 snapshot 必须被 generation gate 丢弃 —— roster + pet states 保持 v2.
+        XCTAssertEqual(Set(vm.members.map { $0.id }), ["u_alice", "u_charlie"],
+                       "same-room rejoin race: 旧 stream（gen=\(oldGen)）的 stale .roomSnapshot 必须被"
+                       + " generation gate 丢弃；round 2 漏盖 .roomSnapshot 的实装会让 roster 错误回滚到"
+                       + " [alice, bob]（u_charlie 消失，u_bob 死灰复燃）")
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .walk,
+                       "u_alice 的 pet state 应保持 .walk（v2），不被 stale v1 snapshot 回滚到 .rest")
+        XCTAssertEqual(vm.memberPetStates["u_charlie"], .walk,
+                       "u_charlie 应保持在 roster + pet state .walk")
+        XCTAssertNil(vm.memberPetStates["u_bob"], "u_bob 应保持已被裁掉，不被 stale snapshot 复活")
+    }
+
     // MARK: - Story 12.4 case#G7 edge: member.joined payload pet=null（pet-less 账号）
 
     /// Story 12.4 AC4 case#G7（推荐，契约 1 nullable pet 回归守护）：

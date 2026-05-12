@@ -604,11 +604,17 @@ public final class RealRoomViewModel: RoomViewModel {
     ///
     /// **fix-review round 2 P2（Story 15.2）**：新增 `streamGeneration` 参数，与 `streamRoomId` 共同
     /// 构成"per-stream identity"守护：
-    ///   - cross-room race（A→B）：靠 `streamRoomId == lastObservedRoomId` 守护
+    ///   - cross-room race（A→B）：靠 `streamRoomId == lastObservedRoomId` 守护（incremental events）+
+    ///     `payload.room.id == lastObservedRoomId` 守护（roomSnapshot）
     ///   - same-room race（A→A leave-rejoin / same-room reconnect）：靠 `streamGeneration == webSocketClient.streamGeneration`
     ///     守护 —— 旧 stream 的 streamGeneration 已被 prepareForReconnect 翻新，新 stream 的 task 捕获的是新值；
     ///     旧 task dequeue 的 stale event 此时 generation 不匹配 → 丢弃.
     /// 两层 gate 必须**同时**满足才进 apply：roomId 防跨房间，generation 防同房间复用.
+    ///
+    /// **fix-review round 3 P2（Story 15.2，本轮纠正 round 2 疏忽）**：generation gate 守护范围**包含**
+    /// `.roomSnapshot`（round 2 错误地 exempt）。snapshot 是整体覆盖语义（applySnapshot 重写 members +
+    /// memberPetStates），same-room rejoin 路径下 stale snapshot 的危害远大于 incremental event ——
+    /// 一次性把新 stream 已 apply 的 roster + pet state 全部回滚到旧值. codex r3 正确指出该 vector.
     ///
     /// **默认值 nil**：保持向后兼容现有测试（已存在的 `handle(message:streamRoomId:)` 调用点继续工作；
     /// 测试在直接调时若不传 generation → 跳过 generation gate，仅 roomId gate 生效）.
@@ -617,30 +623,48 @@ public final class RealRoomViewModel: RoomViewModel {
         // fix-review round 2 P2（Story 15.2）：first-class generation gate ——
         // 仅当 caller 显式传入 generation 时执行 per-stream identity 校验.
         // 校验失败 = 当前 task 是旧 stream 的 stale consumer（同房间 rejoin / reconnect 后新 stream 已起来），
-        // 旧 task 已 dequeue 的所有事件都应丢弃（包含 connectionStateChanged / member.* / pet.state.changed）.
-        // .roomSnapshot 已有 payload.room.id 校验 + 单测期望 generation=nil 路径下仍 apply，所以保留下面的
-        // per-case 校验（.roomSnapshot 不走本 gate）.
+        // 旧 task 已 dequeue 的所有事件都应丢弃（包含 connectionStateChanged / member.* / pet.state.changed
+        // / **roomSnapshot**）.
+        //
+        // **fix-review round 3 P2（Story 15.2，本轮纠正 round 2 的疏忽）**：`.roomSnapshot` 必须**同样**被
+        // generation gate 守护。round 2 显式 exempt `.roomSnapshot` 的理由是"snapshot 有 payload.room.id
+        // 校验 + 测试覆盖 generation=nil 路径下仍 apply"——但 same-room rejoin（A→A leave-rejoin / 同
+        // 房间 reconnect）路径下 payload.room.id == lastObservedRoomId（两端都是 A），payload-level 校验
+        // 直接放行；而 `.roomSnapshot` 又是**整体覆盖**（applySnapshot 重写 members + memberPetStates），
+        // 危害远大于单字段 incremental event：旧 stream 的 stale snapshot 会一次性把新 stream 已 apply 的
+        // roster + pet state 全部回滚到旧值。codex r3 P2 正确指出该 vector 是同根问题的更严重形态.
+        //
+        // **防御深度**：generation gate 是新增的第一层守护；payload.room.id 校验作为第二层保留 —— 跨房
+        // 间 race（A→B）由后者挡，同房间 rejoin race（A→A）由前者挡。两层互补，不冗余.
+        //
+        // **测试兼容**：现有测试在直接调 handle(...) 时多数不传 streamGeneration（保持默认 nil）→ 跳过
+        // generation gate，仅触发原 per-case 校验路径，不破坏 case#10 等覆盖 payload-level 守护的测试.
         if let streamGen = streamGeneration,
            let currentGen = webSocketClient?.streamGeneration,
            streamGen != currentGen {
-            // 仅对 4 个守护 case（memberJoined / memberLeft / petStateChanged / connectionStateChanged）丢弃；
-            // .roomSnapshot 已有 payload.room.id 校验，且测试覆盖 generation=nil 路径，跳过 generation gate；
-            // .pong / .error / .unknown 是无副作用 case，无需挡.
+            // 5 个守护 case（memberJoined / memberLeft / petStateChanged / connectionStateChanged /
+            // **roomSnapshot**）—— 都是会 mutate vm 状态的 message，旧 generation 投递必须丢弃.
+            // .pong / .error / .unknown 是无副作用 case（仅 log / 无 mutate），无需挡.
             switch message {
-            case .memberJoined, .memberLeft, .petStateChanged, .connectionStateChanged:
+            case .memberJoined, .memberLeft, .petStateChanged, .connectionStateChanged, .roomSnapshot:
                 os_log(.debug,
                        "RealRoomViewModel: discard stale event from old stream (myGen=%{public}d, currentGen=%{public}d)",
                        streamGen, currentGen)
                 return
-            case .roomSnapshot, .pong, .error, .unknown:
+            case .pong, .error, .unknown:
                 break  // 走原 per-case 校验路径
             }
         }
         switch message {
         case .roomSnapshot(let payload):
-            // fix-review round 3 P1：丢弃不属于当前房间的 stale snapshot.
+            // fix-review round 3 P1：丢弃不属于当前房间的 stale snapshot（cross-room A→B race）.
             // 注意：lastObservedRoomId == nil 时（已离开房间）任何 snapshot 都属于 stale.
             // payload-level 校验比 streamRoomId 校验更精确（payload 自带 room.id），保留原路径.
+            //
+            // **fix-review round 3 P2（Story 15.2）**：本 guard 仅负责 cross-room race（A→B,
+            // roomId 维度）；same-room rejoin（A→A）race 由 method 顶部的 streamGeneration gate
+            // 兜底拦下 —— payload.room.id == lastObservedRoomId（两端都是 A）会放行 stale snapshot,
+            // 必须前置 generation gate 才能挡住整体覆盖式回滚.
             guard let currentRoomId = lastObservedRoomId, payload.room.id == currentRoomId else {
                 os_log(.debug,
                        "RealRoomViewModel: discard stale room.snapshot (payload.room.id=%{public}@, current=%{public}@)",
