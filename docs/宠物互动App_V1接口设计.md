@@ -540,7 +540,15 @@ JSON 示例：
 
 **事务边界规则**：本接口**不**需要 MySQL 事务（仅 1 个 UPDATE 单语句，DB 引擎默认 autocommit；广播是 fire-and-forget 不在事务内）—— 与 §10.1 / §10.4 / §10.5 房间事务接口的多语句事务边界**不同**（参见数据库设计 §8.x 关键事务设计，本接口**不**入 §8.x 事务列表）。
 
-**WS 广播 vs HTTP 响应的关系**：HTTP 200 是 server-acknowledged 入账确认信号；`pet.state.changed` WS 广播是事件通知信号。两者通过两条独立连接送达 client（HTTP 经 ApiClient；WS 经 WebSocketClient）；client 同房间内**会同时**收到自己的 HTTP 200 + 自己的 `pet.state.changed`（广播范围包含发起者自己，详见 §12.3 `### 宠物状态变更` 关键约束）。client 实装层**应**优先信任 WS 广播作为状态切换的最终一致信号（与 CLAUDE.md §"工作纪律 / 状态以 server 为准"一致），HTTP 响应仅作为 ack 用途。
+**WS 广播 vs HTTP 响应的关系（含发起者自己的 self-broadcast 兜底规则）**：HTTP 200 是 server-acknowledged 入账确认信号；`pet.state.changed` WS 广播是事件通知信号。两者通过两条独立连接送达 client（HTTP 经 ApiClient；WS 经 WebSocketClient）；client 同房间内**会同时**收到自己的 HTTP 200 + 自己的 `pet.state.changed`（广播范围包含发起者自己，详见 §12.3 `### 宠物状态变更` 关键约束）。
+
+**对"别人的状态变化"的权威信号**：以 WS 广播 `pet.state.changed` 为**唯一权威信号**（与 CLAUDE.md §"工作纪律 / 状态以 server 为准"一致）；client **不**通过任何其他渠道驱动别人的 roster pet state 更新。
+
+**对"发起者自己的状态变化"的权威信号（self-broadcast 例外）**：考虑到 self-broadcast 在 §12.3 line 2230 是 fire-and-forget 不重试、且若该唯一信号丢失会让发起者 UI 永久 stale（HTTP 200 + 本地 self-broadcast 丢失 → 永远等不到下一次状态切换 / WS 重连），契约层**允许**发起者在收到 HTTP 200 OK 后**立即更新自己**的本地 roster pet state，**不等** self-broadcast 到达。该例外的语义自洽：(a) HTTP 200 已是 server 端入账完成的强 ack 信号（service 步骤 4 UPDATE 已成功），值上与 self-broadcast 必定相同（同一次写库行为的两路下发，service 层在 UPDATE 后才触发 BroadcastToRoom）；(b) 该例外**仅**对"发起者自己的 entry"生效，对房间内其他成员仍以 WS 广播为唯一权威信号；(c) self-broadcast 到达时按 §12.3 client merge contract 字段级 merge —— 因值与 client 本地已有值相同（同一次写库的两路下发），merge 结果等价于 no-op，不会触发"状态闪烁"。
+
+**self-broadcast 的剩余职责（不作 UI 唯一来源）**：发起者自己收到的 self-broadcast 仅作 (a) 跨设备一致性校验（如未来多端登录场景：另一端在同房间的 client 通过该消息更新自己的视图） + (b) 服务端入账后真实 broadcast 链路的活性探测信号（client 实装层可统计 self-broadcast 到达率作为 WS 连接健康度指标）—— **不**作为发起者本地 UI 的唯一驱动信号。
+
+**iOS 实装层后续 Story 引用**：本规则的 client 落地见 Story 15.4（state-sync HTTP 响应触发本地 self entry 更新 + self-broadcast 到达走标准 merge 路径，对 self entry 做 no-op）/ Story 15.2（房间页 ViewModel 接 WS 广播驱动他人 roster）。
 
 **客户端节流约束（iOS 端 self-imposed，server 侧不强制）**：
 
@@ -554,7 +562,7 @@ JSON 示例：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `data.state` | number (int) | 回显入参 `state` 值（server-acknowledged 入账确认）；client **不**应用此值作为"server 端最终态"反推（理论上该值就是入参，但 client 不应依赖回显语义；如需获取最终 pet 状态请通过 `room.snapshot` / `pet.state.changed` WS 广播 / 下次 `GET /home` 获取） |
+| `data.state` | number (int) | 回显入参 `state` 值（server-acknowledged 入账确认）；client **不**应用此值作为"**他人** server 端最终态"反推（理论上该值就是入参，但 client 不应依赖回显语义来推断别人或全局聚合态；如需获取**其他成员** / 全局 pet 状态请通过 `room.snapshot` / `pet.state.changed` WS 广播 / 下次 `GET /home` 获取）。**self-broadcast 例外**：在"发起者自己"的本地 roster pet state 更新场景下，HTTP 200 + `data.state` **是**契约允许的 self-only 权威信号（见上方"WS 广播 vs HTTP 响应的关系（含发起者自己的 self-broadcast 兜底规则）" + line 593 等价分层声明 §5.2 `data.state` 不进入"权威等价桶"的边界界定 —— 该例外仅作 self entry 本地 UI 立即更新依据，**不**让 `data.state` 进入跨 client / 多设备权威等价桶） |
 
 JSON 示例：
 
@@ -589,8 +597,13 @@ JSON 示例：
 - 用户不在房间（`users.current_room_id == NULL`）**不**视为业务错误 —— 接口仍返回 200 OK + code = 0，**不**广播 WS（与 §10.4 join 失败抛 6004 的语义**不同**：join 是要"操作房间"，无房间归属是前置不满足；state-sync 是要"更新 pet 状态"，无房间归属仅意味着无需广播给他人 —— pet 状态更新本身仍合法 + 仍写库）
 - BIGINT 主键 / 外键（`userId` / `petId` 字段在 `pet.state.changed` payload 中）严格按 §2.5 全局约定字符串化下发；**本接口请求 / 响应 body 中无 BIGINT 字段**（仅 `state` 是 int 枚举），无字符串化诉求
 - `state` 字段类型为 `number (int)`，**不**字符串化（枚举字段不受 §2.5 BIGINT 字符串化规则约束 —— 类似 §6.1 `motionState`）
-- **HTTP 200 vs WS 广播的端到端语义**：HTTP 200 = server-acknowledged 入账成功；WS 广播 = 事件通知。两者通过两条独立连接送达，client 实装层不应**假设**两者同时到达 —— 可能 HTTP 200 先到、WS 广播后到（典型场景）；也可能 WS 广播先到、HTTP 200 后到（罕见，但合法）；甚至 WS 广播可能完全收不到（连接断开 / fire-and-forget 失败）。client 实装层（iOS Story 15.2 / 15.4）**必须**对两者的到达顺序做幂等设计：收到 WS 广播 → 更新 roster（包括自己的）；收到 HTTP 200 → 仅作 ack 不重复更新 roster
-- **字段语义跨章节等价**：§5.2 请求体 `state` 字段 / §5.2 响应体 `data.state` 字段 / §10.3 `data.members[].pet.currentState` / §12.3 `room.snapshot.payload.members[].pet.currentState` / §12.3 `pet.state.changed.payload.currentState` —— **五处字段语义完全等价**（都来自 `pets.current_state`，类型都是 `number (int)` 枚举 1/2/3；自 Story 14.3 起 §10.3 / `room.snapshot` 两处也切换为真实读取 `pets.current_state`，不再固定 `1`，与本节 `state` 字段同语义）
+- **HTTP 200 vs WS 广播的端到端语义（含 self-broadcast 例外）**：HTTP 200 = server-acknowledged 入账成功；WS 广播 = 事件通知。两者通过两条独立连接送达，client 实装层不应**假设**两者同时到达 —— 可能 HTTP 200 先到、WS 广播后到（典型场景）；也可能 WS 广播先到、HTTP 200 后到（罕见，但合法）；甚至 WS 广播可能完全收不到（连接断开 / fire-and-forget 失败）。client 实装层（iOS Story 15.2 / 15.4）**必须**对两者的到达顺序做幂等设计：(a) 对**别人**的状态变化 —— 收到 WS 广播 → 更新 roster；HTTP 不参与（自己发的 HTTP 与别人的状态无关）；(b) 对**自己**的状态变化（self-broadcast 例外，见上方"WS 广播 vs HTTP 响应的关系"说明）—— 收到 HTTP 200 → **立即更新自己**的 roster pet state（避免 self-broadcast 丢失导致永久 stale）；后续 self-broadcast 到达时按字段级 merge 走 no-op 路径（因值与 HTTP 200 已设置的值相同，merge 结果幂等）
+- **字段语义跨章节等价（分两层 + 受 Story 14.3 前置条件约束）**：§5.2 请求体 `state` 字段 / §5.2 响应体 `data.state` 字段 / §10.3 `data.members[].pet.currentState` / §12.3 `room.snapshot.payload.members[].pet.currentState` / §12.3 `pet.state.changed.payload.currentState` —— 这五处字段的"等价"必须区分**值域/DB 来源层**和**权威/信任层**：
+  - **值域 / DB 来源等价（恒成立）**：五处字段类型都是 `number (int)` 枚举 `1 = rest` / `2 = walk` / `3 = run`；语义上都映射到 `pets.current_state` 列（参见数据库设计 §6.4）；happy path 下值相同（无类型转换 / 截断 / 业务变换）
+  - **权威 / client 信任层等价（自 Story 14.3 起成立 + 仅对 server → client 三处）**：`pet.state.changed.payload.currentState` / `room.snapshot.payload.members[].pet.currentState` / §10.3 `data.members[].pet.currentState` 三处自 Story 14.3 起均切换为真实读取 `pets.current_state`（不再固定 `1`），三者承载相同权威级别的状态信号，client 实装层不需要为三者做差异化处理
+  - **§5.2 `data.state` 不进入权威等价桶**：本节响应体回显入参（见上文"设计权衡"），是 server-acknowledged ack 信号而非"server 端最终态读出"，与上述三处的权威级别不同；client **不**应把 `data.state` 与 `room.snapshot` / `pet.state.changed` 同等对待（值相同 ≠ 信任级别相同；详见上文 line 557 字段说明）
+  - **§5.2 `state`（请求体入参）**：是 client → server 单向写入信号，不参与 server → client 权威等价讨论
+  - **Story 14.3 落地前的临时不一致窗口**（Story 14.2 / 14.4 先于 14.3 实装时）：§5.2 / `pet.state.changed` 可下发 2 / 3 真实值，而 §10.3 GET / `room.snapshot` 在该窗口仍**固定返回 `1`**（详见 §10.3 line 1369 + §12.3 `room.snapshot` line 1968 / line 2073 placeholder 说明）；该窗口内的**客户端权威信号优先级**为：`pet.state.changed` WS 广播 > `state-sync` HTTP `data.state`（仅 ack）> `room.snapshot` / GET `data.members[].pet.currentState`（前者一致性最新，后者在 14.3 前固定为 placeholder `1`）；这是节点 5 内部容忍的临时契约不一致，14.3 落地后该不一致窗口消失，三处 server → client 字段统一切换到权威等价层
 
 ---
 
@@ -2222,12 +2235,12 @@ JSON 示例：
 
 **关键约束**：
 
-- 广播范围：**该房间内所有当前在线 Session**（**包含**发起者自己）—— 与 `### 成员加入` 排除加入者自己、`### 成员离开` 排除离开者自己（leaver 物理上收不到自己的 `member.left`）的语义**不同**。原因：(a) `member.joined` / `member.left` 是"成员关系变化通知"，发起者已通过 HTTP response 知道结果，再收一份 WS 通知是冗余；(b) `pet.state.changed` 是"状态事件本身"，server 不区分发起者 / 其他成员的语义区别，让 iOS 端 client 用统一的 WS 消息处理路径更新所有成员（包括自己）的 roster pet state，**避免**"本地切换状态 → 上报 → server 广播回来 → 状态闪烁"问题。这条 single source of truth 原则与 CLAUDE.md §"工作纪律 / 状态以 server 为准"一致 —— 让 server WS 广播成为状态切换的最终一致路径，HTTP response 仅作 ack。
+- 广播范围：**该房间内所有当前在线 Session**（**包含**发起者自己）—— 与 `### 成员加入` 排除加入者自己、`### 成员离开` 排除离开者自己（leaver 物理上收不到自己的 `member.left`）的语义**不同**。原因：(a) `member.joined` / `member.left` 是"成员关系变化通知"，发起者已通过 HTTP response 知道结果，再收一份 WS 通知是冗余；(b) `pet.state.changed` server 端**不区分** broadcast 接收者是发起者 / 其他成员（统一发给房间内全员），让 client 端**对别人的状态变化**走单一 WS 权威信号路径。**发起者自己的 self-broadcast 职责（不作 UI 唯一来源）**：见 §5.2 "WS 广播 vs HTTP 响应的关系（含发起者自己的 self-broadcast 兜底规则）"说明 —— 发起者本地 UI 由 HTTP 200 立即驱动，self-broadcast 作 (a) 跨设备一致性校验 + (b) WS 链路活性探测，不作发起者本地 UI 唯一来源；后续 self-broadcast 到达走字段级 merge no-op 路径（值已相同，merge 幂等）。这条 single source of truth 原则在 CLAUDE.md §"工作纪律 / 状态以 server 为准" 的统一表述下，对"自己 vs 别人"采用对称但不同的具体路径：对别人 → WS 唯一权威；对自己 → HTTP 200 立即驱动 + self-broadcast 仅 ack 校验。
 - `payload.userId` / `payload.petId` / `payload.currentState` 都必填（**禁止** payload 为 `{}` 或缺任一字段）；缺字段视为契约违反，client 解析层**应**走"安全忽略 + log warn"路径（与 Story 10.1 `安全忽略未识别 type` 相同的容错策略，避免单条 malformed 消息把房间页搞崩）
 - client 收到 `pet.state.changed` 后**应**走 §12.3 client merge contract 字段级 merge：(a) roster 中已存在该 `userId` entry → 更新其 `pet.currentState`（仅覆盖该字段，不影响 `nickname` / `avatarUrl` / `pet.petId`）；(b) roster 中**不**存在该 `userId` entry（理论不该发生 —— 同房间内其他成员的 entry 应在握手 `room.snapshot` 时已建立，或后续 `member.joined` 增量；如果 entry 不存在表示 roster 与 server 状态严重不一致）→ 走"安全忽略 + log warn"路径（**不**为单条 `pet.state.changed` 新增 roster entry —— 状态变更广播不携带 `nickname` / `avatarUrl` 等成员展示字段，新增 entry 无法正常渲染）
-- `payload.currentState` 字段语义与 `room.snapshot.payload.members[].pet.currentState` / `GET /rooms/{roomId}.data.members[].pet.currentState` **完全等价**（都来自 `pets.current_state`，类型都是 `number (int)` 枚举 1/2/3；自 Story 14.3 起三处都读真实值，不再固定 `1`），iOS 端解析层**不**需要为三种来源做差异化处理；如三处任一返回不同值表示 server 端状态不一致（race condition），client 实装层**应**以最近一次 WS 广播为最新真相源（按 `ts` 字段时间戳判断新旧）
-- `payload.userId == 当前 user.id` 的"自己的状态广播"也是合法消息（server 不过滤），client **应**正常处理（更新自己的 roster entry pet state；与"别人的广播"统一路径，**禁止** client 仅因 `userId == self` 而丢弃消息 —— 否则 client 自己的 cat sprite 状态不会因 server 广播更新，破坏 single source of truth 原则）
-- 广播 fire-and-forget：如该房间内某些 Session 因网络抖动 / 已 close / SessionManager 状态不一致导致广播失败，server **不**重试（仅 log warning）—— client 实装层（iOS Story 15.x）**不**应假设每条 `pet.state.changed` 都到达；状态对齐由 (a) 下次状态切换时再次广播 (b) WS 重连后 `room.snapshot` 全量重新下发 兜底；这条与 Story 10.5 BroadcastToRoom primitive fire-and-forget 语义、Story 11.8 `member.joined` / `member.left` 广播失败语义一致
+- `payload.currentState` 字段语义与 `room.snapshot.payload.members[].pet.currentState` / `GET /rooms/{roomId}.data.members[].pet.currentState` 的等价分两层 + 受 Story 14.3 前置条件约束（与 §5.2 line 593 等价分层声明保持一致）：(a) **值域 / DB 来源等价（恒成立）** —— 三处类型都是 `number (int)` 枚举 1/2/3，DB 来源都映射 `pets.current_state`；(b) **权威 / client 信任层等价（自 Story 14.3 起成立）** —— 自 Story 14.3 起三处都读真实值，承载相同权威级别，iOS 端解析层**不**需要为三种来源做差异化处理；**Story 14.3 落地前的临时窗口**（Story 14.2 / 14.4 先于 14.3 实装时）：`pet.state.changed` 已能广播 2/3 真实值，但 `room.snapshot` / GET `data.members[].pet.currentState` 仍**固定返回 `1`**（详见 §12.3 `room.snapshot` line 2073 / §10.3 line 1369 placeholder 说明）；client 实装层在该窗口内的**权威信号优先级**为 `pet.state.changed` WS 广播 > `room.snapshot` / GET（后两者在 14.3 前是 placeholder `1`，不能反推为权威状态）；14.3 落地后三处 server → client 字段统一切换到权威等价层。如三处任一在权威等价生效后仍返回不同值表示 server 端状态不一致（race condition），client 实装层**应**以最近一次 WS 广播为最新真相源（按 `ts` 字段时间戳判断新旧）
+- `payload.userId == 当前 user.id` 的"自己的状态广播"也是合法消息（server 不过滤），client **应**正常接收 + 走字段级 merge（与"别人的广播"统一处理路径），**禁止** client 仅因 `userId == self` 而丢弃消息（保留 self-broadcast 作 §5.2 "self-broadcast 的剩余职责" 中所述跨设备一致性校验 + WS 链路活性探测信号）；按 §5.2 self-broadcast 兜底规则，发起者本地 UI 应已由 HTTP 200 立即驱动到目标状态，self-broadcast 到达时 merge 结果是 no-op（值已相同），不再触发"状态闪烁"
+- 广播 fire-and-forget：如该房间内某些 Session 因网络抖动 / 已 close / SessionManager 状态不一致导致广播失败，server **不**重试（仅 log warning）—— client 实装层（iOS Story 15.x）**不**应假设每条 `pet.state.changed` 都到达；状态对齐 fallback：(a) **对别人**的状态：由别人下次状态切换时再次广播 / WS 重连后 `room.snapshot` 全量重新下发兜底（在 14.3 落地权威等价层后；落地前 `room.snapshot` 该字段是 placeholder `1`，详见 §5.2 line 593 临时不一致窗口说明）；(b) **对自己**的状态（self-broadcast 丢失）：由 §5.2 self-broadcast 兜底规则覆盖 —— 发起者本地 UI 由 HTTP 200 立即驱动，self-broadcast 丢失不会造成自己 UI 永久 stale；房间内**其他成员**对该发起者的状态视图若 self-broadcast 丢失则需走 (a) 兜底路径。这条 fire-and-forget 语义与 Story 10.5 BroadcastToRoom primitive、Story 11.8 `member.joined` / `member.left` 广播失败语义一致
 - `ts` 字段（int64 ms）来源是 server 端 `time.Now().UnixMilli()`（具体调用方式由 Story 14.4 实装层决定），与 `### 成员加入` / `### 成员离开` 的 `ts` 字段语义一致；client 可用作时序排序 / 状态新旧判断辅助信号（如多条 `pet.state.changed` 乱序到达时按 `ts` 排序），**不**作为唯一权威信号（time skew 可能存在）
 
 > **Future Fields（节点 5 阶段为占位 / 后续 epic 落地）**：

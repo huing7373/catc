@@ -265,3 +265,4 @@
 | 2026-05-11 | [UITEST nil-WS-client 路径 nil→A 必须保留 RoomScaffoldDefaults seed roster（r11 unconditional clear 的精化）（12-7 r13）](2026-05-11-uitest-nil-ws-client-must-preserve-scaffold-roster-12-7-r13.md) | 1 | testing | `4b0d2cf` |
 | 2026-05-11 | [UseCase stale-success path 必须显式失败（throw error 触发 refresh），不能 silent return 让 client/server desync（12-7 r14）](2026-05-11-stale-usecase-success-must-refresh-not-silently-return-12-7-r14.md) | 1 | architecture | `facec5d` |
 | 2026-05-12 | [state-sync 幂等矛盾（RowsAffected 误判）& WS 消息冻结声明 envelope/payload 字段归属（14-1 r1）](2026-05-12-state-sync-idempotent-rowsaffected-and-ws-envelope-ts.md) | 2 | docs, architecture | `<pending>` |
+| 2026-05-12 | [跨章节字段等价声明必须锁定前置条件 & ack vs 权威等价的分层 & self-broadcast 丢失的 sender-side 兜底（14-1 r2）](2026-05-12-cross-section-equivalence-claim-must-fence-prerequisites-and-self-broadcast-fallback-2.md) | 3 | docs, architecture | `<pending>` |
