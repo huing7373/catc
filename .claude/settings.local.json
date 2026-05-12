@@ -90,7 +90,10 @@
       "mcp__ios-simulator__screenshot",
       "Skill(update-config)",
       "Bash(claude doctor *)",
-      "WebFetch(domain:www.reddit.com)"
+      "WebFetch(domain:www.reddit.com)",
+      "Read(//Users/zhuming/.claude/**)",
+      "Bash(claude config *)",
+      "Bash(claude --version)"
     ],
     "deny": [
       "Bash(rm -rf:*)",
