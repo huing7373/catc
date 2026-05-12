@@ -267,3 +267,4 @@
 | 2026-05-12 | [state-sync 幂等矛盾（RowsAffected 误判）& WS 消息冻结声明 envelope/payload 字段归属（14-1 r1）](2026-05-12-state-sync-idempotent-rowsaffected-and-ws-envelope-ts.md) | 2 | docs, architecture | `<pending>` |
 | 2026-05-12 | [跨章节字段等价声明必须锁定前置条件 & ack vs 权威等价的分层 & self-broadcast 丢失的 sender-side 兜底（14-1 r2）](2026-05-12-cross-section-equivalence-claim-must-fence-prerequisites-and-self-broadcast-fallback-2.md) | 3 | docs, architecture | `<pending>` |
 | 2026-05-12 | [member.joined `pet.currentState` 在 14.3 落地前的 stale race & self-broadcast no-op 措辞必须基于到达顺序对称（14-1 r3）](2026-05-12-member-joined-stale-state-and-self-broadcast-arrival-order-symmetric-3.md) | 2 | docs, architecture | `<pending>` |
+| 2026-05-12 | [self-broadcast UI 驱动语义在 §5.2 / §12.3 必须对称一致 & 冻结边界声明必须区分抽象触发条件与可调阈值 & 临时窗口优先级表必须显式标注 self vs 他人 entry 适用范围（14-1 r4）](2026-05-12-self-broadcast-ui-driver-and-freeze-boundary-and-self-vs-others-priority-4.md) | 3 | docs | `<pending>` |
