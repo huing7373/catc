@@ -1007,6 +1007,64 @@ func TestRoomServiceIntegration_GetRoomDetail_Happy_3Members_With1PetLess(t *tes
 	}
 }
 
+// TestRoomServiceIntegration_GetRoomDetail_RealCurrentState_1_2_3:
+// Story 14.3 集成测试 —— dockertest 真实 MySQL：3 user 各 seed pet.current_state=1/2/3
+// + A 创建房间 + B/C 顺序加入 → A 调 GetRoomDetail → Output.Members[i].Pet.CurrentState
+// 真实驱动 1/2/3（端到端验证 SQL SELECT + service 拼装 + 三档枚举均覆盖）。
+//
+// 验证 Story 14.3 三处统一切换路径之一（GET /rooms 真实驱动 pet.currentState）：
+// service.GetRoomDetail 内 r.PetID != nil 分支把 `CurrentState: 1` 改为
+// `CurrentState: *r.CurrentState` 后真实读 pets.current_state。
+func TestRoomServiceIntegration_GetRoomDetail_RealCurrentState_1_2_3(t *testing.T) {
+	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	const userC = uint64(1003)
+	insertUser(t, sqlDB, userA, "uid-cs-a", "A", "https://avatar/a")
+	insertUser(t, sqlDB, userB, "uid-cs-b", "B", "https://avatar/b")
+	insertUser(t, sqlDB, userC, "uid-cs-c", "C", "https://avatar/c")
+	// 各 user pet.current_state 分别 1=rest / 2=walk / 3=run
+	insertPet(t, sqlDB, 9001, userA, 1, "PetA", 1, 1)
+	insertPet(t, sqlDB, 9002, userB, 1, "PetB", 2, 1)
+	insertPet(t, sqlDB, 9003, userC, 1, "PetC", 3, 1)
+
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+	roomID := createOut.RoomID
+	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userB, RoomID: roomID}); err != nil {
+		t.Fatalf("JoinRoom B: %v", err)
+	}
+	time.Sleep(15 * time.Millisecond)
+	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userC, RoomID: roomID}); err != nil {
+		t.Fatalf("JoinRoom C: %v", err)
+	}
+
+	out, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: userA, RoomID: roomID})
+	if err != nil {
+		t.Fatalf("GetRoomDetail: %v", err)
+	}
+	if len(out.Members) != 3 {
+		t.Fatalf("len(Members) = %d, want 3", len(out.Members))
+	}
+	wantStates := []int8{1, 2, 3}
+	wantPetIDs := []uint64{9001, 9002, 9003}
+	for i, want := range wantStates {
+		if out.Members[i].Pet == nil {
+			t.Fatalf("Members[%d].Pet = nil, want non-nil", i)
+		}
+		if out.Members[i].Pet.PetID != wantPetIDs[i] {
+			t.Errorf("Members[%d].Pet.PetID = %d, want %d", i, out.Members[i].Pet.PetID, wantPetIDs[i])
+		}
+		if out.Members[i].Pet.CurrentState != want {
+			t.Errorf("Members[%d].Pet.CurrentState = %d, want %d (Story 14.3 真实驱动 pets.current_state)", i, out.Members[i].Pet.CurrentState, want)
+		}
+	}
+}
+
 // AC11.6-4: user B 不加入房间 → user B 调 GetRoomDetail(A 的 roomID) → 6004。
 func TestRoomServiceIntegration_GetRoomDetail_UserNotInRoom_Returns6004(t *testing.T) {
 	svc, sqlDB, _, cleanup := buildRoomServiceIntegration(t)
@@ -1296,6 +1354,78 @@ func TestRoomServiceIntegration_JoinRoom_Happy_BroadcastFnInvokedOnce(t *testing
 	}
 	if payload.Pet.CurrentState != 1 {
 		t.Errorf("payload.pet.currentState = %d, want 1", payload.Pet.CurrentState)
+	}
+}
+
+// case J1b: r1 fix (Story 14.3 review) — broadcastMemberJoined 真实驱动 pet.currentState
+// 的 **integration 端到端证明**。既有 J1a case 14 seed pets.current_state=1 → broadcast
+// payload.pet.currentState==1 与切换前 hardcoded 路径**也**能通过，无法证明 site (iii)
+// 真的切了。本 case seed pets.current_state=2 (walk) → join → 断言 broadcast 出来的
+// payload.pet.currentState == 2 (= seeded mysql 真实值)，证明 broadcastMemberJoined
+// 自 Story 14.3 起从 mysql.Pet.CurrentState 读真实值（V1 §12.3 line 2121 钦定）。
+// unit 层对应 case：TestRoomService_BroadcastMemberJoined_PetCurrentState_2
+// (room_service_test.go:2625)。
+func TestRoomServiceIntegration_JoinRoom_BroadcastMemberJoined_PetCurrentState_2(t *testing.T) {
+	svc, sqlDB, _, capture, wg, cleanup := buildRoomServiceIntegrationWithCapture(t)
+	defer cleanup()
+
+	const userA = uint64(1001)
+	const userB = uint64(1002)
+	insertUser(t, sqlDB, userA, "uid-143-r1-a", "用户A", "")
+	insertUser(t, sqlDB, userB, "uid-143-r1-b", "用户B", "https://avatar/b")
+	// 关键：B 的 pet seed current_state=2 (walk)，非 hardcoded 1
+	insertPet(t, sqlDB, 8002, userB, 1, "PetB", 2, 1)
+
+	// A 创建房间
+	createOut, err := svc.CreateRoom(context.Background(), service.CreateRoomInput{UserID: userA})
+	if err != nil {
+		t.Fatalf("createRoom: %v", err)
+	}
+	roomID := createOut.RoomID
+	capture.mu.Lock()
+	capture.calls = nil
+	capture.mu.Unlock()
+
+	// B join
+	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userB, RoomID: roomID}); err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+	wg.Wait()
+
+	if got := capture.callCount(); got != 1 {
+		t.Fatalf("broadcastFn call count = %d, want 1", got)
+	}
+	call := capture.calls[0]
+	if call.roomID != roomID {
+		t.Errorf("call.roomID = %d, want %d", call.roomID, roomID)
+	}
+
+	var env integrationEnvelope
+	if err := json.Unmarshal(call.msg, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != "member.joined" {
+		t.Errorf("env.Type = %q, want \"member.joined\"", env.Type)
+	}
+
+	var payload struct {
+		Pet *struct {
+			PetID        string `json:"petId"`
+			CurrentState int    `json:"currentState"`
+		} `json:"pet"`
+	}
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.Pet == nil {
+		t.Fatalf("payload.pet = nil, want non-nil (B 已 seed default pet)")
+	}
+	if payload.Pet.PetID != "8002" {
+		t.Errorf("payload.pet.petId = %q, want \"8002\"", payload.Pet.PetID)
+	}
+	// 核心断言：currentState 必须 = 2（seed 值），证明 site (iii) 真的从 mysql.Pet 读真实值
+	if payload.Pet.CurrentState != 2 {
+		t.Errorf("payload.pet.currentState = %d, want 2 (Story 14.3 真实驱动 mysql.Pet.CurrentState；hardcoded 路径会返 1)", payload.Pet.CurrentState)
 	}
 }
 

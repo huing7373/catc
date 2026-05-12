@@ -89,19 +89,28 @@ func (Room) TableName() string { return "rooms" }
 // 与"pet-less"；用 pointer 让 NULL → nil pointer，service 层据此把 wire DTO 的
 // `pet` 整体下发为 `null`（V1 §10.3 字段表 nullable 钦定）。
 //
-// **不**包含 pet.currentState / pet.equips：节点 4 阶段固定 `1` / `[]`（V1 §10.3
-// 字段表节点 4 列钦定），由 service 层硬编码；query 层不查 pets.current_state /
-// user_pet_equips 表（YAGNI，节点 5 / 9 由 Epic 14 / 26 真实驱动时再扩展）。
+// **不**包含 pet.equips：节点 4 阶段固定 `[]`（V1 §10.3 字段表节点 4 列钦定），
+// 由 service 层硬编码；query 层不查 user_pet_equips 表（YAGNI，节点 9 由
+// Epic 26 真实驱动时再扩展）。
 //
-// **不**复用 mysql.Pet struct：RosterRow 仅含本 story 需要的 4 个字段，避免
+// **不**复用 mysql.Pet struct：RosterRow 仅含本 story 需要的 5 个字段，避免
 // 拉过多 pets 字段污染 query payload（pet.created_at / pet_type / name / is_default
-// 等都不需要）。future 若需要扩展更多字段（如 currentState 由 Epic 14 真实驱动），
+// 等都不需要）。future 若需要扩展更多字段（如 pet.equips 由 Epic 26 真实驱动），
 // 在本 struct 内加字段而非新建 RosterRowExt。
+//
+// Story 14.3 落地：`CurrentState *int8` 字段从 `pets.current_state` 列读取，
+// pet-less 时 LEFT JOIN 行 NULL → GORM Scan 映射 *int8 nil；service 层在
+// `r.PetID != nil` 分支内直接解引 `*r.CurrentState`（同行 pet 非空 →
+// pets.current_state NOT NULL DEFAULT 1，schema §6.4 钦定 → *r.CurrentState
+// 必非 nil）。三处共享同一 query 路径：GET /rooms/{roomId}（service.GetRoomDetail）
+// + room.snapshot（realSnapshotBuilder.BuildSnapshot）；member.joined
+// 走另一条 FindDefaultByUserID 路径（Pet.CurrentState 是 int8 值类型）。
 type RosterRow struct {
-	UserID    uint64  `gorm:"column:user_id"`
-	Nickname  string  `gorm:"column:nickname"`
-	AvatarURL string  `gorm:"column:avatar_url"`
-	PetID     *uint64 `gorm:"column:pet_id"` // LEFT JOIN pets，pet-less 时为 nil
+	UserID       uint64  `gorm:"column:user_id"`
+	Nickname     string  `gorm:"column:nickname"`
+	AvatarURL    string  `gorm:"column:avatar_url"`
+	PetID        *uint64 `gorm:"column:pet_id"`        // LEFT JOIN pets，pet-less 时为 nil
+	CurrentState *int8   `gorm:"column:current_state"` // LEFT JOIN pets.current_state；Story 14.3 引入，pet-less 时为 nil；r.PetID != nil 分支内必非 nil（schema §6.4 NOT NULL DEFAULT 1）
 }
 
 // RoomMemberRepo 是 room_members 表的最小读取接口（Story 10.3 引入）。
@@ -500,8 +509,12 @@ func (r *roomMemberRepo) ExistsForShareByRoomAndUser(ctx context.Context, roomID
 func (r *roomMemberRepo) ListRosterByRoomID(ctx context.Context, roomID uint64) ([]RosterRow, error) {
 	db := tx.FromContext(ctx, r.db)
 	var rows []RosterRow
+	// Story 14.3 落地：SELECT 列表加 `pets.current_state AS current_state`，
+	// 让 service 层在三处（GET /rooms / RoomSnapshotBuilder / 间接的 dockertest fixture）
+	// 共享同一 query 路径拿到真实 currentState；JOIN / WHERE / ORDER BY 子句不动；
+	// pet.equips 仍由 Epic 26 / Story 26.6 真实驱动。
 	err := db.WithContext(ctx).
-		Raw(`SELECT room_members.user_id AS user_id, users.nickname AS nickname, users.avatar_url AS avatar_url, pets.id AS pet_id
+		Raw(`SELECT room_members.user_id AS user_id, users.nickname AS nickname, users.avatar_url AS avatar_url, pets.id AS pet_id, pets.current_state AS current_state
 		     FROM room_members
 		     INNER JOIN users ON room_members.user_id = users.id
 		     LEFT JOIN pets ON pets.user_id = room_members.user_id AND pets.is_default = 1

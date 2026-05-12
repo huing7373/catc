@@ -39,6 +39,9 @@ import (
 // 简洁；与 mysql.RosterRow 等价（type alias）。
 type wsappRosterRow = mysql.RosterRow
 
+// int8Ptr 是 *int8 字面值便利 helper（Story 14.3 引入，给 RosterRow.CurrentState 配 fixture 用）。
+func int8Ptr(v int8) *int8 { return &v }
+
 // ---------- 测试 helper ----------
 
 // fakeBuilder 实装 wsapp.SnapshotBuilder；走 stub 字段。
@@ -378,9 +381,10 @@ func TestRealSnapshotBuilder_BuildSnapshot_Happy_3Members_With1PetLess(t *testin
 	repo := &stubRoomMemberRepo{
 		listRosterByRoomIDFn: func(_ context.Context, _ uint64) ([]wsappRosterRow, error) {
 			return []wsappRosterRow{
-				{UserID: 1001, Nickname: "Alice", AvatarURL: "https://cdn.example.com/a.png", PetID: uint64Ptr(8001)},
-				{UserID: 1002, Nickname: "Bob", AvatarURL: "https://cdn.example.com/b.png", PetID: uint64Ptr(8002)},
-				{UserID: 1003, Nickname: "Charlie", AvatarURL: "https://cdn.example.com/c.png", PetID: nil}, // pet-less
+				// Story 14.3：CurrentState 从 RosterRow.CurrentState 读；happy case 维持 1=rest 让既有断言 Pet.CurrentState==1 不破
+				{UserID: 1001, Nickname: "Alice", AvatarURL: "https://cdn.example.com/a.png", PetID: uint64Ptr(8001), CurrentState: int8Ptr(1)},
+				{UserID: 1002, Nickname: "Bob", AvatarURL: "https://cdn.example.com/b.png", PetID: uint64Ptr(8002), CurrentState: int8Ptr(1)},
+				{UserID: 1003, Nickname: "Charlie", AvatarURL: "https://cdn.example.com/c.png", PetID: nil, CurrentState: nil}, // pet-less → 两列均 NULL
 			}, nil
 		},
 	}
@@ -467,6 +471,95 @@ func TestRealSnapshotBuilder_BuildSnapshot_Happy_3Members_With1PetLess(t *testin
 	}
 }
 
+// TestRealSnapshotBuilder_BuildSnapshot_Happy_3Members_CurrentState_1_2_3:
+// Story 14.3 新增：3 个 member 各自 RosterRow.CurrentState=1/2/3 → Snapshot.Members[i].Pet.CurrentState
+// 按顺序映射 1/2/3。验证 realSnapshotBuilder.BuildSnapshot 自 Story 14.3 起从
+// RosterRow.CurrentState 读真实值（pets.current_state，V1 §12.3 line 1988 钦定）
+// 替代既有 hardcode `1` 路径。
+func TestRealSnapshotBuilder_BuildSnapshot_Happy_3Members_CurrentState_1_2_3(t *testing.T) {
+	repo := &stubRoomMemberRepo{
+		listRosterByRoomIDFn: func(_ context.Context, _ uint64) ([]wsappRosterRow, error) {
+			return []wsappRosterRow{
+				{UserID: 1001, Nickname: "Alice", AvatarURL: "https://a", PetID: uint64Ptr(9001), CurrentState: int8Ptr(1)},
+				{UserID: 1002, Nickname: "Bob", AvatarURL: "https://b", PetID: uint64Ptr(9002), CurrentState: int8Ptr(2)},
+				{UserID: 1003, Nickname: "Charlie", AvatarURL: "https://c", PetID: uint64Ptr(9003), CurrentState: int8Ptr(3)},
+			}, nil
+		},
+	}
+	builder := wsapp.NewRealSnapshotBuilder(repo)
+
+	snap, err := builder.BuildSnapshot(context.Background(), 3001)
+	if err != nil {
+		t.Fatalf("BuildSnapshot: %v", err)
+	}
+	if len(snap.Members) != 3 {
+		t.Fatalf("len(members) = %d, want 3", len(snap.Members))
+	}
+
+	wantStates := []int{1, 2, 3}
+	wantPetIDs := []string{"9001", "9002", "9003"}
+	for i, wantState := range wantStates {
+		if snap.Members[i].Pet == nil {
+			t.Fatalf("members[%d].pet = nil, want non-nil", i)
+		}
+		if snap.Members[i].Pet.PetID != wantPetIDs[i] {
+			t.Errorf("members[%d].pet.petId = %q, want %q", i, snap.Members[i].Pet.PetID, wantPetIDs[i])
+		}
+		if snap.Members[i].Pet.CurrentState != wantState {
+			t.Errorf("members[%d].pet.currentState = %d, want %d (Story 14.3 真实驱动)", i, snap.Members[i].Pet.CurrentState, wantState)
+		}
+	}
+
+	// JSON 序列化必须含真实 currentState 数值
+	bytes, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	jsonStr := string(bytes)
+	if !strings.Contains(jsonStr, `"currentState":2`) {
+		t.Errorf("snapshot JSON must contain `\"currentState\":2` (Story 14.3 真实驱动); got %s", jsonStr)
+	}
+	if !strings.Contains(jsonStr, `"currentState":3`) {
+		t.Errorf("snapshot JSON must contain `\"currentState\":3` (Story 14.3 真实驱动); got %s", jsonStr)
+	}
+}
+
+// TestRealSnapshotBuilder_BuildSnapshot_Malformed_PetID_NonNil_CurrentState_Nil:
+// r1 fix (Story 14.3 review)：malformed RosterRow —— PetID != nil 但 CurrentState == nil
+// （schema 不变量 §6.4 NOT NULL DEFAULT 1 损坏的 future-schema / old-binary 场景）→
+// 必须 **不 panic** + Pet.CurrentState 兜底默认 1（与 §6.4 DEFAULT 一致）。
+// 防御性 nil guard 回归测试 —— 防止未来重构再次去掉 nil guard 让请求 panic。
+func TestRealSnapshotBuilder_BuildSnapshot_Malformed_PetID_NonNil_CurrentState_Nil(t *testing.T) {
+	repo := &stubRoomMemberRepo{
+		listRosterByRoomIDFn: func(_ context.Context, _ uint64) ([]wsappRosterRow, error) {
+			return []wsappRosterRow{
+				// malformed：PetID 非 nil + CurrentState nil（schema 不变量损坏场景）
+				{UserID: 1001, Nickname: "Malformed", AvatarURL: "", PetID: uint64Ptr(8001), CurrentState: nil},
+			}, nil
+		},
+	}
+	builder := wsapp.NewRealSnapshotBuilder(repo)
+
+	// 关键断言：不能 panic
+	snap, err := builder.BuildSnapshot(context.Background(), 3001)
+	if err != nil {
+		t.Fatalf("BuildSnapshot: %v (malformed row 不应返 error，应兜底默认 1)", err)
+	}
+	if len(snap.Members) != 1 {
+		t.Fatalf("len(members) = %d, want 1", len(snap.Members))
+	}
+	if snap.Members[0].Pet == nil {
+		t.Fatalf("members[0].pet = nil, want non-nil (PetID != nil → Pet 应填充)")
+	}
+	if snap.Members[0].Pet.PetID != "8001" {
+		t.Errorf("members[0].pet.petId = %q, want \"8001\"", snap.Members[0].Pet.PetID)
+	}
+	// 兜底默认值：与 schema §6.4 NOT NULL DEFAULT 1 一致
+	if snap.Members[0].Pet.CurrentState != 1 {
+		t.Errorf("members[0].pet.currentState = %d, want 1 (malformed row nil guard 兜底默认值)", snap.Members[0].Pet.CurrentState)
+	}
+}
+
 // TestRealSnapshotBuilder_BuildSnapshot_PetLess_SingleMember:
 // stub 返 1 行 RosterRow（PetID nil 模拟单成员 pet-less 房间）→ Snapshot.Members
 // 长度 1 + Members[0].Pet == nil + Members[0].Nickname 真实值 + MemberCount == 1.
@@ -474,7 +567,8 @@ func TestRealSnapshotBuilder_BuildSnapshot_PetLess_SingleMember(t *testing.T) {
 	repo := &stubRoomMemberRepo{
 		listRosterByRoomIDFn: func(_ context.Context, _ uint64) ([]wsappRosterRow, error) {
 			return []wsappRosterRow{
-				{UserID: 1001, Nickname: "Solo", AvatarURL: "", PetID: nil}, // pet-less 单成员
+				// Story 14.3: pet-less 时 PetID + CurrentState 同步 nil（LEFT JOIN 行 NULL）
+				{UserID: 1001, Nickname: "Solo", AvatarURL: "", PetID: nil, CurrentState: nil},
 			}, nil
 		},
 	}

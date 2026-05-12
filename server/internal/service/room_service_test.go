@@ -2132,10 +2132,12 @@ func TestRoomService_GetRoomDetail_Happy_3Members_With1PetLess(t *testing.T) {
 			return true, nil
 		},
 		listRosterByRoomIDFn: func(ctx context.Context, rid uint64) ([]mysql.RosterRow, error) {
+			// Story 14.3：CurrentState 字段 fixture（happy 维持 1，与既有断言 CurrentState==1 一致）
+			cs1, cs2 := int8(1), int8(1)
 			return []mysql.RosterRow{
-				{UserID: 1001, Nickname: "A", AvatarURL: "https://a", PetID: &pet1},
-				{UserID: 1002, Nickname: "B", AvatarURL: "", PetID: &pet2},
-				{UserID: 1003, Nickname: "C", AvatarURL: "https://c", PetID: nil},
+				{UserID: 1001, Nickname: "A", AvatarURL: "https://a", PetID: &pet1, CurrentState: &cs1},
+				{UserID: 1002, Nickname: "B", AvatarURL: "", PetID: &pet2, CurrentState: &cs2},
+				{UserID: 1003, Nickname: "C", AvatarURL: "https://c", PetID: nil, CurrentState: nil}, // pet-less
 			}, nil
 		},
 	}
@@ -2174,6 +2176,109 @@ func TestRoomService_GetRoomDetail_Happy_3Members_With1PetLess(t *testing.T) {
 	}
 	if out.Members[2].Pet != nil {
 		t.Errorf("out.Members[2].Pet = %+v, want nil (pet-less)", out.Members[2].Pet)
+	}
+}
+
+// TestRoomService_GetRoomDetail_Happy_3Members_CurrentState_1_2_3:
+// Story 14.3 新增：3 个 RosterRow 各自 CurrentState=1/2/3 → out.Members[i].Pet.CurrentState
+// 真值映射 1/2/3。验证 GetRoomDetail 自 Story 14.3 起从 RosterRow.CurrentState 读真实值
+// （V1 §10.3 line 1389 钦定）替代既有 hardcode `1` 路径。
+func TestRoomService_GetRoomDetail_Happy_3Members_CurrentState_1_2_3(t *testing.T) {
+	roomID := uint64(3001)
+
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1001, CurrentRoomID: &roomID}, nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, CreatorUserID: 1001, Status: 1, MaxMembers: 4}, nil
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		existsForShareByRoomAndUserFn: func(ctx context.Context, rid, uid uint64) (bool, error) {
+			return true, nil
+		},
+		listRosterByRoomIDFn: func(ctx context.Context, rid uint64) ([]mysql.RosterRow, error) {
+			pet1, pet2, pet3 := uint64(9001), uint64(9002), uint64(9003)
+			cs1, cs2, cs3 := int8(1), int8(2), int8(3)
+			return []mysql.RosterRow{
+				{UserID: 1001, Nickname: "A", AvatarURL: "https://a", PetID: &pet1, CurrentState: &cs1},
+				{UserID: 1002, Nickname: "B", AvatarURL: "https://b", PetID: &pet2, CurrentState: &cs2},
+				{UserID: 1003, Nickname: "C", AvatarURL: "https://c", PetID: &pet3, CurrentState: &cs3},
+			}, nil
+		},
+	}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
+	out, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: roomID})
+	if err != nil {
+		t.Fatalf("GetRoomDetail: %v", err)
+	}
+	if len(out.Members) != 3 {
+		t.Fatalf("len(out.Members) = %d, want 3", len(out.Members))
+	}
+	wantStates := []int8{1, 2, 3}
+	for i, want := range wantStates {
+		if out.Members[i].Pet == nil {
+			t.Fatalf("out.Members[%d].Pet = nil, want non-nil", i)
+		}
+		if out.Members[i].Pet.CurrentState != want {
+			t.Errorf("out.Members[%d].Pet.CurrentState = %d, want %d (Story 14.3 真实驱动)", i, out.Members[i].Pet.CurrentState, want)
+		}
+	}
+}
+
+// TestRoomService_GetRoomDetail_Malformed_PetID_NonNil_CurrentState_Nil:
+// r1 fix (Story 14.3 review)：malformed RosterRow —— PetID != nil 但 CurrentState == nil
+// （schema 不变量 §6.4 NOT NULL DEFAULT 1 损坏的 future-schema / old-binary 场景）→
+// 必须 **不 panic** + Member.Pet.CurrentState 兜底默认 1（与 §6.4 DEFAULT 一致）。
+// 防御性 nil guard 回归测试 —— 防止未来重构再次去掉 nil guard 让 GetRoomDetail panic。
+func TestRoomService_GetRoomDetail_Malformed_PetID_NonNil_CurrentState_Nil(t *testing.T) {
+	roomID := uint64(3001)
+
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1001, CurrentRoomID: &roomID}, nil
+		},
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, CreatorUserID: 1001, Status: 1, MaxMembers: 4}, nil
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		existsForShareByRoomAndUserFn: func(ctx context.Context, rid, uid uint64) (bool, error) {
+			return true, nil
+		},
+		listRosterByRoomIDFn: func(ctx context.Context, rid uint64) ([]mysql.RosterRow, error) {
+			pet1 := uint64(9001)
+			// malformed：PetID 非 nil + CurrentState nil
+			return []mysql.RosterRow{
+				{UserID: 1001, Nickname: "A", AvatarURL: "https://a", PetID: &pet1, CurrentState: nil},
+			}, nil
+		},
+	}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, &roomTestStubPetRepo{}, &roomTestStubSessionMgr{}, (&roomTestStubBroadcastFn{}).fn(&atomic.Int64{}), (&roomTestStubBroadcastFn{}).exceptFn(&atomic.Int64{}))
+	// 关键断言：不能 panic
+	out, err := svc.GetRoomDetail(context.Background(), service.GetRoomDetailInput{UserID: 1001, RoomID: roomID})
+	if err != nil {
+		t.Fatalf("GetRoomDetail: %v (malformed row 不应返 error，应兜底默认 1)", err)
+	}
+	if len(out.Members) != 1 {
+		t.Fatalf("len(out.Members) = %d, want 1", len(out.Members))
+	}
+	if out.Members[0].Pet == nil {
+		t.Fatalf("out.Members[0].Pet = nil, want non-nil (PetID != nil → Pet 应填充)")
+	}
+	if out.Members[0].Pet.PetID != 9001 {
+		t.Errorf("out.Members[0].Pet.PetID = %d, want 9001", out.Members[0].Pet.PetID)
+	}
+	// 兜底默认值：与 schema §6.4 NOT NULL DEFAULT 1 一致
+	if out.Members[0].Pet.CurrentState != 1 {
+		t.Errorf("out.Members[0].Pet.CurrentState = %d, want 1 (malformed row nil guard 兜底默认值)", out.Members[0].Pet.CurrentState)
 	}
 }
 
@@ -2561,6 +2666,81 @@ func TestRoomService_JoinRoom_Happy_BroadcastMemberJoinedCalled(t *testing.T) {
 	}
 	if payload.Pet.CurrentState != 1 {
 		t.Errorf("payload.pet.currentState = %d, want 1", payload.Pet.CurrentState)
+	}
+}
+
+// case J1b: Story 14.3 新增 — broadcastMemberJoined 真实驱动 pet.currentState
+// （非 hardcode 1）：mock petRepo 返 `&mysql.Pet{CurrentState: 2}` →
+// member.joined.payload.pet.currentState == 2。验证 broadcastMemberJoined
+// 自 Story 14.3 起从 mysql.Pet.CurrentState 读真实值（V1 §12.3 line 2121 钦定）
+// 替代既有 hardcode `1` 路径。
+func TestRoomService_BroadcastMemberJoined_PetCurrentState_2(t *testing.T) {
+	const userID = uint64(1002)
+	const roomID = uint64(3001)
+	const petID = uint64(9001)
+
+	userRepo := &roomTestStubUserRepo{
+		findByIDFn: func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{
+				ID:            userID,
+				Nickname:      "用户1002",
+				AvatarURL:     "https://avatar/1002",
+				CurrentRoomID: nil,
+			}, nil
+		},
+		updateCurrentRoomIDFn: func(ctx context.Context, uid uint64, rid *uint64) error { return nil },
+	}
+	roomRepo := &roomTestStubRoomRepo{
+		findByIDFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
+		},
+		findByIDForUpdateFn: func(ctx context.Context, rid uint64) (*mysql.Room, error) {
+			return &mysql.Room{ID: roomID, Status: 1, MaxMembers: 4}, nil
+		},
+	}
+	memberRepo := &roomTestStubRoomMemberRepo{
+		countByRoomIDFn: func(ctx context.Context, rid uint64) (int, error) { return 1, nil },
+		createFn:        func(ctx context.Context, m *mysql.RoomMember) error { return nil },
+	}
+	petRepo := &roomTestStubPetRepo{
+		findDefaultByUserIDFn: func(ctx context.Context, uid uint64) (*mysql.Pet, error) {
+			// Story 14.3：CurrentState=2 (walk) 真实驱动；previously hardcoded `1`
+			return &mysql.Pet{ID: petID, UserID: uid, IsDefault: 1, CurrentState: 2}, nil
+		},
+	}
+	bcast, _, fn, exceptFn := newRoomTestStubBroadcastFnWithSeq()
+	sessionMgr := &roomTestStubSessionMgr{}
+
+	svc := service.NewRoomService(roomTestDefaultStubTxMgr(), userRepo, roomRepo, memberRepo, petRepo, sessionMgr, fn, exceptFn)
+	wg := &sync.WaitGroup{}
+	service.SetPostCommitWaitGroupForTest(svc, wg)
+	if _, err := svc.JoinRoom(context.Background(), service.JoinRoomInput{UserID: userID, RoomID: roomID}); err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+	wg.Wait()
+
+	if got := bcast.callCount(); got != 1 {
+		t.Fatalf("broadcastExceptFn call count = %d, want 1", got)
+	}
+
+	var env story118EnvelopeForTest
+	if err := json.Unmarshal(bcast.calls[0].msg, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	var payload struct {
+		Pet *struct {
+			PetID        string `json:"petId"`
+			CurrentState int    `json:"currentState"`
+		} `json:"pet"`
+	}
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.Pet == nil {
+		t.Fatalf("payload.pet = nil, want non-nil")
+	}
+	if payload.Pet.CurrentState != 2 {
+		t.Errorf("payload.pet.currentState = %d, want 2 (Story 14.3 真实驱动 mysql.Pet.CurrentState)", payload.Pet.CurrentState)
 	}
 }
 

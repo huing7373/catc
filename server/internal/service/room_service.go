@@ -1207,8 +1207,9 @@ func (s *roomServiceImpl) GetCurrentRoom(ctx context.Context, in GetCurrentRoomI
 // **ctx 用法**：fn 内全部 4 个 repo 调用用 txCtx；用错 ctx 让 FOR SHARE 锁立即释放，
 // post-leave 数据泄漏 race 重新出现。
 //
-// **节点 4 硬编码字段**：MemberPetOutput.CurrentState 固定 1 (rest)；Equips 固定 [];
-// 节点 5 / 9 / 10 由 Epic 14 / 26 / 29 真实驱动时改为 query 结果。
+// **节点 5 / 9 / 10 真实驱动**：CurrentState 自 Story 14.3 起从 RosterRow.CurrentState
+// 读真实值（V1 §10.3 line 1389 钦定，Epic 14）；Equips 仍固定 []，由 Epic 26 真实驱动；
+// renderConfig 由 Epic 29 真实驱动。
 //
 // **LEFT JOIN pets 行为**：RosterRow.PetID 为 *uint64；nil 表示 pet-less（LEFT JOIN
 // 行 NULL）→ MemberOutput.Pet == nil；非 nil → MemberOutput.Pet = &MemberPetOutput{
@@ -1260,11 +1261,18 @@ func (s *roomServiceImpl) GetRoomDetail(ctx context.Context, in GetRoomDetailInp
 				AvatarURL: r.AvatarURL,
 			}
 			if r.PetID != nil {
-				// 非 pet-less：节点 4 阶段硬编码 CurrentState=1 / Equips=[]
+				// 非 pet-less：CurrentState 自 Story 14.3 起从 RosterRow.CurrentState 读真实值；
+				// Equips 节点 4 / 5 阶段仍固定 []（由 Epic 26 真实驱动）
+				// r1 fix：加 nil 守卫防御 schema 不变量损坏（V1 §10.3 line 1389 自 Story 14.3 起切真实值；
+				// 兜底默认值 1，与 §6.4 NOT NULL DEFAULT 1 一致，避免 panic 整个 GetRoomDetail 请求）
+				var currentState int8 = 1
+				if r.CurrentState != nil {
+					currentState = *r.CurrentState
+				}
 				m.Pet = &MemberPetOutput{
 					PetID:        *r.PetID,
-					CurrentState: 1,                // V1 §10.3 节点 4 阶段固定 1 (rest)
-					Equips:       []EquipOutput{}, // 节点 4 阶段固定 []
+					CurrentState: currentState,
+					Equips:       []EquipOutput{}, // 节点 4 / 5 阶段固定 []，Epic 26 真实驱动
 				}
 			}
 			members = append(members, m)
@@ -1308,7 +1316,8 @@ func (s *roomServiceImpl) GetRoomDetail(ctx context.Context, in GetRoomDetailInp
 //     - ErrPetNotFound → pet-less 路径，pet=nil 构造 payload `pet: null`
 //     - 其他 raw error → log warn + pet=nil 路径降级
 //     - happy → pet=&ws.SnapshotPet{PetID: strconv.FormatUint(pet.ID, 10),
-//     CurrentState: 1}（节点 4 阶段固定 1 rest，V1 §12.3 钦定）
+//     CurrentState: int(petRow.CurrentState)}（Story 14.3 落地：从 mysql.Pet.CurrentState 读真实值；
+//     V1 §12.3 line 2121 自 14.3 起切真实值）
 //  3. 构造 ws.MemberJoinedPayload{UserID: 字符串化, Nickname: real, AvatarURL: real, Pet: <如上>}
 //  4. 调 ws.BuildMemberJoinedEnvelope(payload) 拿 marshal 后 []byte
 //  5. s.broadcastFn(ctx, roomID, msgBytes) 推送（fire-and-forget）
@@ -1361,7 +1370,7 @@ func (s *roomServiceImpl) broadcastMemberJoined(ctx context.Context, roomID, joi
 	} else {
 		pet = &ws.SnapshotPet{
 			PetID:        strconv.FormatUint(petRow.ID, 10),
-			CurrentState: 1, // V1 §12.3 节点 4 阶段固定 1 rest
+			CurrentState: int(petRow.CurrentState), // Story 14.3 落地：从 mysql.Pet.CurrentState 读真实值（V1 §12.3 line 2121 自 Story 14.3 起切真实值）
 		}
 	}
 

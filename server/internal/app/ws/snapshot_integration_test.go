@@ -271,3 +271,89 @@ func TestRealSnapshotBuilder_BuildSnapshot_Integration_FullRoster_With1PetLess(t
 		t.Errorf("snapshot JSON must NOT contain isOnline (range-red-line; going-forward 不下发; got %s)", jsonStr)
 	}
 }
+
+// TestRealSnapshotBuilder_BuildSnapshot_RealCurrentState_1_2_3_Integration:
+// Story 14.3 集成测试 —— 真实 MySQL fixture：建房间 3001 + 3 成员（1001/1002/1003）+
+// 各成员 pet.current_state=1/2/3 → realSnapshotBuilder.BuildSnapshot 返
+// Snapshot.Members[i].Pet.CurrentState 真实驱动 1/2/3。
+//
+// 验证 Story 14.3 三处统一切换路径之一（room.snapshot 真实驱动 pet.currentState）：
+// SQL SELECT 包含 `pets.current_state AS current_state` 列 → RosterRow.CurrentState 真实值
+// → realSnapshotBuilder 在 r.PetID != nil 分支内解引 *r.CurrentState 拼装 SnapshotPet.CurrentState。
+//
+// fixture: 复用 startMySQLWithRoomMemberFixture（已 seed room 3001 + room_members
+// (3001,1001) (3001,1002)），本 case 补 seed 1003 / 加 room_members(3001,1003) +
+// users (1001/1002/1003) + pets 3 行（各 current_state=1/2/3）。
+func TestRealSnapshotBuilder_BuildSnapshot_RealCurrentState_1_2_3_Integration(t *testing.T) {
+	gormDB, cleanup := startMySQLWithRoomMemberFixture(t)
+	defer cleanup()
+
+	rawDB, err := gormDB.DB()
+	if err != nil {
+		t.Fatalf("gormDB.DB: %v", err)
+	}
+	// fixture 已 seed room (3001) + room_members ((3001,1001),(3001,1002))；
+	// 本 case 补 room_members (3001,1003) + users 3 行 + pets 3 行各 current_state 1/2/3
+	seedStmts := []string{
+		`INSERT INTO users (id, guest_uid, nickname, avatar_url, status) VALUES (1001, 'uid-1001', 'Alice', 'https://cdn/a.png', 1)`,
+		`INSERT INTO users (id, guest_uid, nickname, avatar_url, status) VALUES (1002, 'uid-1002', 'Bob', 'https://cdn/b.png', 1)`,
+		`INSERT INTO users (id, guest_uid, nickname, avatar_url, status) VALUES (1003, 'uid-1003', 'Charlie', 'https://cdn/c.png', 1)`,
+		// 注：fixture 已 INSERT room_members (3001,1001) (3001,1002)；再补 (3001,1003)
+		`INSERT INTO room_members (room_id, user_id) VALUES (3001, 1003)`,
+		// 3 只 pet 分别 current_state=1/2/3 验证三档状态都真实驱动
+		`INSERT INTO pets (id, user_id, pet_type, name, current_state, is_default) VALUES (9001, 1001, 1, '小白', 1, 1)`,
+		`INSERT INTO pets (id, user_id, pet_type, name, current_state, is_default) VALUES (9002, 1002, 1, '小灰', 2, 1)`,
+		`INSERT INTO pets (id, user_id, pet_type, name, current_state, is_default) VALUES (9003, 1003, 1, '小黑', 3, 1)`,
+	}
+	for _, stmt := range seedStmts {
+		if _, err := rawDB.Exec(stmt); err != nil {
+			t.Fatalf("seed exec %q: %v", stmt, err)
+		}
+	}
+
+	repo := mysqlrepo.NewRoomMemberRepo(gormDB)
+	builder := wsapp.NewRealSnapshotBuilder(repo)
+
+	snap, err := builder.BuildSnapshot(context.Background(), 3001)
+	if err != nil {
+		t.Fatalf("BuildSnapshot: %v", err)
+	}
+
+	if snap.Room.MemberCount != 3 {
+		t.Errorf("room.memberCount = %d, want 3", snap.Room.MemberCount)
+	}
+	if len(snap.Members) != 3 {
+		t.Fatalf("len(members) = %d, want 3", len(snap.Members))
+	}
+
+	// 顺序按 room_members.joined_at ASC：1001 / 1002 / 1003
+	wantUserIDs := []string{"1001", "1002", "1003"}
+	wantPetIDs := []string{"9001", "9002", "9003"}
+	wantStates := []int{1, 2, 3}
+	for i := 0; i < 3; i++ {
+		if snap.Members[i].UserID != wantUserIDs[i] {
+			t.Errorf("members[%d].userId = %q, want %s", i, snap.Members[i].UserID, wantUserIDs[i])
+		}
+		if snap.Members[i].Pet == nil {
+			t.Fatalf("members[%d].pet = nil, want non-nil", i)
+		}
+		if snap.Members[i].Pet.PetID != wantPetIDs[i] {
+			t.Errorf("members[%d].pet.petId = %q, want %s", i, snap.Members[i].Pet.PetID, wantPetIDs[i])
+		}
+		if snap.Members[i].Pet.CurrentState != wantStates[i] {
+			t.Errorf("members[%d].pet.currentState = %d, want %d (Story 14.3 真实驱动 pets.current_state)", i, snap.Members[i].Pet.CurrentState, wantStates[i])
+		}
+	}
+
+	// 验证 JSON 序列化含全部 3 档真实 currentState
+	bytes, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	jsonStr := string(bytes)
+	for _, want := range []string{`"currentState":1`, `"currentState":2`, `"currentState":3`} {
+		if !strings.Contains(jsonStr, want) {
+			t.Errorf("snapshot JSON must contain %s (Story 14.3 真实驱动); got %s", want, jsonStr)
+		}
+	}
+}

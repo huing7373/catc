@@ -54,8 +54,8 @@ import (
 // 节点 4 阶段 placeholder（Story 10.7）/ Story 11.7 真实实装下发的 wire envelope 一致
 // —— 字段值差异：placeholder 阶段 Nickname/PetID 空字符串 + Pet pointer 始终非 nil
 // + CurrentState=1；真实阶段（Story 11.7）由 users.nickname / pets.id 真实回填 +
-// pet-less 时 Pet pointer 为 nil → wire 下发 `"pet": null` + CurrentState 仍硬编码 1
-// （Epic 14 真实驱动）。
+// pet-less 时 Pet pointer 为 nil → wire 下发 `"pet": null`；
+// CurrentState 自 Story 14.3 起读真实 pets.current_state（placeholder 阶段仍硬编码 1）。
 //
 // 注意：本 struct 直接作为 serverEnvelope.Payload 的具体类型 —— **不**额外引入
 // "内部 domain model + 外部 DTO 转换"层，YAGNI（与既有 inline 实装的 snapshotPayload
@@ -122,8 +122,10 @@ type SnapshotMember struct {
 //
 // 字段：
 //   - PetID: placeholder 阶段空字符串 ""（V1 §12.3 字段表 placeholder 行钦定）
-//   - CurrentState: 节点 4 阶段固定 1 (stationary_or_unknown)；Story 11.7 真实
-//     实装亦固定 1（Epic 14 才真实驱动）—— V1 §12.3 字段表钦定
+//   - CurrentState: placeholder 阶段（Story 10.7 r14 锁定）固定 1 (rest)；
+//     Story 11.7 真实实装阶段亦固定 1；自 Story 14.3 起 realSnapshotBuilder
+//     从 pets.current_state 读真实值（1=rest / 2=walk / 3=run，V1 §12.3
+//     line 1988 + §10.3 line 1389 钦定），placeholder builder 仍硬编码 1
 type SnapshotPet struct {
 	PetID        string `json:"petId"`
 	CurrentState int    `json:"currentState"`
@@ -231,10 +233,12 @@ func (b *placeholderSnapshotBuilder) BuildSnapshot(ctx context.Context, roomID u
 // r14 锁定的 going-forward 契约）：
 //   - placeholder（Story 10.7 落地）：走 ListMembers 单表查询（不 JOIN users / pets），
 //     所有 member 一律下发 `pet ≠ null + petId: ""` + nickname 空字符串 ""
-//   - real（本 story 落地，going-forward 契约）：走 ListRosterByRoomID 多表 JOIN
-//     聚合（INNER JOIN users + LEFT JOIN pets ON pets.is_default=1 + ORDER BY
-//     joined_at ASC，复用 Story 11.6 已落地路径），nickname / petId 真实回填，
-//     pet-less 下发 `pet: null`，pet.currentState 节点 4 阶段仍硬编码 1（rest）
+//   - real（Story 11.7 落地，going-forward 契约；Story 14.3 落地 currentState 真值）：
+//     走 ListRosterByRoomID 多表 JOIN 聚合（INNER JOIN users + LEFT JOIN pets ON
+//     pets.is_default=1 + ORDER BY joined_at ASC，复用 Story 11.6 已落地路径），
+//     nickname / petId 真实回填，pet-less 下发 `pet: null`，pet.currentState
+//     **自 Story 14.3 起**从 RosterRow.CurrentState 读真实值（pets.current_state；
+//     V1 §12.3 line 1988 / §10.3 line 1389 钦定）
 //
 // 参数：
 //   - roomMember: RoomMemberRepo（已在 main.go bootstrap 期 wire；与 gateway / placeholder
@@ -267,7 +271,7 @@ func NewRealSnapshotBuilder(roomMember mysql.RoomMemberRepo) SnapshotBuilder {
 //       JSON 序列化为 `"pet": null`
 //     - r.PetID != nil → SnapshotMember.Pet = &SnapshotPet{
 //         PetID:        strconv.FormatUint(*r.PetID, 10), // BIGINT 字符串化
-//         CurrentState: 1, // 节点 4 阶段固定 1 (rest)；Epic 14 / Story 14.3 真实驱动
+//         CurrentState: int(*r.CurrentState), // Story 14.3 落地：读 RosterRow.CurrentState（pets.current_state；schema §6.4 NOT NULL DEFAULT 1 → r.PetID != nil 分支内 *r.CurrentState 必非 nil）
 //       }
 //   - room.id 字符串化（与 placeholder 一致）
 //   - room.maxMembers 固定 4（V1 §12.3 钦定，与 placeholder 一致）
@@ -313,9 +317,17 @@ func (b *realSnapshotBuilder) BuildSnapshot(ctx context.Context, roomID uint64) 
 			// Pet 字段填充见下：pet-less → nil；非 pet-less → &SnapshotPet{...}
 		}
 		if r.PetID != nil {
+			// Story 14.3 落地：从 RosterRow.CurrentState 读真实值（pets.current_state；
+			// schema §6.4 NOT NULL DEFAULT 1 → r.PetID != nil 分支内 *r.CurrentState 通常非 nil）
+			// r1 fix：仍加 nil 守卫防御 schema 不变量损坏（future migration / 旧 binary 跑新 schema）
+			// → 兜底默认值 1（与 §6.4 NOT NULL DEFAULT 1 一致），避免 panic 整个 snapshot 路径
+			currentState := 1
+			if r.CurrentState != nil {
+				currentState = int(*r.CurrentState)
+			}
 			m.Pet = &SnapshotPet{
 				PetID:        strconv.FormatUint(*r.PetID, 10),
-				CurrentState: 1, // V1 §12.3 节点 4 阶段固定 1 (rest)；Epic 14 真实驱动
+				CurrentState: currentState,
 			}
 		}
 		// r.PetID == nil → m.Pet 保持 nil → JSON 序列化为 `"pet": null`

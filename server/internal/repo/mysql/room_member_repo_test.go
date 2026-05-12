@@ -507,13 +507,14 @@ func TestRoomMemberRepo_ListRosterByRoomID_Happy_3Members_With1PetLess(t *testin
 	gormDB, mock := newGormWithMock(t)
 	repo := NewRoomMemberRepo(gormDB)
 
-	rows := sqlmock.NewRows([]string{"user_id", "nickname", "avatar_url", "pet_id"}).
-		AddRow(uint64(1001), "用户A", "https://a", uint64(8001)).
-		AddRow(uint64(1002), "用户B", "", uint64(8002)).
-		AddRow(uint64(1003), "用户C", "https://c", nil) // pet-less → pet_id 列 NULL
+	// Story 14.3 加 current_state 列；既有断言不破（happy 维持 current_state=1）
+	rows := sqlmock.NewRows([]string{"user_id", "nickname", "avatar_url", "pet_id", "current_state"}).
+		AddRow(uint64(1001), "用户A", "https://a", uint64(8001), int8(1)).
+		AddRow(uint64(1002), "用户B", "", uint64(8002), int8(1)).
+		AddRow(uint64(1003), "用户C", "https://c", nil, nil) // pet-less → pet_id / current_state 两列均 NULL
 
-	// SQL 关键字：LEFT JOIN pets + INNER JOIN users + ORDER BY joined_at ASC
-	mock.ExpectQuery(`LEFT JOIN pets.*ORDER BY room_members\.joined_at ASC`).
+	// SQL 关键字：LEFT JOIN pets + INNER JOIN users + ORDER BY joined_at ASC + Story 14.3 加 pets.current_state 列
+	mock.ExpectQuery(`pets\.current_state AS current_state.*LEFT JOIN pets.*ORDER BY room_members\.joined_at ASC`).
 		WithArgs(uint64(3001)).
 		WillReturnRows(rows)
 
@@ -549,7 +550,7 @@ func TestRoomMemberRepo_ListRosterByRoomID_ZeroRows_ReturnsEmptySlice(t *testing
 
 	mock.ExpectQuery(`LEFT JOIN pets.*ORDER BY room_members\.joined_at ASC`).
 		WithArgs(uint64(9999)).
-		WillReturnRows(sqlmock.NewRows([]string{"user_id", "nickname", "avatar_url", "pet_id"}))
+		WillReturnRows(sqlmock.NewRows([]string{"user_id", "nickname", "avatar_url", "pet_id", "current_state"}))
 
 	got, err := repo.ListRosterByRoomID(context.Background(), 9999)
 	if err != nil {
@@ -590,8 +591,8 @@ func TestRoomMemberRepo_ListRosterByRoomID_SingleMember_StableOrder(t *testing.T
 	gormDB, mock := newGormWithMock(t)
 	repo := NewRoomMemberRepo(gormDB)
 
-	rows := sqlmock.NewRows([]string{"user_id", "nickname", "avatar_url", "pet_id"}).
-		AddRow(uint64(1001), "Solo", "", uint64(8001))
+	rows := sqlmock.NewRows([]string{"user_id", "nickname", "avatar_url", "pet_id", "current_state"}).
+		AddRow(uint64(1001), "Solo", "", uint64(8001), int8(1))
 
 	// SQL 必含 INNER JOIN users 子句（review 阶段必查 vs LEFT JOIN users 反模式）
 	mock.ExpectQuery(`INNER JOIN users.*LEFT JOIN pets.*ORDER BY room_members\.joined_at ASC`).
@@ -607,5 +608,42 @@ func TestRoomMemberRepo_ListRosterByRoomID_SingleMember_StableOrder(t *testing.T
 	}
 	if got[0].UserID != 1001 || got[0].Nickname != "Solo" {
 		t.Errorf("got[0] = %+v, want UserID=1001 Nickname=Solo", got[0])
+	}
+}
+
+// TestRoomMemberRepo_ListRosterByRoomID_ReturnsRealCurrentState_1_2_3:
+// Story 14.3 新增：sqlmock 返 3 rows 各自 current_state=1/2/3 → 断言
+// RosterRow[i].CurrentState != nil + *RosterRow[i].CurrentState == 1/2/3 对应。
+// 验证 SQL SELECT 列表加 `pets.current_state AS current_state` 列输出 + GORM Scan
+// 把 int8 列映射到 *int8 字段（与 PetID *uint64 同 nullable pattern）。
+func TestRoomMemberRepo_ListRosterByRoomID_ReturnsRealCurrentState_1_2_3(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewRoomMemberRepo(gormDB)
+
+	rows := sqlmock.NewRows([]string{"user_id", "nickname", "avatar_url", "pet_id", "current_state"}).
+		AddRow(uint64(1001), "A", "https://a", uint64(9001), int8(1)).
+		AddRow(uint64(1002), "B", "https://b", uint64(9002), int8(2)).
+		AddRow(uint64(1003), "C", "https://c", uint64(9003), int8(3))
+
+	// SQL 必含 pets.current_state AS current_state（Story 14.3 引入）
+	mock.ExpectQuery(`pets\.current_state AS current_state.*INNER JOIN users.*LEFT JOIN pets.*ORDER BY room_members\.joined_at ASC`).
+		WithArgs(uint64(3001)).
+		WillReturnRows(rows)
+
+	got, err := repo.ListRosterByRoomID(context.Background(), 3001)
+	if err != nil {
+		t.Fatalf("ListRosterByRoomID: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	wantStates := []int8{1, 2, 3}
+	for i, want := range wantStates {
+		if got[i].CurrentState == nil {
+			t.Fatalf("got[%d].CurrentState = nil, want non-nil *int8(%d)", i, want)
+		}
+		if *got[i].CurrentState != want {
+			t.Errorf("*got[%d].CurrentState = %d, want %d", i, *got[i].CurrentState, want)
+		}
 	}
 }

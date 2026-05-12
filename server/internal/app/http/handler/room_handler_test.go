@@ -930,6 +930,54 @@ func TestRoomHandler_GetRoomDetail_Happy_With1PetLess(t *testing.T) {
 	}
 }
 
+// TestRoomHandler_GetRoomDetail_PetCurrentState_2_Passthrough:
+// Story 14.3 新增：stub service 返 MemberPetOutput.CurrentState=2 → 断言 wire
+// `data.members[].pet.currentState` == 2。验证 handler 层透传 service 层赋值的真实
+// currentState 值，无 mutation / 无 hardcode（GetRoomDetailResponseMemberPet.CurrentState
+// int8 字段类型不变，仅赋值来源从 hardcode `1` 切到 service 层真实值）。
+func TestRoomHandler_GetRoomDetail_PetCurrentState_2_Passthrough(t *testing.T) {
+	svc := &stubRoomService{
+		getRoomDetailFn: func(ctx context.Context, in service.GetRoomDetailInput) (*service.GetRoomDetailOutput, error) {
+			return &service.GetRoomDetailOutput{
+				RoomID:        3001,
+				CreatorUserID: 1001,
+				MaxMembers:    4,
+				Status:        1,
+				MemberCount:   1,
+				Members: []service.MemberOutput{
+					{UserID: 1001, Nickname: "A", AvatarURL: "https://a", Pet: &service.MemberPetOutput{PetID: 8001, CurrentState: 2, Equips: []service.EquipOutput{}}},
+				},
+			}, nil
+		},
+	}
+	r := newRoomHandlerRouter(svc, 1001)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/rooms/3001", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeRoomEnvelope(t, w.Body.Bytes())
+	data, ok := env.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("envelope.data not object: %T", env.Data)
+	}
+	members, ok := data["members"].([]any)
+	if !ok || len(members) != 1 {
+		t.Fatalf("data.members invalid: %v", data["members"])
+	}
+	m0 := members[0].(map[string]any)
+	pet0, ok := m0["pet"].(map[string]any)
+	if !ok {
+		t.Fatalf("members[0].pet not object: %T", m0["pet"])
+	}
+	if cs, _ := pet0["currentState"].(float64); cs != 2 {
+		t.Errorf("members[0].pet.currentState = %v, want 2 (Story 14.3 handler 层透传 service 真实 currentState)", pet0["currentState"])
+	}
+}
+
 // TestRoomHandler_GetRoomDetail_UserNotInRoom_Returns6004:
 // stub service 返 *AppError{Code:6004} → envelope.code=6004。
 func TestRoomHandler_GetRoomDetail_UserNotInRoom_Returns6004(t *testing.T) {
