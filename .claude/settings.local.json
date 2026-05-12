@@ -87,7 +87,10 @@
       "mcp__ios-simulator__install_app",
       "mcp__ios-simulator__launch_app",
       "mcp__ios-simulator__ui_view",
-      "mcp__ios-simulator__screenshot"
+      "mcp__ios-simulator__screenshot",
+      "Skill(update-config)",
+      "Bash(claude doctor *)",
+      "WebFetch(domain:www.reddit.com)"
     ],
     "deny": [
       "Bash(rm -rf:*)",
