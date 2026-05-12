@@ -41,6 +41,10 @@ func (s *stubHomePetRepo) Create(ctx context.Context, p *mysql.Pet) error { retu
 func (s *stubHomePetRepo) FindDefaultByUserID(ctx context.Context, userID uint64) (*mysql.Pet, error) {
 	return s.findDefaultByUserIDFn(ctx, userID)
 }
+// UpdateCurrentStateByID Story 14.2 加：home_service 不调本方法。
+func (s *stubHomePetRepo) UpdateCurrentStateByID(ctx context.Context, petID uint64, state int8) error {
+	return nil
+}
 
 type stubHomeStepAccountRepo struct {
 	findByUserIDFn func(ctx context.Context, userID uint64) (*mysql.StepAccount, error)

@@ -177,6 +177,11 @@ func (s *roomTestStubPetRepo) FindDefaultByUserID(ctx context.Context, userID ui
 	return nil, mysql.ErrPetNotFound
 }
 
+// UpdateCurrentStateByID Story 14.2 加：room_service 不调本方法（pet state-sync 归 pet_service）。
+func (s *roomTestStubPetRepo) UpdateCurrentStateByID(ctx context.Context, petID uint64, state int8) error {
+	panic("roomTestStubPetRepo.UpdateCurrentStateByID must not be called by room_service")
+}
+
 // roomTestRecordedBroadcast 记录单次 broadcastFn / broadcastExceptFn 调用入参 +
 // 调用时间戳（基于 atomic 序号，单调递增）；用于断言 close 4007 与 broadcast 顺序（r13）。
 //

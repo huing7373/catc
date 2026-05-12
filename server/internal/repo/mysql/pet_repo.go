@@ -40,6 +40,9 @@ func (Pet) TableName() string { return "pets" }
 // 节点 2 阶段消费方：
 //   - service.AuthService.firstTimeLogin: Create（事务内）
 //   - service.AuthService.reuseLogin: FindDefaultByUserID（事务外）
+//
+// 节点 5 阶段消费方（Story 14.2 加）：
+//   - service.PetService.SyncCurrentState: FindDefaultByUserID + UpdateCurrentStateByID
 type PetRepo interface {
 	// Create 插入一行 pets。GORM 在成功后回填 p.ID。
 	Create(ctx context.Context, p *Pet) error
@@ -49,6 +52,35 @@ type PetRepo interface {
 	// NotFound → ErrPetNotFound（理论不应发生 —— firstTimeLogin 后必有默认猫；
 	// 如发生说明数据脏，service 包成 1009）。
 	FindDefaultByUserID(ctx context.Context, userID uint64) (*Pet, error)
+
+	// UpdateCurrentStateByID 按主键更新 pets.current_state 列（Story 14.2 引入；
+	// service 层先 FindDefaultByUserID 拿 pet.ID 后用主键定位更新）。
+	//
+	// **state 取值**：1 = rest, 2 = walk, 3 = run（与数据库设计 §6.4 + V1
+	// §5.2 / §12.3 `### 宠物状态变更` 同义）；调用方（service 层）已确保 state ∈ {1,2,3}
+	// （handler 层 1002 拦截在前）；本方法不重复校验入参枚举范围，仅做 SQL UPDATE。
+	//
+	// **更新字段**：current_state（显式 SET）+ updated_at（GORM autoUpdateTime 自动写
+	// 当前时间，与数据库 §3.2 ON UPDATE CURRENT_TIMESTAMP(3) 语义一致）；**不**显式 SET
+	// updated_at —— 让 GORM tag 处理避免与 ORM autoUpdateTime 双写冲突（与 user_repo
+	// .UpdateNickname / UpdateCurrentRoomID 同模式）。
+	//
+	// **err 二分**（V1 §5.2 line 532-537 + r6 lessons 锁定）：
+	//   - err == nil → 成功（**不**读 RowsAffected）：service 层一律视为成功，返 200 OK + code = 0
+	//   - err != nil → 失败（driver / 网络 / 约束冲突 / 任何 DB 异常）：service 层包成 1009
+	//
+	// **不**读 RowsAffected：MySQL/GORM 语义下"同 user 同 state 重复上报"幂等场景的
+	// `RowsAffected == 0` 是合法路径（V1 §5.2 关键约束 + r1 lessons + r6 实装锁定 + r9 sweep）；
+	// 本接口的 UPDATE 把 updated_at 也写新值，理论上即便 current_state 未变 updated_at 仍变
+	// → MySQL 通常仍报 RowsAffected == 1；但 GORM/driver 在某些 time-zone / 配置组合下
+	// 可能仍返 0，service 层**不**依赖该值判断成功失败。
+	//
+	// ctx 用法（ADR-0007 §2.3）：本方法第一参数 ctx；GORM 调用 .WithContext(ctx)；
+	// 本接口**不**入事务（数据库设计 §8.x 不含 state-sync 事务行；service 层不开 txMgr.WithTx）
+	// —— 即便如此 repo 仍走 tx.FromContext(ctx, r.db) 模式（与 UpdateNickname /
+	// UpdateBalance 一致），让本方法**未来若**被纳入事务（如多接口聚合）也能 ctx-aware
+	// 无需改 repo signature。
+	UpdateCurrentStateByID(ctx context.Context, petID uint64, state int8) error
 }
 
 // petRepo 是 PetRepo 的默认实装。
@@ -83,4 +115,25 @@ func (r *petRepo) FindDefaultByUserID(ctx context.Context, userID uint64) (*Pet,
 		return nil, err
 	}
 	return &p, nil
+}
+
+// UpdateCurrentStateByID 实装：用 Update("current_state", v) 单字段更新（参考
+// user_repo.UpdateNickname 模式 —— state 是 int8 不存在 nil-skip 陷阱，**不**需要
+// Updates(map[string]interface{}) 路径）。
+//
+// **关键**：用 db.Model(&Pet{}).Where("id = ?", petID).Update("current_state", state)
+// 而非 Save(&pet) —— Save 会写**全部**字段（含 created_at / pet_type / name /
+// is_default 等），可能引入并发数据丢失 / autoUpdateTime 行为差异。Update 单字段
+// 仅触发 SET current_state=?, updated_at=NOW() WHERE id=? + tag autoUpdateTime
+// 自动加 updated_at SET（与数据库 §3.2 一致）。
+//
+// **err 二分锁定**（V1 §5.2 line 532-537 + r1 / r6 / r9 lessons）：service 层只看
+// err == nil / err != nil 二分，repo 不读 RowsAffected。本方法透传 GORM err；service
+// 层用 apperror.Wrap 包成 1009。
+func (r *petRepo) UpdateCurrentStateByID(ctx context.Context, petID uint64, state int8) error {
+	db := tx.FromContext(ctx, r.db)
+	return db.WithContext(ctx).
+		Model(&Pet{}).
+		Where("id = ?", petID).
+		Update("current_state", state).Error
 }

@@ -402,6 +402,19 @@ func NewRouter(deps Deps) *gin.Engine {
 		roomSvc := service.NewRoomService(deps.TxMgr, userRepo, roomRepo, roomMemberRepo, petRepo, deps.SessionMgr, roomBroadcastFn, roomBroadcastExceptFn)
 		roomHandler := handler.NewRoomHandler(roomSvc)
 
+		// Story 14.2 加：pet service + handler（POST /pets/current/state-sync；
+		// 单 UPDATE 不开事务）。复用上面构造的 petRepo / userRepo 实例。
+		//
+		// **sessionMgr / broadcastFn 字段 14.4 预留**：本 story service 不广播；router.go
+		// wire 时**先**传 nil（与 11.3 落地时未挂广播但 11.8 才挂的模式一致 —— 当时
+		// service struct 字段也是先 nil 注入）。14.4 落地仅需在该位置补真实实例 + 在
+		// pet_service.go SyncCurrentState 末尾加 fire-and-forget 调用。
+		//
+		// **不**用 roomBroadcastFn 闭包**复用** —— 14.4 envelope 是 pet.state.changed
+		// 而非 member.joined / member.left，逻辑独立；本 story 直接传 nil 让 14.4 灵活决定。
+		petSvc := service.NewPetService(petRepo, userRepo, nil, nil)
+		petsHandler := handler.NewPetsHandler(petSvc)
+
 		api := r.Group("/api/v1")
 
 		// /auth 子组：RateLimitByIP（V1 §4.1 行 218）
@@ -427,6 +440,8 @@ func NewRouter(deps Deps) *gin.Engine {
 		authedGroup.GET("/rooms/current", roomHandler.GetCurrentRoom)
 		// Story 11.6 加：GET /api/v1/rooms/:roomId 查询房间详情（含 roster）
 		authedGroup.GET("/rooms/:roomId", roomHandler.GetRoomDetail)
+		// Story 14.2 加：POST /api/v1/pets/current/state-sync 上报当前宠物状态
+		authedGroup.POST("/pets/current/state-sync", petsHandler.PostStateSync)
 
 		// Story 10.3 加：WS 网关路由
 		// **不**挂在 /api/v1 前缀下（V1 §12.1 钦定 path 是 /ws/rooms/{roomId}）；

@@ -462,6 +462,12 @@ func (f *faultPetRepo) FindDefaultByUserID(ctx context.Context, userID uint64) (
 	return f.delegate.FindDefaultByUserID(ctx, userID)
 }
 
+// UpdateCurrentStateByID Story 14.2 加：auth_service 集成测试不调本方法，透传 delegate
+// 让 PetRepo interface 完整实现（防 build 失败）。
+func (f *faultPetRepo) UpdateCurrentStateByID(ctx context.Context, petID uint64, state int8) error {
+	return f.delegate.UpdateCurrentStateByID(ctx, petID, state)
+}
+
 // faultChestRepo 包装真实 ChestRepo，让 Create 抛 injectErr，FindByUserID 透传。
 //
 // 用于 AC3: 回滚 2（chest repo 第 6 步失败 → 前 5 步全部回滚）。

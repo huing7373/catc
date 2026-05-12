@@ -67,6 +67,11 @@ func (s *stubPetRepo) Create(ctx context.Context, p *mysql.Pet) error {
 func (s *stubPetRepo) FindDefaultByUserID(ctx context.Context, userID uint64) (*mysql.Pet, error) {
 	return s.findDefaultByUserIDFn(ctx, userID)
 }
+// UpdateCurrentStateByID Story 14.2 加：auth_service 不调本方法（pet state-sync 归 pet_service）。
+// 兜底实装 panic：任何"误调"在测试期立刻可见。
+func (s *stubPetRepo) UpdateCurrentStateByID(ctx context.Context, petID uint64, state int8) error {
+	panic("stubPetRepo.UpdateCurrentStateByID must not be called by auth_service")
+}
 
 type stubStepAccountRepo struct {
 	createFn       func(ctx context.Context, a *mysql.StepAccount) error

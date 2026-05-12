@@ -52,3 +52,47 @@ func TestPetRepo_FindDefaultByUserID_NotFound_ReturnsErrPetNotFound(t *testing.T
 		t.Errorf("err = %v, want ErrPetNotFound", err)
 	}
 }
+
+// TestPetRepo_UpdateCurrentStateByID_Happy:
+// 验证 Update("current_state", state) 单字段路径在 happy case 下：
+//   - 命中 UPDATE `pets` SET ... WHERE id = ? 模式
+//   - args 严格匹配 (state, sqlmock.AnyArg() /* updated_at */, petID)
+//   - 返 sqlmock.NewResult(0, 1) → repo 透传 nil error
+//
+// **不**新增 RowsAffected 相关 case（与 V1 §5.2 + r1 / r6 / r9 lessons 锁定一致：
+// service 层不读 RowsAffected，repo 层也不该为 RowsAffected 分流）。
+func TestPetRepo_UpdateCurrentStateByID_Happy(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewPetRepo(gormDB)
+
+	// GORM Update("current_state", v) 会带 updated_at 自动列（autoUpdateTime tag）;
+	// args 顺序：current_state, updated_at, id（与 user_repo.UpdateNickname 同模式）
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE `pets` SET")).
+		WithArgs(int8(2), sqlmock.AnyArg(), uint64(100)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := repo.UpdateCurrentStateByID(context.Background(), 100, 2); err != nil {
+		t.Fatalf("UpdateCurrentStateByID: %v", err)
+	}
+}
+
+// TestPetRepo_UpdateCurrentStateByID_DBError:
+// 模拟 driver 层错误（如连接断 / 死锁）→ repo 透传 raw error；
+// service 层用 apperror.Wrap 包成 1009（service 层单测验证）。
+func TestPetRepo_UpdateCurrentStateByID_DBError(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewPetRepo(gormDB)
+
+	dbErr := stderrors.New("connection refused")
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE `pets` SET")).
+		WithArgs(int8(3), sqlmock.AnyArg(), uint64(200)).
+		WillReturnError(dbErr)
+
+	err := repo.UpdateCurrentStateByID(context.Background(), 200, 3)
+	if err == nil {
+		t.Fatal("UpdateCurrentStateByID: expected DB error, got nil")
+	}
+	if !stderrors.Is(err, dbErr) {
+		t.Errorf("err = %v, want connection refused", err)
+	}
+}
