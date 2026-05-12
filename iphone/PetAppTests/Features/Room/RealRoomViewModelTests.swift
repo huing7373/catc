@@ -1791,6 +1791,318 @@ final class RealRoomViewModelTests: XCTestCase {
                        "snapshot 刷新后 memberPetStates[uB] 应从 .walk 更新为 .run")
     }
 
+    // MARK: - Story 15.2: pet.state.changed WS 消息处理
+
+    /// Story 15.2 case#A happy（epics.md 行 2402）：
+    /// 收到 `pet.state.changed { userId: "u_bob", currentState: 3 }` →
+    /// `vm.memberPetStates["u_bob"] == .run`；字段级 merge 不污染其他 userId 或 members.
+    func testPetStateChangedHappyMergesTargetUserOnly() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_15_2_A")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. 先 emit snapshot 含 u_alice + u_bob 两成员（currentState=1/1）
+        let snap = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_15_2_A", maxMembers: 4, memberCount: 2),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice",
+                                   pet: RoomSnapshotPet(petId: "p_a", currentState: 1)),
+                RoomSnapshotMember(userId: "u_bob", nickname: "Bob",
+                                   pet: RoomSnapshotPet(petId: "p_b", currentState: 1)),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(snap))
+        try await waitForMembersCount(vm: vm, expected: 2)
+
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .rest,
+                       "snapshot baseline: u_alice 应为 .rest")
+        XCTAssertEqual(vm.memberPetStates["u_bob"], .rest,
+                       "snapshot baseline: u_bob 应为 .rest")
+
+        // 2. emit .petStateChanged：u_bob currentState=3 → 应映射为 .run
+        let payload = PetStateChangedPayload(userId: "u_bob", petId: "p_b", currentState: 3)
+        mockWS.emit(.petStateChanged(payload))
+        try await waitForMemberPetState(vm: vm, userId: "u_bob", expected: .run)
+
+        // 3. 关键断言：u_bob 切到 .run；u_alice 不被污染
+        XCTAssertEqual(vm.memberPetStates["u_bob"], .run,
+                       "applyPetStateChanged 应把 u_bob 切到 .run")
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .rest,
+                       "字段级 merge: u_alice 不应被波及")
+
+        // 4. members 字段全程未被改写
+        XCTAssertEqual(vm.members.count, 2)
+        XCTAssertEqual(vm.members.first(where: { $0.id == "u_alice" })?.name, "Alice",
+                       "u_alice members 字段未被改写")
+        XCTAssertEqual(vm.members.first(where: { $0.id == "u_bob" })?.name, "Bob",
+                       "u_bob members 字段未被改写")
+    }
+
+    /// Story 15.2 case#B happy（epics.md 行 2403）：
+    /// 收到 self 的 `pet.state.changed`（payload.userId == 当前用户 id）→
+    /// 自己 entry 的 petState 同步更新（与"别人的广播"统一路径；V1 §12.3 line 2253）.
+    /// 本 story 不要求测试注入 currentUserId —— 路径上 ViewModel **不**对 self 走 short-circuit；
+    /// 任何在 roster 内的 userId 都走同一路径。
+    func testPetStateChangedSelfBroadcastTakesSamePath() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_15_2_B")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. snapshot 含 u_alice（作为 self 占位）
+        let snap = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_15_2_B", maxMembers: 4, memberCount: 1),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice",
+                                   pet: RoomSnapshotPet(petId: "p_a", currentState: 1)),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(snap))
+        try await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .rest)
+
+        // 2. emit pet.state.changed 给 self（同 userId）→ currentState=2 应映射为 .walk
+        let payload = PetStateChangedPayload(userId: "u_alice", petId: "p_a", currentState: 2)
+        mockWS.emit(.petStateChanged(payload))
+        try await waitForMemberPetState(vm: vm, userId: "u_alice", expected: .walk)
+
+        // 3. self entry petState 同步更新
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .walk,
+                       "self entry 必须走同一路径（不为 self short-circuit / 不丢弃 self 消息）")
+    }
+
+    /// Story 15.2 case#C edge（epics.md 行 2404）：
+    /// 收到 `pet.state.changed` 的 userId 不在房间 → ignore + log warn；
+    /// memberPetStates 未被污染（不为单条 pet.state.changed 新增 entry）.
+    func testPetStateChangedUnknownUserIsIgnored() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_15_2_C")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        let snap = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_15_2_C", maxMembers: 4, memberCount: 1),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice",
+                                   pet: RoomSnapshotPet(petId: "p_a", currentState: 1)),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(snap))
+        try await waitForMembersCount(vm: vm, expected: 1)
+
+        // emit u_ghost（不存在的 userId）currentState=2 → 应被 ignore
+        let payload = PetStateChangedPayload(userId: "u_ghost", petId: "p_ghost", currentState: 2)
+        mockWS.emit(.petStateChanged(payload))
+
+        // 等一下，确保 consumer 已处理完
+        try await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+        await Task.yield()
+
+        XCTAssertEqual(vm.memberPetStates.count, 1,
+                       "u_ghost 不应被加入 memberPetStates（不为单条 pet.state.changed 新增 entry）")
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .rest,
+                       "u_alice 状态不应被错误污染")
+        XCTAssertNil(vm.memberPetStates["u_ghost"],
+                     "u_ghost entry 不应被创建（V1 §12.3 line 2251 (b) 钦定安全忽略）")
+        XCTAssertEqual(vm.members.count, 1, "members 字段未被改写")
+        XCTAssertEqual(vm.members.first?.id, "u_alice")
+    }
+
+    /// Story 15.2 case#D edge（epics.md 行 2405）：
+    /// 连续收到 3 条 `pet.state.changed`（u_alice/u_bob/u_charlie）→ 各自正确路由 + 字段级 merge.
+    func testPetStateChangedMultipleRoutedIndependently() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_15_2_D")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // snapshot 3 成员，全部 currentState=1（.rest）
+        let snap = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_15_2_D", maxMembers: 4, memberCount: 3),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice",
+                                   pet: RoomSnapshotPet(petId: "p_a", currentState: 1)),
+                RoomSnapshotMember(userId: "u_bob", nickname: "Bob",
+                                   pet: RoomSnapshotPet(petId: "p_b", currentState: 1)),
+                RoomSnapshotMember(userId: "u_charlie", nickname: "Charlie",
+                                   pet: RoomSnapshotPet(petId: "p_c", currentState: 1)),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(snap))
+        try await waitForMembersCount(vm: vm, expected: 3)
+
+        // emit 3 条 pet.state.changed
+        mockWS.emit(.petStateChanged(PetStateChangedPayload(
+            userId: "u_alice", petId: "p_a", currentState: 1)))
+        mockWS.emit(.petStateChanged(PetStateChangedPayload(
+            userId: "u_bob", petId: "p_b", currentState: 2)))
+        mockWS.emit(.petStateChanged(PetStateChangedPayload(
+            userId: "u_charlie", petId: "p_c", currentState: 3)))
+
+        // 等 u_charlie 切到 .run 表示全部都已处理（最后一条 emit 顺序保证）
+        try await waitForMemberPetState(vm: vm, userId: "u_charlie", expected: .run)
+
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .rest,
+                       "u_alice currentState=1 → .rest")
+        XCTAssertEqual(vm.memberPetStates["u_bob"], .walk,
+                       "u_bob currentState=2 → .walk")
+        XCTAssertEqual(vm.memberPetStates["u_charlie"], .run,
+                       "u_charlie currentState=3 → .run")
+
+        // members 字段全程未被改写
+        XCTAssertEqual(vm.members.count, 3, "members.count 不变")
+        XCTAssertEqual(vm.members.first(where: { $0.id == "u_alice" })?.name, "Alice")
+        XCTAssertEqual(vm.members.first(where: { $0.id == "u_bob" })?.name, "Bob")
+        XCTAssertEqual(vm.members.first(where: { $0.id == "u_charlie" })?.name, "Charlie")
+    }
+
+    /// Story 15.2 case#E edge（防御性）：未知 currentState 值（如 99）→
+    /// fallback `.rest` + log error；与 applySnapshot / applyMemberJoined 同精神.
+    func testPetStateChangedUnknownCurrentStateFallsBackToRest() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_15_2_E")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        let snap = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_15_2_E", maxMembers: 4, memberCount: 1),
+            members: [
+                // baseline 设为 walk，让 fallback 从 .walk 切到 .rest 可观测
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice",
+                                   pet: RoomSnapshotPet(petId: "p_a", currentState: 2)),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(snap))
+        try await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .walk)
+
+        // 推一条 currentState=99 → fallback .rest
+        mockWS.emit(.petStateChanged(PetStateChangedPayload(
+            userId: "u_alice", petId: "p_a", currentState: 99)))
+        try await waitForMemberPetState(vm: vm, userId: "u_alice", expected: .rest)
+
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .rest,
+                       "未知 currentState 应 fallback `.rest`（与 applySnapshot 同精神）")
+    }
+
+    /// Story 15.2 case#F edge：streamRoomId 守护防 cross-room race
+    /// （与 Story 12.4 r2 P1 lesson 同精神：直接调 vm.handle(...) 验证 guard 语义）.
+    func testPetStateChangedFromStaleStreamIsDiscarded() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_B")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 进 room_B + 1 成员 baseline（currentState=1 → .rest）
+        let snap = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_B", maxMembers: 4, memberCount: 1),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "AliceB",
+                                   pet: RoomSnapshotPet(petId: "p_a", currentState: 1)),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(snap))
+        try await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .rest)
+
+        // 直接调 vm.handle(streamRoomId: "room_A") —— 模拟旧 stream 上 dequeue 但 lastObservedRoomId 已是 room_B
+        let stale = PetStateChangedPayload(userId: "u_alice", petId: "p_a", currentState: 3)
+        vm.handle(message: .petStateChanged(stale), streamRoomId: "room_A")
+
+        // 关键断言：守护层挡住，memberPetStates[u_alice] 应保持 .rest（未被切到 .run）
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .rest,
+                       "cross-room race: streamRoomId=room_A != lastObservedRoomId=room_B → 守护应丢弃")
+
+        // 再验：streamRoomId=nil 也应被丢弃
+        vm.handle(message: .petStateChanged(stale), streamRoomId: nil)
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .rest,
+                       "streamRoomId=nil 时任何 pet.state.changed 应被丢弃")
+    }
+
+    // MARK: - Story 15.2 codec 测试（WSMessageCodec.decode `case "pet.state.changed"`）
+
+    /// Story 15.2 case#G happy：codec 解析合法 pet.state.changed envelope.
+    func testCodecPetStateChangedValidPayloadDecodesAsPetStateChanged() {
+        let json = """
+        {
+          "type": "pet.state.changed",
+          "requestId": "",
+          "payload": { "userId": "u_alice", "petId": "p_a", "currentState": 2 },
+          "ts": 1776920345000
+        }
+        """
+        let result = WSMessageCodec.decode(json)
+        guard case .petStateChanged(let payload) = result else {
+            return XCTFail("合法 pet.state.changed payload 应 decode 为 .petStateChanged，实际: \(result)")
+        }
+        XCTAssertEqual(payload.userId, "u_alice")
+        XCTAssertEqual(payload.petId, "p_a")
+        XCTAssertEqual(payload.currentState, 2)
+    }
+
+    /// Story 15.2 case#H edge: empty userId → .unknown(rawType: "pet.state.changed").
+    func testCodecPetStateChangedEmptyUserIdFallsBackToUnknown() {
+        let json = """
+        {
+          "type": "pet.state.changed",
+          "requestId": "",
+          "payload": { "userId": "", "petId": "p_a", "currentState": 2 }
+        }
+        """
+        let result = WSMessageCodec.decode(json)
+        guard case .unknown(let rawType) = result else {
+            return XCTFail("empty userId 必须 fallback 为 .unknown(rawType: \"pet.state.changed\")，实际: \(result)")
+        }
+        XCTAssertEqual(rawType, "pet.state.changed",
+                       "rawType 必须是 \"pet.state.changed\" 而非 \"\"（区分语义校验失败 vs envelope 解码失败）")
+    }
+
+    /// Story 15.2 case#H edge: empty petId → .unknown(rawType: "pet.state.changed").
+    func testCodecPetStateChangedEmptyPetIdFallsBackToUnknown() {
+        let json = """
+        {
+          "type": "pet.state.changed",
+          "requestId": "",
+          "payload": { "userId": "u_alice", "petId": "", "currentState": 2 }
+        }
+        """
+        let result = WSMessageCodec.decode(json)
+        guard case .unknown(let rawType) = result else {
+            return XCTFail("empty petId 必须 fallback 为 .unknown(rawType: \"pet.state.changed\")，实际: \(result)")
+        }
+        XCTAssertEqual(rawType, "pet.state.changed")
+    }
+
+    /// Story 15.2 case#H edge: missing currentState field → .unknown(rawType: "pet.state.changed").
+    /// Decodable 缺字段会 throw → do-catch fallback.
+    func testCodecPetStateChangedMissingCurrentStateFallsBackToUnknown() {
+        let json = """
+        {
+          "type": "pet.state.changed",
+          "requestId": "",
+          "payload": { "userId": "u_alice", "petId": "p_a" }
+        }
+        """
+        let result = WSMessageCodec.decode(json)
+        guard case .unknown(let rawType) = result else {
+            return XCTFail("missing currentState 必须 fallback 为 .unknown(rawType: \"pet.state.changed\")，实际: \(result)")
+        }
+        XCTAssertEqual(rawType, "pet.state.changed")
+    }
+
     // MARK: - helpers
 
     /// 等待 vm.members.count 达到预期值（最多等 1 秒；防 Task consumer 调度时机不确定）.
@@ -1807,6 +2119,19 @@ final class RealRoomViewModelTests: XCTestCase {
         let deadline = Date().addingTimeInterval(1.0)
         while Date() < deadline {
             if vm.wsState == expected { return }
+            try await Task.sleep(nanoseconds: 10_000_000) // 10ms
+        }
+    }
+
+    /// Story 15.2：等 vm.memberPetStates[userId] 切到预期值（pet.state.changed merge 后异步派发）.
+    private func waitForMemberPetState(
+        vm: RealRoomViewModel,
+        userId: String,
+        expected: HomePetState
+    ) async throws {
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if vm.memberPetStates[userId] == expected { return }
             try await Task.sleep(nanoseconds: 10_000_000) // 10ms
         }
     }

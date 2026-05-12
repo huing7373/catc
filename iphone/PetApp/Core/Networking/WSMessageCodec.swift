@@ -93,6 +93,32 @@ public enum WSMessageCodec {
                 os_log(.error, log: logger, "member.left payload decode failed: %{public}@", String(describing: error))
                 return .unknown(rawType: "member.left")
             }
+        case "pet.state.changed":
+            // Story 15.2：pet.state.changed 路由（V1 §12.3 行 2223-2230 字段表）.
+            // 同 member.joined / member.left 精神：Decodable 只能挡 absent / type-mismatch；
+            // server 若推送语义无效 payload（如 `userId == ""` / `petId == ""`）仍会成功解码 ——
+            // 但 V1 §12.3 行 2250 钦定三字段必填且非空，codec 必须把这类语义无效 payload fallback 为
+            // `.unknown(rawType: "pet.state.changed")` 走 Story 10.1 钦定"安全忽略未识别 type" + log warn 路径,
+            // 避免 ViewModel.applyPetStateChanged 用空字段污染 memberPetStates.
+            //
+            // currentState 值域校验：codec **不**强校验 1/2/3 —— 容忍 server 未来扩展新状态值（如 sleep=4），
+            // ViewModel.applyPetStateChanged 层做 HomePetState(rawValue:) 映射 + 未知值 fallback `.rest` + log warn
+            // （与 applySnapshot 同语义；Story 15.1 AC1 已落地 fallback 模式）.
+            do {
+                let dto = try makeDecoder().decode(PetStateChangedEnvelope.self, from: data).payload
+                guard !dto.userId.isEmpty else {
+                    os_log(.error, log: logger, "pet.state.changed rejected: empty userId")
+                    return .unknown(rawType: "pet.state.changed")
+                }
+                guard !dto.petId.isEmpty else {
+                    os_log(.error, log: logger, "pet.state.changed rejected: empty petId")
+                    return .unknown(rawType: "pet.state.changed")
+                }
+                return .petStateChanged(dto.toDomain())
+            } catch {
+                os_log(.error, log: logger, "pet.state.changed payload decode failed: %{public}@", String(describing: error))
+                return .unknown(rawType: "pet.state.changed")
+            }
         default:
             os_log(.info, log: logger, "unknown server type: %{public}@", envelope.type)
             return .unknown(rawType: envelope.type)
@@ -228,6 +254,25 @@ public enum WSMessageCodec {
 
             func toDomain() -> MemberLeftPayload {
                 MemberLeftPayload(userId: userId)
+            }
+        }
+    }
+
+    // MARK: - Story 15.2 pet.state.changed envelope DTO
+
+    /// pet.state.changed 整体信封 —— 与 V1 §12.3 行 2223-2230 字段表 1:1 对齐.
+    /// 三字段（userId / petId / currentState）全部 required —— Decodable 缺字段会 throw，
+    /// 走外层 do-catch 的 `.unknown(rawType: "pet.state.changed")` fallback.
+    private struct PetStateChangedEnvelope: Decodable {
+        let payload: PetStateChangedPayloadDTO
+
+        struct PetStateChangedPayloadDTO: Decodable {
+            let userId: String
+            let petId: String
+            let currentState: Int
+
+            func toDomain() -> PetStateChangedPayload {
+                PetStateChangedPayload(userId: userId, petId: petId, currentState: currentState)
             }
         }
     }

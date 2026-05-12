@@ -70,7 +70,7 @@ extension WebSocketClient {
 ///
 /// **Story 12.1 仅覆盖 Epic 10 阶段 server-active 三种 case** + `unknown` fallback；
 /// `member.joined` / `member.left` 由 **Story 12.4** 扩展（已落地）；
-/// `pet.state.changed` 由 Epic 14 / Story 14.x 扩展；
+/// `pet.state.changed` 由 Story 15.2 扩展（已落地）；
 /// `emoji.received` 由 Epic 17 / Story 17.x 扩展.
 public enum WSMessage: Equatable, Sendable {
     /// `room.snapshot` —— 握手成功后必发的第一条 authoritative 消息（§12.1.3 钦定）.
@@ -96,6 +96,14 @@ public enum WSMessage: Equatable, Sendable {
     /// payload 精简为仅 userId（V1 §12.3 行 2097 钦定 leave 事件 client UX 不需要显示昵称）.
     /// Story 12.4 落地；trigger 唯一来源 = HTTP `POST /api/v1/rooms/{roomId}/leave` 退出事务成功提交后.
     case memberLeft(MemberLeftPayload)
+
+    /// `pet.state.changed` —— 房间内任一成员（含发起者自己）通过 `POST /pets/current/state-sync` 触发状态变更（V1 §12.3 行 2212-2259）.
+    /// payload 三字段（userId + petId + currentState）；client 收到后按 §12.3 client merge contract 字段级 merge：
+    /// (a) `memberPetStates[userId]` 已存在 → 覆盖该字段为 `HomePetState(rawValue: currentState)` 映射后的状态
+    /// (b) `memberPetStates[userId]` 不存在（理论不该发生 —— 表示 roster 与 server 状态严重不一致）→ ignore + log warn
+    /// (c) `payload.userId == self` 自己的 self-broadcast 走同一路径（§5.2 self-broadcast 对称兜底前置条件，由 Story 15.4 落地自身侧 UI 驱动）
+    /// Story 15.2 落地；trigger 唯一来源 = HTTP `POST /api/v1/pets/current/state-sync` 成功 UPDATE 之后 service 层广播.
+    case petStateChanged(PetStateChangedPayload)
 
     /// Story 12.5 新增：client-internal 连接状态变更通知（**不**是 server-side 协议消息）.
     /// 由 `WebSocketClientImpl` 内部 reconnect 状态机 emit；vm 收到后写 `wsState`（三态映射）.
@@ -224,5 +232,29 @@ public struct MemberLeftPayload: Equatable, Sendable {
 
     public init(userId: String) {
         self.userId = userId
+    }
+}
+
+// MARK: - Story 15.2 pet.state.changed payload value type
+
+/// `pet.state.changed` payload（V1 §12.3 行 2223-2230 字段表）.
+/// 三字段 userId + petId + currentState 全部必填（V1 §12.3 行 2250 "禁止 payload 为 {} 或缺任一字段"）；
+/// `userId` / `petId` 是 BIGINT 字符串化（§2.5）；`currentState` 是 Int 枚举 1/2/3（节点 5 阶段 1=rest / 2=walk / 3=run）.
+///
+/// **本 struct 独立于 `RoomSnapshotPet` / `MemberJoinedPet`** —— 三者虽都映射相同业务字段（petId + currentState），
+/// 但每条业务 WS 消息保留各自 payload struct 演进空间（与 Story 12.4 `MemberJoinedPet` 独立模式一致；
+/// 跨消息不复用，避免后续装备字段 / 房间字段独立演进时打架）.
+///
+/// **不引用 `HomePetState`**：payload struct 留 wire 层 Int 值；HomePetState 映射在 ViewModel.applyPetStateChanged
+/// 层做，与 `RoomSnapshotPet.currentState: Int` 同精神（未知值降级 `.rest` 在 ViewModel 层做，codec 容忍 server 未来扩展）.
+public struct PetStateChangedPayload: Equatable, Sendable {
+    public let userId: String
+    public let petId: String
+    public let currentState: Int
+
+    public init(userId: String, petId: String, currentState: Int) {
+        self.userId = userId
+        self.petId = petId
+        self.currentState = currentState
     }
 }

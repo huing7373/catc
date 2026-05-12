@@ -584,6 +584,11 @@ public final class RealRoomViewModel: RoomViewModel {
     /// 协议层 V1 §12.3 钦定 `member.joined` / `member.left` payload 不含 room.id，无法做 per-event
     /// payload-level 校验，必须用此 stream-lifecycle 层守护.
     ///
+    /// **Story 15.2**：`pet.state.changed` 走 streamRoomId 守护（与 `member.joined` / `member.left`
+    /// 同模式）—— V1 §12.3 行 2223-2230 钦定 payload 仅含 userId / petId / currentState 不含 room.id，
+    /// 协议层无法做 payload-level 校验；A→B 切换 / leave-rejoin 路径下旧 stream late message 仍可能
+    /// 在 cancel 前被投递到 main actor，必须依赖 stream-lifecycle 守护防 cross-room 污染.
+    ///
     /// **可见性**：`internal` 而非 `private` —— 让 `@testable import PetApp` 测试能直接调用
     /// 验证 streamRoomId 守护契约（cross-room race 在 mock 上 finish-stream 模型下不易构造端到端
     /// 时序，最 robust 的回归是直接调 handle(streamRoomId: <旧值>) + 断言 members 未被 mutate）.
@@ -629,6 +634,22 @@ public final class RealRoomViewModel: RoomViewModel {
                 return
             }
             applyMemberLeft(payload)
+        case .petStateChanged(let payload):
+            // Story 15.2：pet.state.changed 守护与 member.joined / member.left 同精神 ——
+            // payload 不带 room.id（V1 §12.3 行 2223-2230 钦定三字段 userId + petId + currentState），
+            // server 端按 fanout 范围保证只投递到该房间 sessions；但 client 在 A→B 切换 / leave-rejoin
+            // 路径下旧 consumer task 已 dequeue 的 late message 可能在 cancel 前 deliver 到 main actor，
+            // 此时 lastObservedRoomId 已是 B 但 message 来自 room A 的 stream → streamRoomId（启动时
+            // 捕获 = A）与 lastObservedRoomId（= B）不匹配 → 丢弃 + log debug.
+            guard streamRoomId != nil, streamRoomId == lastObservedRoomId else {
+                os_log(.debug,
+                       "RealRoomViewModel: discard stale pet.state.changed (userId=%{public}@, streamRoomId=%{public}@, current=%{public}@)",
+                       payload.userId,
+                       streamRoomId ?? "<nil>",
+                       lastObservedRoomId ?? "<nil>")
+                return
+            }
+            applyPetStateChanged(payload)
         case .connectionStateChanged(let state):
             // Story 12.5：client-internal 状态变更.
             // **不**调 `setCurrentRoomId(_:)` —— wsState 变更不影响 currentRoomId（房间归属仅由
@@ -855,6 +876,56 @@ public final class RealRoomViewModel: RoomViewModel {
         os_log(.debug,
                "RealRoomViewModel: applyMemberLeft removed entry (userId=%{public}@, members.count=%{public}d)",
                payload.userId, members.count)
+    }
+
+    // MARK: - Story 15.2 incremental mutate (pet.state.changed)
+
+    /// V1 §12.3 client merge contract `pet.state.changed` 处理路径（行 2251）.
+    ///
+    /// **增量 mutate 语义**（**不是** full snapshot replacement）：
+    ///   - 分支 (a) roster 中已存在 `payload.userId` entry → 字段级 merge：仅覆盖 `memberPetStates[userId]`
+    ///     （不影响 `members[].name` / `level` / `status` / `isHost` 等）
+    ///   - 分支 (b) roster 中不存在 `payload.userId` entry（理论不该发生）→ ignore + log warn
+    ///     （**不**新增 roster entry —— 协议层 pet.state.changed payload 不携带 nickname / avatarUrl
+    ///     等成员展示字段，新增 entry 会渲染为占位"成员"无法表达完整成员信息；与 V1 §12.3 行 2251 (b)
+    ///     钦定"安全忽略"一致；与 Story 14.4 r1 lesson "fire-and-forget 边界 + reconnect snapshot 兜底"
+    ///     配套 —— 偶发 server-side 异常路径让 client 缓存与 server 真实状态偏离时，单条 stray 消息
+    ///     也不该污染 client 端 roster，断链 reconnect 后的 room.snapshot 全量重新对齐才是兜底路径）
+    ///
+    /// **未知 currentState 值兜底**（与 applySnapshot / applyJoinedPetState 同精神，Story 15.1 AC1
+    /// 已落地相同 fallback 模式 —— codec 层容忍 server 未来扩展，ViewModel 层做枚举降级）：
+    ///   - `HomePetState(rawValue: payload.currentState) != nil` → 写入映射后的状态
+    ///   - 未知值（如 `99`）→ fallback `.rest` + `os_log(.error)`
+    ///
+    /// **self-broadcast 走同一路径**：V1 §12.3 行 2253 钦定 `payload.userId == 当前 user.id` 也是合法消息
+    /// （server 不过滤）；client 必须**统一**处理路径（不为 self 走 short-circuit / 不丢弃 self 消息）——
+    /// 是 §5.2 self-broadcast 对称兜底规则的前置条件（HTTP 200 与 self-broadcast 任一先到的信号都驱动
+    /// 本地 self entry roster pet state 更新；后到信号走 merge no-op）.
+    /// 本 story 仅落地"接收 + merge"路径；self-broadcast 触发 HTTP state-sync 的发起侧由 Story 15.4 落地.
+    private func applyPetStateChanged(_ payload: PetStateChangedPayload) {
+        // 分支 (b) 守护：roster 不存在该 userId → ignore + log warn（**不**新增 entry）
+        guard members.contains(where: { $0.id == payload.userId }) else {
+            os_log(.error,
+                   "RealRoomViewModel: applyPetStateChanged userId not in members (userId=%{public}@, members.count=%{public}d)",
+                   payload.userId, members.count)
+            return
+        }
+        // 分支 (a) merge：映射 HomePetState + 未知值兜底 `.rest`
+        let mappedState: HomePetState
+        if let parsed = HomePetState(rawValue: payload.currentState) {
+            mappedState = parsed
+        } else {
+            os_log(.error,
+                   "RealRoomViewModel.applyPetStateChanged: unknown payload.currentState=%{public}d for userId=%{public}@; fallback .rest",
+                   payload.currentState, payload.userId)
+            mappedState = .rest
+        }
+        // 字段级 merge: swift dict subscript 默认语义 —— 仅 mutate 该 key，其他 entry 不动
+        // self.members / self.wsState 等其他字段全程不触碰（V1 §12.3 行 2251 (a) 钦定字段级语义）
+        memberPetStates[payload.userId] = mappedState
+        os_log(.debug,
+               "RealRoomViewModel: applyPetStateChanged merged (userId=%{public}@, currentState=%{public}d)",
+               payload.userId, payload.currentState)
     }
 
     // MARK: - override abstract methods
