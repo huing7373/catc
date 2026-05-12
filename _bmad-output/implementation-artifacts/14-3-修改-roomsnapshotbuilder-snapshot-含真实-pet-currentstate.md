@@ -1,6 +1,6 @@
 # Story 14.3: 修改 RoomSnapshotBuilder - snapshot 含真实 pet.currentState（三处统一：§10.3 GET /rooms/{roomId} + §12.3 room.snapshot + §12.3 member.joined 同步切真实读取 `pets.current_state`，去掉硬编码 `1` placeholder + 单测 ≥4 case + dockertest 集成测试覆盖三条路径）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
