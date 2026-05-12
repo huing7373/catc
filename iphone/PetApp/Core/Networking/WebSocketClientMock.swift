@@ -20,6 +20,12 @@ public final class WebSocketClientMock: WebSocketClient, @unchecked Sendable {
         currentStream
     }
 
+    /// fix-review round 2 P2（Story 15.2）：stream generation counter（与 `WebSocketClientImpl` 同语义）.
+    /// 仅 `prepareForReconnect()` +1；`connect` / `disconnect` 不动 ——精确刻画"stream 是否已 swap".
+    /// 测试可读断言"prepareForReconnect 调用前后 streamGeneration 单调递增"，但通常由 ViewModel 透明使用.
+    private var _streamGeneration: Int = 0
+    public var streamGeneration: Int { _streamGeneration }
+
     /// 测试用：记录是否调过 disconnect.
     public private(set) var didDisconnect: Bool = false
 
@@ -108,6 +114,9 @@ public final class WebSocketClientMock: WebSocketClient, @unchecked Sendable {
     /// Story 12.2 production `WebSocketClientImpl.prepareForReconnect()` 行为类似（内部重置 task 状态）.
     public func prepareForReconnect() {
         prepareForReconnectCallCount += 1
+        // fix-review round 2 P2（Story 15.2）：每次 swap stream 同时翻 streamGeneration ——
+        // 让 ViewModel 守护层能区分"同一 client / 同一 roomId 但不同 stream"（same-room rejoin race）.
+        _streamGeneration += 1
         let (stream, cont) = AsyncStream<WSMessage>.makeStream()
         self.currentStream = stream
         self.currentContinuation = cont

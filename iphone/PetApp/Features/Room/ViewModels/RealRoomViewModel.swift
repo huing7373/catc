@@ -545,11 +545,20 @@ public final class RealRoomViewModel: RoomViewModel {
         // 跨 room 场景下 sink 切换 lastObservedRoomId 后 restart 新 task，新 task 捕获新 streamRoomId；
         // 旧 task 的 streamRoomId 已是旧值，handle 时与 lastObservedRoomId 不匹配 → 守护层挡住。
         let streamRoomId = self.lastObservedRoomId
+        // fix-review round 2 P2（Story 15.2）：同时捕获 streamGeneration ——
+        // same-room leave-rejoin（A→A）/ same-room reconnect 路径下 streamRoomId 完全相同（都是 A），
+        // 仅靠 roomId guard 无法挡住旧 stream 的 stale event；prepareForReconnect 翻 streamGeneration，
+        // 让新 task 捕获新 gen，handle 时校验 gen 不变 → 旧 stream 的 task 因 gen 已被翻而被丢弃.
+        let streamGeneration = client.streamGeneration
         messageConsumerTask = Task { [weak self] in
             for await message in client.messages {
                 guard let self else { return }
                 await MainActor.run {
-                    self.handle(message: message, streamRoomId: streamRoomId)
+                    self.handle(
+                        message: message,
+                        streamRoomId: streamRoomId,
+                        streamGeneration: streamGeneration
+                    )
                 }
             }
         }
@@ -592,7 +601,41 @@ public final class RealRoomViewModel: RoomViewModel {
     /// **可见性**：`internal` 而非 `private` —— 让 `@testable import PetApp` 测试能直接调用
     /// 验证 streamRoomId 守护契约（cross-room race 在 mock 上 finish-stream 模型下不易构造端到端
     /// 时序，最 robust 的回归是直接调 handle(streamRoomId: <旧值>) + 断言 members 未被 mutate）.
-    func handle(message: WSMessage, streamRoomId: String?) {
+    ///
+    /// **fix-review round 2 P2（Story 15.2）**：新增 `streamGeneration` 参数，与 `streamRoomId` 共同
+    /// 构成"per-stream identity"守护：
+    ///   - cross-room race（A→B）：靠 `streamRoomId == lastObservedRoomId` 守护
+    ///   - same-room race（A→A leave-rejoin / same-room reconnect）：靠 `streamGeneration == webSocketClient.streamGeneration`
+    ///     守护 —— 旧 stream 的 streamGeneration 已被 prepareForReconnect 翻新，新 stream 的 task 捕获的是新值；
+    ///     旧 task dequeue 的 stale event 此时 generation 不匹配 → 丢弃.
+    /// 两层 gate 必须**同时**满足才进 apply：roomId 防跨房间，generation 防同房间复用.
+    ///
+    /// **默认值 nil**：保持向后兼容现有测试（已存在的 `handle(message:streamRoomId:)` 调用点继续工作；
+    /// 测试在直接调时若不传 generation → 跳过 generation gate，仅 roomId gate 生效）.
+    /// production 路径 `startConsumingMessages` 必传非 nil（捕获 client.streamGeneration）.
+    func handle(message: WSMessage, streamRoomId: String?, streamGeneration: Int? = nil) {
+        // fix-review round 2 P2（Story 15.2）：first-class generation gate ——
+        // 仅当 caller 显式传入 generation 时执行 per-stream identity 校验.
+        // 校验失败 = 当前 task 是旧 stream 的 stale consumer（同房间 rejoin / reconnect 后新 stream 已起来），
+        // 旧 task 已 dequeue 的所有事件都应丢弃（包含 connectionStateChanged / member.* / pet.state.changed）.
+        // .roomSnapshot 已有 payload.room.id 校验 + 单测期望 generation=nil 路径下仍 apply，所以保留下面的
+        // per-case 校验（.roomSnapshot 不走本 gate）.
+        if let streamGen = streamGeneration,
+           let currentGen = webSocketClient?.streamGeneration,
+           streamGen != currentGen {
+            // 仅对 4 个守护 case（memberJoined / memberLeft / petStateChanged / connectionStateChanged）丢弃；
+            // .roomSnapshot 已有 payload.room.id 校验，且测试覆盖 generation=nil 路径，跳过 generation gate；
+            // .pong / .error / .unknown 是无副作用 case，无需挡.
+            switch message {
+            case .memberJoined, .memberLeft, .petStateChanged, .connectionStateChanged:
+                os_log(.debug,
+                       "RealRoomViewModel: discard stale event from old stream (myGen=%{public}d, currentGen=%{public}d)",
+                       streamGen, currentGen)
+                return
+            case .roomSnapshot, .pong, .error, .unknown:
+                break  // 走原 per-case 校验路径
+            }
+        }
         switch message {
         case .roomSnapshot(let payload):
             // fix-review round 3 P1：丢弃不属于当前房间的 stale snapshot.
@@ -614,6 +657,8 @@ public final class RealRoomViewModel: RoomViewModel {
             // 此时 lastObservedRoomId 已是 B 但 message 来自 room A 的 stream → streamRoomId（启动时捕获 = A）
             // 与 lastObservedRoomId（= B）不匹配 → 丢弃 + log debug。
             // streamRoomId == nil（已离开房间起的 task；不应发生但防御性兜底）也通过本守护被正确丢弃.
+            // **fix-review round 2 P2（Story 15.2）**：same-room rejoin（A→A）race 由前置 streamGeneration
+            // gate 拦下（见 method 顶部）；本 guard 仅负责 cross-room race（roomId 维度）.
             guard streamRoomId != nil, streamRoomId == lastObservedRoomId else {
                 os_log(.debug,
                        "RealRoomViewModel: discard stale member.joined (userId=%{public}@, streamRoomId=%{public}@, current=%{public}@)",

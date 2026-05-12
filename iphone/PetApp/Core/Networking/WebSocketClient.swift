@@ -25,6 +25,26 @@ public protocol WebSocketClient: AnyObject, Sendable {
     /// stream，然后再次读 `messages`（拿到新 stream）+ 起新 consumer task.
     var messages: AsyncStream<WSMessage> { get }
 
+    /// fix-review round 2 P2（Story 15.2）：每次 `prepareForReconnect()` 翻新的"stream 身份" counter.
+    ///
+    /// **背景**：`RealRoomViewModel` 守护 stale message 时仅靠 `streamRoomId == lastObservedRoomId` 不够 ——
+    /// 同房间 leave-rejoin（A→A）/ same-room reconnect 路径下，旧 / 新两条 stream 的 `streamRoomId` 都是同
+    /// 一个 room，旧 stream 已 dequeue 的 late message 会通过 roomId-only guard 错误覆盖新 snapshot 派生的
+    /// state（codex review r1+r2 反复 flag 的 P2 race）.
+    ///
+    /// **语义契约**：
+    ///   - 单调递增 `Int`；初值由实装决定（Mock 从 0 起；Impl 同模式）
+    ///   - 仅在 `prepareForReconnect()` 调用处 +1（与 `messages` stream 的 swap 严格对应；同一 stream 实例
+    ///     的整个生命周期内 generation 值不变）
+    ///   - **不**由 `connect(roomId:)` / `disconnect()` 翻新 ——它们不 swap stream（disconnect 仅 finish 当前
+    ///     continuation；connect 在 fresh state 下不 makeStream）
+    ///   - read-only：caller 仅读不写
+    ///
+    /// **使用模式**（caller 端）：consumer task 启动时 snapshot 当前 generation 值；handle message 时校验
+    /// `myStreamGen == webSocketClient.streamGeneration` —— 不一致 = stream 已被 swap = 当前 task 已是
+    /// 旧 stream 的 stale consumer，丢弃所有事件.
+    var streamGeneration: Int { get }
+
     /// Story 12.2 新增：拨号到指定 roomId 的 WS 网关.
     ///
     /// 实装层（WebSocketClientImpl）：

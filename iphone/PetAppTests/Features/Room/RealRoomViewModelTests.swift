@@ -1356,6 +1356,111 @@ final class RealRoomViewModelTests: XCTestCase {
         XCTAssertEqual(vm.members, [], "streamRoomId=nil 时任何 member.left 应被丢弃")
     }
 
+    // MARK: - Story 15.2 fix-review round 2 P2: same-room rejoin generation guard
+
+    /// Story 15.2 fix-review round 2 P2: same-room rejoin / same-room reconnect race ——
+    /// 旧 stream 和新 stream 的 `streamRoomId` 都是同一个 room（A→A），仅靠 roomId-only guard
+    /// 无法挡住旧 stream 的 stale event；新增 `streamGeneration` gate（prepareForReconnect 翻 +1）
+    /// 让"旧 task 的 streamGeneration ≠ 当前 client.streamGeneration"被识别为 stale.
+    ///
+    /// 复现策略：
+    ///   1. mock client snapshot 当前 generation = G0
+    ///   2. mock client.prepareForReconnect() → generation 翻新到 G1
+    ///   3. 进入 room_A baseline
+    ///   4. 直接调 handle(message: .petStateChanged, streamRoomId: "room_A", streamGeneration: G0)
+    ///      模拟"旧 task 持有 G0、新 stream 已是 G1"瞬间
+    ///   5. 断言：state 不被旧 stream 事件覆盖（旧实装仅 roomId guard 会错误 apply）
+    func testSameRoomRejoinPetStateChangedFromOldGenerationIsDiscarded() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_A")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. baseline：进入 room_A + 1 成员（pet currentState=1 → .rest）
+        let snap = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_A", maxMembers: 4, memberCount: 1),
+            members: [
+                RoomSnapshotMember(userId: "u_alice", nickname: "Alice",
+                                   pet: RoomSnapshotPet(petId: "p_a", currentState: 1)),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(snap))
+        try await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .rest)
+
+        // 2. snapshot 当前 generation 作为旧 stream 的"过去值"；触发 prepareForReconnect → 当前+1
+        // 注意：vm 初始化路径已经可能调用过 prepareForReconnect（subscribeRoomIdConnect first-injection
+        // 分支会 swap stream），所以 streamGeneration 不是从 0 起；以"调 prepare 前后差 1"做 robust 校验.
+        let oldGen = mockWS.streamGeneration
+        mockWS.prepareForReconnect()
+        let newGen = mockWS.streamGeneration
+        XCTAssertEqual(newGen, oldGen + 1, "prepareForReconnect 必须翻 streamGeneration")
+
+        // 3. 模拟旧 stream（gen=oldGen）late 投递的 pet.state.changed → currentState=3 (.run)
+        let stale = PetStateChangedPayload(userId: "u_alice", petId: "p_a", currentState: 3)
+        vm.handle(message: .petStateChanged(stale), streamRoomId: "room_A", streamGeneration: oldGen)
+
+        // 4. 关键断言：roomId 匹配但 streamGeneration 不匹配 → guard 丢弃，pet state 保持 .rest
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .rest,
+                       "same-room rejoin race: 旧 stream（gen=\(oldGen)）的 pet.state.changed 必须被 generation gate 丢弃；"
+                       + "旧实装仅 roomId guard 在 same-room rejoin 路径下会错误 apply → .run")
+
+        // 5. 同 stream 的新 task（gen=newGen）应该正常 apply
+        let fresh = PetStateChangedPayload(userId: "u_alice", petId: "p_a", currentState: 2)
+        vm.handle(message: .petStateChanged(fresh), streamRoomId: "room_A", streamGeneration: newGen)
+        XCTAssertEqual(vm.memberPetStates["u_alice"], .walk,
+                       "新 stream（gen=\(newGen)）的 pet.state.changed 应正常 apply")
+    }
+
+    /// Story 15.2 fix-review round 2 P2: same-room rejoin 守护扩展到 4 个 case ——
+    /// memberJoined / memberLeft / connectionStateChanged 都必须被 generation gate 挡住，
+    /// 不只是 petStateChanged.
+    func testSameRoomRejoinAllFourCasesAreDiscardedByGenerationGate() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_A")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. baseline：进入 room_A + 1 成员
+        let snap = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_A", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u_alice", nickname: "Alice", pet: nil)]
+        )
+        mockWS.emit(.roomSnapshot(snap))
+        try await waitForMembersCount(vm: vm, expected: 1)
+        let baselineWsState = vm.wsState
+
+        // 2. snapshot 当前 generation 作为旧 stream 的"过去值"；翻新到新 generation
+        let oldGen = mockWS.streamGeneration
+        mockWS.prepareForReconnect()
+        XCTAssertEqual(mockWS.streamGeneration, oldGen + 1)
+
+        // 3. case A: memberJoined from old stream → 丢
+        let joined = MemberJoinedPayload(userId: "u_ghost", nickname: "Ghost", avatarUrl: "", pet: nil)
+        vm.handle(message: .memberJoined(joined), streamRoomId: "room_A", streamGeneration: oldGen)
+        XCTAssertEqual(vm.members.count, 1, "旧 generation 的 memberJoined 必须被丢弃")
+        XCTAssertNil(vm.members.first { $0.id == "u_ghost" })
+
+        // 4. case B: memberLeft from old stream → 丢
+        vm.handle(message: .memberLeft(MemberLeftPayload(userId: "u_alice")),
+                  streamRoomId: "room_A", streamGeneration: oldGen)
+        XCTAssertEqual(vm.members.count, 1, "旧 generation 的 memberLeft 必须被丢弃")
+        XCTAssertEqual(vm.members.first?.id, "u_alice", "u_alice 应保留")
+
+        // 5. case C: connectionStateChanged from old stream → 丢
+        vm.handle(message: .connectionStateChanged(.disconnected),
+                  streamRoomId: "room_A", streamGeneration: oldGen)
+        XCTAssertEqual(vm.wsState, baselineWsState,
+                       "旧 generation 的 connectionStateChanged 必须被丢弃；wsState 保持 baseline")
+
+        // 6. case D: petStateChanged from old stream → 丢（已由独立 test 覆盖，这里冗余校验）
+        // baseline pet.currentState=nil（pet=nil 的成员），不重复断言.
+    }
+
     // MARK: - Story 12.4 case#G7 edge: member.joined payload pet=null（pet-less 账号）
 
     /// Story 12.4 AC4 case#G7（推荐，契约 1 nullable pet 回归守护）：

@@ -193,7 +193,13 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
     /// **为什么不复用 sessionGeneration**：sessionGeneration 在每次 connect/prepareForReconnect/disconnect 都翻；
     /// 但 connect-replace 路径（review 关切）下 stream **没换**，仍是同一个 currentContinuation/currentStream；
     /// 单字段无法区分"stream 已 swap"vs"session 翻新但 stream 复用". 双字段精确刻画两个不同语义.
-    private var streamGeneration: Int = 0
+    ///
+    /// **fix-review round 2 P2（Story 15.2）**：该字段同时被 `WebSocketClient.streamGeneration` protocol getter
+    /// 暴露给 ViewModel —— RealRoomViewModel 在 consumer task 启动时 snapshot 当时的 generation，handle
+    /// message 时校验未变（变了 = stream 已被 swap = 当前 task 是旧 stream 的 stale consumer，丢弃所有事件）.
+    /// 同房间 leave-rejoin（A→A）/ same-room reconnect 路径下，旧 / 新两条 stream 的 `streamRoomId` 都是同
+    /// 一个 room，仅靠 roomId guard 无法区分；引入 streamGeneration 后能精确区分.
+    private var streamGenerationStorage: Int = 0
 
     // MARK: - Story 12.6 heartbeat 字段
 
@@ -282,6 +288,22 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return currentStream
+    }
+
+    /// fix-review round 2 P2（Story 15.2）：暴露内部 `streamGenerationStorage` 给 protocol 层 caller
+    /// （ViewModel 守护用）.
+    ///
+    /// **lock 必要性**：`streamGenerationStorage` 字段写发生在 `makeStream()`（init / `prepareForReconnect()`）
+    /// 内部，受 `lock` 保护；公共 getter 必须同样持锁读，否则 caller 在 `prepareForReconnect()` 进行中
+    /// 读到撕裂值的风险（Int 写在 64-bit 平台是原子的，但语义上要保证 read 看到的 generation 与 currentStream
+    /// 配对，与 `messages` getter 同模式）.
+    ///
+    /// **caller 端典型用法**：consumer task 启动时 `let myStreamGen = client.streamGeneration` snapshot；
+    /// handle message 时校验 `myStreamGen == client.streamGeneration` —— 不一致 = stream 已被 swap.
+    public var streamGeneration: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return streamGenerationStorage
     }
 
     /// production 默认 init —— urlSession 默认 .shared；与 APIClient 同模式.
@@ -396,7 +418,7 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         currentRoomId = roomId
         continuation = currentContinuation
         mySession = sessionGeneration
-        myStreamGen = streamGeneration
+        myStreamGen = streamGenerationStorage
         lock.unlock()
 
         task.resume()
@@ -529,7 +551,7 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         sessionGeneration += 1
         // fix-review round 4 P2：递增 streamGeneration —— stream 已 swap，旧 receive-loop 的 yield/finish
         //   通过 streamGeneration 校验时识别为孤儿（finish 仍允许让旧 consumer for-await 退出，yield silent drop）.
-        streamGeneration += 1
+        streamGenerationStorage += 1
         self.currentStream = stream
         self.currentContinuation = cont
         lock.unlock()
@@ -891,7 +913,7 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         myStreamGen: Int
     ) {
         lock.lock()
-        let curStreamGen = streamGeneration
+        let curStreamGen = streamGenerationStorage
         let curSession = sessionGeneration
         lock.unlock()
         // 第 1 层：stream 已 swap → 孤儿 continuation，silent drop
@@ -935,7 +957,7 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         myStreamGen: Int
     ) {
         lock.lock()
-        let curStreamGen = streamGeneration
+        let curStreamGen = streamGenerationStorage
         let curSession = sessionGeneration
         lock.unlock()
         // stream 已 swap → 孤儿 continuation，必须 finish 让旧 consumer for-await 退出.
