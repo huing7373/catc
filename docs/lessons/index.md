@@ -271,3 +271,4 @@
 | 2026-05-12 | [临时窗口优先级必须改写通用 merge contract 的覆盖规则 & `ts` 全局禁用业务排序必须章节间一致 & 权威等价桶的"四处字段"必须显式枚举不能引用章节号（14-1 r5）](2026-05-12-merge-contract-exception-and-ts-business-ordering-ban-and-ack-bucket-explicit-enum-5.md) | 3 | docs, architecture | `<pending>` |
 | 2026-05-12 | [state-sync `err` 二分锁定 & placeholder 例外白名单必须覆盖 self HTTP ack（14-1 r6）](2026-05-12-state-sync-err-binary-and-placeholder-whitelist-self-http-ack-14-1-r6.md) | 2 | docs, architecture | `<pending>` |
 | 2026-05-12 | [state-sync pet-less 必须与 /home / room / member.joined 同语义合法 edge case，不能既"理论不该发生 → 1003"又"client 必须支持 pet = null"（14-1 r7）](2026-05-12-state-sync-pet-less-noop-consistent-with-home-room-snapshot-14-1-r7.md) | 1 | docs, architecture | `<pending>` |
+| 2026-05-12 | [story 文件本身必须与 frozen V1 doc 同步：self-broadcast 对称兜底 + ts 业务排序禁令 + 等价分两层在 story 描述章节也复述一致（14-1 r8）](2026-05-12-story-file-must-stay-in-sync-with-frozen-v1-doc-14-1-r8.md) | 2 | docs | `<pending>` |
