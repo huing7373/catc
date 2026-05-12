@@ -1,6 +1,6 @@
 # Story 15.1: 房间页内多成员猫位渲染 + snapshot pet.currentState 解析
 
-Status: review
+Status: done
 
 ## Story
 
