@@ -108,6 +108,46 @@ final class RoomUITests: XCTestCase {
         )
     }
 
+    /// Story 15.1 AC4: mock vm 注入 3 成员各自不同 pet state (.rest / .walk / .run) →
+    /// 验证 RoomScaffoldView memberRow 内 3 个 PetSpriteView 的 a11y identifier 各为
+    /// `petSprite_rest` / `petSprite_walk` / `petSprite_run`.
+    ///
+    /// 路径：与既有 testRoomScaffoldRendersThreeMembersAndOneEmptySlotWhenMockHasThreeMembers 共用
+    /// `UITEST_ROOM_THREE_MEMBERS=1` launch flag —— RootView.init() 在该 flag 下把 `roomViewModel`
+    /// 切到 MockRoomViewModel(members: 3 fixed) 并同时注入
+    ///   `memberPetStates = ["u_alice": .rest, "u_bob": .walk, "u_charlie": .run]`
+    /// 让 RoomScaffoldView 渲染 3 个 PetSpriteView 各对应不同 a11y identifier.
+    ///
+    /// PetSpriteView a11y identifier 由 Story 8.4 钦定（`petSprite_rest` / `petSprite_walk` / `petSprite_run`，
+    /// 见 AccessibilityID.Home），本 case 用 `descendants(matching: .any)[identifier]` 定位三个不同 sprite.
+    func testMemberRowsRenderPetSpriteViewsWithDistinctAccessibilityIdentifiers() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
+        app.launchEnvironment["UITEST_FORCE_IN_ROOM"] = "1"
+        app.launchEnvironment["UITEST_ROOM_THREE_MEMBERS"] = "1"
+        app.launch()
+
+        let timeout: TimeInterval = 5
+
+        // sanity: 房间页 + 3 个成员行已渲染
+        let roomIdDisplay = app.descendants(matching: .any)[AccessibilityID.Room.roomIdDisplay]
+        XCTAssertTrue(roomIdDisplay.waitForExistence(timeout: timeout),
+                      "roomIdDisplay a11y 锚未找到（RoomScaffoldView 未渲染）")
+
+        // 3 个 PetSpriteView 各自的 a11y identifier 可定位（u_alice → rest / u_bob → walk / u_charlie → run）
+        let restSprite = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteRest]
+        XCTAssertTrue(restSprite.waitForExistence(timeout: timeout),
+                      "petSprite_rest a11y 锚未找到（u_alice 成员行应渲染 .rest 状态 PetSpriteView）")
+
+        let walkSprite = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteWalk]
+        XCTAssertTrue(walkSprite.waitForExistence(timeout: timeout),
+                      "petSprite_walk a11y 锚未找到（u_bob 成员行应渲染 .walk 状态 PetSpriteView）")
+
+        let runSprite = app.descendants(matching: .any)[AccessibilityID.Home.petSpriteRun]
+        XCTAssertTrue(runSprite.waitForExistence(timeout: timeout),
+                      "petSprite_run a11y 锚未找到（u_charlie 成员行应渲染 .run 状态 PetSpriteView）")
+    }
+
     /// Story 12.7 AC9: launch app → Home Tab idle → 点 `homeTeamIdleCard_create`
     /// → 验证 RoomView 出现（roomIdDisplay 锚定可定位）+ Tab Bar 仍可见.
     ///

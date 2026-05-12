@@ -149,6 +149,13 @@ struct RootView: View {
                 ],
                 userIsHost: RoomScaffoldDefaults.userIsHost
             )
+            // Story 15.1 AC4: 给三成员注入三种不同 pet state → UITest 可定位
+            // petSprite_rest / petSprite_walk / petSprite_run 三个 a11y identifier.
+            mock.memberPetStates = [
+                "u_alice": .rest,
+                "u_bob": .walk,
+                "u_charlie": .run,
+            ]
             self._roomViewModel = StateObject(wrappedValue: mock)
             return
         }

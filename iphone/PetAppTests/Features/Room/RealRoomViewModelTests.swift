@@ -85,9 +85,13 @@ final class RealRoomViewModelTests: XCTestCase {
         XCTAssertEqual(vm.members[2].name, "Latte")
         XCTAssertFalse(vm.members[2].isHost)
 
-        // memberPetStates 节点 4 阶段保持空 map（snapshot currentState 固定 1，不写入）.
-        XCTAssertEqual(vm.memberPetStates, [:],
-                       "节点 4 阶段 memberPetStates 应保持空 map（待 Epic 14 后真实驱动）")
+        // Story 15.1 AC1：memberPetStates 自本 story 起从 snapshot.pet.currentState 真实写入；
+        // 旧 case 全 currentState=1（rest）+ 一个 pet=nil（pet-less）→ 全部映射为 .rest.
+        XCTAssertEqual(vm.memberPetStates, [
+            "u_alice": .rest,
+            "u_bob": .rest,
+            "u_charlie": .rest,  // pet=nil（pet-less）→ fallback .rest（Story 15.1 AC1 钦定）
+        ], "Story 15.1 起 snapshot 写入 memberPetStates：currentState=1 → .rest，pet=nil 兜底 .rest")
     }
 
     // MARK: - case#3 happy: currentRoomId nil ↔ non-nil 切换驱动 wsState + 清空 members
@@ -798,8 +802,13 @@ final class RealRoomViewModelTests: XCTestCase {
                        "重复 emit 后 member id 顺序 / 集合不变")
         XCTAssertEqual(vm.members.map { $0.name }, ["Alice", "Bob", "Charlie"],
                        "重复 emit 后 nickname 字段不退化（不被空串覆盖；不被错误 wipe-out）")
-        XCTAssertEqual(vm.memberPetStates, [:],
-                       "重复 emit 后 memberPetStates 仍保持空 map（节点 4 阶段不写入）")
+        // Story 15.1 AC1：memberPetStates 自本 story 起真实写入；payload 全 currentState=1（rest）+
+        // u_charlie pet=nil（pet-less）→ 全部映射 `.rest`. 重复 emit 同 payload 后值不退化、不重复.
+        XCTAssertEqual(vm.memberPetStates, [
+            "u_alice": .rest,
+            "u_bob": .rest,
+            "u_charlie": .rest,  // pet=nil → fallback .rest
+        ], "Story 15.1 起 idempotent snapshot 路径下 memberPetStates 仍稳定")
     }
 
     // MARK: - Story 12.3 case#C happy: empty snapshot members → vm.members = []
@@ -1649,6 +1658,137 @@ final class RealRoomViewModelTests: XCTestCase {
         )
         XCTAssertNotEqual(vm.wsState, .reconnecting,
                           "stale .reconnecting from room_A stream 不应污染 room_B 的 wsState")
+    }
+
+    // MARK: - Story 15.1 AC3: snapshot pet.currentState 解析 + memberPetStates 真实写入
+
+    /// case#A happy（Story 15.1 AC3 epic line 2382）：snapshot 含 3 成员 + currentState 1/2/3 →
+    /// memberPetStates 写入正确（.rest / .walk / .run）.
+    func testSnapshotPetCurrentStateOneTwoThreeMapsToRestWalkRun() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_15_1_A")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        let payload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_15_1_A", maxMembers: 4, memberCount: 3),
+            members: [
+                RoomSnapshotMember(userId: "userId1", nickname: "Alice",
+                                   pet: RoomSnapshotPet(petId: "p1", currentState: 1)),
+                RoomSnapshotMember(userId: "userId2", nickname: "Bob",
+                                   pet: RoomSnapshotPet(petId: "p2", currentState: 2)),
+                RoomSnapshotMember(userId: "userId3", nickname: "Carol",
+                                   pet: RoomSnapshotPet(petId: "p3", currentState: 3)),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(payload))
+        try await waitForMembersCount(vm: vm, expected: 3)
+
+        XCTAssertEqual(vm.memberPetStates["userId1"], .rest,
+                       "currentState=1 → HomePetState.rest")
+        XCTAssertEqual(vm.memberPetStates["userId2"], .walk,
+                       "currentState=2 → HomePetState.walk")
+        XCTAssertEqual(vm.memberPetStates["userId3"], .run,
+                       "currentState=3 → HomePetState.run")
+    }
+
+    /// case#B edge（Story 15.1 AC3 epic line 2383）：snapshot 含未知 currentState 值（如 99）→
+    /// 默认按 `.rest` 处理 + log warning（防御性兜底，不应发生但必须有路径覆盖）.
+    func testSnapshotUnknownPetCurrentStateFallsBackToRest() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_15_1_B")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        let payload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_15_1_B", maxMembers: 4, memberCount: 1),
+            members: [
+                RoomSnapshotMember(userId: "userId_unknown", nickname: "Unknown",
+                                   pet: RoomSnapshotPet(petId: "p_x", currentState: 99)),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(payload))
+        try await waitForMembersCount(vm: vm, expected: 1)
+
+        XCTAssertEqual(vm.memberPetStates["userId_unknown"], .rest,
+                       "未知 currentState 值（99）应 fallback `.rest`（Story 15.1 AC1 钦定防御性兜底）")
+    }
+
+    /// case#C happy（Story 15.1 AC3 epic line 2384）：snapshot 缺 pet 字段（pet-less 账号）→
+    /// 默认 `.rest`（让 PetSpriteView 有默认渲染；AC1 推荐策略）.
+    func testSnapshotPetlessMemberDefaultsToRest() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_15_1_C")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        let payload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_15_1_C", maxMembers: 4, memberCount: 1),
+            members: [
+                RoomSnapshotMember(userId: "userId_petless", nickname: "PetLess", pet: nil),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(payload))
+        try await waitForMembersCount(vm: vm, expected: 1)
+
+        XCTAssertEqual(vm.memberPetStates["userId_petless"], .rest,
+                       "pet=nil（pet-less 账号）应兜底 `.rest`（让 PetSpriteView 有默认渲染）")
+    }
+
+    /// case#D happy（Story 15.1 AC3 epic line 2385-2386）：同一房间多次刷新 snapshot →
+    /// memberPetStates 正确同步更新（不是仅累加；状态变化时旧值被新值覆盖）.
+    func testRepeatedSnapshotUpdatesMemberPetStates() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "room_15_1_D")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. 第一次 snapshot：2 成员 currentState=1/2
+        let snap1 = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_15_1_D", maxMembers: 4, memberCount: 2),
+            members: [
+                RoomSnapshotMember(userId: "uA", nickname: "A",
+                                   pet: RoomSnapshotPet(petId: "p_a", currentState: 1)),
+                RoomSnapshotMember(userId: "uB", nickname: "B",
+                                   pet: RoomSnapshotPet(petId: "p_b", currentState: 2)),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(snap1))
+        try await waitForMembersCount(vm: vm, expected: 2)
+        XCTAssertEqual(vm.memberPetStates["uA"], .rest)
+        XCTAssertEqual(vm.memberPetStates["uB"], .walk)
+
+        // 2. 第二次 snapshot：同 userId 但 currentState=2/3 → memberPetStates 必须同步更新
+        let snap2 = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "room_15_1_D", maxMembers: 4, memberCount: 2),
+            members: [
+                RoomSnapshotMember(userId: "uA", nickname: "A",
+                                   pet: RoomSnapshotPet(petId: "p_a", currentState: 2)),
+                RoomSnapshotMember(userId: "uB", nickname: "B",
+                                   pet: RoomSnapshotPet(petId: "p_b", currentState: 3)),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(snap2))
+        // 第二次 snapshot 不改变 members.count，无法用 waitForMembersCount 区分；
+        // 用循环+短 sleep 等 memberPetStates[uA] 切到新值（Story 15.1 整体替换语义）.
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            if vm.memberPetStates["uA"] == .walk { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(vm.memberPetStates["uA"], .walk,
+                       "snapshot 刷新后 memberPetStates[uA] 应从 .rest 更新为 .walk")
+        XCTAssertEqual(vm.memberPetStates["uB"], .run,
+                       "snapshot 刷新后 memberPetStates[uB] 应从 .walk 更新为 .run")
     }
 
     // MARK: - helpers

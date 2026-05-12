@@ -20,11 +20,19 @@ import SwiftUI
 public struct PetSpriteView: View {
     public let state: MotionState
 
+    /// 渲染尺寸（pt）；默认 180 保持 HomeView catStage 视觉基线不变.
+    /// Story 15.1 review r1：RoomScaffoldView 成员行需要 40pt 缩略版 sprite —— 用
+    /// `.frame(width: 40, height: 40).clipped()` 包裹只会裁切 180×180 内容，不会缩放，
+    /// 视觉表现为"被裁切的猫头"。把 size 参数化让调用方真正决定渲染尺寸.
+    /// 详见 docs/lessons/2026-05-12-swiftui-frame-clipped-does-not-scale.md.
+    public let size: CGFloat
+
     /// Story 37.5: 主题 token 取值入口；本 view 嵌入 HomeView catStage 内 → 由父级 .environment(\.theme, ...) 透传.
     @Environment(\.theme) private var theme
 
-    public init(state: MotionState) {
+    public init(state: MotionState, size: CGFloat = 180) {
         self.state = state
+        self.size = size
     }
 
     public var body: some View {
@@ -94,13 +102,13 @@ public struct PetSpriteView: View {
         }
     }
 
-    /// 单一占位 sprite image 渲染（SF Symbol 180pt + 半透明 tint）.
+    /// 单一占位 sprite image 渲染（SF Symbol + 半透明 tint，尺寸由 `size` 入参决定）.
     /// 节点 3 阶段美术资产不阻塞；后续 Story 30.x 落地真实 sprite render 时替换此 helper.
     private func spriteImage(symbol: String, tintColor: Color) -> some View {
         Image(systemName: symbol)
             .resizable()
             .scaledToFit()
-            .frame(width: 180, height: 180)
+            .frame(width: size, height: size)
             .foregroundColor(tintColor.opacity(0.7))
     }
 }

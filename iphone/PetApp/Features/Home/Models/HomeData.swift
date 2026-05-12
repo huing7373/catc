@@ -123,6 +123,26 @@ public enum HomePetState: Int, Equatable, Sendable {
     case run = 3
 }
 
+// MARK: - Story 15.1 AC2: HomePetState → MotionState 桥接
+
+public extension HomePetState {
+    /// 桥接到 `MotionState`（用于 `PetSpriteView(state: MotionState)` 渲染层）.
+    ///
+    /// 项目内存在两个枚举映射相同业务概念：
+    ///   - `HomePetState`（rawValue Int 1/2/3）—— 从 server wire（snapshot pet.currentState）解析
+    ///   - `MotionState`（rawValue String "rest"/"walk"/"run"）—— 从 CoreMotion 解析 + 用作 /steps/sync wire
+    ///
+    /// 房间场景路径：server wire (Int) → `HomePetState` → `motionState` 桥接 → `MotionState` →
+    /// `PetSpriteView` 渲染. 不新建第三个枚举（详见 Story 15.1 Dev Notes "Latest tech information"）.
+    var motionState: MotionState {
+        switch self {
+        case .rest: return .rest
+        case .walk: return .walk
+        case .run:  return .run
+        }
+    }
+}
+
 public struct HomeEquip: Equatable, Sendable {
     public let slot: Int
     public let userCosmeticItemId: String

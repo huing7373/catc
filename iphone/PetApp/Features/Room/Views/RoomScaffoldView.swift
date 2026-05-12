@@ -300,7 +300,18 @@ public struct RoomScaffoldView: View {
         }
     }
 
-    /// 已加入成员行（Avatar + 名字 + 队长 tag + Lv.x · status 副标题 + paw icon）.
+    /// 已加入成员行（Avatar + 名字 + 队长 tag + Lv.x · status 副标题 + PetSpriteView）.
+    ///
+    /// Story 15.1 AC2：成员行右侧渲染 `PetSpriteView(state:)`，用于直观显示该成员的实时猫状态
+    /// （rest / walk / run）. 数据源：`state.memberPetStates[member.id]`（Story 15.1 在 applySnapshot /
+    /// applyMemberJoined 中真实写入；缺失时 fallback `.rest`）→ 经 `HomePetState.motionState` 桥接
+    /// 后传给 PetSpriteView. 替换原本的 paw icon（与该行的功能位置等价；avoid 增加新位置打破 5 区块视觉契约）.
+    ///
+    /// 尺寸缩小：PetSpriteView 内部 frame 是 180×180pt（HomeView catStage 尺寸），房间成员行空间有限,
+    /// 用外层 `.frame(width: 40, height: 40)` 覆盖（SwiftUI frame modifier 在最后应用的优先）.
+    ///
+    /// a11y identifier：PetSpriteView 自带 `petSprite_rest / walk / run`（Story 8.4 钦定，AccessibilityID.Home
+    /// 内常量）；本 story UITest（AC4）注入 3 个 fixed members 各持不同 state，3 个 identifier 各自唯一可定位.
     private func memberRow(member: RoomMember, index: Int) -> some View {
         HStack(spacing: 12) {
             Avatar(name: member.name, size: 40)
@@ -323,9 +334,18 @@ public struct RoomScaffoldView: View {
                     .foregroundColor(theme.colors.inkSoft)
             }
             Spacer()
-            Image(systemName: Icons.symbol(for: "paw"))
-                .font(.system(size: 16))
-                .foregroundColor(theme.colors.accent)
+            // Story 15.1 AC2: PetSpriteView 渲染成员当前猫状态（替换原 paw icon）.
+            // member.id 不在 memberPetStates 中时 fallback `.rest`（防御性；applySnapshot 会兜底，
+            // 但 RoomScaffoldDefaults seed 路径下 memberPetStates 仍是空 map，fallback 让初始帧不空）.
+            //
+            // Story 15.1 review r1 fix：用 `size: 40` 让 PetSpriteView 真正按 40pt 渲染；
+            // 之前 `.frame(width: 40, height: 40).clipped()` 只裁不缩 → SF Symbol 180×180
+            // 被裁成"截断的猫头"。详见 docs/lessons/2026-05-12-swiftui-frame-clipped-does-not-scale.md.
+            PetSpriteView(
+                state: (state.memberPetStates[member.id] ?? .rest).motionState,
+                size: 40
+            )
+            .frame(width: 40, height: 40)
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 16).fill(theme.colors.surface))
@@ -336,6 +356,12 @@ public struct RoomScaffoldView: View {
             x: theme.shadow.sm.x,
             y: theme.shadow.sm.y
         )
+        // Story 15.1 AC4: 必须用 `.accessibilityElement(children: .contain)`，否则父层
+        // `.accessibilityIdentifier(roomMember_N)` 会把 PetSpriteView 的 a11y leaf（带
+        // petSprite_rest/walk/run identifier）合并掉，UITest 无法定位三态 sprite identifier.
+        // 与 HomeView.catStage（line 288-289）同精神（同样 `.accessibilityElement(children: .contain)`
+        // + `.accessibilityIdentifier(...)` 组合让 catStage 父 identifier 与 PetSpriteView 子 identifier 共存）.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier(AccessibilityID.Room.member(at: index))
     }
 

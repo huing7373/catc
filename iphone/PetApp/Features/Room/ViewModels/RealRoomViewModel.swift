@@ -556,10 +556,15 @@ public final class RealRoomViewModel: RoomViewModel {
     }
 
     /// §12.3 client merge contract 实装：snapshot 是 enrich/correct 而非 wipe-out.
-    /// 节点 4 阶段（本 story）实装最小路径：
+    /// 节点 4 阶段（Story 12.1）落地最小路径；自 Story 15.1 起 memberPetStates 切真实值（Epic 14.3 server 端
+    /// 已下发真实 `pet.currentState` 1/2/3 → 本 path 解析 + 写入 memberPetStates）：
     ///   - roster 集合层：以 snapshot 的 userId 集合为权威（缺失则移除、新增则 append）
     ///   - 字段级：非空值覆盖、空字符串保留 client 已有值、null 直接覆盖
-    ///   - memberPetStates：节点 4 阶段 server 固定 currentState=1 → 本 story 保持空 map（Epic 14 真实驱动后再写入）
+    ///   - memberPetStates（Story 15.1 解禁）：
+    ///       · pet ≠ nil + currentState ∈ {1,2,3} → 写入 `HomePetState(rawValue:)` 映射后的状态
+    ///       · pet ≠ nil + currentState 未知值（如 99）→ fallback `.rest` + log warning（防御性，不应发生）
+    ///       · pet == nil（pet-less 账号）→ 写入 `.rest` 默认值，让 RoomScaffoldView PetSpriteView 有默认渲染
+    ///       · snapshot 中不存在的 userId（已从 roster 移除的成员）→ 从 memberPetStates 中 removeValue
     ///
     /// **fix-review round 3 P1（Story 12.1）**：`.roomSnapshot` 前先校验 `payload.room.id` 与
     /// `lastObservedRoomId` 匹配，不匹配则丢弃 + log debug。
@@ -710,9 +715,38 @@ public final class RealRoomViewModel: RoomViewModel {
             newMembers.append(merged)
         }
         self.members = newMembers
-        // memberPetStates：节点 4 阶段 server 固定 currentState=1，不写入；Epic 14 后真实驱动.
-        // 本 story 不动 memberPetStates（保持初始 [:]）.
-        os_log(.debug, "RealRoomViewModel: applied snapshot (members.count = %{public}d)", newMembers.count)
+
+        // Story 15.1 AC1：snapshot pet.currentState 解析 + memberPetStates 真实写入.
+        // 自 Story 14.3 起 server snapshot 真实下发 pet.currentState 1/2/3（Epic 14 落地后 server
+        // 端权威等价桶四处全就绪）→ 本 story 在 iOS 端完成解析 + 映射 + 写入 memberPetStates.
+        // 规则（与 AC1 钦定一致）：
+        //   - pet ≠ nil + HomePetState(rawValue:) 映射成功 → 写入对应状态
+        //   - pet ≠ nil + currentState 未知值 → fallback `.rest` + os_log(.error) warning（防御性）
+        //   - pet == nil（pet-less 账号）→ 写入 `.rest` 默认值（让 PetSpriteView 有默认渲染）
+        //   - snapshot 中不存在的 userId（已从 roster 移除的成员）→ 同步 removeValue
+        var newPetStates: [String: HomePetState] = [:]
+        for snapshotMember in payload.members {
+            let mappedState: HomePetState
+            if let pet = snapshotMember.pet {
+                if let parsed = HomePetState(rawValue: pet.currentState) {
+                    mappedState = parsed
+                } else {
+                    os_log(.error,
+                           "RealRoomViewModel.applySnapshot: unknown pet.currentState=%{public}d for userId=%{public}@; fallback .rest",
+                           pet.currentState, snapshotMember.userId)
+                    mappedState = .rest
+                }
+            } else {
+                // pet-less 账号兜底（让 PetSpriteView 有默认 .rest 渲染；与 AC1 钦定推荐策略一致）.
+                mappedState = .rest
+            }
+            newPetStates[snapshotMember.userId] = mappedState
+        }
+        // 用整体替换语义同步 removeValue：snapshot 中不存在的 userId 不会出现在 newPetStates 里 → 自然移除.
+        self.memberPetStates = newPetStates
+        os_log(.debug,
+               "RealRoomViewModel: applied snapshot (members.count = %{public}d, memberPetStates.count = %{public}d)",
+               newMembers.count, newPetStates.count)
         _ = snapshotUserIds  // for future use（Story 12.4 增量 mutate 时需要做 set diff）
     }
 
@@ -728,13 +762,17 @@ public final class RealRoomViewModel: RoomViewModel {
     /// **节点 4 阶段实装策略**（与 applySnapshot 主干保持一致）：
     ///   - `level / status / isHost` 沿用 applySnapshot 的占位（默认 8 / "在玩耍" / false）；
     ///     `isHost` 严格 false（fix-review r4 lesson 同精神：不做位置启发式）
-    ///   - 节点 4 阶段 server `pet.currentState` 固定 1 → **不写入** `memberPetStates`（与 applySnapshot 一致；
-    ///     待 Epic 14 真实驱动）
     ///   - `nickname` 空字符串场景理论不会发生（V1 §12.3 行 2008 钦定 member.joined nickname 必非空），
     ///     但防御性写：empty string fallback "成员"（与 applySnapshot 同精神）
     ///   - `avatarUrl` 字段当前 RoomMember struct 无对应 field —— 节点 4 阶段不挂入 RoomMember；
     ///     server payload 已有 avatarUrl 但 client 还未渲染头像图（Story 37.13 a11y 表 + Story 30.x 真实
     ///     渲染时挂入），本 story 仅 codec / payload 层透传.
+    ///
+    /// **Story 15.1 AC1 解禁**：自 Story 14.3 起 server 端 `member.joined.pet.currentState` 真实下发
+    /// 1/2/3 → 本路径同 applySnapshot 规则写入 memberPetStates：
+    ///   - `payload.pet ≠ nil` + currentState 已知 → 写入对应 HomePetState
+    ///   - `payload.pet ≠ nil` + currentState 未知值（如 99）→ fallback `.rest` + log warning
+    ///   - `payload.pet == nil` → 写入 `.rest` 默认值（让 PetSpriteView 有默认渲染）
     private func applyMemberJoined(_ payload: MemberJoinedPayload) {
         // 分支 (a)：dedup by userId —— 已存在 entry → 字段级 enrich（不重复 append）
         if let existingIndex = members.firstIndex(where: { $0.id == payload.userId }) {
@@ -750,6 +788,8 @@ public final class RealRoomViewModel: RoomViewModel {
                 isHost: false
             )
             members[existingIndex] = merged
+            // Story 15.1 AC1：同步写入 memberPetStates（即便 entry 已存在；pet.currentState 可能变化）.
+            applyJoinedPetState(userId: payload.userId, pet: payload.pet)
             os_log(.debug,
                    "RealRoomViewModel: applyMemberJoined enriched existing entry (userId=%{public}@)",
                    payload.userId)
@@ -765,9 +805,30 @@ public final class RealRoomViewModel: RoomViewModel {
             isHost: false              // 严格 false（fix-review r4 lesson 同精神）
         )
         members.append(newMember)
+        // Story 15.1 AC1：同步写入 memberPetStates（与 applySnapshot 同语义；pet-less / 未知值兜底 .rest）.
+        applyJoinedPetState(userId: payload.userId, pet: payload.pet)
         os_log(.debug,
                "RealRoomViewModel: applyMemberJoined appended new entry (userId=%{public}@, members.count=%{public}d)",
                payload.userId, members.count)
+    }
+
+    /// Story 15.1 AC1: applyMemberJoined 内部 helper —— 解析 MemberJoinedPet.currentState 写入
+    /// memberPetStates；与 applySnapshot 同规则（pet-less 与未知值都兜底 `.rest`）.
+    private func applyJoinedPetState(userId: String, pet: MemberJoinedPet?) {
+        let mappedState: HomePetState
+        if let pet = pet {
+            if let parsed = HomePetState(rawValue: pet.currentState) {
+                mappedState = parsed
+            } else {
+                os_log(.error,
+                       "RealRoomViewModel.applyMemberJoined: unknown pet.currentState=%{public}d for userId=%{public}@; fallback .rest",
+                       pet.currentState, userId)
+                mappedState = .rest
+            }
+        } else {
+            mappedState = .rest
+        }
+        memberPetStates[userId] = mappedState
     }
 
     /// V1 §12.3 client merge contract `member.left` 处理路径（行 2099）.

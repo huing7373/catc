@@ -277,3 +277,4 @@
 | 2026-05-12 | [Story 文件描述下游 Story 落地范围时必须三处统一（GET + room.snapshot + member.joined）+ References 错误码描述清理 1003 残留（14-1 r11）](2026-05-12-story-file-14-3-scope-must-list-member-joined-14-1-r11.md) | 2 | docs | `28a1d0e` |
 | 2026-05-12 | [`*int8` 等 nullable 列解引用必须 nil-guard 兜底（schema 不变量不等于类型系统不变量）& "hardcoded → 真实值"切换的 integration test 必须用区别于 hardcoded 默认值的 fixture（14-3 r1）](2026-05-12-nil-deref-defense-and-integration-evidence-14-3-r1.md) | 2 | error-handling, testing | `ddc1224` |
 | 2026-05-12 | [fire-and-forget 边界必须包住"决定是否 broadcast 的前置 IO"（含 user / room / member 查询）—— 性能理由不能凌驾于契约（14-4 r1）](2026-05-12-fire-and-forget-boundary-must-include-prerequisite-io-14-4-r1.md) | 1 | architecture | `0f1bf12` |
+| 2026-05-12 | [SwiftUI 外层 `.frame(...).clipped()` 只裁不缩；内容硬编码尺寸的子 view 必须显式参数化 size（15-1 r1）](2026-05-12-swiftui-frame-clipped-does-not-scale-15-1-r1.md) | 1 | correctness, ui | `<pending>` |
