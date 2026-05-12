@@ -1,6 +1,6 @@
 # Story 15.2: pet.state.changed WS 消息处理（iOS 端 — RoomViewModel 收 `pet.state.changed` envelope → 按 §12.3 client merge contract 字段级 merge `memberPetStates[userId]`；含发起者自己也同路径处理；不存在的 userId 安全忽略 + log warn；不破坏其他成员字段；payload schema 校验失败 fallback `.unknown`；单测 ≥4 case，UITest 已由 15.1 / 15.3 覆盖动效与 a11y 验证，本 story 不新增 UITest）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
