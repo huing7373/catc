@@ -274,3 +274,4 @@
 | 2026-05-12 | [story 文件本身必须与 frozen V1 doc 同步：self-broadcast 对称兜底 + ts 业务排序禁令 + 等价分两层在 story 描述章节也复述一致（14-1 r8）](2026-05-12-story-file-must-stay-in-sync-with-frozen-v1-doc-14-1-r8.md) | 2 | docs | `<pending>` |
 | 2026-05-12 | [story 文件 RowsAffected 措辞 + 顶层 1003 引用必须与 V1 doc 同步：r8 漏改的 r6 / r7 残留 drift（14-1 r9）](2026-05-12-story-file-rowsaffected-and-top-level-1003-drift-14-1-r9.md) | 2 | docs | `<pending>` |
 | 2026-05-12 | [Story AC 在"权威等价"语义中必须区分字段方向（client→server / server→client / ack-only），不能把所有"值域等价"字段一概并入"权威等价桶"（14-1 r10）](2026-05-12-story-ac-authority-bucket-direction.md) | 1 | docs | `<pending>` |
+| 2026-05-12 | [Story 文件描述下游 Story 落地范围时必须三处统一（GET + room.snapshot + member.joined）+ References 错误码描述清理 1003 残留（14-1 r11）](2026-05-12-story-file-14-3-scope-must-list-member-joined-14-1-r11.md) | 2 | docs | `<pending>` |
