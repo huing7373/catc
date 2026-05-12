@@ -545,13 +545,22 @@ public final class RealRoomViewModel: RoomViewModel {
         // 跨 room 场景下 sink 切换 lastObservedRoomId 后 restart 新 task，新 task 捕获新 streamRoomId；
         // 旧 task 的 streamRoomId 已是旧值，handle 时与 lastObservedRoomId 不匹配 → 守护层挡住。
         let streamRoomId = self.lastObservedRoomId
-        // fix-review round 2 P2（Story 15.2）：同时捕获 streamGeneration ——
-        // same-room leave-rejoin（A→A）/ same-room reconnect 路径下 streamRoomId 完全相同（都是 A），
-        // 仅靠 roomId guard 无法挡住旧 stream 的 stale event；prepareForReconnect 翻 streamGeneration，
-        // 让新 task 捕获新 gen，handle 时校验 gen 不变 → 旧 stream 的 task 因 gen 已被翻而被丢弃.
-        let streamGeneration = client.streamGeneration
+        // fix-review round 4 P1（Story 15.2）：**原子**捕获 stream + generation 快照 ——
+        // 旧实装分两步读（先 `client.streamGeneration` 再 `client.messages`）存在 race：
+        //   T0: let streamGeneration = client.streamGeneration           // 读到 G_old
+        //   T1: prepareForReconnect() 内部 swap stream + 翻 generation     // (并发)
+        //   T2: for await message in client.messages { ... }              // 订阅到 NEW stream
+        // → 新 task 持有 NEW stream + OLD generation；handle 校验 gen 不匹配 → 新 stream 所有消息当
+        //   stale 全部丢弃 → 房间更新卡死直到下次 restart consumer.
+        // 用 `currentStreamSnapshot` 在 client 内部锁内同时读两字段，让 (stream, gen) 作为不可分割的
+        // 一对返回 —— 任何 prepareForReconnect() 要么完全先于本读（拿到新对），要么完全后于本读
+        // （拿到旧对，下次 message 投递时被 generation gate 识别为 stale，符合预期语义）.
+        // codex review r4 [P1] 落地点；详见 `WebSocketClient.currentStreamSnapshot` 文档.
+        let snapshot = client.currentStreamSnapshot
+        let stream = snapshot.stream
+        let streamGeneration = snapshot.generation
         messageConsumerTask = Task { [weak self] in
-            for await message in client.messages {
+            for await message in stream {
                 guard let self else { return }
                 await MainActor.run {
                     self.handle(

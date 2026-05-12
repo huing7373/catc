@@ -306,6 +306,21 @@ public final class WebSocketClientImpl: WebSocketClient, @unchecked Sendable {
         return streamGenerationStorage
     }
 
+    /// fix-review round 4 P1（Story 15.2）：原子读 stream + generation 快照.
+    ///
+    /// **必要性**：consumer 启动若分两步读（`streamGeneration` 然后 `messages`），
+    /// `prepareForReconnect()` 在两次锁之间发生 → 新 task 订阅新 stream 但携带旧 generation
+    /// → handle 把新 stream 所有消息当 stale 全丢，房间更新卡死.
+    ///
+    /// **实装**：同一个 `lock.lock()` / `lock.unlock()` 临界区内同时读 `currentStream` +
+    /// `streamGenerationStorage`，让两者作为不可分割的快照对返回. `prepareForReconnect()` 也持同一
+    /// `lock` 写两个字段（见行 535-557），与本读路径互斥.
+    public var currentStreamSnapshot: (stream: AsyncStream<WSMessage>, generation: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (currentStream, streamGenerationStorage)
+    }
+
     /// production 默认 init —— urlSession 默认 .shared；与 APIClient 同模式.
     public convenience init(
         baseURL: URL,

@@ -40,10 +40,41 @@ public protocol WebSocketClient: AnyObject, Sendable {
     ///     continuation；connect 在 fresh state 下不 makeStream）
     ///   - read-only：caller 仅读不写
     ///
-    /// **使用模式**（caller 端）：consumer task 启动时 snapshot 当前 generation 值；handle message 时校验
-    /// `myStreamGen == webSocketClient.streamGeneration` —— 不一致 = stream 已被 swap = 当前 task 已是
-    /// 旧 stream 的 stale consumer，丢弃所有事件.
+    /// **使用模式**（caller 端）：consumer task 启动时优先使用 `currentStreamSnapshot` 原子读 ——
+    /// 单独读 `streamGeneration` 仅留作向后兼容（测试断言"prepare 前后差 1"等 read-only 场景）.
+    /// 关键 race 场景（codex r4 P1）：consumer 启动若先 `let g = client.streamGeneration` 再
+    /// `for await message in client.messages`，两步之间 `prepareForReconnect()` 翻新两个字段 →
+    /// 新 task 拿到新 stream 但携带旧 generation，handle 把新 stream 所有消息当 stale 丢弃 →
+    /// 房间更新卡死直到下次 restart consumer. **正确接缝是 `currentStreamSnapshot`**.
     var streamGeneration: Int { get }
+
+    /// fix-review round 4 P1（Story 15.2）：原子读 stream + generation 的快照接缝.
+    ///
+    /// **race 背景**：consumer 启动若分两步读（先 `streamGeneration` 再 `messages`），
+    /// `prepareForReconnect()` 在两步之间发生 → 新 task 订阅**新** stream 却携带**旧** generation
+    /// → handle 把新 stream 上所有消息识别为 stale 全部丢弃 → 房间更新卡死直到下次 restart consumer.
+    /// codex review r4 [P1] 定位的实际可达路径（`RealRoomViewModel.startConsumingMessages`
+    /// 第 552-554 行）.
+    ///
+    /// **语义契约**：返回的 `(stream, generation)` 必须在同一临界区内捕获 ——
+    ///   - 实装层（`WebSocketClientImpl`）：lock 内同时读 `currentStream` + `streamGenerationStorage`
+    ///     → 任何 `prepareForReconnect()` 要么完全先于本次读（拿到新对 + 新 gen），要么完全后于本次读
+    ///     （拿到旧对 + 旧 gen 后下次 message 投递时被 generation gate 识别为 stale）.
+    ///   - Mock 层（`WebSocketClientMock`）：单线程语义下两个字段写在同一函数体（`prepareForReconnect`），
+    ///     单次方法调用一次读取即可同时返回，天然原子.
+    ///
+    /// **调用方使用模式**：
+    /// ```swift
+    /// let snapshot = client.currentStreamSnapshot
+    /// consumerTask = Task {
+    ///     for await message in snapshot.stream {
+    ///         handle(message: message, streamGeneration: snapshot.generation)
+    ///     }
+    /// }
+    /// ```
+    /// 注意：**不要**在 Task 体内重新读 `client.messages` / `client.streamGeneration` ——
+    /// 那会重新引入 race；快照拿到后视为一对不可分割的"per-task identity".
+    var currentStreamSnapshot: (stream: AsyncStream<WSMessage>, generation: Int) { get }
 
     /// Story 12.2 新增：拨号到指定 roomId 的 WS 网关.
     ///
@@ -84,6 +115,13 @@ extension WebSocketClient {
     /// 默认 no-op：对不需要重启 stream 的实装（例如未来某些一次性 client）保持向后兼容.
     /// `WebSocketClientMock` 与 Story 12.2 的 `WebSocketClientImpl` 都会 override.
     public func prepareForReconnect() {}
+
+    /// fix-review round 4 P1 默认实现：**非原子**的兜底（仅给那些不可能并发 swap stream 的极简实装用）.
+    /// 真实生产 / mock 实装**必须 override** 提供原子语义；这里 default 仅为编译期向后兼容.
+    /// 实际生产用 `WebSocketClientImpl` 在锁内同时读两个字段；mock 在单线程语义下天然原子.
+    public var currentStreamSnapshot: (stream: AsyncStream<WSMessage>, generation: Int) {
+        (messages, streamGeneration)
+    }
 }
 
 /// 服务端 → 客户端消息（按 §12.3 type 字段路由后的强类型 enum）.

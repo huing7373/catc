@@ -26,6 +26,14 @@ public final class WebSocketClientMock: WebSocketClient, @unchecked Sendable {
     private var _streamGeneration: Int = 0
     public var streamGeneration: Int { _streamGeneration }
 
+    /// fix-review round 4 P1（Story 15.2）：原子快照. mock 单线程语义下两个字段写在同一方法体
+    /// （`prepareForReconnect`），单次方法调用一次读取即可同时返回，天然原子.
+    /// 真实生产 `WebSocketClientImpl` 用 `lock` 严格互斥；mock 这里仅显式实现以"对齐 protocol 契约"
+    /// + 让单测能模拟"snapshot 拿到旧对（旧 stream + 旧 gen）后才 prepareForReconnect"的时序.
+    public var currentStreamSnapshot: (stream: AsyncStream<WSMessage>, generation: Int) {
+        (currentStream, _streamGeneration)
+    }
+
     /// 测试用：记录是否调过 disconnect.
     public private(set) var didDisconnect: Bool = false
 
