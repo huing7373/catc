@@ -1,6 +1,6 @@
 # Story 14.4: pet.state.changed WS 广播（service 层激活 14.2 pre-wire 的 broadcast 挂载点：UPDATE 成功后查 users.current_room_id 非 null → BroadcastToRoom 给该房间内全员（**包含**发起者自己）+ envelope BuildPetStateChangedEnvelope 新建 + fire-and-forget 严格语义 + 单测 ≥4 case + dockertest 集成测试覆盖"A 调 state-sync → A 自己收到 pet.state.changed"）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
