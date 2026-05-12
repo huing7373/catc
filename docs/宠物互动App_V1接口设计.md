@@ -46,7 +46,7 @@
 - Future Fields 标记的字段（`members[].pet.equips` 节点 9 落地 / `members[].pet.equips[].renderConfig` 节点 10 落地 / `members[].pet.currentState` 节点 5 真实驱动；其中 `pet.currentState` 节点 5 真实驱动同时覆盖 §12.3 `room.snapshot.payload.members[].pet.currentState` + `member.joined.payload.pet.currentState`，三处由 Story 14.3 同一落地点同步切真实路径，避免 join 房间后 stale `1` 风险）**不**视为契约变更，由对应节点 epic 自然激活；具体过渡见 §10.3.5 五阶段过渡表。
 - WS 业务消息（`pet.state.changed` / `emoji.send` / `emoji.received` 等）的字段层契约**不**在节点 4 房间业务冻结范围内，由对应 Epic 的 §X.1 story（Story 14.1 / 17.1）独立锚定 + 独立冻结。
 - 自 2026-05-12（Story 14.1 完成日，对应 git commit hash 见 commit message）起，§5.2（POST /pets/current/state-sync）节点 5 REST 接口的 schema + §12.3 `### 宠物状态变更（pet.state.changed）` 节点 5 业务 WS 消息的字段表进入**冻结**状态。
-- 任何字段名 / 字段类型 / `state` 枚举值（1 / 2 / 3）/ 错误码（1001 / 1002 / 1003 / 1005 / 1009）触发条件 / `pet.state.changed` payload 字段（`userId` / `petId` / `currentState`）+ 顶层 envelope 字段（`type` / `requestId` / `ts`，遵循 §12.3 通用信封）/ 广播范围（包含发起者自己 vs 排除）/ fire-and-forget 语义 / **Story 14.3 落地点同时覆盖 §10.3 + §12.3 `room.snapshot` + §12.3 `member.joined` 三处 `pet.currentState` 字段切真实路径**（避免 join 房间后 stale `1` 风险）的修改都必须（**冻结边界说明**：1005 的"触发条件"冻结在**抽象层**——"走通用 rate_limit 中间件按 `user_id` 维度限频拦截"——这一不变量；**具体阈值**（如 60/min）由 Story 4.5 默认值 + 配置层管理，调整阈值**不**视为本接口契约变更，**不**触发下文 1-4 步流程；删除限频中间件 / 切换限频维度 / 把 1005 改成抛其他错误码才视为契约变更）：
+- 任何字段名 / 字段类型 / `state` 枚举值（1 / 2 / 3）/ 错误码（1001 / 1002 / 1005 / 1009）触发条件 / **pet-less 账号走 server-acknowledged noop 路径（200 OK + code = 0，与 §5.1 / §10.3 / §12.3 pet-less 合法 edge case 语义一致；本接口**不**触发 1003）** / `pet.state.changed` payload 字段（`userId` / `petId` / `currentState`）+ 顶层 envelope 字段（`type` / `requestId` / `ts`，遵循 §12.3 通用信封）/ 广播范围（包含发起者自己 vs 排除）/ fire-and-forget 语义 / **Story 14.3 落地点同时覆盖 §10.3 + §12.3 `room.snapshot` + §12.3 `member.joined` 三处 `pet.currentState` 字段切真实路径**（避免 join 房间后 stale `1` 风险）的修改都必须（**冻结边界说明**：1005 的"触发条件"冻结在**抽象层**——"走通用 rate_limit 中间件按 `user_id` 维度限频拦截"——这一不变量；**具体阈值**（如 60/min）由 Story 4.5 默认值 + 配置层管理，调整阈值**不**视为本接口契约变更，**不**触发下文 1-4 步流程；删除限频中间件 / 切换限频维度 / 把 1005 改成抛其他错误码才视为契约变更）：
   1. 触发 iOS Epic 15 重新评审（影响 Story 15.1 / 15.2 / 15.4 / 15.5 房间内宠物状态展示 + 上报 + 跨房间恢复 story）
   2. 触发 server Epic 14 已完成 story 的回归（影响 Story 14.2 / 14.3 / 14.4 已落地的 handler / RoomSnapshotBuilder / 广播路径）
   3. 触发后续业务 Epic 17 的契约 story（17.1）回归（如新业务消息基于本骨架扩展）
@@ -527,7 +527,7 @@ JSON 示例：
 1. **认证 & 限频**：auth 中间件校验 Bearer token；rate_limit 中间件按默认配置限频（60 次/分按 user_id 计；已认证业务路由统一按 user_id 而非 IP，与 §6.1 / §6.2 / §10.x 同语义）
 2. **参数校验**：`state` 必填 + 类型为 number (int) + 值 ∈ {1, 2, 3}；任何不通过 → 返回 1002 参数错误（不开 DB 事务）
 3. **查找当前用户的默认 pet**：`SELECT id FROM pets WHERE user_id = ? AND is_default = 1`（数据库设计 §5.3 唯一约束保证最多 1 行）
-   - **0 行**（用户无默认 pet，理论不该发生 —— Story 4.6 游客登录初始化事务保证每个 user 必有 1 行 pets；触发即数据 invariant 已损坏，应该 log error）→ 返回 1003 资源不存在
+   - **0 行**（pet-less 账号 —— 与 §5.1 GET /home `data.pet = null` / §10.3 `data.members[].pet = null` / §12.3 `member.joined.payload.pet = null` 是**同一类合法 edge case**，contract 内显式覆盖；非 invariant 损坏）→ 走 **server-acknowledged noop 路径**：跳过步骤 4（无 pet 行可 UPDATE）+ 跳过步骤 5（无 pet 实体可广播 `pet.state.changed`）+ 直接进入步骤 6 返回 **200 OK + code = 0 + `data.state` = 入参 state 值**（回显）。service 层 **不** log error（pet-less 是 contract-valid 状态，不是 invariant 损坏；如需可观测性可 log info 级"pet-less state-sync noop"，但**不**触发任何业务错误码）
    - **1 行** → 进入步骤 4
 4. **UPDATE**：`UPDATE pets SET current_state = ?, updated_at = NOW() WHERE id = ?`（按上一步查到的 pet.id）
    - **`err == nil`**（DB 调用无错误）→ **一律**返回 200 OK + code = 0，进入步骤 5；service 层**不**读 `RowsAffected`、**不**根据该值分支业务逻辑
@@ -593,15 +593,14 @@ JSON 示例：
 |---|---|---|
 | 1001 | 未登录 / token 无效 | auth 中间件拦截（无 Authorization 头 / token 非法 / token 过期 / token 解析失败） |
 | 1002 | 参数错误 | `state` 字段缺失 / 类型非 int / 值不在 {1, 2, 3} 范围内 |
-| 1003 | 资源不存在 | 用户无默认 pet 行（理论不该发生 —— 登录时由 Story 4.6 五表事务初始化；触发即数据 invariant 已损坏，应该 log error） |
 | 1005 | 操作过于频繁 | rate_limit 中间件拦截（**已认证路由**按 `user_id` 限频，每用户每分钟 > 60 次；按 Story 4.5 默认值，配置可调） |
 | 1009 | 服务繁忙 | DB 异常（UPDATE 执行返回 `err != nil`，含 driver / 网络 / 约束冲突等）/ 内部 panic（见 Story 14.2 service 实装）。**不**包含 `RowsAffected == 0` —— 该分支在本接口下视为幂等成功（详见 §5.2 服务端逻辑步骤 4） |
 
-> **注**：本接口**不**会触发 6001 ~ 6005（房间相关错误） —— 用户不在房间是合法场景（仅不广播 WS，HTTP 仍 200 OK + code = 0），不视为业务错误。同样**不**触发 3001 / 3002（步数相关）/ 4xxx（宝箱）/ 5xxx（装扮）/ 7xxx（表情 / WS）。`pet.state.changed` WS 广播失败也**不**触发任何错误码（仅 server 端 log warning，HTTP response 仍 200 OK + code = 0）。
+> **注**：本接口**不**会触发 6001 ~ 6005（房间相关错误） —— 用户不在房间是合法场景（仅不广播 WS，HTTP 仍 200 OK + code = 0），不视为业务错误。同样**不**触发 3001 / 3002（步数相关）/ 4xxx（宝箱）/ 5xxx（装扮）/ 7xxx（表情 / WS）。`pet.state.changed` WS 广播失败也**不**触发任何错误码（仅 server 端 log warning，HTTP response 仍 200 OK + code = 0）。本接口**亦不触发 1003** —— pet-less（用户无活跃默认 pet 行）是与 §5.1 / §10.3 / §12.3 同语义的**合法 edge case**，server 对 pet-less 用户的 state-sync 走 server-acknowledged noop 路径返回 200 OK + code = 0（详见 §5.2 服务端逻辑步骤 3）。
 
 **关键约束**：
 
-- 1002 vs 1003 的语义差异**必须**明确：1002 是**请求参数本身**不合法（`state` 字段缺失 / 类型非 int / 值不在 {1, 2, 3}），客户端应停止重试并修正参数；1003 是**参数合法但用户没有默认 pet 行**（数据 invariant 损坏），客户端无法通过修改请求修正，应作为 P0 报警（理论不可达）
+- **1002 语义（唯一保留的请求侧错误码）**：1002 是**请求参数本身**不合法（`state` 字段缺失 / 类型非 int / 值不在 {1, 2, 3}），客户端应停止重试并修正参数。本接口**不**触发 1003 —— pet-less 账号（用户无活跃默认 pet 行）与 §5.1 GET /home `data.pet = null` / §10.3 `data.members[].pet = null` / §12.3 `member.joined.payload.pet = null` 是**同一类合法 edge case**（contract 内显式覆盖，非 invariant 损坏），server 对 pet-less 用户走 server-acknowledged noop 路径返回 200 OK + code = 0（详见 §5.2 服务端逻辑步骤 3）；client 实装层（iOS Story 15.4）**不**需要为 pet-less state-sync 做 special-case suppress，正常发起 state-sync 即可，server 自行决定 UPDATE / 广播 / noop 分支
 - 用户不在房间（`users.current_room_id == NULL`）**不**视为业务错误 —— 接口仍返回 200 OK + code = 0，**不**广播 WS（与 §10.4 join 失败抛 6004 的语义**不同**：join 是要"操作房间"，无房间归属是前置不满足；state-sync 是要"更新 pet 状态"，无房间归属仅意味着无需广播给他人 —— pet 状态更新本身仍合法 + 仍写库）
 - BIGINT 主键 / 外键（`userId` / `petId` 字段在 `pet.state.changed` payload 中）严格按 §2.5 全局约定字符串化下发；**本接口请求 / 响应 body 中无 BIGINT 字段**（仅 `state` 是 int 枚举），无字符串化诉求
 - `state` 字段类型为 `number (int)`，**不**字符串化（枚举字段不受 §2.5 BIGINT 字符串化规则约束 —— 类似 §6.1 `motionState`）
