@@ -2,7 +2,7 @@
 date: 2026-05-12
 source_review: codex review round 3（epic-loop 自动派发；review 原文 `/tmp/epic-loop-review-15-2-r3.md`）
 story: 15-2-pet-state-changed-ws-消息处理
-commit: <pending>
+commit: 72fb37e
 lesson_count: 1
 ---
 

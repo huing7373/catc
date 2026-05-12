@@ -2,7 +2,7 @@
 date: 2026-05-12
 source_review: codex review (round 1) — /tmp/epic-loop-review-15-2-r1.md（末尾 ^codex$ 段，line 末段）
 story: 15-2-pet-state-changed-ws-消息处理
-commit: <pending>
+commit: 9ea7e13
 lesson_count: 1
 ---
 

@@ -2,7 +2,7 @@
 date: 2026-05-13
 source_review: codex review r4 on Story 15.2 (/tmp/epic-loop-review-15-2-r4.md)
 story: 15-2-pet-state-changed-ws-消息处理
-commit: <pending>
+commit: 0184339
 lesson_count: 1
 ---
 

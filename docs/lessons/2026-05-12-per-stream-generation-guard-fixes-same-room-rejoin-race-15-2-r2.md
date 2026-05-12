@@ -2,7 +2,7 @@
 date: 2026-05-12
 source_review: codex review (round 2) — /tmp/epic-loop-review-15-2-r2.md（末尾 ^codex$ 段，重新 flag r1 已 defer 的同一个 P2）
 story: 15-2-pet-state-changed-ws-消息处理
-commit: <pending>
+commit: 850d31f
 lesson_count: 1
 related_lesson: 2026-05-12-pet-state-changed-stream-roomid-guard-residual-risk-same-room-rejoin-15-2-r1.md
 ---
