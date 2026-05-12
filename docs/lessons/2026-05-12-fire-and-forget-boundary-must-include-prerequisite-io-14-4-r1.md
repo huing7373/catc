@@ -2,7 +2,7 @@
 date: 2026-05-12
 source_review: file:/tmp/epic-loop-review-14-4-r1-retry.md (codex P1)
 story: 14-4-pet-state-changed-ws-广播
-commit: <pending>
+commit: 0f1bf12
 lesson_count: 1
 ---
 
