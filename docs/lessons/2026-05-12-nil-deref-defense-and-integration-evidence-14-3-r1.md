@@ -2,7 +2,7 @@
 date: 2026-05-12
 source_review: codex review r1 for Story 14.3 (/tmp/epic-loop-review-14-3-r1.md)
 story: 14-3-修改-roomsnapshotbuilder-snapshot-含真实-pet-currentstate
-commit: <pending>
+commit: ddc1224
 lesson_count: 2
 ---
 
