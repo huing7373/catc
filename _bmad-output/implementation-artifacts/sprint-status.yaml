@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-05-12 (epic-12 retrospective done)
+# last_updated: 2026-05-12 (story 14-1 review)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-05-12  # Epic 12 retrospective done
+last_updated: 2026-05-12  # Story 14.1 created (ready-for-dev) + Epic 14 in-progress
 # Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
 # 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
@@ -168,8 +168,8 @@ development_status:
   13-2-节点-4-demo-验收: backlog
   13-3-文档同步与-tech-debt-登记: backlog
   epic-13-retrospective: optional
-  epic-14: backlog
-  14-1-接口契约最终化: backlog
+  epic-14: in-progress
+  14-1-接口契约最终化: review
   14-2-post-pets-current-state-sync-接口-pets-current_state-更新: backlog
   14-3-修改-roomsnapshotbuilder-snapshot-含真实-pet-currentstate: backlog
   14-4-pet-state-changed-ws-广播: backlog

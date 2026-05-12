@@ -264,3 +264,4 @@
 | 2026-05-11 | [`applyHomeData(_:)` 仅在 currentRoomId 实际变更时 bump generation token（防 hydrate refresh 误伤 in-flight room request）（12-7 r12）](2026-05-11-apply-home-data-bump-only-on-room-id-change-12-7-r12.md) | 1 | architecture | `50a35d6` |
 | 2026-05-11 | [UITEST nil-WS-client 路径 nil→A 必须保留 RoomScaffoldDefaults seed roster（r11 unconditional clear 的精化）（12-7 r13）](2026-05-11-uitest-nil-ws-client-must-preserve-scaffold-roster-12-7-r13.md) | 1 | testing | `4b0d2cf` |
 | 2026-05-11 | [UseCase stale-success path 必须显式失败（throw error 触发 refresh），不能 silent return 让 client/server desync（12-7 r14）](2026-05-11-stale-usecase-success-must-refresh-not-silently-return-12-7-r14.md) | 1 | architecture | `facec5d` |
+| 2026-05-12 | [state-sync 幂等矛盾（RowsAffected 误判）& WS 消息冻结声明 envelope/payload 字段归属（14-1 r1）](2026-05-12-state-sync-idempotent-rowsaffected-and-ws-envelope-ts.md) | 2 | docs, architecture | `<pending>` |
