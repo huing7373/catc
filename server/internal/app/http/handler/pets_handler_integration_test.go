@@ -455,7 +455,7 @@ func buildPetsHandlerIntegrationWithWS(t *testing.T) (*httptest.Server, *sql.DB,
 		WriteTimeoutSec:     5,
 	}
 	snapshotBuilder := wsapp.NewRealSnapshotBuilder(roomMemberRepo)
-	gateway := wsapp.NewGateway(signer, sessionMgr, roomMemberRepo, wsCfg, "test", snapshotBuilder)
+	gateway := wsapp.NewGateway(signer, sessionMgr, roomMemberRepo, wsCfg, "test", snapshotBuilder, nil)
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

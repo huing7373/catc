@@ -122,3 +122,104 @@ func fakeEmojiDBError() error {
 type emojiMockDBErr struct{ msg string }
 
 func (e *emojiMockDBErr) Error() string { return e.msg }
+
+// ============================================================================
+// Story 17.5 — EmojiRepo.Exists sqlmock 单测（≥3 case）
+// ============================================================================
+//
+// SQL 字面量与 GORM 生成对齐：
+//   - GORM .Model(&EmojiConfig{}).Select("1")
+//     .Where("code = ? AND is_enabled = ?", code, 1)
+//     .Limit(1)
+//     .Find(&dummy)
+//   - GORM 实际生成 SQL（base table name 反引号化）：
+//     SELECT 1 FROM `emoji_configs` WHERE code = ? AND is_enabled = ? LIMIT ?
+//
+// V1 §12.2 服务端逻辑步骤 4 钦定的语义对齐：
+//   - is_enabled = 1 过滤
+//   - LIMIT 1
+//   - 0 行 → (false, nil)；1 行 → (true, nil)；DB err → (false, err)
+
+// TestEmojiRepo_Exists_HappyPath_EnabledRowFound：DB 中有 enabled 行 → 返 (true, nil)
+func TestEmojiRepo_Exists_HappyPath_EnabledRowFound(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewEmojiRepo(gormDB)
+
+	mock.ExpectQuery(regexp.QuoteMeta(
+		"SELECT 1 FROM `emoji_configs` WHERE code = ? AND is_enabled = ? LIMIT ?",
+	)).
+		WithArgs("wave", 1, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+
+	got, err := repo.Exists(context.Background(), "wave")
+	if err != nil {
+		t.Fatalf("Exists: %v", err)
+	}
+	if !got {
+		t.Errorf("got = false, want true (wave is enabled in fixture)")
+	}
+}
+
+// TestEmojiRepo_Exists_NotFound_ReturnsFalse：code 不存在 → 返 (false, nil)
+func TestEmojiRepo_Exists_NotFound_ReturnsFalse(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewEmojiRepo(gormDB)
+
+	mock.ExpectQuery(regexp.QuoteMeta(
+		"SELECT 1 FROM `emoji_configs` WHERE code = ? AND is_enabled = ? LIMIT ?",
+	)).
+		WithArgs("nonexistent", 1, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"1"})) // 0 行
+
+	got, err := repo.Exists(context.Background(), "nonexistent")
+	if err != nil {
+		t.Fatalf("Exists: %v", err)
+	}
+	if got {
+		t.Errorf("got = true, want false (code not in DB)")
+	}
+}
+
+// TestEmojiRepo_Exists_DisabledRow_ReturnsFalse：DB 有 is_enabled=0 行，但
+// WHERE is_enabled=1 过滤后 0 行匹配 → (false, nil)。验证"合并语义"：disabled
+// 与"完全不存在"对 caller 返回值相同（§12.2 服务端逻辑步骤 4 钦定）。
+func TestEmojiRepo_Exists_DisabledRow_ReturnsFalse(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewEmojiRepo(gormDB)
+
+	// DB 即使有 code='secret' 的行但 is_enabled=0 → query 走 WHERE is_enabled=1 不命中
+	mock.ExpectQuery(regexp.QuoteMeta(
+		"SELECT 1 FROM `emoji_configs` WHERE code = ? AND is_enabled = ? LIMIT ?",
+	)).
+		WithArgs("secret", 1, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"1"})) // 0 行（is_enabled=1 过滤已生效）
+
+	got, err := repo.Exists(context.Background(), "secret")
+	if err != nil {
+		t.Fatalf("Exists: %v", err)
+	}
+	if got {
+		t.Errorf("got = true, want false (disabled rows filtered by is_enabled=1)")
+	}
+}
+
+// TestEmojiRepo_Exists_DBError_ReturnsRawError：DB 错误 → 返 (false, raw err)
+func TestEmojiRepo_Exists_DBError_ReturnsRawError(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewEmojiRepo(gormDB)
+
+	dbErr := fakeEmojiDBError()
+	mock.ExpectQuery(regexp.QuoteMeta(
+		"SELECT 1 FROM `emoji_configs` WHERE code = ? AND is_enabled = ? LIMIT ?",
+	)).
+		WithArgs("wave", 1, 1).
+		WillReturnError(dbErr)
+
+	got, err := repo.Exists(context.Background(), "wave")
+	if err == nil {
+		t.Fatal("err == nil, want raw DB error")
+	}
+	if got {
+		t.Errorf("got = true on error, want false")
+	}
+}

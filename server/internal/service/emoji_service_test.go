@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	stderrors "errors"
+	"strings"
 	"testing"
 
 	apperror "github.com/huing/cat/server/internal/pkg/errors"
@@ -11,21 +12,37 @@ import (
 )
 
 // Story 17.4 — EmojiService.ListAvailable 单测（≥4 case stub repo）
+// Story 17.5 — EmojiService.ValidateCode 单测追加（≥6 case stub repo）
 //
 // 与 home_service_test / auth_service_test 同模式：用 stub repo struct 注入
 // fn 字段让每 case 自定义返回；不依赖 sqlmock / 真 mysql。
 
-// stubEmojiRepo 用 fn 字段让每个 case 自定义返回。
+// stubEmojiRepo 用 fn 字段让每个 case 自定义返回（Story 17.5 加 existsFn 与
+// listFn 并列）。
 type stubEmojiRepo struct {
-	listFn func(ctx context.Context) ([]mysql.EmojiConfig, error)
+	listFn   func(ctx context.Context) ([]mysql.EmojiConfig, error)
+	existsFn func(ctx context.Context, code string) (bool, error)
 }
 
 func (s *stubEmojiRepo) List(ctx context.Context) ([]mysql.EmojiConfig, error) {
 	return s.listFn(ctx)
 }
 
+func (s *stubEmojiRepo) Exists(ctx context.Context, code string) (bool, error) {
+	return s.existsFn(ctx, code)
+}
+
 func buildEmojiService(listFn func(ctx context.Context) ([]mysql.EmojiConfig, error)) service.EmojiService {
 	return service.NewEmojiService(&stubEmojiRepo{listFn: listFn})
+}
+
+// buildEmojiServiceWithExists 给 Story 17.5 ValidateCode case 用：注入 existsFn，
+// listFn 占位返 nil（ValidateCode 不调 listFn）。
+func buildEmojiServiceWithExists(existsFn func(ctx context.Context, code string) (bool, error)) service.EmojiService {
+	return service.NewEmojiService(&stubEmojiRepo{
+		listFn:   func(ctx context.Context) ([]mysql.EmojiConfig, error) { return nil, nil },
+		existsFn: existsFn,
+	})
 }
 
 // AC4.1 happy: 4 个 enabled 表情 → 4 个 EmojiBrief 按 sort_order 顺序返回
@@ -123,5 +140,129 @@ func TestEmojiService_ListAvailable_DBError_Returns1009(t *testing.T) {
 	// 验证 cause 保留（errors.Is 穿透）
 	if !stderrors.Is(err, dbErr) {
 		t.Errorf("errors.Is(err, dbErr) = false, want true (cause should be preserved for log)")
+	}
+}
+
+// ============================================================================
+// Story 17.5 — EmojiService.ValidateCode 单测（≥6 case stub repo）
+// ============================================================================
+
+// AC4.1 happy: emojiCode 合法 + DB 存在 → nil error
+func TestEmojiService_ValidateCode_HappyPath_ReturnsNil(t *testing.T) {
+	svc := buildEmojiServiceWithExists(func(ctx context.Context, code string) (bool, error) {
+		if code != "wave" {
+			t.Errorf("Exists called with code=%q, want wave", code)
+		}
+		return true, nil
+	})
+
+	err := svc.ValidateCode(context.Background(), "wave")
+	if err != nil {
+		t.Fatalf("ValidateCode: %v, want nil", err)
+	}
+}
+
+// AC4.2 edge: emojiCode 字符集非法（含大写）→ 1002
+// 显式断言 Exists should not be called（防 service 实装顺序 bug：字符集 fail 后还调 repo）
+func TestEmojiService_ValidateCode_InvalidCharset_Returns1002(t *testing.T) {
+	svc := buildEmojiServiceWithExists(func(ctx context.Context, code string) (bool, error) {
+		t.Errorf("Exists should not be called when code is invalid; got code=%q", code)
+		return false, nil
+	})
+
+	err := svc.ValidateCode(context.Background(), "Wave") // 大写 W
+	if err == nil {
+		t.Fatal("err == nil, want 1002 AppError")
+	}
+	var appErr *apperror.AppError
+	if !stderrors.As(err, &appErr) {
+		t.Fatalf("err is not *apperror.AppError: %T", err)
+	}
+	if appErr.Code != apperror.ErrInvalidParam {
+		t.Errorf("appErr.Code = %d, want %d (ErrInvalidParam)", appErr.Code, apperror.ErrInvalidParam)
+	}
+}
+
+// AC4.3 edge: emojiCode 长度 = 0 → 1002
+func TestEmojiService_ValidateCode_EmptyCode_Returns1002(t *testing.T) {
+	svc := buildEmojiServiceWithExists(func(ctx context.Context, code string) (bool, error) {
+		t.Errorf("Exists should not be called when code is empty")
+		return false, nil
+	})
+
+	err := svc.ValidateCode(context.Background(), "")
+	if err == nil {
+		t.Fatal("err == nil, want 1002 AppError")
+	}
+	var appErr *apperror.AppError
+	if !stderrors.As(err, &appErr) {
+		t.Fatalf("err is not *apperror.AppError: %T", err)
+	}
+	if appErr.Code != apperror.ErrInvalidParam {
+		t.Errorf("appErr.Code = %d, want %d", appErr.Code, apperror.ErrInvalidParam)
+	}
+}
+
+// AC4.4 edge: emojiCode 长度 = 65 → 1002
+func TestEmojiService_ValidateCode_TooLong_Returns1002(t *testing.T) {
+	svc := buildEmojiServiceWithExists(func(ctx context.Context, code string) (bool, error) {
+		t.Errorf("Exists should not be called when code is too long")
+		return false, nil
+	})
+
+	longCode := strings.Repeat("a", 65)
+	err := svc.ValidateCode(context.Background(), longCode)
+	if err == nil {
+		t.Fatal("err == nil, want 1002 AppError")
+	}
+	var appErr *apperror.AppError
+	if !stderrors.As(err, &appErr) {
+		t.Fatalf("err is not *apperror.AppError: %T", err)
+	}
+	if appErr.Code != apperror.ErrInvalidParam {
+		t.Errorf("appErr.Code = %d, want %d", appErr.Code, apperror.ErrInvalidParam)
+	}
+}
+
+// AC4.5 edge: emojiCode 字符集合法但 DB 不存在 → 7001
+func TestEmojiService_ValidateCode_CodeNotFound_Returns7001(t *testing.T) {
+	svc := buildEmojiServiceWithExists(func(ctx context.Context, code string) (bool, error) {
+		return false, nil
+	})
+
+	err := svc.ValidateCode(context.Background(), "ghost")
+	if err == nil {
+		t.Fatal("err == nil, want 7001 AppError")
+	}
+	var appErr *apperror.AppError
+	if !stderrors.As(err, &appErr) {
+		t.Fatalf("err is not *apperror.AppError: %T", err)
+	}
+	if appErr.Code != apperror.ErrEmojiNotFound {
+		t.Errorf("appErr.Code = %d, want %d (ErrEmojiNotFound)", appErr.Code, apperror.ErrEmojiNotFound)
+	}
+}
+
+// AC4.6 edge: DB 错误 → 1009（lesson 2026-05-13 Lesson 2 钦定 DB error 必有 1009 路径）
+func TestEmojiService_ValidateCode_DBError_Returns1009(t *testing.T) {
+	dbErr := stderrors.New("driver: connection lost")
+	svc := buildEmojiServiceWithExists(func(ctx context.Context, code string) (bool, error) {
+		return false, dbErr
+	})
+
+	err := svc.ValidateCode(context.Background(), "wave")
+	if err == nil {
+		t.Fatal("err == nil, want 1009 AppError")
+	}
+	var appErr *apperror.AppError
+	if !stderrors.As(err, &appErr) {
+		t.Fatalf("err is not *apperror.AppError: %T", err)
+	}
+	if appErr.Code != apperror.ErrServiceBusy {
+		t.Errorf("appErr.Code = %d, want %d (ErrServiceBusy)", appErr.Code, apperror.ErrServiceBusy)
+	}
+	// 验证 cause 保留（errors.Is 穿透）
+	if !stderrors.Is(err, dbErr) {
+		t.Errorf("errors.Is(err, dbErr) = false, want true")
 	}
 }

@@ -509,6 +509,33 @@ func NewRouter(deps Deps) *gin.Engine {
 			// petId 真实回填 + pet-less 下发 null（V1 §12.3 行 1878 + 行 1976 r14
 			// going-forward 契约）。placeholder builder 仅由测试路径保留作便捷 stub。
 			snapshotBuilder := wsapp.NewRealSnapshotBuilder(roomMemberRepo)
+
+			// Story 17.5 加：emoji.received 广播 closure（与 petBroadcastFn 同模式
+			// nil-tolerant + 同样调 wsapp.BroadcastToRoom）。
+			//
+			// **关键差异**（与 roomBroadcastFn / roomBroadcastExceptFn 同实现但语义独立）：
+			//   - roomBroadcastExceptFn 用于 member.joined / left（11.8）—— 排除发起者
+			//   - petBroadcastFn 用于 pet.state.changed（14.4）—— **包含**发起者
+			//   - emojiBroadcastFn 用于 emoji.received（17.5）—— **包含**发起者
+			//     （V1 §12.3 钦定广播范围，与 pet.state.changed 同语义）
+			//
+			// 实装与 petBroadcastFn 完全一致（nil-tolerant + wsapp.BroadcastToRoom 直调）。
+			// **不**复用 petBroadcastFn closure：让 broadcast 语义边界清晰（"emoji
+			// 广播 vs pet 广播 vs room 广播"在 router wire 层就分离）+ future 任一
+			// 路径需要差异化（如 metric / log 前缀）时不影响另一路径。
+			emojiBroadcastFn := wsapp.BroadcastFn(func(ctx context.Context, roomID uint64, msg []byte) (int, error) {
+				if deps.SessionMgr == nil {
+					return 0, nil
+				}
+				return wsapp.BroadcastToRoom(ctx, deps.SessionMgr, roomID, msg)
+			})
+
+			// Story 17.5 加：emoji handler（dispatch emoji.send 消息）。
+			// 复用 17.4 落地的 emojiSvc + 既有 userRepo + 本 story 落地的 emojiBroadcastFn。
+			// emojiSvc 由 service.NewEmojiService(emojiRepo) 构造，含 17.4 ListAvailable
+			// + 17.5 ValidateCode 两方法（编译期自动满足 ws.EmojiValidator 接口子集）。
+			emojiHandler := wsapp.NewEmojiHandler(emojiSvc, userRepo, emojiBroadcastFn)
+
 			gateway := wsapp.NewGateway(
 				deps.Signer,
 				deps.SessionMgr,
@@ -516,6 +543,7 @@ func NewRouter(deps Deps) *gin.Engine {
 				deps.WSCfg,
 				deps.EnvName,    // review r2 P2 加：prod contract override 强制
 				snapshotBuilder, // Story 10.7 加：snapshot 构造路径
+				emojiHandler,    // Story 17.5 加：emoji.send dispatch
 			)
 			r.GET("/ws/rooms/:roomId", gateway.Handle)
 		}

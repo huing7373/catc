@@ -931,3 +931,147 @@ func TestBuildPetStateChangedEnvelope_PayloadShapeIsExactlyThreeFields(t *testin
 		}
 	}
 }
+
+// ============================================================================
+// Story 17.5 — BuildEmojiReceivedEnvelope helper 单测
+// ============================================================================
+
+// TestBuildEmojiReceivedEnvelope_Happy_FullPayload: happy 路径，验证 envelope 字段
+// + payload 字段 1:1 对齐 V1 §12.3。
+func TestBuildEmojiReceivedEnvelope_Happy_FullPayload(t *testing.T) {
+	payload := wsapp.EmojiReceivedPayload{
+		UserID:    "1001",
+		EmojiCode: "wave",
+	}
+	before := time.Now().UnixMilli()
+	bs, err := wsapp.BuildEmojiReceivedEnvelope(payload)
+	if err != nil {
+		t.Fatalf("BuildEmojiReceivedEnvelope: %v", err)
+	}
+	after := time.Now().UnixMilli()
+
+	var env snapEnvelopeForTest
+	if err := json.Unmarshal(bs, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != "emoji.received" {
+		t.Errorf("env.Type = %q, want \"emoji.received\"", env.Type)
+	}
+	if env.RequestID != "" {
+		t.Errorf("env.RequestID = %q, want \"\" (主动推送类固定 \"\"; V1 §12.3 钦定)", env.RequestID)
+	}
+	if env.Ts < before || env.Ts > after {
+		t.Errorf("env.Ts = %d, expected in [%d, %d]", env.Ts, before, after)
+	}
+
+	var got wsapp.EmojiReceivedPayload
+	if err := json.Unmarshal(env.Payload, &got); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if got.UserID != "1001" {
+		t.Errorf("payload.userId = %q, want \"1001\"", got.UserID)
+	}
+	if got.EmojiCode != "wave" {
+		t.Errorf("payload.emojiCode = %q, want \"wave\"", got.EmojiCode)
+	}
+}
+
+// TestBuildEmojiReceivedEnvelope_PayloadShapeIsExactlyTwoFields:
+// 严格断言 payload 字段集合 = {userId, emojiCode}（防字段漂移，与 BPS3 同模式）。
+func TestBuildEmojiReceivedEnvelope_PayloadShapeIsExactlyTwoFields(t *testing.T) {
+	payload := wsapp.EmojiReceivedPayload{UserID: "1001", EmojiCode: "wave"}
+
+	bs, err := wsapp.BuildEmojiReceivedEnvelope(payload)
+	if err != nil {
+		t.Fatalf("BuildEmojiReceivedEnvelope: %v", err)
+	}
+
+	var env snapEnvelopeForTest
+	if err := json.Unmarshal(bs, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	var asMap map[string]interface{}
+	if err := json.Unmarshal(env.Payload, &asMap); err != nil {
+		t.Fatalf("unmarshal payload as map: %v", err)
+	}
+	if len(asMap) != 2 {
+		t.Errorf("payload field count = %d, want 2 (userId + emojiCode); got fields: %v", len(asMap), asMap)
+	}
+	for _, want := range []string{"userId", "emojiCode"} {
+		if _, ok := asMap[want]; !ok {
+			t.Errorf("payload missing %q: %v", want, asMap)
+		}
+	}
+	// 范围红线钦定：emoji.received payload **不**含 ts / assetUrl / name / 任何
+	// 其他字段（client 用 emojiCode 作 key 查 §11.1 缓存）
+	for _, forbidden := range []string{"assetUrl", "name", "ts", "nickname", "avatarUrl"} {
+		if _, ok := asMap[forbidden]; ok {
+			t.Errorf("payload should NOT contain %q (V1 §12.3 + 范围红线): %v", forbidden, asMap)
+		}
+	}
+}
+
+// ============================================================================
+// Story 17.5 — BuildErrorEnvelope helper 单测（**首次**落地 WS error 路径）
+// ============================================================================
+
+// TestBuildErrorEnvelope_Happy_ResponseTypeWithRequestID: 响应类 error envelope
+// （回带 client 请求 requestId）的 happy 路径。
+func TestBuildErrorEnvelope_Happy_ResponseTypeWithRequestID(t *testing.T) {
+	before := time.Now().UnixMilli()
+	bs, err := wsapp.BuildErrorEnvelope("msg_001", 7001, "emoji not found")
+	if err != nil {
+		t.Fatalf("BuildErrorEnvelope: %v", err)
+	}
+	after := time.Now().UnixMilli()
+
+	var env snapEnvelopeForTest
+	if err := json.Unmarshal(bs, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != "error" {
+		t.Errorf("env.Type = %q, want \"error\"", env.Type)
+	}
+	if env.RequestID != "msg_001" {
+		t.Errorf("env.RequestID = %q, want \"msg_001\" (响应类 error 回带 client requestId)", env.RequestID)
+	}
+	if env.Ts < before || env.Ts > after {
+		t.Errorf("env.Ts = %d, expected in [%d, %d]", env.Ts, before, after)
+	}
+
+	var got wsapp.ErrorPayload
+	if err := json.Unmarshal(env.Payload, &got); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if got.Code != 7001 {
+		t.Errorf("payload.code = %d, want 7001", got.Code)
+	}
+	if got.Message != "emoji not found" {
+		t.Errorf("payload.message = %q, want \"emoji not found\"", got.Message)
+	}
+}
+
+// TestBuildErrorEnvelope_EmptyRequestID_ServerInitiated: server 主动产生的 error
+// （非响应类）→ requestId 应为 ""。
+func TestBuildErrorEnvelope_EmptyRequestID_ServerInitiated(t *testing.T) {
+	bs, err := wsapp.BuildErrorEnvelope("", 1009, "服务繁忙")
+	if err != nil {
+		t.Fatalf("BuildErrorEnvelope: %v", err)
+	}
+
+	var env snapEnvelopeForTest
+	if err := json.Unmarshal(bs, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.RequestID != "" {
+		t.Errorf("env.RequestID = %q, want \"\" (主动推送类)", env.RequestID)
+	}
+
+	var got wsapp.ErrorPayload
+	if err := json.Unmarshal(env.Payload, &got); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if got.Code != 1009 || got.Message != "服务繁忙" {
+		t.Errorf("payload = %+v, want {Code: 1009, Message: 服务繁忙}", got)
+	}
+}

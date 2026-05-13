@@ -37,7 +37,9 @@ import (
 	"github.com/huing/cat/server/internal/infra/config"
 	"github.com/huing/cat/server/internal/infra/migrate"
 	"github.com/huing/cat/server/internal/pkg/auth"
+	apperror "github.com/huing/cat/server/internal/pkg/errors"
 	mysqlrepo "github.com/huing/cat/server/internal/repo/mysql"
+	"github.com/huing/cat/server/internal/service"
 )
 
 // migrationsPathForWS 返回 server/migrations 的绝对路径。本测试文件位于
@@ -181,7 +183,7 @@ func startGatewayWithRealMySQL(t *testing.T, gormDB *gorm.DB) (string, *auth.Sig
 		WriteTimeoutSec:     5,
 	}
 	builder := wsapp.NewPlaceholderSnapshotBuilder(repo)
-	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "test", builder)
+	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "test", builder, nil)
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.GET("/ws/rooms/:roomId", gateway.Handle)
@@ -595,4 +597,200 @@ func TestWSIntegration_BroadcastToRoom_3Clients_AllReceive(t *testing.T) {
 			t.Errorf("conn[%d] type = %v, want member.left", idx, env["type"])
 		}
 	}
+}
+
+// ============================================================================
+// Story 17.5 — emoji.send WS 集成测试
+// ============================================================================
+
+// startGatewayWithEmojiWired 用 startGatewayWithRealMySQL 同 fixture 起一个挂着
+// **真实** emoji 服务 + emoji handler 的 httptest gateway（Story 17.5 加）。
+//
+// 差异 vs startGatewayWithRealMySQL：
+//   - 多构造 emojiRepo / emojiSvc（service.NewEmojiService）/ userRepo
+//   - 用 wsapp.BroadcastFn(wsapp.BroadcastToRoom...) closure 作为 emojiBroadcastFn
+//   - 用 wsapp.NewEmojiHandler 构造 handler 注入 gateway
+//   - **不**复用 startGatewayWithRealMySQL（那个钦定 emojiHandler=nil；本 case
+//     需要真实 wire）
+func startGatewayWithEmojiWired(t *testing.T, gormDB *gorm.DB) (string, *auth.Signer, wsapp.SessionManager, *httptest.Server) {
+	t.Helper()
+	signer, err := auth.New("integration-test-secret-32-bytes-min", 3600)
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+	mgr := wsapp.NewSessionManager()
+	roomMemberRepo := mysqlrepo.NewRoomMemberRepo(gormDB)
+	emojiRepo := mysqlrepo.NewEmojiRepo(gormDB)
+	userRepo := mysqlrepo.NewUserRepo(gormDB)
+	emojiSvc := service.NewEmojiService(emojiRepo)
+
+	emojiBroadcastFn := wsapp.BroadcastFn(func(ctx context.Context, roomID uint64, msg []byte) (int, error) {
+		return wsapp.BroadcastToRoom(ctx, mgr, roomID, msg)
+	})
+	emojiHandler := wsapp.NewEmojiHandler(emojiSvc, userRepo, emojiBroadcastFn)
+
+	cfg := config.WSConfig{
+		HeartbeatTimeoutSec: 60,
+		MaxMessageSizeBytes: 16384,
+		WriteTimeoutSec:     5,
+	}
+	builder := wsapp.NewPlaceholderSnapshotBuilder(roomMemberRepo)
+	gateway := wsapp.NewGateway(signer, mgr, roomMemberRepo, cfg, "test", builder, emojiHandler)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/ws/rooms/:roomId", gateway.Handle)
+	ts := httptest.NewServer(r)
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http")
+	return wsURL, signer, mgr, ts
+}
+
+// TestWSEmojiSend_HappyPath_BroadcastsEmojiReceivedToAB:
+//   - fixture：rooms.id=3001, room_members (3001,1001) + (3001,1002),
+//     emoji_configs 4 行 seed（migrate up 已落地）+ users 2 行
+//     (id=1001, current_room_id=3001) + (id=1002, current_room_id=3001)
+//   - A (userID=1001) + B (userID=1002) 各自建 WS 连接到 /ws/rooms/3001
+//   - A 发 `emoji.send {requestId: "msg_001", emojiCode: "wave"}`
+//   - 验证 A、B 都收到 `emoji.received` envelope（requestId 固定 ""，payload
+//     含 userId="1001" / emojiCode="wave"，ts > 0）
+//   - A 再发 `emoji.send {requestId: "msg_002", emojiCode: "ghost"}`
+//   - 验证 A 收到 error envelope（requestId="msg_002", code=7001），
+//     B **不**收到任何新消息（read deadline timeout）
+func TestWSEmojiSend_HappyPath_BroadcastsEmojiReceivedToAB(t *testing.T) {
+	gormDB, cleanup := startMySQLWithRoomMemberFixture(t)
+	defer cleanup()
+
+	// 额外 fixture：users 2 行（current_room_id = 3001）
+	sqlDB, err := gormDB.DB()
+	if err != nil {
+		t.Fatalf("gormDB.DB: %v", err)
+	}
+	if _, err := sqlDB.Exec(`
+		INSERT INTO users (id, guest_uid, nickname, avatar_url, status, current_room_id, created_at, updated_at)
+		VALUES (1001, 'guest-1001', 'userA', '', 1, 3001, NOW(3), NOW(3)),
+		       (1002, 'guest-1002', 'userB', '', 1, 3001, NOW(3), NOW(3))`); err != nil {
+		t.Fatalf("INSERT users: %v", err)
+	}
+
+	wsURL, signer, mgr, ts := startGatewayWithEmojiWired(t, gormDB)
+	defer mgr.Close()
+	defer ts.Close()
+
+	// 拨 A / B 两个 WS connection
+	connA := dialWSWithToken(t, wsURL, signer, 1001, 3001)
+	defer connA.Close()
+	connB := dialWSWithToken(t, wsURL, signer, 1002, 3001)
+	defer connB.Close()
+
+	// 跳过 snapshot 帧（握手成功后第一帧）
+	_ = connA.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, _, err := connA.ReadMessage(); err != nil {
+		t.Fatalf("read snapshot A: %v", err)
+	}
+	_ = connB.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, _, err := connB.ReadMessage(); err != nil {
+		t.Fatalf("read snapshot B: %v", err)
+	}
+
+	// 等待两个 Session 进入 SessionManager 索引（broadcast fanout 依赖于此）
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(mgr.ListSessionsByRoomID(context.Background(), 3001)) >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := len(mgr.ListSessionsByRoomID(context.Background(), 3001)); got != 2 {
+		t.Fatalf("ListSessionsByRoomID(3001) = %d, want 2", got)
+	}
+
+	// A 发 emoji.send {emojiCode: "wave"}
+	sendMsg := `{"type":"emoji.send","requestId":"msg_001","payload":{"emojiCode":"wave"}}`
+	if err := connA.WriteMessage(websocket.TextMessage, []byte(sendMsg)); err != nil {
+		t.Fatalf("write emoji.send: %v", err)
+	}
+
+	// A、B 都应收到 emoji.received（V1 §12.3 钦定广播范围包含发起者）
+	for label, conn := range map[string]*websocket.Conn{"A": connA, "B": connB} {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("conn %s ReadMessage emoji.received: %v", label, err)
+		}
+		var got struct {
+			Type      string                     `json:"type"`
+			RequestID string                     `json:"requestId"`
+			Payload   wsapp.EmojiReceivedPayload `json:"payload"`
+			Ts        int64                      `json:"ts"`
+		}
+		if err := json.Unmarshal(msg, &got); err != nil {
+			t.Fatalf("conn %s unmarshal: %v (raw=%s)", label, err, string(msg))
+		}
+		if got.Type != "emoji.received" {
+			t.Errorf("conn %s type = %q, want emoji.received", label, got.Type)
+		}
+		if got.RequestID != "" {
+			t.Errorf("conn %s requestId = %q, want \"\" (broadcast 类固定空)", label, got.RequestID)
+		}
+		if got.Payload.UserID != "1001" {
+			t.Errorf("conn %s payload.userId = %q, want \"1001\"", label, got.Payload.UserID)
+		}
+		if got.Payload.EmojiCode != "wave" {
+			t.Errorf("conn %s payload.emojiCode = %q, want \"wave\"", label, got.Payload.EmojiCode)
+		}
+		if got.Ts <= 0 {
+			t.Errorf("conn %s ts = %d, want > 0", label, got.Ts)
+		}
+	}
+
+	// A 再发 emoji.send {emojiCode: "ghost"}（DB 中没有该 emoji）
+	sendBadMsg := `{"type":"emoji.send","requestId":"msg_002","payload":{"emojiCode":"ghost"}}`
+	if err := connA.WriteMessage(websocket.TextMessage, []byte(sendBadMsg)); err != nil {
+		t.Fatalf("write emoji.send ghost: %v", err)
+	}
+
+	// A 应收到 error envelope（code=7001 + requestId="msg_002"）
+	_ = connA.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, errRaw, err := connA.ReadMessage()
+	if err != nil {
+		t.Fatalf("conn A read error envelope: %v", err)
+	}
+	var gotErr struct {
+		Type      string             `json:"type"`
+		RequestID string             `json:"requestId"`
+		Payload   wsapp.ErrorPayload `json:"payload"`
+	}
+	if err := json.Unmarshal(errRaw, &gotErr); err != nil {
+		t.Fatalf("conn A unmarshal error envelope: %v (raw=%s)", err, string(errRaw))
+	}
+	if gotErr.Type != "error" {
+		t.Errorf("conn A error type = %q, want \"error\"", gotErr.Type)
+	}
+	if gotErr.RequestID != "msg_002" {
+		t.Errorf("conn A error requestId = %q, want \"msg_002\" (回带)", gotErr.RequestID)
+	}
+	if gotErr.Payload.Code != apperror.ErrEmojiNotFound {
+		t.Errorf("conn A error code = %d, want %d (7001 ErrEmojiNotFound)", gotErr.Payload.Code, apperror.ErrEmojiNotFound)
+	}
+
+	// B 应**不**收到 ghost 的 error envelope（error 是单 Session 响应；不广播）
+	_ = connB.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	_, raw, err := connB.ReadMessage()
+	if err == nil {
+		t.Errorf("conn B should not receive any message (error envelope is per-Session, not broadcast); got: %s", string(raw))
+	}
+}
+
+// dialWSWithToken 用 signer 签 userID 的 token 并拨连到指定 roomID。
+func dialWSWithToken(t *testing.T, wsURL string, signer *auth.Signer, userID, roomID uint64) *websocket.Conn {
+	t.Helper()
+	token, err := signer.Sign(userID, 3600)
+	if err != nil {
+		t.Fatalf("Sign userID=%d: %v", userID, err)
+	}
+	url := fmt.Sprintf("%s/ws/rooms/%d?token=%s", wsURL, roomID, token)
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatalf("Dial userID=%d: %v", userID, err)
+	}
+	return conn
 }

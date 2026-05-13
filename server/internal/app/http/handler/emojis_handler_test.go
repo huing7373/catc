@@ -21,12 +21,25 @@ import (
 // 复用 ErrorMappingMiddleware 让 c.Error(err) 走完整 envelope 路径。
 
 // stubEmojiService 用 fn 字段让每个 case 自定义返回。
+//
+// Story 17.5 加 validateCodeFn 占位字段（默认 nil；本 handler test 不调
+// ValidateCode，但 service.EmojiService interface 已含该方法 → stub 必须实现以
+// satisfy interface 编译）。
 type stubEmojiService struct {
 	listAvailableFn func(ctx context.Context) ([]service.EmojiBrief, error)
+	validateCodeFn  func(ctx context.Context, code string) error
 }
 
 func (s *stubEmojiService) ListAvailable(ctx context.Context) ([]service.EmojiBrief, error) {
 	return s.listAvailableFn(ctx)
+}
+
+func (s *stubEmojiService) ValidateCode(ctx context.Context, code string) error {
+	if s.validateCodeFn == nil {
+		// 本 handler test 不应调 ValidateCode；防御性 panic 让漂移暴露
+		panic("stubEmojiService.ValidateCode not configured (emojis_handler_test 仅测 GET /emojis 路径，不期望走 WS emoji.send 路径)")
+	}
+	return s.validateCodeFn(ctx, code)
 }
 
 // buildEmojisHandlerRouter 构造 handler test router。

@@ -127,7 +127,7 @@ func startGatewayServer(t *testing.T, signer *auth.Signer, mgr wsapp.SessionMana
 		WriteTimeoutSec:     2,
 	}
 	builder := wsapp.NewPlaceholderSnapshotBuilder(repo)
-	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "test", builder)
+	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "test", builder, nil)
 	r := gin.New()
 	r.GET("/ws/rooms/:roomId", gateway.Handle)
 	ts := httptest.NewServer(r)
@@ -1366,7 +1366,7 @@ func TestSession_Send_BufferFull_ReturnsErr(t *testing.T) {
 		WriteTimeoutSec:     30, // 长 timeout 让写 goroutine 卡住更稳定
 	}
 	builder := wsapp.NewPlaceholderSnapshotBuilder(repo)
-	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "test", builder)
+	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "test", builder, nil)
 	r := gin.New()
 	r.GET("/ws/rooms/:roomId", gateway.Handle)
 	ts := httptest.NewServer(r)
@@ -1812,7 +1812,7 @@ func TestNewGateway_ProdEnv_RejectsNonContractHeartbeat(t *testing.T) {
 		MaxMessageSizeBytes: 16384,
 		WriteTimeoutSec:     5,
 	}
-	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "prod", wsapp.NewPlaceholderSnapshotBuilder(repo))
+	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "prod", wsapp.NewPlaceholderSnapshotBuilder(repo), nil)
 }
 
 // TestNewGateway_ProdEnv_RejectsNonContractMaxMessageSize: env=prod 配
@@ -1838,7 +1838,7 @@ func TestNewGateway_ProdEnv_RejectsNonContractMaxMessageSize(t *testing.T) {
 		MaxMessageSizeBytes: 8192, // 非契约值
 		WriteTimeoutSec:     5,
 	}
-	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "prod", wsapp.NewPlaceholderSnapshotBuilder(repo))
+	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "prod", wsapp.NewPlaceholderSnapshotBuilder(repo), nil)
 }
 
 // TestNewGateway_EmptyEnv_BehavesAsProd: env="" 应按 prod 严格策略
@@ -1859,7 +1859,7 @@ func TestNewGateway_EmptyEnv_BehavesAsProd(t *testing.T) {
 		MaxMessageSizeBytes: 16384,
 		WriteTimeoutSec:     5,
 	}
-	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "", wsapp.NewPlaceholderSnapshotBuilder(repo))
+	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "", wsapp.NewPlaceholderSnapshotBuilder(repo), nil)
 }
 
 // TestNewGateway_DevEnv_AcceptsOverride: env=dev 应允许 YAML 覆盖契约字段。
@@ -1879,7 +1879,7 @@ func TestNewGateway_DevEnv_AcceptsOverride(t *testing.T) {
 		MaxMessageSizeBytes: 8192,
 		WriteTimeoutSec:     5,
 	}
-	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "dev", wsapp.NewPlaceholderSnapshotBuilder(repo))
+	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "dev", wsapp.NewPlaceholderSnapshotBuilder(repo), nil)
 	if gateway == nil {
 		t.Error("NewGateway returned nil in dev env")
 	}
@@ -1902,7 +1902,7 @@ func TestNewGateway_ProdEnv_AcceptsContractValues(t *testing.T) {
 		MaxMessageSizeBytes: 16384,
 		WriteTimeoutSec:     5,
 	}
-	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "prod", wsapp.NewPlaceholderSnapshotBuilder(repo))
+	gateway := wsapp.NewGateway(signer, mgr, repo, cfg, "prod", wsapp.NewPlaceholderSnapshotBuilder(repo), nil)
 	if gateway == nil {
 		t.Error("NewGateway returned nil in prod env with contract values")
 	}
@@ -1931,7 +1931,7 @@ func TestNewGateway_NilBuilder_Panics(t *testing.T) {
 		MaxMessageSizeBytes: 16384,
 		WriteTimeoutSec:     5,
 	}
-	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "prod", nil)
+	_ = wsapp.NewGateway(signer, mgr, repo, cfg, "prod", nil, nil)
 }
 
 // ---------- Story 10.4：Session.CloseWithCode 测试 ----------

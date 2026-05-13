@@ -27,7 +27,7 @@ func TestSession_Close_FastWhenWriteLoopNotStarted(t *testing.T) {
 	defer cleanup()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s := newSession("", 1001, 3001, conn, logger, 16384, 2*time.Second)
+	s := newSession("", 1001, 3001, conn, logger, 16384, 2*time.Second, nil)
 
 	start := time.Now()
 	if err := s.Close(); err != nil {
@@ -53,7 +53,7 @@ func TestSession_CloseWithCode_FastWhenWriteLoopNotStarted(t *testing.T) {
 	defer cleanup()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s := newSession("", 1001, 3001, conn, logger, 16384, 2*time.Second)
+	s := newSession("", 1001, 3001, conn, logger, 16384, 2*time.Second, nil)
 
 	start := time.Now()
 	// CloseWithCode 在 writeLoopStarted=false 下也应该快（跳过 wait）；
@@ -81,7 +81,7 @@ func TestSession_CloseWithCode_AfterWriteLoopStarted_StillWaits(t *testing.T) {
 	defer cleanup()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s := newSession("", 1001, 3001, conn, logger, 16384, 2*time.Second)
+	s := newSession("", 1001, 3001, conn, logger, 16384, 2*time.Second, nil)
 
 	// 启动 writeLoop（writeLoopStarted 入口立即翻 true）
 	go s.writeLoop()
@@ -135,7 +135,7 @@ func TestSession_Close_AfterWriteLoopStarted_DoesNotWait(t *testing.T) {
 	defer cleanup()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s := newSession("", 1001, 3001, conn, logger, 16384, 2*time.Second)
+	s := newSession("", 1001, 3001, conn, logger, 16384, 2*time.Second, nil)
 
 	// 启动 writeLoop（writeLoopStarted 入口立即翻 true）
 	go s.writeLoop()
@@ -182,7 +182,7 @@ func TestSession_Close_FastEvenWhenWriteLoopBlockedOnWrite(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	// writeTimeout=2s 让对照清晰：原版会等 2.2s，r4 后应 < 100ms
-	s := newSession("", 1001, 3001, conn, logger, 16384, 2*time.Second)
+	s := newSession("", 1001, 3001, conn, logger, 16384, 2*time.Second, nil)
 
 	// 启动 writeLoop
 	go s.writeLoop()
@@ -247,7 +247,7 @@ func TestSession_CloseWaitTimeout_EqualsWriteTimeoutPlusBuffer(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newSession("", 1001, 3001, conn, logger, 16384, tc.writeTimeout)
+			s := newSession("", 1001, 3001, conn, logger, 16384, tc.writeTimeout, nil)
 			if got := s.closeWaitTimeout; got != tc.want {
 				t.Errorf("closeWaitTimeout = %v with writeTimeout=%v, want %v (review r3 P2: must = writeTimeout + 200ms)", got, tc.writeTimeout, tc.want)
 			}
@@ -271,7 +271,7 @@ func TestSession_CloseWaitTimeout_GreaterThanCloseFrameWriteDeadline_ForProducti
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// 用 production 默认 writeTimeout=5s
-	s := newSession("", 1001, 3001, conn, logger, 16384, 5*time.Second)
+	s := newSession("", 1001, 3001, conn, logger, 16384, 5*time.Second, nil)
 	if s.closeWaitTimeout <= closeFrameWriteDeadline {
 		t.Errorf("closeWaitTimeout %v <= closeFrameWriteDeadline %v with production writeTimeout=5s: r3 fix did not actually extend wait beyond original 500ms",
 			s.closeWaitTimeout, closeFrameWriteDeadline)

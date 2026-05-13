@@ -558,3 +558,115 @@ func BuildPetStateChangedEnvelope(payload PetStateChangedPayload) ([]byte, error
 	}
 	return bytes, nil
 }
+
+// ============================================================================
+// Story 17.5 — emoji.received payload + envelope helper
+// ============================================================================
+
+// EmojiReceivedPayload 是 emoji.received 消息的 payload（Story 17.5 引入）。
+//
+// 与 V1 §12.3 `### 收到表情广播（emoji.received）` 字段表完全 1:1 对齐：
+//   - UserID:    BIGINT 字符串化（V1 §2.5 全局约定）；表情发起者的 user 主键；
+//                来自 emoji.send 当前 user.id（即 WS 握手 token 解码后的 user.id）
+//   - EmojiCode: 客户端发送的表情业务标识符；server 已在 §12.2 服务端逻辑步骤 4
+//                校验过该 emojiCode 必然存在于 emoji_configs 且 is_enabled=1
+//                （client 收到 emoji.received 时**无需**再次校验 —— server 端为
+//                single source of truth）；与 §11.1 data.items[].code 同语义
+//
+// **payload 字段集合严格只 2 字段**（V1 §12.3 future fields 注 + 本 story 范围
+// 红线钦定）：不含 ts（envelope 顶层已含）/ assetUrl（client 从 §11.1 缓存列表
+// 查得）/ name（同上）/ 任何其他字段；client 用 emojiCode 作 key 在 §11.1 缓存中
+// 定位 assetUrl / name 等渲染所需字段，**不**靠 broadcast 携带。
+//
+// **关键约束**（V1 §12.3 钦定）：2 字段都必填；缺字段视为契约违反，client 解析
+// 层走"安全忽略 + log warn"路径。Go struct 层不显式 omitempty（与
+// PetStateChangedPayload / MemberJoinedPayload 同模式），所有字段一律 JSON
+// marshal 输出。
+type EmojiReceivedPayload struct {
+	UserID    string `json:"userId"`
+	EmojiCode string `json:"emojiCode"`
+}
+
+// BuildEmojiReceivedEnvelope wrap EmojiReceivedPayload 进 serverEnvelope +
+// json.Marshal 返 ([]byte, error)（Story 17.5 引入；与 BuildPetStateChangedEnvelope
+// / BuildMemberJoinedEnvelope / BuildMemberLeftEnvelope 同模式）。
+//
+// 用途：handler 层（emoji_handler.HandleEmojiSend）在 §12.2 服务端逻辑步骤 5
+// 校验全通过后调用本 helper 拿到 []byte 后调 BroadcastFn 推送给该房间内所有
+// 在线 Session（**包含**发起者自己 —— 与 member.joined / member.left 排除发起者
+// 不同语义，与 pet.state.changed 同语义；详见 V1 §12.3）。
+//
+// envelope 字段值（V1 §12.3 通用信封 + 钦定）：
+//   - Type:      "emoji.received"
+//   - RequestID: ""（主动推送类消息固定 ""；V1 §12.3 钦定 ——
+//                **不**回带 emoji.send.requestId，广播 fanout 给房间内所有 Session，
+//                server 端无法对所有接收者都"配对" emoji.send.requestId；
+//                发起者自己的 self-broadcast 也走广播路径，故 requestId 同样固定 ""）
+//   - Payload:   入参 payload
+//   - Ts:        time.Now().UnixMilli()（与 pet.state.changed / member.joined 同
+//                语义，仅作日志关联 + UI 辅助展示，**禁止**用作业务排序）
+//
+// 错误：json.Marshal 在 marshalable struct 下不可能失败；防御性 wrap。caller 收到
+// error 时 log warn 不重试（与 broadcast 失败同 fire-and-forget 语义）。
+func BuildEmojiReceivedEnvelope(payload EmojiReceivedPayload) ([]byte, error) {
+	env := serverEnvelope{
+		Type:      "emoji.received",
+		RequestID: "", // V1 §12.3 主动推送类消息固定 ""
+		Payload:   payload,
+		Ts:        time.Now().UnixMilli(),
+	}
+	bytes, err := json.Marshal(env)
+	if err != nil {
+		return nil, fmt.Errorf("ws envelope: marshal emoji.received: %w", err)
+	}
+	return bytes, nil
+}
+
+// ============================================================================
+// Story 17.5 — error payload + envelope helper（**首次**落地 WS error 路径）
+// ============================================================================
+
+// ErrorPayload 是 error 消息的 payload（Story 17.5 引入；V1 §12.3 `### error` 字段表）。
+//
+// 字段：
+//   - Code:    错误码，复用 §3 全局错误码定义（本 story 用到的：1002 参数错误 /
+//              1009 服务繁忙 / 6004 用户不在房间中 / 7001 emoji not found）
+//   - Message: 错误描述，可读字符串（不做国际化，与 §3 message 字段一致）
+type ErrorPayload struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// BuildErrorEnvelope wrap (requestID, code, message) 进 serverEnvelope +
+// json.Marshal 返 ([]byte, error)（Story 17.5 引入；**首次**落地 WS error
+// envelope helper —— 节点 4 / 5 既有路径都没用过 WS error 消息：snapshot 失败走
+// close 1011；pet.state.changed / member.joined / member.left 都是 broadcast 类
+// 消息失败仅 log，不回 error）。
+//
+// 用途：emoji_handler.HandleEmojiSend 在校验失败（1002 / 1009 / 6004 / 7001）时
+// 调用本 helper 拿 []byte 后调 Session.SendPriority 直接推回发起者 Session
+// （**不**走 broadcast —— V1 §12.2 钦定"错误响应通过 §12.3 error 消息回送 /
+// requestId 回带 emoji.send.requestId"，是单 Session 响应而非房间广播）。
+//
+// envelope 字段值（V1 §12.3 通用信封 + 钦定）：
+//   - Type:      "error"
+//   - RequestID: caller 入参 requestID（响应类 error 回带 client 请求的 requestId；
+//                server 主动错误传 "" 即可，本 story 只调用响应类路径）
+//   - Payload:   ErrorPayload{Code, Message}
+//   - Ts:        time.Now().UnixMilli()
+//
+// 错误：json.Marshal 在 marshalable struct 下不可能失败；防御性 wrap（与既有
+// envelope helpers 同模式）。
+func BuildErrorEnvelope(requestID string, code int, message string) ([]byte, error) {
+	env := serverEnvelope{
+		Type:      "error",
+		RequestID: requestID, // 响应类 error 回带 client 请求 requestId
+		Payload:   ErrorPayload{Code: code, Message: message},
+		Ts:        time.Now().UnixMilli(),
+	}
+	bytes, err := json.Marshal(env)
+	if err != nil {
+		return nil, fmt.Errorf("ws envelope: marshal error: %w", err)
+	}
+	return bytes, nil
+}

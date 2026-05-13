@@ -52,6 +52,15 @@ type Gateway struct {
 	//
 	// **不可 nil**：NewGateway 内 fail-fast 校验。
 	builder SnapshotBuilder
+
+	// emojiHandler（Story 17.5 引入）：传给 newSession 让 readLoop 路由 emoji.send。
+	//
+	// **可 nil**：单测 / HTTP-only 部署传 nil；newSession 接受 nil（与
+	// Session.emojiHandler 字段同语义，readLoop dispatcher 看到 emoji.send +
+	// emojiHandler==nil 时 log warn fallthrough 走 unknown type 路径）。
+	// bootstrap 阶段 wire 真实实例（17.5 范围）；未来 epic 加新 WS 业务消息（如
+	// 装扮变更广播）时新增 cosmeticHandler / chestHandler 字段同模式。
+	emojiHandler EmojiHandler
 }
 
 // NewGateway 构造 Gateway（main.go bootstrap wire 用）。
@@ -79,6 +88,7 @@ func NewGateway(
 	cfg config.WSConfig,
 	envName string,
 	builder SnapshotBuilder,
+	emojiHandler EmojiHandler, // Story 17.5 加（第 7 参数，**末尾追加**让既有 caller 仅在末尾追加 nil 或真实实例）；可为 nil
 ) *Gateway {
 	// **prod 配置覆盖强制**（review r2 P2；与 Story 7.3 NewStepService 同模式）：
 	// envName 归一化为小写；只有显式 "dev" / "staging" / "test" 才允许 contract 字段
@@ -130,6 +140,7 @@ func NewGateway(
 		cfg:          cfg,
 		writeTimeout: writeTimeout,
 		builder:      builder,
+		emojiHandler: emojiHandler, // Story 17.5 加；可为 nil
 	}
 }
 
@@ -271,7 +282,7 @@ func (g *Gateway) Handle(c *gin.Context) {
 	//
 	// 6.1 创建 Session（sessionID 暂为空，Register 内回填）；**不** Register。
 	// 此时 Session 尚未进入 manager 索引，旧 session（如有）保持活跃。
-	session := newSession("", userID, roomID, conn, g.logger, g.cfg.MaxMessageSizeBytes, g.writeTimeout)
+	session := newSession("", userID, roomID, conn, g.logger, g.cfg.MaxMessageSizeBytes, g.writeTimeout, g.emojiHandler)
 
 	// 6.2 同步段构造 + 写 placeholder room.snapshot（**先于** Register；
 	// transient 失败时旧 session 不被 evict）—— Story 10.7 把原 inline 三段

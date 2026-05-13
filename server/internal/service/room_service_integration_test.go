@@ -2366,7 +2366,7 @@ func startWSGatewayForLeaveCase(t *testing.T, sqlDB *sql.DB, sessionMgr wsapp.Se
 		WriteTimeoutSec:     5,
 	}
 	builder := wsapp.NewPlaceholderSnapshotBuilder(repo)
-	gateway := wsapp.NewGateway(signer, sessionMgr, repo, cfg, "test", builder)
+	gateway := wsapp.NewGateway(signer, sessionMgr, repo, cfg, "test", builder, nil)
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.GET("/ws/rooms/:roomId", gateway.Handle)

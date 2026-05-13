@@ -77,6 +77,29 @@ type EmojiRepo interface {
 	// 覆盖 `WHERE is_enabled = 1 ORDER BY sort_order ASC`（数据库设计 §5.15 钦定）；
 	// 无 filesort，性能稳定。
 	List(ctx context.Context) ([]EmojiConfig, error)
+
+	// Exists 查 code 是否存在且 is_enabled=1（Story 17.5 引入；V1 §12.2 服务端
+	// 逻辑步骤 4 钦定）。
+	//
+	// SQL: SELECT 1 FROM emoji_configs WHERE code = ? AND is_enabled = 1 LIMIT 1
+	//
+	// 关键约束（§12.2 钦定）：
+	//   - **`is_enabled = 1` 过滤**：disabled 表情视同"不存在"返 false（避免 server
+	//     暴露 enabled / disabled 状态信息；与 §12.2 服务端逻辑步骤 4 "两种情况合并
+	//     为同一错误" 钦定一致）
+	//   - LIMIT 1 优化：UNIQUE KEY uk_code 已保证 code 唯一，LIMIT 1 是 query planner
+	//     hint，让 DB 命中第一行就返回
+	//   - **走索引**：`uk_code` UNIQUE KEY 直接定位单行 + 应用层 filter `is_enabled = 1`
+	//     （O(1) 查询；数据库设计 §5.15 钦定）
+	//   - 0 行 → (false, nil)（包括 code 不存在 / 存在但 is_enabled=0）
+	//   - 1 行 → (true, nil)
+	//   - DB error → (false, raw error 透传给 service（service 包成 1009）)
+	//
+	// **不**返 EmojiConfig 完整行：本方法仅供 emoji.send 校验路径用，service 层
+	// 只需要 bool 信号而非完整字段；少 SELECT 字段 = 少 wire 字节 = 少 GORM Scan
+	// 开销。如 future 需要"查 code 然后用 assetUrl"，由对应 story 加新方法
+	// （如 GetByCode），**不**改 Exists 签名。
+	Exists(ctx context.Context, code string) (bool, error)
 }
 
 // emojiRepo 是 EmojiRepo 的默认实装。
@@ -87,6 +110,27 @@ type emojiRepo struct {
 // NewEmojiRepo 构造 EmojiRepo。
 func NewEmojiRepo(db *gorm.DB) EmojiRepo {
 	return &emojiRepo{db: db}
+}
+
+// Exists 实装：单 SELECT 查询 with LIMIT 1。详见 EmojiRepo.Exists 接口注释。
+//
+// 用 Select("1") + Limit(1) + Find(&result)：返 0 行时 result 为空 slice 而非
+// error；与 GORM 既有 EmojiConfig.List 模式一致；不用 First 是因为 First 在 0
+// 行时返 ErrRecordNotFound，需要在 caller 层额外 errors.Is 判断（增加复杂度）。
+func (r *emojiRepo) Exists(ctx context.Context, code string) (bool, error) {
+	db := tx.FromContext(ctx, r.db).WithContext(ctx)
+
+	var dummy []int
+	err := db.
+		Model(&EmojiConfig{}).
+		Select("1").
+		Where("code = ? AND is_enabled = ?", code, 1).
+		Limit(1).
+		Find(&dummy).Error
+	if err != nil {
+		return false, err
+	}
+	return len(dummy) > 0, nil
 }
 
 // List 实装：单 SELECT 查询。详见 EmojiRepo.List 接口注释。

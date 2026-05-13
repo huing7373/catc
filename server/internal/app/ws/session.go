@@ -214,6 +214,16 @@ type Session struct {
 	notifier          closeNotifier // SessionManager 注入；nil 安全（不通知）
 	ctx               context.Context
 	cancelCtx         context.CancelFunc
+
+	// emojiHandler 是 emoji.send 消息的 dispatch 目标（Story 17.5 引入）。
+	//
+	// **nil-safe**：单测 / HTTP-only 部署可传 nil；readLoop dispatcher 看到
+	// env.Type == "emoji.send" + s.emojiHandler == nil 时走 unknown type 路径
+	// （log warn + 不 close 连接），与既有未识别消息行为一致。
+	//
+	// 不导出（小写）：与既有 conn / sendChan 等内部字段一致；外部访问通过
+	// newSession 注入 + readLoop 内部消费。
+	emojiHandler EmojiHandler
 }
 
 // newSession 构造 Session（私有，仅供 SessionManager / Gateway 调用）。
@@ -239,6 +249,7 @@ func newSession(
 	logger *slog.Logger,
 	maxMessageSize int,
 	writeTimeout time.Duration,
+	emojiHandler EmojiHandler, // Story 17.5 加（**新参数放在末尾**，避免 caller 大改）；可为 nil
 ) *Session {
 	ctx, cancel := context.WithCancel(context.Background())
 	// closeWaitTimeout = writeTimeout + 200ms（review r3 P2 加）。**必须** ≥
@@ -268,6 +279,7 @@ func newSession(
 		closeWaitTimeout: closeWait,
 		ctx:              ctx,
 		cancelCtx:        cancel,
+		emojiHandler:     emojiHandler, // Story 17.5 加；可为 nil
 	}
 	s.lastHeartbeatAt.Store(time.Now().UnixMilli())
 	if maxMessageSize > 0 {
@@ -588,6 +600,18 @@ func (s *Session) readLoop() {
 		switch env.Type {
 		case "ping":
 			s.handlePing(env)
+		case "emoji.send":
+			// Story 17.5 引入：dispatch 到 EmojiHandler；handler nil 时走 unknown type 路径
+			if s.emojiHandler == nil {
+				s.logger.Warn("ws emoji.send received but no EmojiHandler wired; ignoring",
+					slog.String("requestId", env.RequestID))
+				continue
+			}
+			// **同步**调 handler.HandleEmojiSend（与 handlePing 同模式）—— ValidateCode +
+			// FindByID + broadcast 全程 O(1 + 2 query)，与 ping 同量级；不需要 goroutine。
+			// ctx 用 s.ctx（与 readLoop 上下文绑定，session.Close → ctx cancel → handler
+			// 内部 ctx-aware service / repo 立即中止）。
+			s.emojiHandler.HandleEmojiSend(s.ctx, s, env)
 		default:
 			// V1 §12.3 末尾草稿示例延后锚定声明：未识别 type 安全忽略 + log warn
 			s.logger.Warn("ws unknown message type ignored", slog.String("type", env.Type), slog.String("requestId", env.RequestID))

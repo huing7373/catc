@@ -2,8 +2,12 @@ package ws
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // 本文件让 black-box 测试包 ws_test 能访问 unexported 测试 helper / 内部字段
@@ -100,6 +104,66 @@ func (s *Session) CloseWaitTimeoutForTest() time.Duration {
 // WriteTimeoutForTest 暴露 internal writeTimeout 给单测断言对照用。
 func (s *Session) WriteTimeoutForTest() time.Duration {
 	return s.writeTimeout
+}
+
+// NewSessionForTest 是 newSession 的 exported 别名（Story 17.5 引入），让
+// ws_test 包 emoji_handler_test 能跨包访问 unexported newSession 构造 + 内部启动
+// writeLoop。
+//
+// **使用约定**：
+//   - sid: 单测可传任意非空 string；不进 SessionManager 索引，仅用于 logger 字段
+//   - uid / rid: caller 自定义 user/room 标识
+//   - conn: 必须是 server-side *websocket.Conn（gorilla.Upgrade 后的 conn，不是
+//     client.Dial 拿到的 conn）；本 helper 内**自动启动** writeLoop，让 SendPriority
+//     入队的 msg 真的被消费写到 wire
+//   - emojiHandler: 可为 nil；不为 nil 时 readLoop dispatch 到该 handler
+//
+// 与 14.4 既有 handler test 同模式：handler test 不依赖完整 readLoop（test 是
+// 同步调 HandleEmojiSend 直接传 envelope），但**必须**启动 writeLoop —— 否则
+// SendPriority 入队的 error envelope 永不被消费 → client.ReadMessage 超时。
+//
+// **不**启动 readLoop：handler test 不需要从 client 读消息，只验证 SendPriority
+// 的 wire 输出；readLoop 启动会触发 client/server-conn 双向 ReadMessage 互相阻塞，
+// 把 test 复杂度提升而无收益。
+func NewSessionForTest(_ testing.TB, sid string, uid, rid uint64, conn *websocket.Conn, emojiHandler EmojiHandler) *Session {
+	s := newSession(sid, uid, rid, conn, slog.Default(), 16384, 5*time.Second, emojiHandler)
+	// 自动启动 writeLoop（让 SendPriority 入队的 msg 真的写到 conn）。**不**启
+	// readLoop（emoji_handler_test 不消费 client → server 方向消息）。
+	go s.writeLoop()
+	return s
+}
+
+// NewClientEnvelopeForTest 是 clientEnvelope 的构造便利函数（Story 17.5 引入）。
+//
+// 用途：emoji_handler_test 直接构造 envelope 调 HandleEmojiSend，绕过完整的
+// readLoop JSON 解析路径。
+func NewClientEnvelopeForTest(typ, reqID string, payload []byte) ClientEnvelopeForTest {
+	return ClientEnvelopeForTest{
+		Type:      typ,
+		RequestID: reqID,
+		Payload:   json.RawMessage(payload),
+	}
+}
+
+// ClientEnvelopeForTest 是 clientEnvelope 的可导出别名（Story 17.5 引入）；
+// 字段集合与 clientEnvelope 1:1 对齐，但首字母大写让 ws_test 包能直接构造。
+//
+// **使用**：通过 NewClientEnvelopeForTest 构造，然后调
+// `handler.HandleEmojiSend(ctx, session, env.AsInternal())` 转回 internal type。
+type ClientEnvelopeForTest struct {
+	Type      string
+	RequestID string
+	Payload   json.RawMessage
+}
+
+// AsInternal 把 ClientEnvelopeForTest 转回 unexported clientEnvelope（让 ws_test
+// 包能传给 EmojiHandler.HandleEmojiSend）。
+func (e ClientEnvelopeForTest) AsInternal() clientEnvelope {
+	return clientEnvelope{
+		Type:      e.Type,
+		RequestID: e.RequestID,
+		Payload:   e.Payload,
+	}
 }
 
 // BroadcastToRoomForTest 是 BroadcastToRoom 的测试别名（review 10-5 r1 后保留
