@@ -1,6 +1,6 @@
 # Story 17.3: emoji_configs seed（首次落地 0010_seed_emoji_configs.up/down.sql + ≥4 个表情 INSERT IGNORE + 每个表情非空 asset_url + ≥2 case 单测 + dockertest 集成测试覆盖 seed 后表内容 + 重复 migrate up 幂等）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
