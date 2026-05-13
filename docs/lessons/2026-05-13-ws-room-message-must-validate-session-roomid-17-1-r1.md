@@ -2,7 +2,7 @@
 date: 2026-05-13
 source_review: codex review output (/tmp/epic-loop-review-17-1-r1.md)
 story: 17-1-接口契约最终化
-commit: <pending>
+commit: ee6d398
 lesson_count: 1
 ---
 
