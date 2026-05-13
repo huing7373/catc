@@ -1,7 +1,12 @@
 package mysql
 
 import (
+	"context"
 	"time"
+
+	"gorm.io/gorm"
+
+	"github.com/huing/cat/server/internal/repo/tx"
 )
 
 // EmojiConfig 是 emoji_configs 表的完整 GORM domain struct（Story 17.2 引入；
@@ -39,3 +44,77 @@ type EmojiConfig struct {
 
 // TableName 显式声明 "emoji_configs"。
 func (EmojiConfig) TableName() string { return "emoji_configs" }
+
+// EmojiRepo 是 emoji_configs 表的读取接口（Story 17.4 引入）。
+//
+// 本 story 阶段仅含 List 方法（GET /emojis 端点）；future Story 17.5 加
+// Exists(ctx, code) 方法（WS emoji.send 校验 emojiCode 合法性 —— 单 emoji code
+// 查询路径，与 List 全列表查询路径分开实装）。
+//
+// 不在本 story 落地：Create / Update / Delete（MVP 节点 6 无 admin 后台需求；
+// emoji_configs 写入路径目前仅 0010_seed migration 一次性 seed，无运行时 admin 改写场景）
+type EmojiRepo interface {
+	// List 返回所有 is_enabled=1 的 emoji_configs 行（V1 §11.1 服务端逻辑步骤 2 钦定）。
+	//
+	// SQL: SELECT id, code, name, asset_url, sort_order FROM emoji_configs
+	//      WHERE is_enabled = 1 ORDER BY sort_order ASC, id ASC
+	//
+	// 关键约束（§11.1 钦定）：
+	//   - **次要排序键 `id ASC`**：保证 sort_order 相同时返回顺序确定
+	//     （避免 client 端"同 sort_order 表情顺序在不同请求间不一致"问题）
+	//   - **`is_enabled = 1`** 过滤：disabled 表情**不**返回（被 admin 临时下架 /
+	//     WIP 阶段不放出的表情）
+	//   - 0 行（如 seed 未执行 / 全部 disabled）→ ([]EmojiConfig{}, nil)，**不**返 nil slice
+	//   - 多行 → ([]EmojiConfig{...}, nil)
+	//   - DB error → (nil, raw error 透传给 service（service 包成 1009）)
+	//
+	// **注**：本方法返回 `[]EmojiConfig` 含 ID / CreatedAt / UpdatedAt 等字段，但 service
+	// 层 DTO 转换会过滤掉 client 不需要的字段（V1 §11.1 钦定 id / is_enabled /
+	// created_at / updated_at 不下发）；repo 层不做字段裁剪 —— 让 service 层关心 wire
+	// 契约，repo 层只关心表字段映射。
+	//
+	// **走索引**：emoji_configs 表 `idx_enabled_sort (is_enabled, sort_order ASC)` 索引
+	// 覆盖 `WHERE is_enabled = 1 ORDER BY sort_order ASC`（数据库设计 §5.15 钦定）；
+	// 无 filesort，性能稳定。
+	List(ctx context.Context) ([]EmojiConfig, error)
+}
+
+// emojiRepo 是 EmojiRepo 的默认实装。
+type emojiRepo struct {
+	db *gorm.DB
+}
+
+// NewEmojiRepo 构造 EmojiRepo。
+func NewEmojiRepo(db *gorm.DB) EmojiRepo {
+	return &emojiRepo{db: db}
+}
+
+// List 实装：单 SELECT 查询。详见 EmojiRepo.List 接口注释。
+func (r *emojiRepo) List(ctx context.Context) ([]EmojiConfig, error) {
+	// 用 tx.FromContext 取 db handle：事务外调用走 r.db；事务内调用走 txCtx 注入的
+	// tx 句柄（与 11.6 既有 repo 同模式；本 story 阶段实际不会在事务内调，但保持
+	// 与既有 repo 模式一致让 future 扩展无需改 method body）。
+	db := tx.FromContext(ctx, r.db).WithContext(ctx)
+
+	var rows []EmojiConfig
+	// 显式 Select 字段集（不依赖 GORM 自动 SELECT *），与 §11.1 服务端逻辑步骤 2
+	// 钦定字段 1:1 对齐；避免 future 表加字段时被自动拉过来污染 query payload。
+	// **注**：CreatedAt / UpdatedAt **不**在 SELECT 列表中（client 不需要 + service
+	// 层不做 wire DTO 转换），但 GORM Scan 会把它们填为 zero-value time.Time；
+	// service 层 DTO 转换不读这两字段，所以 zero-value 是安全的。
+	err := db.
+		Select("id, code, name, asset_url, sort_order").
+		Where("is_enabled = ?", 1).
+		Order("sort_order ASC, id ASC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	// GORM Find 在 0 行时返回空 slice 而非 nil（与 ListMembers 同模式 — 验证：
+	// db.Find(&[]X{}) 返回 len(rows)==0 且 rows != nil）；保险起见显式兜底空 slice
+	// 让 service 层调用方不需要 nil-check。
+	if rows == nil {
+		rows = []EmojiConfig{}
+	}
+	return rows, nil
+}

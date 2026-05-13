@@ -318,6 +318,9 @@ func NewRouter(deps Deps) *gin.Engine {
 		// 构造，gateway / SnapshotBuilder 复用本处实例。
 		roomRepo := repomysql.NewRoomRepo(deps.GormDB)
 		roomMemberRepo := repomysql.NewRoomMemberRepo(deps.GormDB)
+		// Story 17.4 加：emojiRepo —— 表情列表 GET /emojis 端点使用。
+		// 复用同一 db handle；与其他 repo 平级，让 emojiSvc 构造段读得到该实例。
+		emojiRepo := repomysql.NewEmojiRepo(deps.GormDB)
 
 		// auth service：5 repo + txMgr + signer
 		authSvc := service.NewAuthService(
@@ -337,6 +340,11 @@ func NewRouter(deps Deps) *gin.Engine {
 		// **不**依赖 authBindingRepo / txMgr / signer —— GET /home 全只读）。
 		homeSvc := service.NewHomeService(userRepo, petRepo, stepAccountRepo, chestRepo)
 		homeHandler := handler.NewHomeHandler(homeSvc)
+
+		// Story 17.4 加：emoji service + handler（单 SELECT 不开事务）。
+		// 复用上面构造的 emojiRepo 实例；service 不需要 user 维度参数（全局静态列表）。
+		emojiSvc := service.NewEmojiService(emojiRepo)
+		emojisHandler := handler.NewEmojisHandler(emojiSvc)
 
 		// Story 7.3 加：step service + handler（事务内差值入账 + 防作弊；
 		// 复用 stepAccountRepo + 新 stepSyncLogRepo + txMgr）。
@@ -456,6 +464,8 @@ func NewRouter(deps Deps) *gin.Engine {
 			middleware.RateLimit(deps.RateLimitCfg, middleware.RateLimitByUserID),
 		)
 		authedGroup.GET("/home", homeHandler.LoadHome)
+		// Story 17.4 加：GET /api/v1/emojis 表情列表（auth + RateLimitByUserID）
+		authedGroup.GET("/emojis", emojisHandler.GetEmojis)
 		authedGroup.POST("/steps/sync", stepsHandler.PostSync)     // Story 7.3 加
 		authedGroup.GET("/steps/account", stepsHandler.GetAccount) // Story 7.4 加
 		authedGroup.POST("/rooms", roomHandler.CreateRoom)         // Story 11.3 加
