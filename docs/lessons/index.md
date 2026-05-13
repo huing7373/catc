@@ -284,3 +284,4 @@
 | 2026-05-13 | [Consumer 启动必须原子捕获 (stream, generation) —— 分两步读会被 prepareForReconnect 撕成"新 stream + 旧 gen"，让新 stream 所有消息被错误识别为 stale 丢弃（15-2 r4）](2026-05-13-consumer-must-atomically-snapshot-stream-and-generation-15-2-r4.md) | 1 | architecture | `0184339` |
 | 2026-05-13 | [room-scoped WS 消息必须以 `Session.roomID` 而非 `users.current_room_id` 做权威校验 + 广播目标（17-1 r1）](2026-05-13-ws-room-message-must-validate-session-roomid-17-1-r1.md) | 1 | security, architecture | `<pending>` |
 | 2026-05-13 | [冻结声明摘要必须与详细规约同步 & 错误响应表必须枚举 DB-error 1009 路径 & enabled 资源契约不允许空字符串（17-1 r2）](2026-05-13-emoji-contract-self-consistency-and-1009-and-asset-url-17-1-r2.md) | 3 | docs, error-handling | `<pending>` |
+| 2026-05-13 | [WS fire-and-forget 副产物（含 self-broadcast）不承担 server ACK 职责 & 冻结声明错误码列表必须从实装路径反推（不机械抄通用错误码集）（17-1 r3）](2026-05-13-self-broadcast-not-ack-and-summary-error-code-list-purity-17-1-r3.md) | 2 | docs | `<pending>` |
