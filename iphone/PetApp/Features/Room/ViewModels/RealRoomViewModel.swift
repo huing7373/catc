@@ -82,6 +82,15 @@ public final class RealRoomViewModel: RoomViewModel {
     /// 把 wsState 切对.
     private var lastObservedRoomId: String?
 
+    /// Story 15.5 AC3: WS 重连成功后通知"自己 pet state 重新对齐"的 delegate.
+    ///
+    /// **weak**: 避免循环引用；与 webSocketClient weak 字段同模式.
+    /// **MainActor isolated**: 与 vm 的其他字段一致（vm 是 @MainActor 隔离的 ObservableObject）.
+    ///
+    /// 由 RootView 在 wire 阶段（`.onAppear` bind 之后）调 `bindReconnectAlignmentDelegate(_:)` 注入；
+    /// 测试路径直接通过 setter / mock delegate 注入.
+    weak var reconnectAlignmentDelegate: PetStateReconnectAlignmentDelegate?
+
     public override init() {
         super.init()
         self.appState = nil
@@ -258,6 +267,12 @@ public final class RealRoomViewModel: RoomViewModel {
                 }
             }
         }
+    }
+
+    /// Story 15.5 AC3: 注入 reconnect alignment delegate（由 RootView 在 wire 阶段调）.
+    /// nil 注入 = 不 wire（弱引用 nil 化）；与 webSocketClient 同精神保持 init 干净.
+    func bindReconnectAlignmentDelegate(_ delegate: PetStateReconnectAlignmentDelegate?) {
+        self.reconnectAlignmentDelegate = delegate
     }
 
     // MARK: - subscribe helpers
@@ -752,6 +767,12 @@ public final class RealRoomViewModel: RoomViewModel {
             switch state {
             case .connected:
                 self.wsState = .connected
+                // Story 15.5 AC3: 重连（含 first connect）成功后通知 PetStateSyncTriggerService 触发"自己 pet
+                // state 重新对齐"。delegate 是 weak —— RootView wire 时绑定；wire 残缺时（如 UITEST 路径
+                // webSocketClient=nil）delegate 为 nil → ?. 短路（无副作用 / 不报错）.
+                // **不**在本分支判断 currentRoomId / lastObservedRoomId —— delegate 调 service.triggerManualResync,
+                // service 内部走 roomId preflight 自然短路（DRY）.
+                reconnectAlignmentDelegate?.didReconnectAlignmentRequested()
             case .reconnecting:
                 self.wsState = .reconnecting
             case .disconnected:

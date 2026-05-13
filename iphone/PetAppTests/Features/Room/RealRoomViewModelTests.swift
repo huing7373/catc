@@ -3263,6 +3263,277 @@ final class RealRoomViewModelTests: XCTestCase {
         XCTAssertEqual(vm.memberPetStates, [:],
                        "production path 同时清 memberPetStates")
     }
+
+    // MARK: - Story 15.5 AC1 case (i) happy: WS 断 → 重连 → 收到新 snapshot → 所有成员 petState 重置为 snapshot 值
+
+    /// Story 15.5 AC1 case (i) (epics.md 行 2461)：
+    /// 既有 Story 15.1 `applySnapshot` 路径在 reconnect 边界自然工作 ——
+    /// **零 production 代码改动**，仅断言新 snapshot 整体覆盖 memberPetStates.
+    func testReconnectSnapshotResetsMemberPetStatesToServerValues() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "R1")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. 初始 snapshot：3 成员 currentState = 1/2/3 → memberPetStates = [.rest, .walk, .run]
+        let initialPayload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "R1", maxMembers: 4, memberCount: 3),
+            members: [
+                RoomSnapshotMember(userId: "u1", nickname: "Alice",
+                                   pet: RoomSnapshotPet(petId: "p1", currentState: 1)),
+                RoomSnapshotMember(userId: "u2", nickname: "Bob",
+                                   pet: RoomSnapshotPet(petId: "p2", currentState: 2)),
+                RoomSnapshotMember(userId: "u3", nickname: "Carol",
+                                   pet: RoomSnapshotPet(petId: "p3", currentState: 3)),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(initialPayload))
+        try await waitForMembersCount(vm: vm, expected: 3)
+        XCTAssertEqual(vm.memberPetStates["u1"], .rest)
+        XCTAssertEqual(vm.memberPetStates["u2"], .walk)
+        XCTAssertEqual(vm.memberPetStates["u3"], .run)
+
+        // 2. 模拟 reconnect 时序：disconnected → reconnecting → connected.
+        mockWS.emitConnectionState(.disconnected)
+        try await waitForWsState(vm: vm, expected: .disconnected)
+
+        mockWS.emitConnectionState(.reconnecting(attempt: 1))
+        try await waitForWsState(vm: vm, expected: .reconnecting)
+
+        mockWS.emitConnectionState(.connected)
+        try await waitForWsState(vm: vm, expected: .connected)
+
+        // 3. server 在 reconnect 后自动重发 snapshot —— currentState 反转为 3/2/1.
+        let updatedPayload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "R1", maxMembers: 4, memberCount: 3),
+            members: [
+                RoomSnapshotMember(userId: "u1", nickname: "Alice",
+                                   pet: RoomSnapshotPet(petId: "p1", currentState: 3)),
+                RoomSnapshotMember(userId: "u2", nickname: "Bob",
+                                   pet: RoomSnapshotPet(petId: "p2", currentState: 2)),
+                RoomSnapshotMember(userId: "u3", nickname: "Carol",
+                                   pet: RoomSnapshotPet(petId: "p3", currentState: 1)),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(updatedPayload))
+        try await waitForMemberPetState(vm: vm, userId: "u1", expected: .run)
+
+        // 4. 关键断言：applySnapshot 整体覆盖 —— 三个成员 petState 全部重置为 snapshot 值.
+        XCTAssertEqual(vm.memberPetStates["u1"], .run,
+                       "Story 15.1 applySnapshot 路径自然覆盖 u1 .rest → .run（snapshot 权威）")
+        XCTAssertEqual(vm.memberPetStates["u2"], .walk,
+                       "u2 .walk 不变（snapshot 仍是 currentState=2）")
+        XCTAssertEqual(vm.memberPetStates["u3"], .rest,
+                       "u3 .run → .rest（snapshot 权威）")
+    }
+
+    // MARK: - Story 15.5 AC1 case (iii) edge: 断线期间晚到的 stale pet.state.changed 被 generation gate + snapshot 双层守护
+
+    /// Story 15.5 AC1 case (iii)（epics.md 行 2463）：模拟"断线期间收到的旧 pet.state.changed"
+    /// 通过 streamGeneration gate 拦下；reconnect + 新 snapshot 整体覆盖 memberPetStates 为权威值.
+    /// 仍是**零 production 代码改动**——既有 Story 15.2 r3 generation gate + Story 15.1 applySnapshot 已守护.
+    ///
+    /// 测试时序模式（与 Story 15.2 case#G6.5 / case#"H6 generation gate covers .roomSnapshot" 同精神）：
+    /// 因 mockWS.prepareForReconnect() 会 swap stream → vm 的旧 consumer 拿不到新 emit；
+    /// 用直接调 vm.handle(...) + 显式 streamGeneration 模拟"新/旧 stream 投递".
+    func testReconnectSnapshotOverridesStaleIncrementalEvents() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "R1")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 1. 初始 snapshot：u1 currentState = 1 → memberPetStates[u1] = .rest（走 emit 路径触发 lastObservedRoomId 设定）.
+        let initialPayload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "R1", maxMembers: 4, memberCount: 1),
+            members: [
+                RoomSnapshotMember(userId: "u1", nickname: "Alice",
+                                   pet: RoomSnapshotPet(petId: "p1", currentState: 1)),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(initialPayload))
+        try await waitForMembersCount(vm: vm, expected: 1)
+        XCTAssertEqual(vm.memberPetStates["u1"], .rest)
+
+        // 2. 在当前 generation 上 apply 一次 incremental event（直接调 handle —— 复刻 Story 15.2 测试模式）.
+        let oldGen = mockWS.streamGeneration
+        let incrementalPayload = PetStateChangedPayload(userId: "u1", petId: "p1", currentState: 2)
+        vm.handle(message: .petStateChanged(incrementalPayload),
+                  streamRoomId: "R1",
+                  streamGeneration: oldGen)
+        XCTAssertEqual(vm.memberPetStates["u1"], .walk,
+                       "前置：incremental event 在当前 generation 已 apply → u1 .rest → .walk")
+
+        // 3. 模拟 reconnect：mockWS.prepareForReconnect() 翻新 generation（stream 被 swap，旧 consumer 失效）.
+        mockWS.prepareForReconnect()
+        let newGen = mockWS.streamGeneration
+        XCTAssertEqual(newGen, oldGen + 1, "prepareForReconnect 翻新 streamGeneration")
+
+        // 4. 直接调 vm.handle() with newGen 模拟"新 stream 上的 fresh snapshot"（与 case#G6.5 同模式：
+        //    因 mock prepareForReconnect 后 emit 到新 stream，但 vm 旧 consumer 仍订阅旧 stream，无法用 emit 触发）.
+        let authoritativePayload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "R1", maxMembers: 4, memberCount: 1),
+            members: [
+                RoomSnapshotMember(userId: "u1", nickname: "Alice",
+                                   pet: RoomSnapshotPet(petId: "p1", currentState: 1)),
+            ]
+        )
+        vm.handle(message: .roomSnapshot(authoritativePayload),
+                  streamRoomId: "R1",
+                  streamGeneration: newGen)
+
+        // 5. 关键断言：snapshot 权威覆盖 —— u1 .walk → .rest（applySnapshot 整体替换语义）.
+        XCTAssertEqual(vm.memberPetStates["u1"], .rest,
+                       "snapshot 权威覆盖 incremental event 残留；既有 Story 15.1 applySnapshot 路径自然工作")
+
+        // 6. 隐含验证：旧 generation 的 stale event 应被 generation gate 丢弃 → snapshot 权威值不被破坏.
+        let staleEvent = PetStateChangedPayload(userId: "u1", petId: "p1", currentState: 2)
+        vm.handle(message: .petStateChanged(staleEvent),
+                  streamRoomId: "R1",
+                  streamGeneration: oldGen)  // 用旧 generation 模拟 stale stream
+        XCTAssertEqual(vm.memberPetStates["u1"], .rest,
+                       "Story 15.2 r3 generation gate 拦下旧 stream stale event；snapshot 权威值不被破坏")
+    }
+
+    // MARK: - Story 15.5 AC3 case (j) happy: .connectionStateChanged(.connected) 触发 delegate
+
+    /// Story 15.5 AC3 case (j)：vm 在 .connectionStateChanged(.connected) 分支调
+    /// reconnectAlignmentDelegate?.didReconnectAlignmentRequested() 一次.
+    ///
+    /// **测试时序**：用直接调 vm.handle(...) 验证（与 Story 15.2 case#H5 / case#G6.5 同模式）——
+    /// 既绕过"consumer task 异步派发"时序不确定，又允许显式控制 streamRoomId / streamGeneration.
+    func testConnectionStateChangedConnectedTriggersDelegate() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "R1")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        // 注入 mock delegate（vm bind webSocketClient 后；保持 strong 引用防止 weak 立即 nil）.
+        let mockDelegate = MockPetStateReconnectAlignmentDelegate()
+        vm.bindReconnectAlignmentDelegate(mockDelegate)
+
+        // 让 vm 进入正常 in-room 状态：snapshot 让 lastObservedRoomId == "R1".
+        let snapshotPayload = RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "R1", maxMembers: 4, memberCount: 1),
+            members: [
+                RoomSnapshotMember(userId: "u1", nickname: "Alice", pet: nil),
+            ]
+        )
+        mockWS.emit(.roomSnapshot(snapshotPayload))
+        try await waitForMembersCount(vm: vm, expected: 1)
+
+        // 直接调 vm.handle(.connectionStateChanged(.connected), streamRoomId: "R1", streamGeneration: nil).
+        // streamGeneration: nil → 跳过 generation gate（与 case#H5 同模式：直接调 handle 不传 generation 时
+        // 仅 roomId guard 生效）；streamRoomId: "R1" 与 lastObservedRoomId 匹配 → 走入 connected 分支调 delegate.
+        vm.handle(
+            message: .connectionStateChanged(.connected),
+            streamRoomId: "R1",
+            streamGeneration: nil
+        )
+
+        // 关键断言：delegate 被调一次.
+        XCTAssertEqual(mockDelegate.didReconnectAlignmentRequestedCalls, 1,
+                       ".connectionStateChanged(.connected) 分支必须调 delegate.didReconnectAlignmentRequested 一次")
+        XCTAssertEqual(vm.wsState, .connected,
+                       "wsState 切到 .connected（delegate 调用不影响主路径）")
+    }
+
+    // MARK: - Story 15.5 AC3 case (k) edge: .connectionStateChanged(.reconnecting/.disconnected) 不触发 delegate
+
+    /// Story 15.5 AC3 case (k)：仅 .connected 触发 delegate；.reconnecting / .disconnected 不调.
+    func testConnectionStateChangedNonConnectedDoesNotTriggerDelegate() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "R1")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        let mockDelegate = MockPetStateReconnectAlignmentDelegate()
+        vm.bindReconnectAlignmentDelegate(mockDelegate)
+
+        // baseline snapshot 让 vm 在 in-room.
+        mockWS.emit(.roomSnapshot(RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "R1", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u1", nickname: "Alice", pet: nil)]
+        )))
+        try await waitForMembersCount(vm: vm, expected: 1)
+
+        // 注：vm 初始 wsState 在 in-room + ≠nil client 路径已是 .connected（构造时占位）；
+        // 这意味着我们要 reset baseline —— 直接 emit .reconnecting 与 .disconnected 验证 delegate 不被调.
+        let baselineCalls = mockDelegate.didReconnectAlignmentRequestedCalls
+
+        mockWS.emitConnectionState(.reconnecting(attempt: 1))
+        try await waitForWsState(vm: vm, expected: .reconnecting)
+        XCTAssertEqual(mockDelegate.didReconnectAlignmentRequestedCalls, baselineCalls,
+                       ".reconnecting 不应触发 delegate")
+
+        mockWS.emitConnectionState(.disconnected)
+        try await waitForWsState(vm: vm, expected: .disconnected)
+        XCTAssertEqual(mockDelegate.didReconnectAlignmentRequestedCalls, baselineCalls,
+                       ".disconnected 不应触发 delegate")
+
+        XCTAssertEqual(vm.wsState, .disconnected,
+                       "最终状态 .disconnected（delegate 调用次数仍为 baseline）")
+    }
+
+    // MARK: - Story 15.5 AC3 case (l) edge: cross-room race（streamRoomId 不匹配）不触发 delegate
+
+    /// Story 15.5 AC3 case (l)：streamRoomId guard 拦下 stale .connectionStateChanged(.connected)
+    /// → delegate 不被调（与 wsState 不被 mutate 同一守护点）.
+    func testConnectionStateChangedConnectedStaleStreamDoesNotTriggerDelegate() async throws {
+        let appState = AppState.makeHydrated(currentRoomId: "R2")
+        let mockWS = WebSocketClientMock()
+        let vm = RealRoomViewModel(appState: appState, webSocketClient: mockWS)
+
+        await Task.yield()
+        await Task.yield()
+
+        let mockDelegate = MockPetStateReconnectAlignmentDelegate()
+        vm.bindReconnectAlignmentDelegate(mockDelegate)
+
+        // baseline snapshot 让 lastObservedRoomId = "R2".
+        mockWS.emit(.roomSnapshot(RoomSnapshotPayload(
+            room: RoomSnapshotRoomInfo(id: "R2", maxMembers: 4, memberCount: 1),
+            members: [RoomSnapshotMember(userId: "u1", nickname: "Alice", pet: nil)]
+        )))
+        try await waitForMembersCount(vm: vm, expected: 1)
+
+        // 重置 wsState 让本测试断言更明确（先 disconnect 然后用 stale stream 触发 .connected）.
+        mockWS.emitConnectionState(.disconnected)
+        try await waitForWsState(vm: vm, expected: .disconnected)
+        let baselineCalls = mockDelegate.didReconnectAlignmentRequestedCalls
+
+        // 直接调 vm.handle 模拟"旧 stream stale .connected"（streamRoomId="R1"，lastObservedRoomId="R2"）.
+        vm.handle(
+            message: .connectionStateChanged(.connected),
+            streamRoomId: "R1",  // 旧 stream room id
+            streamGeneration: nil
+        )
+
+        XCTAssertEqual(mockDelegate.didReconnectAlignmentRequestedCalls, baselineCalls,
+                       "stale streamRoomId 的 .connected 应被守护丢弃 → delegate 不被调")
+        XCTAssertEqual(vm.wsState, .disconnected,
+                       "stale stream guard 同时挡 wsState mutate（与 case#H5 同精神）")
+    }
+}
+
+// MARK: - Story 15.5 inline mock for AC3 delegate tests
+
+/// Mock for `PetStateReconnectAlignmentDelegate`—— inline 在测试文件内（与 dev notes 二选一路径一致）.
+/// `@MainActor`：与 protocol method `@MainActor func didReconnectAlignmentRequested()` 对齐.
+@MainActor
+final class MockPetStateReconnectAlignmentDelegate: PetStateReconnectAlignmentDelegate {
+    private(set) var didReconnectAlignmentRequestedCalls: Int = 0
+
+    func didReconnectAlignmentRequested() {
+        didReconnectAlignmentRequestedCalls += 1
+    }
 }
 
 // MARK: - Inline mocks for Story 12.7

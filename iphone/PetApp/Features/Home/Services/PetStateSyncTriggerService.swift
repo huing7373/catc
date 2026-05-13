@@ -36,6 +36,20 @@
 import Foundation
 import Combine  // lesson `2026-04-25-swift-explicit-import-combine.md`：Combine 必须显式 import 才能用 .dropFirst() / AnyCancellable.
 
+/// Story 15.5 AC3: WS 重连成功后由 RealRoomViewModel 通知 PetStateSyncTriggerService 触发对齐的 delegate 协议.
+///
+/// 设计：vm 不 import service 类型（避免反向耦合 —— Room feature 不应依赖 Home feature 类型）；
+/// 通过本"语义中立"协议接缝传递通知；service 适配 conformance；RootView 在 wire 时把 service
+/// 注入为 vm.reconnectAlignmentDelegate（弱引用，避免循环）.
+///
+/// 调用契约：
+///   - vm 在 `.connectionStateChanged(.connected)` 分支（含 first connect / reconnect）调用一次本方法
+///   - service 在 `didReconnectAlignmentRequested()` 内调 `triggerManualResync()` 触发 self push
+public protocol PetStateReconnectAlignmentDelegate: AnyObject {
+    @MainActor
+    func didReconnectAlignmentRequested()
+}
+
 @MainActor
 public final class PetStateSyncTriggerService {
 
@@ -107,6 +121,30 @@ public final class PetStateSyncTriggerService {
         subscription = nil
     }
 
+    /// Story 15.5 AC2: 重连成功后由 RealRoomViewModel 通过 PetStateReconnectAlignmentDelegate 触发的
+    /// "manual resync" 入口 —— **绕过 5s 同 state 节流**，让 reconnect 边界的状态对齐不被节流锚点错挡.
+    ///
+    /// 语义：
+    ///   1. reset 节流锚点：`lastSentState = nil; lastSentAt = nil` —— 让本次 sync 必发（不论上次 sync 时间）
+    ///   2. 调 handlePetStateChange(homeViewModel.petState) —— 走完整 throttle (now no-op) / roomId preflight /
+    ///      commit-to-send / fire-and-forget 流水线 —— 与 reactive subscription 路径同流水线，确保 roomId guard
+    ///      与 throttle "重新建立锚点" 等行为一致.
+    ///
+    /// **idempotent / safe**: 当 user 不在房间（appState.currentRoomId == nil）时，roomId preflight 自然短路 ——
+    /// 调用本方法是无害的；但 caller 应仅在合适时机调（ws connected + 在房间），避免无谓 syscall.
+    ///
+    /// **fire-and-forget**: 与 reactive 路径同语义；本方法**同步**返回，UseCase Task 在背景 spawn；失败 silently 吞.
+    public func triggerManualResync() {
+        guard let homeViewModel else { return }  // service 已 deinit / wire 残缺 → no-op
+        // Step 1: reset 节流锚点 —— 让 handlePetStateChange 内 throttle preflight 必通过.
+        // **不**重置 nowProvider —— 那是 test seam，与节流逻辑解耦.
+        // **不**调 stop() —— subscription 不动，避免 reactive 路径被打断.
+        lastSentState = nil
+        lastSentAt = nil
+        // Step 2: 走完整流水线（throttle 已 reset → 必通过；roomId guard / commit / fire-and-forget 走原路径）.
+        handlePetStateChange(homeViewModel.petState)
+    }
+
     // MARK: - Private
 
     /// sink 回调入口：preflight throttle + roomId guard → commit-to-send → fire-and-forget spawn UseCase Task.
@@ -163,5 +201,15 @@ public final class PetStateSyncTriggerService {
         // Swift 6 严格模式可能告警，但 deinit 是 final class 的 nonisolated 默认 —— 与 sibling
         // StepSyncTriggerService.deinit 同模式 / 同接受度）.
         subscription?.cancel()
+    }
+}
+
+// MARK: - Story 15.5 AC3: PetStateReconnectAlignmentDelegate conformance
+
+/// 与 class 主体解耦：class 主体只有"reactive subscription 触发器"语义；
+/// extension 负责"reconnect-edge 触发器"语义.
+extension PetStateSyncTriggerService: PetStateReconnectAlignmentDelegate {
+    public func didReconnectAlignmentRequested() {
+        triggerManualResync()
     }
 }

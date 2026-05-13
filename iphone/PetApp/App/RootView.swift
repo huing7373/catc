@@ -382,6 +382,13 @@ struct RootView: View {
             ensureStepSyncWired()
             // Story 15.4 AC4: lazy 注入 petStateSyncTriggerService（与 ensureStepSyncWired 同模式）.
             ensurePetStateSyncWired()
+            // Story 15.5 AC3: 把 PetStateSyncTriggerService 作为 reconnect alignment delegate 注入 vm.
+            // 时机：vm.bind(appState:webSocketClient:) 之后（vm 字段已就位）+ ensurePetStateSyncWired
+            // 之后（service 已构造）. UITEST_SKIP_GUEST_LOGIN=1 路径下 service 仍构造（与 stepSync 同行为）；
+            // 弱引用让 wire 残缺时 vm.handle .connected 分支 ?. 短路.
+            if let realRoomVM = roomViewModel as? RealRoomViewModel {
+                realRoomVM.bindReconnectAlignmentDelegate(petStateSyncTriggerService)
+            }
         }
         .task {
             // Story 5.5：bind LoadHomeUseCase + ErrorPresenter，让 ErrorPresenter onRetry 闭包

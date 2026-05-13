@@ -178,6 +178,82 @@ final class PetStateSyncTriggerServiceTests: XCTestCase {
             "上次失败不应阻塞后续触发；下次 state 变化照常 spawn")
     }
 
+    // MARK: - Story 15.5 case#M happy: triggerManualResync 在 inRoom + 5s 内已 sync 同 state 仍触发 sync（绕过节流）
+
+    /// Story 15.5 AC2 case (M)：reactive 路径已 sync 一次 .walk 后节流锚点写入；
+    /// 5s 内调 triggerManualResync() 应 reset 节流锚点 + 再次触发 .walk sync（节流被绕过）.
+    func test_M_happy_triggerManualResync_inRoom_bypassesThrottle() async {
+        let useCase = MockSyncPetStateUseCase()
+        let viewModel = HomeViewModel()
+        let appState = AppState()
+        appState.setCurrentRoomId("room-X")
+
+        // 固定 nowProvider 返定值 → 5s 节流窗口内任何同 state 调用均会被节流（除非锚点被 reset）.
+        let baseDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let service = PetStateSyncTriggerService(
+            syncPetStateUseCase: useCase,
+            homeViewModel: viewModel,
+            appState: appState
+        )
+        service.nowProvider = { baseDate }
+        service.start()
+        await yieldRepeatedly()
+
+        // reactive 路径触发首次 sync（.rest → .walk；mutate 是真实 transition，dropFirst 已抹掉 currentValue replay）.
+        viewModel.petState = .walk
+        await yieldRepeatedly()
+        XCTAssertEqual(useCase.executeCalls.count, 1,
+                       "前置：reactive 路径应触发 1 次 sync（.walk）")
+
+        // 节流锚点已写入 (.walk, baseDate) —— 5s 内任何同 state 调用都会被节流挡.
+        // 若直接 mutate 同 state：.walk → .walk 不会再 emit（@Published 用 == 去重；除非 mutate 不同值）；
+        // 但 manual trigger 走 triggerManualResync —— 应当 reset 锚点后再走 handlePetStateChange，
+        // homeViewModel.petState 当前值 .walk → 节流命中（如未 reset 锚点） / 重发（如已 reset）.
+        service.triggerManualResync()
+        await yieldRepeatedly()
+
+        XCTAssertEqual(useCase.executeCalls.count, 2,
+                       "triggerManualResync 必须 reset 节流锚点 → 同 state 5s 内仍再次触发 sync")
+        XCTAssertEqual(useCase.executeCalls.last, .walk,
+                       "triggerManualResync 应使用 homeViewModel.petState 当前值（.walk）作为入参")
+    }
+
+    // MARK: - Story 15.5 case#N edge: triggerManualResync 在 notInRoom 时不发 sync（roomId guard 短路）
+
+    /// Story 15.5 AC2 case (N)：not-in-room 路径下 triggerManualResync 应 reset 锚点但不触发 sync
+    /// （handlePetStateChange Step 2 roomId preflight 短路）；下次进入房间 reactive 路径仍正常工作.
+    func test_N_edge_triggerManualResync_notInRoom_doesNotTriggerButResetsAnchor() async {
+        let useCase = MockSyncPetStateUseCase()
+        let viewModel = HomeViewModel()
+        let appState = AppState()
+        // 不调 setCurrentRoomId → currentRoomId 默认 nil（not-in-room）.
+
+        let service = PetStateSyncTriggerService(
+            syncPetStateUseCase: useCase,
+            homeViewModel: viewModel,
+            appState: appState
+        )
+        service.start()
+        await yieldRepeatedly()
+
+        // 调 triggerManualResync —— roomId guard 应短路，不触发 sync.
+        service.triggerManualResync()
+        await yieldRepeatedly()
+
+        XCTAssertEqual(useCase.executeCalls.count, 0,
+                       "not-in-room 时 triggerManualResync 不应触发 sync（roomId preflight 短路）")
+
+        // 验证锚点 reset 已发生：进入房间后 reactive mutate 同 state 应**立即**触发（锚点为 nil，不被节流挡）.
+        // 步骤：(1) 锚点是 nil → 进房间后第一次同 state mutate 会触发 sync；
+        //       (2) 若锚点被错误保留旧值，进房间后 5s 内同 state mutate 仍会被错挡 → 这条断言会 fail.
+        appState.setCurrentRoomId("room-Y")
+        viewModel.petState = .walk
+        await yieldRepeatedly()
+
+        XCTAssertEqual(useCase.executeCalls.count, 1,
+                       "锚点已 reset → 进房间后 reactive 路径首次同 state mutate 应正常触发 sync")
+    }
+
     // MARK: - Helpers
 
     /// 让出当前 task N 次，让 Combine sink + spawned Task + UseCase.execute 排队完成.
