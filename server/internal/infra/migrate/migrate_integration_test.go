@@ -20,6 +20,15 @@
 //    Epic 17 节点 6 表情广播链路 schema 根基，17.3 seed / 17.4 GET /emojis / 17.5
 //    WS emoji.send 校验各路径依赖）
 //
+// Story 17.3 扩展：在表 schema 不变（仍 9 张）基础上新增 0010_seed_emoji_configs；
+//   主要 case 跑 4 行 seed 的内容正确性 + INSERT IGNORE 幂等（不影响表数量断言）；
+//   StatusAfterUp 版本号断言从 v=9 改 v=10。
+//
+// Story 17.3 r1 review [P2] 重写 SeedIdempotent：原版走 Up→Down→Up 路径但 Down
+//   把整张表 DROP 掉 → 第二次 Up 跑空表 → 没真正触发 duplicate-code 路径。新版改
+//   "预填 admin-flavored 行 → UPDATE schema_migrations 回滚版本号 → 再 Up" 让
+//   INSERT IGNORE 真正在 duplicate-code 路径执行 + 断言预存行字段不被 seed 覆盖。
+//
 // build tag `integration` 隔离 → 默认 `bash scripts/build.sh --test` 不跑这些；
 // 只在 `bash scripts/build.sh --integration`（即 `go test -tags=integration`）触发。
 //
@@ -537,12 +546,13 @@ func TestMigrateIntegration_TablesPresent_AfterUp(t *testing.T) {
 	}
 }
 
-// TestMigrateIntegration_StatusAfterUp 验证 Up 完成后 Status 返回 (version=9, dirty=false, nil)。
+// TestMigrateIntegration_StatusAfterUp 验证 Up 完成后 Status 返回 (version=10, dirty=false, nil)。
 // Story 7.2 扩展：从 5 改 6（多了 0006_init_user_step_sync_logs）
 // Story 10.3 review r5 [P1] 扩展：从 6 改 8（多了 0007_init_rooms +
 // 0008_init_room_members；把 Epic 11.2 的"建表"职责拆出来提前到 Story 10.3）
 // Story 17.2 扩展：从 8 改 9（多了 0009_init_emoji_configs；Epic 17 节点 6
 // 表情广播链路 schema 根基）
+// Story 17.3 扩展：从 9 改 10（多了 0010_seed_emoji_configs；Epic 17 节点 6 表情 seed）
 func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	dsn, cleanup := startMySQL(t)
 	defer cleanup()
@@ -573,8 +583,8 @@ func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status after Up: %v", err)
 	}
-	if v != 9 {
-		t.Errorf("Status version = %d, want 9", v)
+	if v != 10 {
+		t.Errorf("Status version = %d, want 10", v)
 	}
 	if dirty {
 		t.Errorf("Status dirty = true, want false")
@@ -881,15 +891,24 @@ func TestMigrateIntegration_EmojiConfigs_Schema(t *testing.T) {
 //
 // **覆盖路径**：
 //  1. migrate up → emoji_configs 表存在
-//  2. 插入 emoji_configs (code='wave', name='挥手', sort_order=1) → 成功
-//  3. 再次插入 emoji_configs (code='wave', name='挥手 v2', sort_order=2) → DB 拒绝
+//  2. 插入 emoji_configs (code='test_unique_code_a', name='TestA', sort_order=1001) → 成功
+//  3. 再次插入 emoji_configs (code='test_unique_code_a', name='TestA v2', sort_order=1002) → DB 拒绝
 //     （UNIQUE KEY uk_code (code) 兜底；same code 不能插两次）；
 //     err 必须含 "Duplicate entry"（MySQL 错误码 = 1062 ER_DUP_ENTRY）
 //
 // 用 database/sql 直跑 raw INSERT（**不**走 GORM）让测试结果**不**依赖 ORM
 // 行为差异（与 Story 11.2 落地的
 // TestMigrateIntegration_RoomMembers_UniqueUserID_Rejected 同模式）。
+//
+// **Story 17.3 解耦**：本 case 早期版本用 `'wave'` 作为测试 code，但 17.3 落地
+// `0010_seed_emoji_configs.up.sql` 把 `'wave'` 写入 emoji_configs 后，本 case 第一次
+// INSERT 会直接因为 seed 已存在而失败 → 违反"先插成功再插冲突"的两步语义。
+// 现改用测试专用 code（`test_unique_code_a`）与 seed 的 wave/love/laugh/cry 字面量
+// 完全隔离；sort_order 用 1001 / 1002 大于 1000 的值，也与 seed 段的 1-4 隔离。
 func TestMigrateIntegration_EmojiConfigs_UniqueCode_Rejected(t *testing.T) {
+	// **用测试专用 code（test_unique_code_a）与 0010 seed 的 wave/love/laugh/cry 字面量
+	// 隔离**，避免 seed 先写入 wave 后导致本 case 第一次 INSERT 就触发 UNIQUE 而非预期的
+	// 第二次（Story 17.3 解耦）。
 	dsn, cleanup := startMySQL(t)
 	defer cleanup()
 
@@ -912,19 +931,283 @@ func TestMigrateIntegration_EmojiConfigs_UniqueCode_Rejected(t *testing.T) {
 	}
 	defer sqlDB.Close()
 
-	// 步骤 2：首条 emoji_configs (code='wave', name='挥手', sort_order=1) 必须成功
+	// 步骤 2：首条 emoji_configs (code='test_unique_code_a', name='TestA', sort_order=1001) 必须成功
 	if _, err := sqlDB.ExecContext(ctx,
-		`INSERT INTO emoji_configs (code, name, asset_url, sort_order, is_enabled) VALUES ('wave', '挥手', 'https://cdn.example.com/wave.png', 1, 1)`); err != nil {
-		t.Fatalf("first insert emoji_configs (code='wave') should succeed: %v", err)
+		`INSERT INTO emoji_configs (code, name, asset_url, sort_order, is_enabled) VALUES ('test_unique_code_a', 'TestA', 'https://example.com/test_a.png', 1001, 1)`); err != nil {
+		t.Fatalf("first insert emoji_configs (code='test_unique_code_a') should succeed: %v", err)
 	}
 
 	// 步骤 3：UNIQUE(code) 约束 —— 同 code 再插一次必须被拒
 	_, err = sqlDB.ExecContext(ctx,
-		`INSERT INTO emoji_configs (code, name, asset_url, sort_order, is_enabled) VALUES ('wave', '挥手 v2', 'https://cdn.example.com/wave_v2.png', 2, 1)`)
+		`INSERT INTO emoji_configs (code, name, asset_url, sort_order, is_enabled) VALUES ('test_unique_code_a', 'TestA v2', 'https://example.com/test_a_v2.png', 1002, 1)`)
 	if err == nil {
-		t.Fatalf("expected duplicate-entry error on second insert (code='wave') violating UNIQUE(code), got nil")
+		t.Fatalf("expected duplicate-entry error on second insert (code='test_unique_code_a') violating UNIQUE(code), got nil")
 	}
 	if !strings.Contains(err.Error(), "Duplicate entry") {
 		t.Errorf("UNIQUE(code) rejection error message = %q, want substring \"Duplicate entry\"", err.Error())
+	}
+}
+
+// TestMigrateIntegration_EmojiConfigs_SeedContent 验证
+// migrations/0010_seed_emoji_configs.up.sql 钦定的 4 个表情 seed 在 migrate up
+// 后真实写入 emoji_configs 表，且每行字段值符合 V1 §11.1 + AR19 + 17-1 r2 lesson
+// 约束：
+//
+//   - 4 个 code 都存在：wave / love / laugh / cry
+//   - 每行 asset_url 非空（V1 §11.1 钦定 length ≥ 1；17-1 r2 lesson 收紧禁止 ""）
+//   - 每行 is_enabled = 1（enabled 表情才会被 GET /emojis 返回）
+//   - 每行 name 非空（VARCHAR(64) NOT NULL）
+//   - sort_order 唯一且单调（避免 client 端排序退化到 id 次要键）
+//
+// **背景（Story 17.3 引入）**：epics.md §Story 17.3 钦定的"集成测试覆盖（dockertest）：
+// migrate up → SELECT * FROM emoji_configs → 验证 4 个表情存在 + URL 字段格式合法"
+// 路径在本 case 落地；用于 Story 17.4 / 17.5 / Epic 18.1 / Epic 19.1 实装时
+// 验证 seed 数据真实在位的根基。
+//
+// 用 database/sql 直跑 SELECT（**不**走 GORM）让测试结果**不**依赖 ORM 行为差异
+// （与 11.2 / 17.2 落地的 dockertest case 同模式）。
+func TestMigrateIntegration_EmojiConfigs_SeedContent(t *testing.T) {
+	dsn, cleanup := startMySQL(t)
+	defer cleanup()
+
+	mig, err := migrate.New(dsn, migrationsPath(t))
+	if err != nil {
+		t.Fatalf("migrate.New: %v", err)
+	}
+	defer mig.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := mig.Up(ctx); err != nil {
+		t.Fatalf("migrate Up: %v", err)
+	}
+
+	sqlDB, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	// 钦定的 4 个 code + 对应 sort_order（与 0010_seed_emoji_configs.up.sql 1:1 对齐）
+	wantSortOrders := map[string]int{
+		"wave":  1,
+		"love":  2,
+		"laugh": 3,
+		"cry":   4,
+	}
+
+	// 1. SELECT 全表（按 sort_order 升序），>=4 行
+	rows, err := sqlDB.QueryContext(ctx, `
+		SELECT code, name, asset_url, sort_order, is_enabled
+		FROM emoji_configs
+		ORDER BY sort_order ASC`)
+	if err != nil {
+		t.Fatalf("SELECT emoji_configs: %v", err)
+	}
+	defer rows.Close()
+
+	type rowData struct {
+		code      string
+		name      string
+		assetURL  string
+		sortOrder int
+		isEnabled int
+	}
+	var allRows []rowData
+	seenCodes := make(map[string]rowData)
+	for rows.Next() {
+		var r rowData
+		if err := rows.Scan(&r.code, &r.name, &r.assetURL, &r.sortOrder, &r.isEnabled); err != nil {
+			t.Errorf("scan row: %v", err)
+			continue
+		}
+		allRows = append(allRows, r)
+		seenCodes[r.code] = r
+	}
+	if err := rows.Err(); err != nil {
+		t.Errorf("rows.Err: %v", err)
+	}
+
+	if len(allRows) < 4 {
+		t.Errorf("emoji_configs row count = %d, want >= 4 (Story 17.3 seed 钦定 4 个表情)", len(allRows))
+	}
+
+	// 2. 4 个钦定 code 必须全部存在 + 每行字段值符合约束
+	for code, wantSO := range wantSortOrders {
+		r, ok := seenCodes[code]
+		if !ok {
+			t.Errorf("seed missing code = %q (钦定 4 个 wave/love/laugh/cry 都必须存在)", code)
+			continue
+		}
+		// a. name 非空
+		if len(r.name) == 0 {
+			t.Errorf("seed code=%q name 为空 (VARCHAR(64) NOT NULL + seed 钦定非空)", code)
+		}
+		// b. asset_url 非空（V1 §11.1 + 17-1 r2 lesson）
+		if len(r.assetURL) == 0 {
+			t.Errorf("seed code=%q asset_url 为空 (V1 §11.1 + 17-1 r2 lesson 钦定 enabled 表情 asset_url 必须非空)", code)
+		}
+		// c. is_enabled == 1
+		if r.isEnabled != 1 {
+			t.Errorf("seed code=%q is_enabled = %d, want 1 (enabled 才能被 GET /emojis 返回)", code, r.isEnabled)
+		}
+		// d. sort_order 与钦定值一致
+		if r.sortOrder != wantSO {
+			t.Errorf("seed code=%q sort_order = %d, want %d (与 0010 SQL 钦定 1/2/3/4 一致)", code, r.sortOrder, wantSO)
+		}
+	}
+
+	// 3. sort_order 在 4 个钦定 code 中必须唯一（避免 client 端排序退化到次要键 id）
+	sortOrderSeen := make(map[int]string)
+	for code := range wantSortOrders {
+		r, ok := seenCodes[code]
+		if !ok {
+			continue
+		}
+		if prev, dup := sortOrderSeen[r.sortOrder]; dup {
+			t.Errorf("sort_order=%d 在 seed 中被 %q 和 %q 重复使用 (4 个 sort_order 必须唯一)", r.sortOrder, prev, code)
+		}
+		sortOrderSeen[r.sortOrder] = code
+	}
+}
+
+// TestMigrateIntegration_EmojiConfigs_SeedIdempotent 验证
+// migrations/0010_seed_emoji_configs.up.sql 钦定的 INSERT IGNORE 语义：
+// **当 UNIQUE KEY uk_code 命中时，INSERT IGNORE 静默丢弃 + 保留预存行原值不动**。
+//
+// **背景（Story 17.3 引入；17.3 r1 review [P2] 重写）**：原 case 走 Up → Down → Up
+// 路径，但 Down 把整张表 DROP 掉 → 第二次 Up 跑空表 → 没真正测到 duplicate-code
+// 路径 → 把 0010.up 从 INSERT IGNORE 改成普通 INSERT 也能通过。本版本改成
+// **预填 admin-flavored 行 → 回滚 schema_migrations 版本号 → 重跑 0010.up**，
+// 让 INSERT IGNORE 真正在 duplicate-code 路径上被执行。
+//
+// **覆盖路径**：
+//  1. migrate Up 全程 (v=10) → emoji_configs 4 行（0010 seed 写入）
+//  2. DELETE seed 4 行 + 手动 INSERT 4 行 admin-flavored 数据（asset_url / name
+//     都和 seed 不同，模拟 admin 在上线后改过这些行）
+//  3. UPDATE schema_migrations SET version = 9 → 让 golang-migrate 认为 0010 还没跑过
+//  4. migrate Up 重跑 → 触发 0010.up INSERT IGNORE 命中 uk_code 4 次
+//  5. 断言：行数仍 4（不翻倍到 8）+ admin 写入的 asset_url / name 保留不被 seed 覆盖
+//
+// **为什么不走 force(9)**：本 migrate 包没暴露 Force API（migrate.go 仅 Up / Down
+// / Status / Close）。直接 UPDATE schema_migrations 是 dockertest 集成测试可控
+// 范围内的最小操作；也忠实模拟了 ops 在生产里手工修复 dirty 后的回退场景。
+//
+// 用 database/sql 直跑 SQL（**不**走 GORM）。
+func TestMigrateIntegration_EmojiConfigs_SeedIdempotent(t *testing.T) {
+	dsn, cleanup := startMySQL(t)
+	defer cleanup()
+
+	mig, err := migrate.New(dsn, migrationsPath(t))
+	if err != nil {
+		t.Fatalf("migrate.New: %v", err)
+	}
+	defer mig.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// 步骤 1：第一次 migrate up → emoji_configs 4 行（0010 seed 写入）
+	if err := mig.Up(ctx); err != nil {
+		t.Fatalf("first migrate Up: %v", err)
+	}
+
+	sqlDB, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	var countAfterFirstUp int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM emoji_configs WHERE code IN ('wave', 'love', 'laugh', 'cry')`).Scan(&countAfterFirstUp); err != nil {
+		t.Fatalf("SELECT COUNT after first Up: %v", err)
+	}
+	if countAfterFirstUp != 4 {
+		t.Fatalf("after first Up, emoji_configs seed rows = %d, want 4 (Story 17.3 钦定 4 个表情)", countAfterFirstUp)
+	}
+
+	// 步骤 2：DELETE seed 4 行 + 手动 INSERT 4 行 admin-flavored 数据（模拟 admin
+	// 在上线后调整过 wave/love/laugh/cry 的 asset_url / name 等字段）
+	if _, err := sqlDB.ExecContext(ctx,
+		`DELETE FROM emoji_configs WHERE code IN ('wave', 'love', 'laugh', 'cry')`); err != nil {
+		t.Fatalf("DELETE seed rows: %v", err)
+	}
+
+	type adminRow struct {
+		code     string
+		name     string
+		assetURL string
+	}
+	// **故意**与 0010.up.sql seed 值不同（asset_url 用 admin-cdn 域名 / name 改成
+	// 不同字符），用于步骤 5 断言 INSERT IGNORE 没把 admin 值覆盖回 seed 值。
+	adminRows := []adminRow{
+		{code: "wave", name: "挥手-admin", assetURL: "https://admin-cdn.example.com/wave.png"},
+		{code: "love", name: "爱心-admin", assetURL: "https://admin-cdn.example.com/love.png"},
+		{code: "laugh", name: "大笑-admin", assetURL: "https://admin-cdn.example.com/laugh.png"},
+		{code: "cry", name: "哭-admin", assetURL: "https://admin-cdn.example.com/cry.png"},
+	}
+	for i, r := range adminRows {
+		if _, err := sqlDB.ExecContext(ctx,
+			`INSERT INTO emoji_configs (code, name, asset_url, sort_order, is_enabled) VALUES (?, ?, ?, ?, 1)`,
+			r.code, r.name, r.assetURL, i+1); err != nil {
+			t.Fatalf("INSERT admin row %q: %v", r.code, err)
+		}
+	}
+
+	// 步骤 3：回滚 schema_migrations 版本号到 9，让 golang-migrate 认为 0010 还没跑过；
+	// 这是触发 "duplicate-code 路径下重跑 0010.up" 的关键。
+	// schema_migrations 表是 golang-migrate 自动维护的版本元数据表
+	// （PRIMARY KEY version + dirty TINYINT）；直接 UPDATE 是集成测试 fixture 可控操作。
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE schema_migrations SET version = 9, dirty = 0 WHERE 1=1`); err != nil {
+		t.Fatalf("UPDATE schema_migrations to v=9: %v", err)
+	}
+
+	// migrate New 已经在步骤 0 打开了 source / database driver；要重新读 schema_migrations
+	// 需要新开一个 Migrator 实例（golang-migrate 内部 cache 版本号；不重开会以为还在 v=10）。
+	if err := mig.Close(); err != nil {
+		t.Fatalf("close first migrator: %v", err)
+	}
+	mig2, err := migrate.New(dsn, migrationsPath(t))
+	if err != nil {
+		t.Fatalf("migrate.New (after rollback to v=9): %v", err)
+	}
+	defer mig2.Close()
+
+	// 步骤 4：再跑一次 migrate Up → 0010.up 会被重跑 → INSERT IGNORE 命中 uk_code
+	if err := mig2.Up(ctx); err != nil {
+		t.Fatalf("second migrate Up (after schema_migrations rollback): %v", err)
+	}
+
+	// 步骤 5a：行数仍恰好 4（不翻倍到 8 —— INSERT IGNORE 没插入重复行）
+	var countAfterSecondUp int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM emoji_configs WHERE code IN ('wave', 'love', 'laugh', 'cry')`).Scan(&countAfterSecondUp); err != nil {
+		t.Fatalf("SELECT COUNT after second Up: %v", err)
+	}
+	if countAfterSecondUp != 4 {
+		t.Errorf("after second Up, emoji_configs seed rows = %d, want 4 (INSERT IGNORE 兜底不重复插入；不应翻倍到 8)", countAfterSecondUp)
+	}
+
+	// 步骤 5b：每行 asset_url / name 仍是 admin 写入的值，不是 0010 seed 值
+	// —— 真正验证 INSERT IGNORE 没覆盖预存行；这是把 0010.up 改成 INSERT INTO
+	// （非 IGNORE）时**必然**炸的断言（普通 INSERT 会撞 uk_code 1062 直接报错）。
+	for _, want := range adminRows {
+		var gotName, gotAssetURL string
+		err := sqlDB.QueryRowContext(ctx,
+			`SELECT name, asset_url FROM emoji_configs WHERE code = ?`, want.code).
+			Scan(&gotName, &gotAssetURL)
+		if err != nil {
+			t.Errorf("SELECT admin row %q after second Up: %v", want.code, err)
+			continue
+		}
+		if gotName != want.name {
+			t.Errorf("emoji %q name = %q, want %q (INSERT IGNORE 应保留 admin 值不覆盖)", want.code, gotName, want.name)
+		}
+		if gotAssetURL != want.assetURL {
+			t.Errorf("emoji %q asset_url = %q, want %q (INSERT IGNORE 应保留 admin 值不覆盖)", want.code, gotAssetURL, want.assetURL)
+		}
 	}
 }

@@ -1,0 +1,30 @@
+-- 回滚 0010_seed_emoji_configs.up.sql
+--
+-- **本 migration 由 Story 17.3 首次落地（Epic 17 节点 6 表情广播链路 seed owner）**
+-- 含 ≥2 case 单测 + dockertest 集成测试覆盖 seed 内容正确 + INSERT IGNORE 幂等。
+--
+-- 回滚策略：**no-op（不做 per-row DELETE）**。
+--
+-- 为什么 no-op？因为 0010.up 用 `INSERT IGNORE`，**故意**容忍 "DB 在 apply 0010 前
+-- 已存在 wave/love/laugh/cry 行" 的场景（admin 手工 INSERT / 上次回滚未清干净 /
+-- 测试残留）—— 这种预存行 up 保留不动。
+--
+-- 如果 down 走 `DELETE FROM emoji_configs WHERE code IN ('wave','love','laugh','cry')`，
+-- 就会把 up 故意保留的预存行也一并删掉 → up / down **不对称** → 在 duplicate-code
+-- 场景下静默丢失 admin 数据。这正是 0010.up `INSERT IGNORE` 容忍的场景，down 不能反过来破坏它。
+--
+-- **down 实际执行场景**（与 golang-migrate 语义对齐）：
+--   (a) 单跑 0010.down（保留 0009 schema）→ no-op：再 up 一次会重新跑 0010.up，
+--       预存行被保留 + 缺失行被 INSERT IGNORE 补回，回到 ≥4 行；语义自洽
+--   (b) 跑 0009.down（链式带 0010.down 先跑）→ 0009.down `DROP TABLE emoji_configs`
+--       覆盖了整张表的清理 → 0010.down 不需要做 per-row DELETE 重复劳动
+--
+-- 等价类比：seed migration 的 down 不应该把 **可能不是它插入的** 行删掉。
+-- "Down 完全回滚 up 的副作用" 语义在此处弱化为 "down 不引入新的副作用"，
+-- 与 INSERT IGNORE "行不一定是本 up 插入" 的契约保持一致。
+--
+-- 详见 lesson：docs/lessons/2026-05-14-insert-ignore-symmetric-down-and-test.md
+--
+-- 注：本文件必须存在（不能空文件 / 不能缺失），否则 golang-migrate 找不到 down
+-- 对应文件会报 ErrShortLimit / Dirty —— 用一句无副作用 SQL 占位。
+SELECT 1;

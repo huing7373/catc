@@ -1,0 +1,64 @@
+-- 对齐 epics.md §Story 17.3 + AR19 + V1接口设计.md §11.1
+-- emoji_configs 系统表情配置 seed
+--
+-- **本 migration 由 Story 17.3 首次落地（Epic 17 节点 6 表情广播链路 seed owner）**
+-- 含 ≥2 case 单测（seed 后 ≥4 行 + asset_url 都非空 / 重复 migrate up 不重复插入）
+-- + dockertest 集成测试覆盖 seed 内容正确 + INSERT IGNORE 幂等
+-- （epics.md §Story 17.3 钦定的"集成测试覆盖：migrate up → SELECT * FROM emoji_configs
+-- → 验证 4 个表情存在 + URL 字段格式合法"路径）。
+--
+-- 表情清单（与 epics.md §Story 17.3 行 2569-2573 钦定 1:1 对齐）：
+--   1. wave  挥手     sort_order=1
+--   2. love  爱心     sort_order=2
+--   3. laugh 大笑     sort_order=3
+--   4. cry   哭       sort_order=4
+--
+-- 字段值约束：
+--   - code:       严格符合 V1 §11.1 字符集约束 [a-z0-9_-] + length 1-64
+--                 （本 4 个 code 都是纯小写英文字母，长度 3-5，合法）
+--   - name:       中文短名，长度 ≤ 64（VARCHAR(64) DDL 边界）
+--   - asset_url:  非空 placeholder URL（V1 §11.1 + 17-1 r2 lesson 钦定：
+--                 enabled 表情 asset_url **禁止**空字符串；MVP 阶段允许 placeholder
+--                 URL `https://placehold.co/64x64?text=Wave` 等，但**必须**是可
+--                 访问的 web URL；真实美术资产由 §Epic 17 retrospective tech-debt
+--                 登记 + 后续 epic 切换）
+--   - sort_order: 1 / 2 / 3 / 4（单调递增 + 唯一；与 V1 §11.1 服务端逻辑步骤 2
+--                 `ORDER BY sort_order ASC, id ASC` 一致；4 个值互不相同保证 client
+--                 端表情面板顺序稳定，不需要次要排序键 fallback）
+--   - is_enabled: 全部 1（enabled；V1 §11.1 服务端逻辑步骤 2 仅返回 is_enabled=1
+--                 的表情，disabled 表情对 client 不可见）
+--
+-- **INSERT IGNORE 语义**（epics.md §Story 17.3 行 2575 钦定）：
+-- 当 UNIQUE KEY uk_code (code) 命中时，MySQL 丢弃当前 INSERT 不报错（不抛 1062
+-- ER_DUP_ENTRY）。本 seed 主要保障**绕过 migration 框架的入库路径幂等**：
+--   (a) golang-migrate force(9) 后再 up → 0010 SQL 会被重跑（不走 ErrNoChange 路径）
+--   (b) dev / admin 手工 mysql import 0010 文件 → 重复入库
+--   (c) migrate down 到版本 0 后再 up（重跑全部 migration）
+-- migrate up 默认幂等路径（version 9 → 10 跑一次后 9 → 10 不重跑）由 golang-migrate
+-- 框架兜底，**不**依赖 INSERT IGNORE；INSERT IGNORE 是双层兜底，保证即使框架
+-- 兜底失效（dirty / force / 手工跑）seed 仍幂等。
+--
+-- **不**用 ON DUPLICATE KEY UPDATE：因为 update 路径会修改 asset_url / name /
+-- sort_order 等可能被 admin 手工调整过的字段（如某 emoji 临时下架 admin 改 is_enabled=0，
+-- 重跑 seed 不应把 is_enabled 重置回 1）；INSERT IGNORE 只在不冲突时插入，已有
+-- 数据保留 admin 修改，符合"seed 是初始默认值不是覆盖式重置"语义。
+--
+-- **对应 down**（0010_seed_emoji_configs.down.sql）：**no-op**。理由：本 up 用
+-- INSERT IGNORE 故意容忍预存的 wave/love/laugh/cry 行（admin 插入 / 历史残留），
+-- 如果 down 走 `DELETE FROM emoji_configs WHERE code IN (...)` 会反向把预存行
+-- 删掉 → up/down 不对称 → 数据损失。整张表的清理由 0009.down DROP TABLE 覆盖。
+-- 详见 lesson：docs/lessons/2026-05-14-insert-ignore-symmetric-down-and-test.md
+--
+-- **范围红线**：本 migration **仅** INSERT 4 行；不修改 schema（17.2 owner）/
+-- 不含任何业务 service / handler / repo write 方法（17.4 / 17.5 落地）/ 不含
+-- ON DUPLICATE KEY UPDATE / DELETE / TRUNCATE 任何破坏性 SQL。
+--
+-- **不**用 server 端代码层（如 Go 的 seedEmojis() 函数）做 seed：
+-- (a) ADR-0003 钦定 migrations/ 文件是 schema + 静态数据的真相源；
+-- (b) seed 通过 SQL migration 让 dev / test / staging / prod 同一份数据；
+-- (c) 与 cosmetic seed（Epic 20）未来落地路径同模式，避免每个 seed 自己定一种执行方式。
+INSERT IGNORE INTO emoji_configs (code, name, asset_url, sort_order, is_enabled) VALUES
+    ('wave',  '挥手', 'https://placehold.co/64x64?text=Wave',  1, 1),
+    ('love',  '爱心', 'https://placehold.co/64x64?text=Love',  2, 1),
+    ('laugh', '大笑', 'https://placehold.co/64x64?text=Laugh', 3, 1),
+    ('cry',   '哭',   'https://placehold.co/64x64?text=Cry',   4, 1);
