@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-05-13 (story 17-1 review)
+# last_updated: 2026-05-13 (story 17-1 done)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -187,7 +187,7 @@ development_status:
   16-3-文档同步与-tech-debt-登记: backlog
   epic-16-retrospective: optional
   epic-17: in-progress
-  17-1-接口契约最终化: review
+  17-1-接口契约最终化: done
   17-2-emoji_configs-migration: backlog
   17-3-emoji_configs-seed: backlog
   17-4-get-emojis-接口: backlog
