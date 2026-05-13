@@ -43,11 +43,14 @@
 -- 重跑 seed 不应把 is_enabled 重置回 1）；INSERT IGNORE 只在不冲突时插入，已有
 -- 数据保留 admin 修改，符合"seed 是初始默认值不是覆盖式重置"语义。
 --
--- **对应 down**（0010_seed_emoji_configs.down.sql）：**no-op**。理由：本 up 用
--- INSERT IGNORE 故意容忍预存的 wave/love/laugh/cry 行（admin 插入 / 历史残留），
--- 如果 down 走 `DELETE FROM emoji_configs WHERE code IN (...)` 会反向把预存行
--- 删掉 → up/down 不对称 → 数据损失。整张表的清理由 0009.down DROP TABLE 覆盖。
--- 详见 lesson：docs/lessons/2026-05-14-insert-ignore-symmetric-down-and-test.md
+-- **对应 down**（0010_seed_emoji_configs.down.sql）：**narrow DELETE 4 行**
+-- （wave/love/laugh/cry）。
+-- 设计决策（17-3 r2 定稿）：down 必须真正 undo up，否则违反 golang-migrate 标准
+-- invariant —— 单步回滚后 schema_migrations.version 与表内容不一致是 migration bug。
+-- INSERT IGNORE 的"容忍预存行"语义不构成 down no-op 的理由；admin 数据保留通过
+-- "code 由本 seed 钦定占用 + 新增表情走 0011+ migration" 约定解决（详见 down.sql 头部注释）。
+-- 整张表清理由 0009.down DROP TABLE 覆盖；本 down 只 narrow DELETE 4 行不动其他 code。
+-- 详见 lesson：docs/lessons/2026-05-14-down-must-undo-up-invariant-over-admin-data.md
 --
 -- **范围红线**：本 migration **仅** INSERT 4 行；不修改 schema（17.2 owner）/
 -- 不含任何业务 service / handler / repo write 方法（17.4 / 17.5 落地）/ 不含

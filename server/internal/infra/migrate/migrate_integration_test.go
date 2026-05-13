@@ -1073,22 +1073,35 @@ func TestMigrateIntegration_EmojiConfigs_SeedContent(t *testing.T) {
 }
 
 // TestMigrateIntegration_EmojiConfigs_SeedIdempotent 验证
-// migrations/0010_seed_emoji_configs.up.sql 钦定的 INSERT IGNORE 语义：
-// **当 UNIQUE KEY uk_code 命中时，INSERT IGNORE 静默丢弃 + 保留预存行原值不动**。
+// migrations/0010_seed_emoji_configs.up.sql 钦定的 INSERT IGNORE 语义在
+// duplicate-code 路径下的 server 端表现：
+// **当 UNIQUE KEY uk_code 命中时，INSERT IGNORE 不报错 + 不翻倍 + 不覆盖现有字段值**。
 //
-// **背景（Story 17.3 引入；17.3 r1 review [P2] 重写）**：原 case 走 Up → Down → Up
-// 路径，但 Down 把整张表 DROP 掉 → 第二次 Up 跑空表 → 没真正测到 duplicate-code
-// 路径 → 把 0010.up 从 INSERT IGNORE 改成普通 INSERT 也能通过。本版本改成
-// **预填 admin-flavored 行 → 回滚 schema_migrations 版本号 → 重跑 0010.up**，
-// 让 INSERT IGNORE 真正在 duplicate-code 路径上被执行。
+// **背景（Story 17.3 引入；17.3 r1 [P2] 重写；17.3 r2 [P2] 调整注释语义）**：
+//   - 原 case（r1 前）走 Up → Down → Up 路径，但 Down 把整张表 DROP 掉 → 第二次 Up
+//     跑空表 → 没真正测到 duplicate-code 路径 → 把 0010.up 从 INSERT IGNORE 改成普通
+//     INSERT 也能通过。r1 重写改成 "预填 admin-flavored 行 → 回滚 schema_migrations
+//     版本号 → 重跑 0010.up"，让 INSERT IGNORE 真正在 duplicate-code 路径上被执行。
+//   - r2 review 把 0010.down 从 r1 的 no-op 改回 narrow DELETE 4 行（migration invariant
+//     优先于 admin 数据保留；admin 数据保留改用"code 钦定占用 + 新 migration"约定）。
+//     这意味着"down 后预存行保留"语义在 r2 之后**不再成立** —— 本测试**不**测这条；
+//     测的核心是上面那句："INSERT IGNORE 在 duplicate code 时 server 端表现：不报错 +
+//     不翻倍 + 不覆盖现有值"。测试 setup 仍手工预填 admin-flavored 行（不变），
+//     只是结论从"down 后保留 admin 行"收紧成"up 重跑撞 uk_code 不破坏现有数据"。
 //
 // **覆盖路径**：
 //  1. migrate Up 全程 (v=10) → emoji_configs 4 行（0010 seed 写入）
 //  2. DELETE seed 4 行 + 手动 INSERT 4 行 admin-flavored 数据（asset_url / name
-//     都和 seed 不同，模拟 admin 在上线后改过这些行）
+//     都和 seed 不同，模拟 admin 在上线后改过这些行；本步骤**不**走 down，因此
+//     和 r2 后 down=narrow DELETE 的语义不冲突）
 //  3. UPDATE schema_migrations SET version = 9 → 让 golang-migrate 认为 0010 还没跑过
 //  4. migrate Up 重跑 → 触发 0010.up INSERT IGNORE 命中 uk_code 4 次
 //  5. 断言：行数仍 4（不翻倍到 8）+ admin 写入的 asset_url / name 保留不被 seed 覆盖
+//
+// **三种"伪幂等"实现仍被本测试抓到**：
+//   - INSERT INTO（无 IGNORE）→ 步骤 4 撞 uk_code 1062 直接报错
+//   - INSERT ... ON DUPLICATE KEY UPDATE name=VALUES(name) → 行数对但 admin 字段被覆盖 → 步骤 5b 断言炸
+//   - REPLACE INTO → 同上（覆盖式语义）
 //
 // **为什么不走 force(9)**：本 migrate 包没暴露 Force API（migrate.go 仅 Up / Down
 // / Status / Close）。直接 UPDATE schema_migrations 是 dockertest 集成测试可控

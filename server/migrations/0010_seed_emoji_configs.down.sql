@@ -3,28 +3,35 @@
 -- **本 migration 由 Story 17.3 首次落地（Epic 17 节点 6 表情广播链路 seed owner）**
 -- 含 ≥2 case 单测 + dockertest 集成测试覆盖 seed 内容正确 + INSERT IGNORE 幂等。
 --
--- 回滚策略：**no-op（不做 per-row DELETE）**。
+-- 回滚策略：**narrow DELETE 4 行**（只删 wave/love/laugh/cry 这 4 行；不动其他 code 的行）。
 --
--- 为什么 no-op？因为 0010.up 用 `INSERT IGNORE`，**故意**容忍 "DB 在 apply 0010 前
--- 已存在 wave/love/laugh/cry 行" 的场景（admin 手工 INSERT / 上次回滚未清干净 /
--- 测试残留）—— 这种预存行 up 保留不动。
+-- **设计决策（17-3 r2 review 后定稿）**：
+--   r1 review 阶段曾尝试把 down 改成 no-op（理由：用 INSERT IGNORE up 路径"容忍预存行"，
+--   down DELETE 会反向破坏对称性、静默丢失 admin 数据）；但 r2 review 抓出这违反
+--   golang-migrate 标准 invariant **"down 必须真正 undo up"**：
+--     - 操作员单步回滚（`migrate down 1` / `goto 9`）→ schema_migrations.version=9，
+--       但 wave/love/laugh/cry 行仍在 → 数据库与版本号不一致 → migration 框架 bug。
+--   两种设计目标互相冲突，**优先 migration invariant**；admin 数据保留通过下面的
+--   "code 钦定占用 + 新 migration 兜底"约定解决，不通过 down 路径搞 no-op。
 --
--- 如果 down 走 `DELETE FROM emoji_configs WHERE code IN ('wave','love','laugh','cry')`，
--- 就会把 up 故意保留的预存行也一并删掉 → up / down **不对称** → 在 duplicate-code
--- 场景下静默丢失 admin 数据。这正是 0010.up `INSERT IGNORE` 容忍的场景，down 不能反过来破坏它。
+-- **强约定（admin / 运维必读）**：
+--   1. wave / love / laugh / cry **这 4 个 code 由 0010 钦定固定占用**，是系统 seed
+--      表情；admin / 运维 **不应**手工 INSERT 这 4 个 code。
+--   2. 需要新增表情（如 angry / surprised）→ 通过**新 migration**（0011+）添加，
+--      不要在 emoji_configs 表上做 admin 直插。
+--   3. 0010.up 用 INSERT IGNORE 是为了**仅**容忍两类预存行：
+--      (a) admin 误操作残留（违反约定 1 的预存行）
+--      (b) 测试环境残留 / 上次回滚未清干净的本 seed 行
+--      —— down 会清掉它们；admin 真要保留同 code 行需要手动 stage rollback
+--      （`migrate down 1` 前先备份）。
+--   4. 本 down 是 **narrow DELETE 4 行**（不是 TRUNCATE、不是全表 DELETE）：
+--      只删 4 个钦定 code，**不会动** 0011+ 加的新表情（如 angry / surprised）的行。
 --
 -- **down 实际执行场景**（与 golang-migrate 语义对齐）：
---   (a) 单跑 0010.down（保留 0009 schema）→ no-op：再 up 一次会重新跑 0010.up，
---       预存行被保留 + 缺失行被 INSERT IGNORE 补回，回到 ≥4 行；语义自洽
---   (b) 跑 0009.down（链式带 0010.down 先跑）→ 0009.down `DROP TABLE emoji_configs`
---       覆盖了整张表的清理 → 0010.down 不需要做 per-row DELETE 重复劳动
+--   (a) 单跑 0010.down（保留 0009 schema）→ DELETE 4 行 → schema_migrations 回退到 v=9
+--       → 表存在但 wave/love/laugh/cry 不在；再 up 一次会重新跑 0010.up 把 4 行 INSERT 回来。
+--   (b) 跑 0009.down 链式带 0010.down 先跑 → 先 DELETE 4 行 → 再 DROP TABLE emoji_configs
+--       → 整张表清理；语义自洽。
 --
--- 等价类比：seed migration 的 down 不应该把 **可能不是它插入的** 行删掉。
--- "Down 完全回滚 up 的副作用" 语义在此处弱化为 "down 不引入新的副作用"，
--- 与 INSERT IGNORE "行不一定是本 up 插入" 的契约保持一致。
---
--- 详见 lesson：docs/lessons/2026-05-14-insert-ignore-symmetric-down-and-test.md
---
--- 注：本文件必须存在（不能空文件 / 不能缺失），否则 golang-migrate 找不到 down
--- 对应文件会报 ErrShortLimit / Dirty —— 用一句无副作用 SQL 占位。
-SELECT 1;
+-- 详见 lesson：docs/lessons/2026-05-14-down-must-undo-up-invariant-over-admin-data.md
+DELETE FROM emoji_configs WHERE code IN ('wave', 'love', 'laugh', 'cry');

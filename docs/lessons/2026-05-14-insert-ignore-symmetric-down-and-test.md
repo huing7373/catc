@@ -2,9 +2,29 @@
 date: 2026-05-14
 source_review: codex round 1 review of Story 17.3 (file: /tmp/epic-loop-review-17-3-r1.md)
 story: 17-3-emoji_configs-seed
-commit: <pending>
+commit: 20d9039
 lesson_count: 2
+superseded_by: 2026-05-14-down-must-undo-up-invariant-over-admin-data.md
+status: partially-superseded
 ---
+
+> ⚠️ **SUPERSEDED 警告（2026-05-14 r2 review 后更新）**：
+>
+> 本 lesson 的 **Lesson 1**（"INSERT IGNORE seed migration 的 down 应该 no-op"）在 r2 review 中被推翻。
+> r2 抓出：down=no-op 违反 golang-migrate 标准 invariant "down 必须真正 undo up" —— 单步回滚后
+> schema_migrations.version=9 但 wave/love/laugh/cry 行仍在 → 数据库与版本号不一致。
+>
+> **最终决策（17-3 r2 定稿）**：down 必须真正 undo up（narrow DELETE 4 行），admin 数据保留通过
+> "code 由 seed 钦定占用 + 新增表情走 0011+ migration" 约定解决，**不**通过 down no-op。
+>
+> 完整说明 + 最终预防规则见 → **[docs/lessons/2026-05-14-down-must-undo-up-invariant-over-admin-data.md](2026-05-14-down-must-undo-up-invariant-over-admin-data.md)（17-3 r2）**。
+>
+> **Lesson 2**（"测 INSERT IGNORE 必须走 duplicate-code 路径"）的核心仍成立：drop-and-recreate 路径
+> 测不到 INSERT IGNORE 关键字的实际生效。但**结论需小幅收紧** —— 测试不再测"down 后预存行保留"
+> （该语义在 r2 后已不成立），改测"INSERT IGNORE 在 duplicate code 时不报错 + 不翻倍 + 不覆盖现有值"。
+> 测试代码本身（setup + 断言）保留不动。
+>
+> **未来 Claude 读到本文件请直接跳转 r2 lesson，不要按 r1 Lesson 1 的"down no-op"建议落地。**
 
 # Review Lessons — 2026-05-14 — INSERT IGNORE seed migration 的对称 down + duplicate-code 路径测试
 
