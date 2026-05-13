@@ -409,6 +409,37 @@ public final class AppContainer: ObservableObject {
         )
     }
 
+    // MARK: - Story 15.4 AC4: Pet State Sync 链路 factory
+
+    /// Story 15.4 AC1: 构造 PetRepository（每次调用返回新实例；apiClient 单例由 container 持有）.
+    /// 与 makeStepRepository 同模式（value type struct，构造廉价）.
+    public func makePetRepository() -> PetRepositoryProtocol {
+        DefaultPetRepository(apiClient: apiClient)
+    }
+
+    /// Story 15.4 AC2: 构造 SyncPetStateUseCase（每次调用返回新实例；依赖 repository / appState）.
+    /// caller 必须传 appState（AppState 在 RootView 持有；不进 AppContainer 字段；ADR-0010 §3.1）.
+    public func makeSyncPetStateUseCase(appState: AppState) -> SyncPetStateUseCaseProtocol {
+        DefaultSyncPetStateUseCase(
+            repository: makePetRepository(),
+            appState: appState
+        )
+    }
+
+    /// Story 15.4 AC3: 构造 PetStateSyncTriggerService（**每次调用返回新实例**；caller 应自行通过
+    /// @State 持有 strong 引用，避免 RootView body 重建时重启 subscription —— 与 makeStepSyncTriggerService
+    /// 同模式 / 同精神，详见 lesson `2026-04-26-stateobject-debug-instance-aliasing.md`）.
+    public func makePetStateSyncTriggerService(
+        appState: AppState,
+        homeViewModel: HomeViewModel
+    ) -> PetStateSyncTriggerService {
+        PetStateSyncTriggerService(
+            syncPetStateUseCase: makeSyncPetStateUseCase(appState: appState),
+            homeViewModel: homeViewModel,
+            appState: appState
+        )
+    }
+
     #if DEBUG
     /// Story 2.8 新增（仅 Debug build）：构造 ResetIdentityViewModel。
     /// Release build 该方法不存在；调用方（RootView）也必须 #if DEBUG 包裹调用 — fail-closed。

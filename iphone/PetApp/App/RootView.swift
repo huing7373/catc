@@ -110,6 +110,13 @@ struct RootView: View {
     /// `nil` 守卫让 `ensureStepSyncWired()` 仅初始化一次（与 ensureLaunchStateMachineWired() 同模式）.
     @State private var stepSyncTriggerService: StepSyncTriggerService?
 
+    /// Story 15.4 AC4: PetStateSyncTriggerService（订阅 HomeViewModel.$petState → 5s 节流 + roomId
+    /// preflight → fire-and-forget 触发 SyncPetStateUseCase）.
+    /// 由 RootView @State 持有，避免 body 重建时 service 重启 subscription（rebuild → factory 返回新 service →
+    /// 旧 subscription 与新 subscription 同时活 → 重复 spawn）.与 stepSyncTriggerService 同模式;
+    /// 详见 lesson `2026-04-26-stateobject-debug-instance-aliasing.md`.
+    @State private var petStateSyncTriggerService: PetStateSyncTriggerService?
+
     /// Story 8.4 review round 2 P2 fix: scenePhase listener，让 background → foreground reactivate
     /// 时再 bind 一次 motionProvider —— 覆盖 first-launch 用户去 Settings 改权限再回 app 的真实路径.
     ///
@@ -201,6 +208,10 @@ struct RootView: View {
                         // currentUser 等）；ready 子树只在 bootstrap 完成后渲染 → onReadyTask 执行时
                         // SessionStore.token 必已存在；service.start() 调 /steps/sync 不会 401.
                         stepSyncTriggerService?.start()
+
+                        // Story 15.4 AC4: 启动 pet state-sync 触发器（subscribe `homeViewModel.$petState` +
+                        // dropFirst 抹掉订阅瞬间 replay）；与 stepSync 同时机；start() 幂等 (subscription != nil 短路).
+                        petStateSyncTriggerService?.start()
                     },
                     // Story 8.5 review round 2 [P2] fix: launch state 离开 .ready 时停 step sync timer.
                     //
@@ -219,6 +230,10 @@ struct RootView: View {
                     // 详见 docs/lessons/2026-05-04-launch-state-leave-ready-must-stop-feature-services.md.
                     onLeaveReady: {
                         stepSyncTriggerService?.stop()
+                        // Story 15.4 AC4: 离开 .ready 时同停 pet state-sync subscription
+                        // （与 stepSync 同精神 —— token expiry / cold-start 后避免无效请求 + 释放订阅引用）.
+                        // 详见 lesson `2026-05-04-launch-state-leave-ready-must-stop-feature-services.md`.
+                        petStateSyncTriggerService?.stop()
                     }
                 )
             } else {
@@ -365,6 +380,8 @@ struct RootView: View {
             // Story 8.5 AC9: lazy 注入 stepSyncTriggerService（与 ensureLaunchStateMachineWired 同模式）.
             // 必须在 ensureLaunchStateMachineWired 之后调（与未来 audit 期望顺序一致）.
             ensureStepSyncWired()
+            // Story 15.4 AC4: lazy 注入 petStateSyncTriggerService（与 ensureStepSyncWired 同模式）.
+            ensurePetStateSyncWired()
         }
         .task {
             // Story 5.5：bind LoadHomeUseCase + ErrorPresenter，让 ErrorPresenter onRetry 闭包
@@ -395,8 +412,10 @@ struct RootView: View {
             // 详见 docs/lessons/2026-05-04-scenephase-rebind-for-auth-gated-subscriptions.md.
 
             // Story 8.5 AC9: background 进入时 stop step sync timer（节省电；下次 .active 重启）.
+            // Story 15.4 AC4: 同时 stop pet state-sync subscription（释放订阅引用；下次 .active 重启幂等）.
             if newPhase == .background {
                 stepSyncTriggerService?.stop()
+                petStateSyncTriggerService?.stop()
             }
 
             guard newPhase == .active, oldPhase != .active else { return }
@@ -418,6 +437,9 @@ struct RootView: View {
             // 详见 docs/lessons/2026-05-04-launch-state-leave-ready-must-stop-feature-services.md.
             if launchStateMachine?.state == .ready {
                 stepSyncTriggerService?.start()
+                // Story 15.4 AC4: 与 stepSync 同 .ready guard —— 仅当 launch state 在 .ready 时才 start
+                // pet state-sync subscription（幂等：subscription != nil 短路；resume 与 first start 同处理）.
+                petStateSyncTriggerService?.start()
             }
         }
         .errorPresentationHost(presenter: container.errorPresenter)
@@ -438,6 +460,18 @@ struct RootView: View {
     private func ensureStepSyncWired() {
         guard stepSyncTriggerService == nil else { return }
         stepSyncTriggerService = container.makeStepSyncTriggerService(
+            appState: appState,
+            homeViewModel: homeViewModel
+        )
+    }
+
+    /// Story 15.4 AC4: lazy 注入 `petStateSyncTriggerService`（与 ensureStepSyncWired 同模式）.
+    /// nil 守卫防 RootView 重建覆盖既有 service instance —— 否则旧 subscription 仍活 + 新 subscription
+    /// 也建 → 重复 spawn 同 state-sync.service 持 homeViewModel + appState weak 引用，
+    /// 借 `homeViewModel.$petState` publisher 触发 + `appState.currentRoomId` 同步读 preflight.
+    private func ensurePetStateSyncWired() {
+        guard petStateSyncTriggerService == nil else { return }
+        petStateSyncTriggerService = container.makePetStateSyncTriggerService(
             appState: appState,
             homeViewModel: homeViewModel
         )
