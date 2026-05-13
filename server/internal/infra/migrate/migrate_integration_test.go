@@ -2,10 +2,10 @@
 // +build integration
 
 // Story 4.3 集成测试：用 dockertest 起真实 mysql:8.0 容器跑 4 条 case：
-//   1. happy: migrate Up → 8 张表存在 → migrate Down → 8 张表全消失（仅 schema_migrations）
+//   1. happy: migrate Up → 9 张表存在 → migrate Down → 9 张表全消失（仅 schema_migrations）
 //   2. edge: 重复 migrate Up → ErrNoChange 被吞 → 返 nil（幂等）
 //   3. happy: Up 后通过 INFORMATION_SCHEMA 抽样验关键索引 / 字段类型 / 主键约束
-//   4. edge: Up 后 Status 返回 (version=8, dirty=false, nil)
+//   4. edge: Up 后 Status 返回 (version=9, dirty=false, nil)
 //
 // Story 7.2 扩展：把 4 条 case 的断言从 5 张表扩展到 6 张表
 //   （新增 user_step_sync_logs：日志表，含 idx_user_date / idx_user_created_at；
@@ -14,6 +14,11 @@
 // Story 10.3 review r5 [P1] 扩展：把 4 条 case 的断言从 6 张表扩展到 8 张表
 //   （新增 rooms / room_members：把 Epic 11.2 的"建表"职责拆出来提前到 Story 10.3，
 //    让 WS 网关 self-contained 可部署；JOIN / LEAVE 业务事务仍在 Epic 11.4 / 11.5 落地）
+//
+// Story 17.2 扩展：把 4 条 case 的断言从 8 张表扩展到 9 张表
+//   （新增 emoji_configs：系统表情配置表，含 UNIQUE uk_code + KEY idx_enabled_sort；
+//    Epic 17 节点 6 表情广播链路 schema 根基，17.3 seed / 17.4 GET /emojis / 17.5
+//    WS emoji.send 校验各路径依赖）
 //
 // build tag `integration` 隔离 → 默认 `bash scripts/build.sh --test` 不跑这些；
 // 只在 `bash scripts/build.sh --integration`（即 `go test -tags=integration`）触发。
@@ -113,12 +118,15 @@ func migrationsPath(t *testing.T) string {
 	return abs
 }
 
-// TestMigrateIntegration_UpThenDown 起容器 → migrate Up → 8 张表存在 →
-// migrate Down → 8 张表全消失（仅 schema_migrations）。
+// TestMigrateIntegration_UpThenDown 起容器 → migrate Up → 9 张表存在 →
+// migrate Down → 9 张表全消失（仅 schema_migrations）。
 //
 // **Story 10.3 review r5 [P1] 扩展**：从 6 改 8（多了 0007_init_rooms +
 // 0008_init_room_members；把 Epic 11.2 的"建表"职责拆出来提前到 Story 10.3，
 // 让 WS 网关骨架 self-contained 可部署）。
+//
+// **Story 17.2 扩展**：从 8 改 9（多了 0009_init_emoji_configs；Epic 17 节点 6
+// 表情广播链路 schema 根基）。
 func TestMigrateIntegration_UpThenDown(t *testing.T) {
 	dsn, cleanup := startMySQL(t)
 	defer cleanup()
@@ -136,14 +144,14 @@ func TestMigrateIntegration_UpThenDown(t *testing.T) {
 		t.Fatalf("migrate Up: %v", err)
 	}
 
-	// 验证 8 张表存在
+	// 验证 9 张表存在
 	sqlDB, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	defer sqlDB.Close()
 
-	expectedTables := []string{"users", "user_auth_bindings", "pets", "user_step_accounts", "user_chests", "user_step_sync_logs", "rooms", "room_members"}
+	expectedTables := []string{"users", "user_auth_bindings", "pets", "user_step_accounts", "user_chests", "user_step_sync_logs", "rooms", "room_members", "emoji_configs"}
 	for _, table := range expectedTables {
 		var count int
 		err := sqlDB.QueryRowContext(ctx, `
@@ -158,7 +166,7 @@ func TestMigrateIntegration_UpThenDown(t *testing.T) {
 		}
 	}
 
-	// migrate Down → 5 张表全消失
+	// migrate Down → 9 张表全消失
 	if err := mig.Down(ctx); err != nil {
 		t.Fatalf("migrate Down: %v", err)
 	}
@@ -312,12 +320,12 @@ func TestMigrateIntegration_UpTwice_Idempotent(t *testing.T) {
 	err = sqlDB.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM information_schema.tables
 		WHERE table_schema = 'cat_test' AND table_name IN
-		('users', 'user_auth_bindings', 'pets', 'user_step_accounts', 'user_chests', 'user_step_sync_logs', 'rooms', 'room_members')`).Scan(&tableCount)
+		('users', 'user_auth_bindings', 'pets', 'user_step_accounts', 'user_chests', 'user_step_sync_logs', 'rooms', 'room_members', 'emoji_configs')`).Scan(&tableCount)
 	if err != nil {
 		t.Fatalf("count tables: %v", err)
 	}
-	if tableCount != 8 {
-		t.Errorf("after two Up calls, table count = %d, want 8 (Story 10.3 review r5 [P1] 加 rooms / room_members)", tableCount)
+	if tableCount != 9 {
+		t.Errorf("after two Up calls, table count = %d, want 9 (Story 10.3 review r5 [P1] 加 rooms / room_members → Story 17.2 加 emoji_configs，总计 9 张表)", tableCount)
 	}
 }
 
@@ -529,10 +537,12 @@ func TestMigrateIntegration_TablesPresent_AfterUp(t *testing.T) {
 	}
 }
 
-// TestMigrateIntegration_StatusAfterUp 验证 Up 完成后 Status 返回 (version=8, dirty=false, nil)。
+// TestMigrateIntegration_StatusAfterUp 验证 Up 完成后 Status 返回 (version=9, dirty=false, nil)。
 // Story 7.2 扩展：从 5 改 6（多了 0006_init_user_step_sync_logs）
 // Story 10.3 review r5 [P1] 扩展：从 6 改 8（多了 0007_init_rooms +
 // 0008_init_room_members；把 Epic 11.2 的"建表"职责拆出来提前到 Story 10.3）
+// Story 17.2 扩展：从 8 改 9（多了 0009_init_emoji_configs；Epic 17 节点 6
+// 表情广播链路 schema 根基）
 func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	dsn, cleanup := startMySQL(t)
 	defer cleanup()
@@ -563,8 +573,8 @@ func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status after Up: %v", err)
 	}
-	if v != 8 {
-		t.Errorf("Status version = %d, want 8", v)
+	if v != 9 {
+		t.Errorf("Status version = %d, want 9", v)
 	}
 	if dirty {
 		t.Errorf("Status dirty = true, want false")
@@ -660,5 +670,261 @@ func TestMigrateIntegration_RoomMembers_UniqueUserID_Rejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Duplicate entry") {
 		t.Errorf("UNIQUE(room_id, user_id) rejection error message = %q, want substring \"Duplicate entry\"", err.Error())
+	}
+}
+
+// TestMigrateIntegration_EmojiConfigs_Schema 验证
+// migrations/0009_init_emoji_configs.up.sql 钦定的 emoji_configs 表 schema
+// 与数据库设计.md §5.15 + V1接口设计.md §11.1 一致：
+//
+//   - id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT
+//   - code VARCHAR(64) NOT NULL + UNIQUE KEY uk_code (code)
+//   - name VARCHAR(64) NOT NULL
+//   - asset_url VARCHAR(255) NOT NULL DEFAULT ''
+//   - sort_order INT NOT NULL DEFAULT 0
+//   - is_enabled TINYINT NOT NULL DEFAULT 1
+//   - created_at / updated_at DATETIME(3)
+//   - KEY idx_enabled_sort (is_enabled, sort_order)
+//
+// **背景（Story 17.2 引入）**：本 case 验证 0009 migration 落地的 schema
+// 与 §5.15 钦定 1:1 对齐；用于在 epics.md §Story 17.2 钦定的"单元测试覆盖 ≥3 case"
+// 中作为 schema-correctness 路径（happy / migrate up 后表存在 + 字段类型 +
+// 全部索引和约束都符合 §5.15）。
+func TestMigrateIntegration_EmojiConfigs_Schema(t *testing.T) {
+	dsn, cleanup := startMySQL(t)
+	defer cleanup()
+
+	mig, err := migrate.New(dsn, migrationsPath(t))
+	if err != nil {
+		t.Fatalf("migrate.New: %v", err)
+	}
+	defer mig.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := mig.Up(ctx); err != nil {
+		t.Fatalf("migrate Up: %v", err)
+	}
+
+	sqlDB, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	// 1. INFORMATION_SCHEMA.TABLES：emoji_configs 表存在
+	var tableCount int
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.tables
+		WHERE table_schema = 'cat_test' AND table_name = 'emoji_configs'`).Scan(&tableCount)
+	if err != nil {
+		t.Errorf("query emoji_configs table existence: %v", err)
+	} else if tableCount != 1 {
+		t.Errorf("emoji_configs table count = %d, want 1", tableCount)
+	}
+
+	// 2. INFORMATION_SCHEMA.COLUMNS：8 列存在 + 类型对齐
+	emojiCols := []struct {
+		col          string
+		wantDataType string
+		wantColType  string
+	}{
+		{"id", "bigint", "bigint unsigned"},
+		{"code", "varchar", "varchar(64)"},
+		{"name", "varchar", "varchar(64)"},
+		{"asset_url", "varchar", "varchar(255)"},
+		{"sort_order", "int", "int"},
+		{"is_enabled", "tinyint", "tinyint"},
+		{"created_at", "datetime", "datetime(3)"},
+		{"updated_at", "datetime", "datetime(3)"},
+	}
+	for _, c := range emojiCols {
+		var dt, ct string
+		err := sqlDB.QueryRowContext(ctx, `
+			SELECT data_type, column_type FROM information_schema.columns
+			WHERE table_schema = 'cat_test' AND table_name = 'emoji_configs' AND column_name = ?`,
+			c.col).Scan(&dt, &ct)
+		if err != nil {
+			t.Errorf("query emoji_configs.%s type: %v", c.col, err)
+			continue
+		}
+		if dt != c.wantDataType {
+			t.Errorf("emoji_configs.%s data_type = %q, want %q", c.col, dt, c.wantDataType)
+		}
+		if ct != c.wantColType {
+			t.Errorf("emoji_configs.%s column_type = %q, want %q", c.col, ct, c.wantColType)
+		}
+	}
+
+	// 3a. emoji_configs.id PK = id（自增；§5.15 + §3.1 钦定）
+	var pkCol string
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT column_name FROM information_schema.key_column_usage
+		WHERE table_schema = 'cat_test' AND table_name = 'emoji_configs' AND constraint_name = 'PRIMARY'`).Scan(&pkCol)
+	if err != nil {
+		t.Errorf("query emoji_configs PK: %v", err)
+	} else if pkCol != "id" {
+		t.Errorf("emoji_configs PK column = %q, want 'id'", pkCol)
+	}
+
+	// 3b. UNIQUE KEY uk_code (code) 存在 + non_unique = 0
+	var ukCount int
+	var ukNonUnique int
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(*), MAX(non_unique) FROM information_schema.statistics
+		WHERE table_schema = 'cat_test' AND table_name = 'emoji_configs' AND index_name = 'uk_code'`).Scan(&ukCount, &ukNonUnique)
+	if err != nil {
+		t.Errorf("query emoji_configs.uk_code: %v", err)
+	} else {
+		if ukCount == 0 {
+			t.Errorf("emoji_configs.uk_code: index not found")
+		}
+		if ukNonUnique != 0 {
+			t.Errorf("emoji_configs.uk_code: non_unique = %d, want 0 (UNIQUE)", ukNonUnique)
+		}
+	}
+
+	// uk_code 单列 (code)
+	var ukCol string
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT column_name FROM information_schema.statistics
+		WHERE table_schema = 'cat_test' AND table_name = 'emoji_configs' AND index_name = 'uk_code'
+		ORDER BY seq_in_index ASC LIMIT 1`).Scan(&ukCol)
+	if err != nil {
+		t.Errorf("query emoji_configs.uk_code column: %v", err)
+	} else if ukCol != "code" {
+		t.Errorf("emoji_configs.uk_code column = %q, want 'code'", ukCol)
+	}
+
+	// 3c. KEY idx_enabled_sort 存在 + 列顺序 (is_enabled, sort_order)
+	rows, err := sqlDB.QueryContext(ctx, `
+		SELECT column_name FROM information_schema.statistics
+		WHERE table_schema = 'cat_test' AND table_name = 'emoji_configs' AND index_name = 'idx_enabled_sort'
+		ORDER BY seq_in_index ASC`)
+	if err != nil {
+		t.Errorf("query emoji_configs.idx_enabled_sort columns: %v", err)
+	} else {
+		defer rows.Close()
+		var cols []string
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				t.Errorf("scan idx_enabled_sort column: %v", err)
+				continue
+			}
+			cols = append(cols, c)
+		}
+		want := []string{"is_enabled", "sort_order"}
+		if len(cols) != 2 {
+			t.Errorf("emoji_configs.idx_enabled_sort column count = %d, want 2 (cols=%v)", len(cols), cols)
+		} else {
+			for i, w := range want {
+				if cols[i] != w {
+					t.Errorf("emoji_configs.idx_enabled_sort column[%d] = %q, want %q", i, cols[i], w)
+				}
+			}
+		}
+	}
+
+	// 4. INFORMATION_SCHEMA.COLUMNS.COLUMN_DEFAULT 默认值校验
+	defaultCases := []struct {
+		col         string
+		wantDefault string
+	}{
+		{"asset_url", ""},
+		{"sort_order", "0"},
+		{"is_enabled", "1"},
+	}
+	for _, c := range defaultCases {
+		var def sql.NullString
+		err := sqlDB.QueryRowContext(ctx, `
+			SELECT column_default FROM information_schema.columns
+			WHERE table_schema = 'cat_test' AND table_name = 'emoji_configs' AND column_name = ?`,
+			c.col).Scan(&def)
+		if err != nil {
+			t.Errorf("query emoji_configs.%s default: %v", c.col, err)
+			continue
+		}
+		if !def.Valid || def.String != c.wantDefault {
+			t.Errorf("emoji_configs.%s default = %v, want %q", c.col, def, c.wantDefault)
+		}
+	}
+
+	// created_at / updated_at 默认值 = CURRENT_TIMESTAMP(3)
+	// MySQL 8.0 INFORMATION_SCHEMA 返回的字符串可能是 "CURRENT_TIMESTAMP(3)" 或带函数语义；
+	// 用 substring contains 兜底匹配。
+	for _, col := range []string{"created_at", "updated_at"} {
+		var def sql.NullString
+		err := sqlDB.QueryRowContext(ctx, `
+			SELECT column_default FROM information_schema.columns
+			WHERE table_schema = 'cat_test' AND table_name = 'emoji_configs' AND column_name = ?`,
+			col).Scan(&def)
+		if err != nil {
+			t.Errorf("query emoji_configs.%s default: %v", col, err)
+			continue
+		}
+		if !def.Valid || !strings.Contains(strings.ToUpper(def.String), "CURRENT_TIMESTAMP") {
+			t.Errorf("emoji_configs.%s default = %v, want substring 'CURRENT_TIMESTAMP'", col, def)
+		}
+	}
+}
+
+// TestMigrateIntegration_EmojiConfigs_UniqueCode_Rejected 验证
+// migrations/0009_init_emoji_configs.up.sql 钦定的 UNIQUE KEY uk_code (code)
+// 在运行时被 MySQL 真实拒绝重复 code 插入。
+//
+// **背景（Story 17.2 引入）**：epics.md §Story 17.2 钦定的"集成测试覆盖（dockertest）：
+// migrate up → 尝试 INSERT 重复 code → 数据库拒绝"路径在本 case 落地；
+// 是 Story 17.3 seed 用 INSERT IGNORE 兜底 + Story 17.5 校验 emojiCode 合法性 +
+// admin 后台未来写入路径的 schema 层根基。
+//
+// **覆盖路径**：
+//  1. migrate up → emoji_configs 表存在
+//  2. 插入 emoji_configs (code='wave', name='挥手', sort_order=1) → 成功
+//  3. 再次插入 emoji_configs (code='wave', name='挥手 v2', sort_order=2) → DB 拒绝
+//     （UNIQUE KEY uk_code (code) 兜底；same code 不能插两次）；
+//     err 必须含 "Duplicate entry"（MySQL 错误码 = 1062 ER_DUP_ENTRY）
+//
+// 用 database/sql 直跑 raw INSERT（**不**走 GORM）让测试结果**不**依赖 ORM
+// 行为差异（与 Story 11.2 落地的
+// TestMigrateIntegration_RoomMembers_UniqueUserID_Rejected 同模式）。
+func TestMigrateIntegration_EmojiConfigs_UniqueCode_Rejected(t *testing.T) {
+	dsn, cleanup := startMySQL(t)
+	defer cleanup()
+
+	mig, err := migrate.New(dsn, migrationsPath(t))
+	if err != nil {
+		t.Fatalf("migrate.New: %v", err)
+	}
+	defer mig.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := mig.Up(ctx); err != nil {
+		t.Fatalf("migrate Up: %v", err)
+	}
+
+	sqlDB, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	// 步骤 2：首条 emoji_configs (code='wave', name='挥手', sort_order=1) 必须成功
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO emoji_configs (code, name, asset_url, sort_order, is_enabled) VALUES ('wave', '挥手', 'https://cdn.example.com/wave.png', 1, 1)`); err != nil {
+		t.Fatalf("first insert emoji_configs (code='wave') should succeed: %v", err)
+	}
+
+	// 步骤 3：UNIQUE(code) 约束 —— 同 code 再插一次必须被拒
+	_, err = sqlDB.ExecContext(ctx,
+		`INSERT INTO emoji_configs (code, name, asset_url, sort_order, is_enabled) VALUES ('wave', '挥手 v2', 'https://cdn.example.com/wave_v2.png', 2, 1)`)
+	if err == nil {
+		t.Fatalf("expected duplicate-entry error on second insert (code='wave') violating UNIQUE(code), got nil")
+	}
+	if !strings.Contains(err.Error(), "Duplicate entry") {
+		t.Errorf("UNIQUE(code) rejection error message = %q, want substring \"Duplicate entry\"", err.Error())
 	}
 }
