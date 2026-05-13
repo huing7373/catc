@@ -2,7 +2,7 @@
 date: 2026-05-14
 source_review: codex round 3 review of Story 17.3 (file: /tmp/epic-loop-review-17-3-r3.md)
 story: 17-3-emoji_configs-seed
-commit: <pending>
+commit: 2729df2
 lesson_count: 2
 supersedes_partial: 2026-05-14-down-must-undo-up-invariant-over-admin-data.md (注释级补充，决策方向一致；本 lesson 在 r2 决策上**进一步 lock down** up 路径语义)
 final_decision_lock: true
@@ -246,3 +246,84 @@ LLM code review 模型（即使是 codex / claude / gpt-5+ 级别）有以下系
 3. admin / 运维是否会在这些 keys 上做 customization？如果会，谁来定 admin vs seed 的优先级？
 
 3 个问题答案确定后，up / down 的 SQL 选择就**机械导出**了 —— 不需要后续 review 反复横跳。
+
+---
+
+## r4 Pushback Record (deferred wontfix by epic-loop main agent judgment)
+
+> 📌 本节是 **r4 codex review pushback 的永久决策记录**，由 epic-loop 主 agent 在 r3 lock-down
+> 后判定为 "视为通过 + flag"。记录在这里目的有二：
+>
+> 1. 让未来 Claude 读到本 r3 lesson 时**同时**看到 r4 pushback 已被显式 wontfix，避免误以为 r4 finding "还没处理"
+> 2. 写明**未来何时可以 reopen** —— 不是 reviewer 角度变了就 reopen，而是**事实层面**出现新 context 才 reopen
+>
+> 本记录**不**是 r3 决策的 supersede / 部分撤销 —— r3 的 up `INSERT ... ON DUPLICATE KEY UPDATE`
+> + down narrow DELETE 决策**继续有效，未做任何字面或语义调整**。
+
+### r4 codex finding（原文摘录，来自 `/tmp/epic-loop-review-17-3-r4.md` 末尾 codex 段）
+
+> The new migration is not safe for databases that already have `wave/love/laugh/cry` rows: upgrading overwrites existing config, and rolling back deletes it outright. That data-clobbering behavior is a blocking correctness issue for seed migrations.
+>
+> Review comment:
+>
+> - **[P1] Avoid clobbering pre-existing emoji rows during 0010 upgrade — `server/migrations/0010_seed_emoji_configs.up.sql:77-80`**
+>   If any environment already contains one of these codes before `0010` runs (for example from a manual backfill, a hotfix, or importing the seed file once outside golang-migrate), this `ON DUPLICATE KEY UPDATE` will silently rewrite `name`, `asset_url`, `sort_order`, and `is_enabled`. That changes live behavior on upgrade — e.g. a deliberately disabled emoji becomes enabled again — and the paired `0010.down.sql` cannot restore the previous values because it only deletes the rows. In those pre-populated databases, applying 0010 becomes a destructive data migration rather than a safe seed.
+
+### 主 agent 判定：**视为通过 + flag（wontfix，不进入 r5）**
+
+### 判定依据
+
+**(a) r4 finding 本质 = r3 lock-down 决断的同一类 "admin 数据保留派" 论点重提**
+
+把 r4 finding 拆开看：
+- "upgrading overwrites existing config" → r3 lesson Lesson 1 §症状 已经讨论过：admin 在 0010 owned codes 上的 customization 会被 up 覆盖
+- "rolling back deletes it outright" → r1 [P2] 原始论点（已被 r2 否决）；r3 [P1 #2] 重提（已被 r3 wontfix）；r4 是**第三次**重提
+- "deliberately disabled emoji becomes enabled again" → r3 决策的**预期行为**：0010 钦定 `is_enabled=1`，admin 把它改成 0 是违反"admin 禁止 customize 0010 owned codes"约定，被 up 强制治愈是 feature 不是 bug
+
+r4 没有引入 r3 没考虑到的新角度，只是把"down 不能恢复 + up 会 overwrite"两个 r1/r2/r3 都已讨论过的事实重新合在一起，换成"destructive data migration"的语气重提。
+
+**(b) r3 lesson 顶部已显式 lock down**
+
+r3 lesson frontmatter 含 `final_decision_lock: true`；顶部 FINAL DECISION block 明确写：
+
+> 🔒 **FINAL DECISION on 0010 up/down semantics (post r3 review)**
+>
+> ...经过 r1 / r2 / r3 三轮 codex review 反复打架，本 lesson 是**最终决断**。
+> **不要**在 r4+ 因为同一类 finding 再次重开决策（除非引入 r3 没有的全新 context）
+
+r4 没有引入"r3 没有的全新 context" → 触发 r3 lesson §Lesson 2 预防规则的 wontfix 路径。
+
+**(c) 接受 r4 会触发 r5 的 invariant 派反驳 → 进入无限死循环**
+
+如果按 r4 finding 改回 INSERT IGNORE（admin 数据保留派）：
+- r5 必然重新抓出 r3 [P1 #1] 的原始 finding：INSERT IGNORE 让预存坏行幸存 → 下游 Story 17.4/17.5/18.1 依赖的 invariant 无法保证
+- 然后 r6 又会被 admin 派抓出 destructive migration
+- → 这正是 r3 lesson Lesson 2 §症状 警告过的"LLM review 缺乏长期 review history 记忆"导致的死循环
+
+**(d) "0010 owns these 4 codes; admin 禁止 customize" 约定本身就是 admin 数据 overwrite 问题的根本解决方案**
+
+r4 finding 暗含的 mental model 是 "admin 在 emoji_configs 表上自由 customize 是合法用例 → 因此 migration 不应该 overwrite admin 数据"。
+
+但 r3 已经显式打破了这个 mental model：**0010 owned 4 codes 上的 customization 在产品定义层面就是非法的**（admin 增加 emoji 必须走 0011+ migration，不能在 0010 owned codes 上做）。在这个约定下：
+- r4 "deliberately disabled emoji becomes enabled again" 不成立 —— admin 不应该 disable 这 4 个 emoji；如果产品需要"动态 disable emoji"功能，应该走业务层（运行时 feature flag）而不是改 migration seed 行
+- r4 "manual backfill / hotfix outside golang-migrate" 不成立 —— admin 不应该绕过 migration 框架直接改 emoji_configs；如果业务需要这个能力，应该在产品层先建立 emoji_audit_logs / 灾备恢复机制（见下面 reopen 条件）
+
+→ r4 finding 表面是"代码 bug"，实际是"产品约定与 r4 reviewer 假设不同" → 不应该改代码，应该让 reviewer 理解约定（本节就是这个理解的载体）。
+
+### 后续 reopen 条件（写明，让未来 Claude 知道何时才能真正修）
+
+以下任一**事实层面**变化发生时，r4 finding 可以重新进入决策视野：
+
+1. **引入了 customizable 0010-equivalent emoji**：即业务定义改为 "admin 可在某些 emoji 上做 customization"，且这些 customization 必须在 migrate up 时存活
+   - 例：Epic 17+ 加入 "admin 可在 wave/love/laugh/cry 4 个 emoji 上自定义 asset_url 切换不同主题素材"功能
+   - 对应改动：0010 split into "base table + override table" —— `emoji_configs_base`（migration owned，强制覆盖）+ `emoji_configs_overrides`（admin owned，migration 不动）；GET /emojis service 层做 left join
+2. **引入了 emoji_audit_logs / 灾备恢复机制**：让 admin 数据保留成为 hard requirement
+   - 例：Epic 17+ 加入 "所有 emoji 配置变更必须记录 audit log 用于灾备恢复"
+   - 对应改动：0010 自身保持不变，但 0010.up / 0010.down 触发前由灾备机制 snapshot；admin 数据保留通过 snapshot 兜底，不通过 migration 路径兜底
+3. **业务定义出现 "admin 必须能 hotfix 0010 owned emoji 配置" 用例**：例如生产事故场景下需要紧急 disable 一个 emoji
+   - 对应改动：要么走 admin 后台 + 业务层 feature flag（不改 0010）；要么 0010 改成只 seed *缺失行*（INSERT IGNORE）并明示 "下游 invariant 依赖运行时 service 层校验而非 migration 强保证"
+
+以上任一发生 → **重开决断**：把 r4 finding 从 wontfix 升级为 fix-with-new-design，可能改设计为
+"0010 split into base table + override table" 或其他不同形态。
+
+**在以上任一发生之前，r4 finding 维持 wontfix**；未来 r5 / r6 / ... 如果只是换 angle 重提同一类论点，按本节 + r3 lesson Lesson 2 预防规则继续 wontfix，**不**重新进入 fix-review 循环。

@@ -2,7 +2,7 @@
 date: 2026-05-14
 source_review: codex round 2 review of Story 17.3 (file: /tmp/epic-loop-review-17-3-r2.md)
 story: 17-3-emoji_configs-seed
-commit: <pending>
+commit: d4467f1
 lesson_count: 1
 supersedes_partial: 2026-05-14-insert-ignore-symmetric-down-and-test.md (Lesson 1)
 locked_down_by: 2026-05-14-0010-final-decision-up-force-overwrite-down-narrow-delete.md (r3 在 r2 基础上把 up 路径也收紧成 invariant 强保证)

@@ -287,5 +287,5 @@
 | 2026-05-13 | [WS fire-and-forget 副产物（含 self-broadcast）不承担 server ACK 职责 & 冻结声明错误码列表必须从实装路径反推（不机械抄通用错误码集）（17-1 r3）](2026-05-13-self-broadcast-not-ack-and-summary-error-code-list-purity-17-1-r3.md) | 2 | docs | `8881b57` |
 | 2026-05-13 | [契约层不绑定 client 渲染器 / array 上限必须有对应 SQL 否则删 / 跨独立 server 路径的事件顺序必为 race window（17-1 r4）](2026-05-13-contract-decouple-client-renderer-and-cap-and-race-window-17-1-r4.md) | 3 | docs, architecture | `20f8d49` |
 | 2026-05-14 | [INSERT IGNORE seed migration 的 down 必须 no-op + 测幂等必须走 duplicate-code 路径（17-3 r1，**Lesson 1 已被 r2 推翻**）](2026-05-14-insert-ignore-symmetric-down-and-test.md) | 2 | architecture, testing | `20d9039` |
-| 2026-05-14 | [seed migration 的 down 必须真正 undo up（migration invariant 优先于 admin 数据保留，supersede r1 Lesson 1）（17-3 r2）](2026-05-14-down-must-undo-up-invariant-over-admin-data.md) | 1 | architecture | `<pending>` |
-| 2026-05-14 | [0010 emoji_configs seed 最终决断：up 强制覆盖 + down narrow DELETE（三轮 review 反复打架后 lock down）（17-3 r3）](2026-05-14-0010-final-decision-up-force-overwrite-down-narrow-delete.md) | 2 | architecture, review-meta | `<pending>` |
+| 2026-05-14 | [seed migration 的 down 必须真正 undo up（migration invariant 优先于 admin 数据保留，supersede r1 Lesson 1）（17-3 r2）](2026-05-14-down-must-undo-up-invariant-over-admin-data.md) | 1 | architecture | `d4467f1` |
+| 2026-05-14 | [0010 emoji_configs seed 最终决断：up 强制覆盖 + down narrow DELETE（三轮 review 反复打架后 lock down）（17-3 r3）](2026-05-14-0010-final-decision-up-force-overwrite-down-narrow-delete.md) | 2 | architecture, review-meta | `2729df2` |
