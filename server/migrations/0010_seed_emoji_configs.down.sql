@@ -1,37 +1,56 @@
 -- 回滚 0010_seed_emoji_configs.up.sql
 --
 -- **本 migration 由 Story 17.3 首次落地（Epic 17 节点 6 表情广播链路 seed owner）**
--- 含 ≥2 case 单测 + dockertest 集成测试覆盖 seed 内容正确 + INSERT IGNORE 幂等。
+-- 含 ≥2 case 单测 + dockertest 集成测试覆盖 seed 内容正确 + ON DUPLICATE KEY UPDATE
+-- 强制覆盖语义。
 --
 -- 回滚策略：**narrow DELETE 4 行**（只删 wave/love/laugh/cry 这 4 行；不动其他 code 的行）。
 --
--- **设计决策（17-3 r2 review 后定稿）**：
---   r1 review 阶段曾尝试把 down 改成 no-op（理由：用 INSERT IGNORE up 路径"容忍预存行"，
---   down DELETE 会反向破坏对称性、静默丢失 admin 数据）；但 r2 review 抓出这违反
---   golang-migrate 标准 invariant **"down 必须真正 undo up"**：
---     - 操作员单步回滚（`migrate down 1` / `goto 9`）→ schema_migrations.version=9，
---       但 wave/love/laugh/cry 行仍在 → 数据库与版本号不一致 → migration 框架 bug。
---   两种设计目标互相冲突，**优先 migration invariant**；admin 数据保留通过下面的
---   "code 钦定占用 + 新 migration 兜底"约定解决，不通过 down 路径搞 no-op。
+-- ============================================================================
+-- **最终决策（17-3 r3 锁定，经过 r1 / r2 / r3 三轮 codex review 反复打架后定稿）**
+-- ============================================================================
+-- **wave / love / laugh / cry 这 4 个 code 由 0010 完全占用 / 强制覆盖**。
+-- admin / 运维 **禁止**在这 4 个 code 上做 customization；如要加 emoji **必须**新建
+-- migration 0011+（如 `0011_seed_emoji_angry.up.sql`），**不**要在 emoji_configs
+-- 表上做 admin 直插 / 直改这 4 个 code。
+--
+-- 配套：
+--   - **up 强制覆盖** = `INSERT ... ON DUPLICATE KEY UPDATE`（覆盖 name / asset_url
+--     / sort_order / is_enabled 4 字段为 0010 钦定值）
+--   - **down narrow DELETE** = 当前文件下面这行 SQL（只删 4 个钦定 code）
+--
+-- 这一对决策共同保证：Story 17.4/17.5/18.1 依赖的 **4 个 enabled emoji 配置 invariant
+-- 100% 强保证**，不依赖任何 admin 自律。
+--
+-- **三轮 review 演化简史**：
+--   - r1 [P2]: down DELETE 删 admin 数据 → 改成 no-op `SELECT 1;`
+--   - r2 [P2]: no-op down 违反 golang-migrate invariant → 改回 narrow DELETE
+--   - r3 [P1 #1]: up INSERT IGNORE 让坏行幸存 → up 改 ON DUPLICATE KEY UPDATE 强制覆盖
+--     r3 [P1 #2]: 重提 r1 "down 不应删 admin 数据" → **wontfix**：
+--       (a) "0010 owns these 4 codes" 是显式约定；admin 不该 customize → admin
+--           数据保留是 soft convention
+--       (b) migration framework invariant（version ↔ data 一致）是 hard constraint
+--       (c) up 强制覆盖后，admin 在这 4 个 code 上的 customization 在 up 时就会被
+--           覆盖；down DELETE 是 up 强制覆盖语义的**对称延续** —— admin 数据在
+--           0010 owned codes 上无论如何无法保留
+--
+-- 详见 lesson：
+--   - docs/lessons/2026-05-14-down-must-undo-up-invariant-over-admin-data.md (r2)
+--   - docs/lessons/2026-05-14-0010-final-decision-up-force-overwrite-down-narrow-delete.md (r3, **最终决断**)
 --
 -- **强约定（admin / 运维必读）**：
---   1. wave / love / laugh / cry **这 4 个 code 由 0010 钦定固定占用**，是系统 seed
---      表情；admin / 运维 **不应**手工 INSERT 这 4 个 code。
+--   1. wave / love / laugh / cry 这 4 个 code **由 0010 完全占用 / 强制覆盖**；
+--      admin / 运维 **禁止**手工 INSERT / UPDATE 这 4 个 code 的行（up 重跑会被覆盖；
+--      down 会被删除；任何 customization 都无法存活）。
 --   2. 需要新增表情（如 angry / surprised）→ 通过**新 migration**（0011+）添加，
 --      不要在 emoji_configs 表上做 admin 直插。
---   3. 0010.up 用 INSERT IGNORE 是为了**仅**容忍两类预存行：
---      (a) admin 误操作残留（违反约定 1 的预存行）
---      (b) 测试环境残留 / 上次回滚未清干净的本 seed 行
---      —— down 会清掉它们；admin 真要保留同 code 行需要手动 stage rollback
---      （`migrate down 1` 前先备份）。
---   4. 本 down 是 **narrow DELETE 4 行**（不是 TRUNCATE、不是全表 DELETE）：
+--   3. 本 down 是 **narrow DELETE 4 行**（不是 TRUNCATE、不是全表 DELETE）：
 --      只删 4 个钦定 code，**不会动** 0011+ 加的新表情（如 angry / surprised）的行。
 --
 -- **down 实际执行场景**（与 golang-migrate 语义对齐）：
 --   (a) 单跑 0010.down（保留 0009 schema）→ DELETE 4 行 → schema_migrations 回退到 v=9
---       → 表存在但 wave/love/laugh/cry 不在；再 up 一次会重新跑 0010.up 把 4 行 INSERT 回来。
+--       → 表存在但 wave/love/laugh/cry 不在；再 up 一次会重新跑 0010.up
+--       （ON DUPLICATE KEY UPDATE）把 4 行 INSERT/覆盖回来。
 --   (b) 跑 0009.down 链式带 0010.down 先跑 → 先 DELETE 4 行 → 再 DROP TABLE emoji_configs
 --       → 整张表清理；语义自洽。
---
--- 详见 lesson：docs/lessons/2026-05-14-down-must-undo-up-invariant-over-admin-data.md
 DELETE FROM emoji_configs WHERE code IN ('wave', 'love', 'laugh', 'cry');

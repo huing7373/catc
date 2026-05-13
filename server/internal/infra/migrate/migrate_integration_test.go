@@ -1073,35 +1073,43 @@ func TestMigrateIntegration_EmojiConfigs_SeedContent(t *testing.T) {
 }
 
 // TestMigrateIntegration_EmojiConfigs_SeedIdempotent 验证
-// migrations/0010_seed_emoji_configs.up.sql 钦定的 INSERT IGNORE 语义在
+// migrations/0010_seed_emoji_configs.up.sql 钦定的 ON DUPLICATE KEY UPDATE 语义在
 // duplicate-code 路径下的 server 端表现：
-// **当 UNIQUE KEY uk_code 命中时，INSERT IGNORE 不报错 + 不翻倍 + 不覆盖现有字段值**。
+// **当 UNIQUE KEY uk_code 命中时，ON DUPLICATE KEY UPDATE 不报错 + 不翻倍 +
+// 强制把 name / asset_url / sort_order / is_enabled 4 字段覆盖回 0010 钦定值**。
 //
-// **背景（Story 17.3 引入；17.3 r1 [P2] 重写；17.3 r2 [P2] 调整注释语义）**：
+// **背景（Story 17.3 引入；r1 [P2] 重写；r2 [P2] 调整注释语义；r3 [P1] 反转语义）**：
 //   - 原 case（r1 前）走 Up → Down → Up 路径，但 Down 把整张表 DROP 掉 → 第二次 Up
 //     跑空表 → 没真正测到 duplicate-code 路径 → 把 0010.up 从 INSERT IGNORE 改成普通
 //     INSERT 也能通过。r1 重写改成 "预填 admin-flavored 行 → 回滚 schema_migrations
-//     版本号 → 重跑 0010.up"，让 INSERT IGNORE 真正在 duplicate-code 路径上被执行。
-//   - r2 review 把 0010.down 从 r1 的 no-op 改回 narrow DELETE 4 行（migration invariant
-//     优先于 admin 数据保留；admin 数据保留改用"code 钦定占用 + 新 migration"约定）。
-//     这意味着"down 后预存行保留"语义在 r2 之后**不再成立** —— 本测试**不**测这条；
-//     测的核心是上面那句："INSERT IGNORE 在 duplicate code 时 server 端表现：不报错 +
-//     不翻倍 + 不覆盖现有值"。测试 setup 仍手工预填 admin-flavored 行（不变），
-//     只是结论从"down 后保留 admin 行"收紧成"up 重跑撞 uk_code 不破坏现有数据"。
+//     版本号 → 重跑 0010.up"，让 duplicate-code 路径真正被触发。
+//   - r2 把 0010.down 从 r1 的 no-op 改回 narrow DELETE 4 行（migration invariant
+//     优先于 admin 数据保留）；测试**注释语义**调整成"INSERT IGNORE 不覆盖现有值"。
+//   - **r3 [P1 #1] 反转 up 语义**：INSERT IGNORE 让 admin 预存的"坏行"（is_enabled=0
+//     / asset_url='' / sort_order 乱序）幸存 → Story 17.4/17.5/18.1 依赖的"4 个 enabled
+//     emoji 配置 invariant"无法保证。0010.up 改成 `INSERT ... ON DUPLICATE KEY UPDATE`
+//     强制覆盖 4 字段。本测试**结论反转**：从 r2 的"不覆盖现有值" → r3 的"强制覆盖现有值"。
+//     测试 setup（预填 admin-flavored 行）**不变**，只是断言从"保留 admin 值" → "覆盖回
+//     seed 值"。
 //
-// **覆盖路径**：
+// **覆盖路径（r3 反转后）**：
 //  1. migrate Up 全程 (v=10) → emoji_configs 4 行（0010 seed 写入）
 //  2. DELETE seed 4 行 + 手动 INSERT 4 行 admin-flavored 数据（asset_url / name
-//     都和 seed 不同，模拟 admin 在上线后改过这些行；本步骤**不**走 down，因此
-//     和 r2 后 down=narrow DELETE 的语义不冲突）
+//     都和 seed 不同，模拟 admin 在 0010 owned codes 上做了"违规 customization"）
 //  3. UPDATE schema_migrations SET version = 9 → 让 golang-migrate 认为 0010 还没跑过
-//  4. migrate Up 重跑 → 触发 0010.up INSERT IGNORE 命中 uk_code 4 次
-//  5. 断言：行数仍 4（不翻倍到 8）+ admin 写入的 asset_url / name 保留不被 seed 覆盖
+//  4. migrate Up 重跑 → 触发 0010.up ON DUPLICATE KEY UPDATE 命中 uk_code 4 次
+//  5. 断言：行数仍 4（不翻倍到 8）+ admin 字段值被**强制覆盖回 0010 seed 钦定值**
+//     —— 这是 r3 决策"0010 owns these 4 codes"的 100% 强保证。
 //
-// **三种"伪幂等"实现仍被本测试抓到**：
-//   - INSERT INTO（无 IGNORE）→ 步骤 4 撞 uk_code 1062 直接报错
-//   - INSERT ... ON DUPLICATE KEY UPDATE name=VALUES(name) → 行数对但 admin 字段被覆盖 → 步骤 5b 断言炸
-//   - REPLACE INTO → 同上（覆盖式语义）
+// **三种"伪幂等"实现仍被本测试抓到（结论反转后）**：
+//   - INSERT INTO（无 IGNORE / ON DUPLICATE KEY UPDATE）→ 步骤 4 撞 uk_code 1062 直接报错
+//   - INSERT IGNORE → 行数对但 admin 字段**保留不被覆盖** → 步骤 5b 断言炸
+//     （断言期望"覆盖回 seed 值"，IGNORE 路径下还是 admin 值）
+//   - REPLACE INTO → 行数对，name/asset_url/sort_order/is_enabled 也覆盖正确，但
+//     REPLACE 是 DELETE+INSERT 实现，会触发外键级联 / id 重排 / 触发器副作用 →
+//     虽然字段断言可能能过，但在 dockertest 里若 emoji_configs id 被外键引用时
+//     语义会失效（17.2 schema 当前无外键引用，故 REPLACE 也能 pass —— 但 ON DUPLICATE
+//     KEY UPDATE 更安全；这里不强测 REPLACE 一定挂，靠注释和 SQL review 兜底）
 //
 // **为什么不走 force(9)**：本 migrate 包没暴露 Force API（migrate.go 仅 Up / Down
 // / Status / Close）。直接 UPDATE schema_migrations 是 dockertest 集成测试可控
@@ -1149,22 +1157,27 @@ func TestMigrateIntegration_EmojiConfigs_SeedIdempotent(t *testing.T) {
 	}
 
 	type adminRow struct {
-		code     string
-		name     string
-		assetURL string
+		code      string
+		name      string
+		assetURL  string
+		sortOrder int
+		isEnabled int
 	}
-	// **故意**与 0010.up.sql seed 值不同（asset_url 用 admin-cdn 域名 / name 改成
-	// 不同字符），用于步骤 5 断言 INSERT IGNORE 没把 admin 值覆盖回 seed 值。
+	// **故意**与 0010.up.sql seed 值的全部 4 字段都不同（name / asset_url 改成不同字符串；
+	// sort_order 用 90+ 模拟 admin 乱改排序；is_enabled 用 0 模拟 admin "下架"了这 4 个 emoji）。
+	// 这是 r3 决策的核心测试场景 —— 模拟 admin 在 0010 owned codes 上做了"违规 customization"
+	// （including is_enabled=0 和 asset_url 不变但 sort_order 乱序的"坏行"），验证 0010.up
+	// ON DUPLICATE KEY UPDATE 路径会把这 4 字段**强制覆盖回** seed 钦定值。
 	adminRows := []adminRow{
-		{code: "wave", name: "挥手-admin", assetURL: "https://admin-cdn.example.com/wave.png"},
-		{code: "love", name: "爱心-admin", assetURL: "https://admin-cdn.example.com/love.png"},
-		{code: "laugh", name: "大笑-admin", assetURL: "https://admin-cdn.example.com/laugh.png"},
-		{code: "cry", name: "哭-admin", assetURL: "https://admin-cdn.example.com/cry.png"},
+		{code: "wave", name: "挥手-admin", assetURL: "https://admin-cdn.example.com/wave.png", sortOrder: 91, isEnabled: 0},
+		{code: "love", name: "爱心-admin", assetURL: "https://admin-cdn.example.com/love.png", sortOrder: 92, isEnabled: 0},
+		{code: "laugh", name: "大笑-admin", assetURL: "https://admin-cdn.example.com/laugh.png", sortOrder: 93, isEnabled: 0},
+		{code: "cry", name: "哭-admin", assetURL: "https://admin-cdn.example.com/cry.png", sortOrder: 94, isEnabled: 0},
 	}
-	for i, r := range adminRows {
+	for _, r := range adminRows {
 		if _, err := sqlDB.ExecContext(ctx,
-			`INSERT INTO emoji_configs (code, name, asset_url, sort_order, is_enabled) VALUES (?, ?, ?, ?, 1)`,
-			r.code, r.name, r.assetURL, i+1); err != nil {
+			`INSERT INTO emoji_configs (code, name, asset_url, sort_order, is_enabled) VALUES (?, ?, ?, ?, ?)`,
+			r.code, r.name, r.assetURL, r.sortOrder, r.isEnabled); err != nil {
 			t.Fatalf("INSERT admin row %q: %v", r.code, err)
 		}
 	}
@@ -1194,33 +1207,55 @@ func TestMigrateIntegration_EmojiConfigs_SeedIdempotent(t *testing.T) {
 		t.Fatalf("second migrate Up (after schema_migrations rollback): %v", err)
 	}
 
-	// 步骤 5a：行数仍恰好 4（不翻倍到 8 —— INSERT IGNORE 没插入重复行）
+	// 步骤 5a：行数仍恰好 4（不翻倍到 8 —— ON DUPLICATE KEY UPDATE 兜底不重复插入）
 	var countAfterSecondUp int
 	if err := sqlDB.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM emoji_configs WHERE code IN ('wave', 'love', 'laugh', 'cry')`).Scan(&countAfterSecondUp); err != nil {
 		t.Fatalf("SELECT COUNT after second Up: %v", err)
 	}
 	if countAfterSecondUp != 4 {
-		t.Errorf("after second Up, emoji_configs seed rows = %d, want 4 (INSERT IGNORE 兜底不重复插入；不应翻倍到 8)", countAfterSecondUp)
+		t.Errorf("after second Up, emoji_configs seed rows = %d, want 4 (ON DUPLICATE KEY UPDATE 兜底不重复插入；不应翻倍到 8)", countAfterSecondUp)
 	}
 
-	// 步骤 5b：每行 asset_url / name 仍是 admin 写入的值，不是 0010 seed 值
-	// —— 真正验证 INSERT IGNORE 没覆盖预存行；这是把 0010.up 改成 INSERT INTO
-	// （非 IGNORE）时**必然**炸的断言（普通 INSERT 会撞 uk_code 1062 直接报错）。
-	for _, want := range adminRows {
+	// 步骤 5b（r3 反转）：每行 name / asset_url / sort_order / is_enabled **被强制
+	// 覆盖回 0010 seed 钦定值**，**不是** admin 写入的值。
+	// —— 真正验证 ON DUPLICATE KEY UPDATE 的"强制覆盖"语义；这是 r3 决策
+	//   "wave/love/laugh/cry 这 4 个 code 由 0010 完全占用 / 强制覆盖"的 100% 强保证。
+	// 0010.up.sql 钦定值（与 SQL 文件 1:1 对齐）：
+	type seedRow struct {
+		code      string
+		name      string
+		assetURL  string
+		sortOrder int
+		isEnabled int
+	}
+	seedRows := []seedRow{
+		{code: "wave", name: "挥手", assetURL: "https://placehold.co/64x64?text=Wave", sortOrder: 1, isEnabled: 1},
+		{code: "love", name: "爱心", assetURL: "https://placehold.co/64x64?text=Love", sortOrder: 2, isEnabled: 1},
+		{code: "laugh", name: "大笑", assetURL: "https://placehold.co/64x64?text=Laugh", sortOrder: 3, isEnabled: 1},
+		{code: "cry", name: "哭", assetURL: "https://placehold.co/64x64?text=Cry", sortOrder: 4, isEnabled: 1},
+	}
+	for _, want := range seedRows {
 		var gotName, gotAssetURL string
+		var gotSortOrder, gotIsEnabled int
 		err := sqlDB.QueryRowContext(ctx,
-			`SELECT name, asset_url FROM emoji_configs WHERE code = ?`, want.code).
-			Scan(&gotName, &gotAssetURL)
+			`SELECT name, asset_url, sort_order, is_enabled FROM emoji_configs WHERE code = ?`, want.code).
+			Scan(&gotName, &gotAssetURL, &gotSortOrder, &gotIsEnabled)
 		if err != nil {
-			t.Errorf("SELECT admin row %q after second Up: %v", want.code, err)
+			t.Errorf("SELECT row %q after second Up: %v", want.code, err)
 			continue
 		}
 		if gotName != want.name {
-			t.Errorf("emoji %q name = %q, want %q (INSERT IGNORE 应保留 admin 值不覆盖)", want.code, gotName, want.name)
+			t.Errorf("emoji %q name = %q, want %q (ON DUPLICATE KEY UPDATE 应强制覆盖回 0010 seed 钦定值)", want.code, gotName, want.name)
 		}
 		if gotAssetURL != want.assetURL {
-			t.Errorf("emoji %q asset_url = %q, want %q (INSERT IGNORE 应保留 admin 值不覆盖)", want.code, gotAssetURL, want.assetURL)
+			t.Errorf("emoji %q asset_url = %q, want %q (ON DUPLICATE KEY UPDATE 应强制覆盖回 0010 seed 钦定值)", want.code, gotAssetURL, want.assetURL)
+		}
+		if gotSortOrder != want.sortOrder {
+			t.Errorf("emoji %q sort_order = %d, want %d (ON DUPLICATE KEY UPDATE 应强制覆盖回 0010 seed 钦定值)", want.code, gotSortOrder, want.sortOrder)
+		}
+		if gotIsEnabled != want.isEnabled {
+			t.Errorf("emoji %q is_enabled = %d, want %d (ON DUPLICATE KEY UPDATE 应强制覆盖回 0010 seed 钦定值)", want.code, gotIsEnabled, want.isEnabled)
 		}
 	}
 }

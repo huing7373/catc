@@ -5,7 +5,22 @@ story: 17-3-emoji_configs-seed
 commit: <pending>
 lesson_count: 1
 supersedes_partial: 2026-05-14-insert-ignore-symmetric-down-and-test.md (Lesson 1)
+locked_down_by: 2026-05-14-0010-final-decision-up-force-overwrite-down-narrow-delete.md (r3 在 r2 基础上把 up 路径也收紧成 invariant 强保证)
+status: valid-historical-context; up 路径细节被 r3 lesson 进一步收紧
 ---
+
+> 📎 **r3 update note (2026-05-14 r3 review 后追加)**：
+>
+> 本 lesson 的核心决策（down 必须真正 undo up）**仍然有效** —— r3 没有推翻 r2 关于 down 路径的决断；narrow DELETE 在 r3 后**继续保留**。
+>
+> 但本 lesson 里关于 up 路径的注释（"INSERT IGNORE 容忍预存行" / "admin 数据保留通过约定 + 新 migration 兜底"）在 r3 后**部分失效**：
+> - r3 抓到 `INSERT IGNORE` 让预存的"坏行"（is_enabled=0 / asset_url='' / sort_order 乱序）幸存，**下游 Story 17.4/17.5/18.1 依赖的"4 个 enabled emoji 配置正确"invariant 无法保证**。
+> - **最终决断**：up 改成 `INSERT ... ON DUPLICATE KEY UPDATE` 强制覆盖 4 字段。
+> - **admin 数据保留约定**进一步收紧为：admin **禁止**在 0010 owned codes 上做 customization（up 重跑会被覆盖；down 会被删除；customization 无论如何无法存活）。
+>
+> r2 的方向（migration invariant > admin 数据保留）r3 进一步加固到 up 路径；具体最终决断见 → **[docs/lessons/2026-05-14-0010-final-decision-up-force-overwrite-down-narrow-delete.md](2026-05-14-0010-final-decision-up-force-overwrite-down-narrow-delete.md)**。
+>
+> **未来 Claude 读到本 lesson 请同时读 r3 lesson；r3 是最终落地版本。**
 
 # Review Lessons — 2026-05-14 — seed migration 的 down 必须真正 undo up（migration invariant 优先于 admin 数据保留）
 
