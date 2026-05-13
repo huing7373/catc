@@ -54,6 +54,17 @@
 - `pets.current_state` 枚举（`1 = rest` / `2 = walk` / `3 = run`，来源数据库设计 §6.4）属契约一部分；新增枚举值（如 `4 = sleep`）视为契约变更。
 - `pet.state.changed` 广播范围（**包含**发起者自己）属契约一部分；与 `member.joined` / `member.left` 排除发起者 / 离开者**不同**语义，是显式设计选择（state 是事件本身，让 client 用统一路径处理；joined/left 是关系变化，发起者已通过 HTTP response 知道结果）；如未来需要切换为排除发起者，视为契约变更。
 - `pet.state.changed` fire-and-forget 语义（广播失败仅 log，不回滚 DB UPDATE，不影响 HTTP 200 响应）属契约一部分；如未来需要切换为强一致（如广播失败回滚），视为契约变更。
+- 自 2026-05-13（Story 17.1 完成日，对应 git commit hash 见 commit message）起，§11.1（GET /api/v1/emojis）节点 6 REST 接口的 schema + §12.2 `### 发送表情`（`emoji.send`）+ §12.3 `### 收到表情广播`（`emoji.received`）两个节点 6 业务 WS 消息的字段表进入**冻结**状态。
+- 任何字段名 / 字段类型 / `emojiCode` 字符集约束（`[a-z0-9_-]` + length 1-64） / 错误码（1001 / 1002 / 1005 / 1009 / 6004 / 7001）触发条件 / `emoji.received` payload 字段（`userId` / `emojiCode`）+ 顶层 envelope 字段（`type` / `requestId` / `ts`，遵循 §12.3 通用信封）/ 广播范围（**包含**发起者自己，与 `pet.state.changed` 同语义）/ fire-and-forget 语义 / **表情不持久化语义**（与 `pet.state.changed` 持久化 `pets.current_state` 不同）/ **client 端对 self-broadcast 的去重规则**（跳过 `payload.userId == 当前 user.id` 的 echo，与 `pet.state.changed` self-broadcast 双轨兜底**不同**语义）/ GET /emojis 不分页 + 不接受 query 参数 + 不返回 `is_enabled=0` 表情等核心契约的修改都必须（**冻结边界说明**：1005 的"触发条件"冻结在**抽象层** —— "走通用 rate_limit 中间件按 `user_id` 维度限频拦截"——这一不变量；**具体阈值**（如 60/min）由 Story 4.5 默认值 + 配置层管理，调整阈值**不**视为本接口契约变更；同理 7001 / 6004 的"触发条件"冻结在抽象层 —— "走 emoji_configs `is_enabled=1` 查询 / 走 `users.current_room_id != NULL` 查询"这一不变量；**具体 DB 查询路径调优**（如加索引 / 改 cache）**不**视为契约变更）：
+  1. 触发 iOS Epic 18 重新评审（影响 Story 18.1 / 18.2 / 18.3 / 18.4 所有表情面板 + 发送 + 接收动效 story）
+  2. 触发 server Epic 17 已完成 story 的回归（影响 Story 17.2 / 17.3 / 17.4 / 17.5 已落地的 migration / seed / handler / dispatcher / 广播路径）
+  3. 在本 story 文件 + epics.md 同步标注变更原因 + 影响范围
+- `emoji_configs.code` 字符集约束（`[a-z0-9_-]` + length 1-64，与 §5.15 数据库 `VARCHAR(64)` 字段一致）属契约一部分；新增字符集字符（如允许 `.` / `:` 等点分形式）视为契约变更；`emoji_configs.is_enabled` 仅 0 / 1 两值（与 §6 状态枚举一致）属契约一部分。
+- `emoji.received` 广播范围（**包含**发起者自己）属契约一部分；与 `member.joined` / `member.left` 排除发起者 / 离开者**不同**语义、与 `pet.state.changed` **同**语义，是显式设计选择（表情是事件本身，让 client 用统一 WS 入口处理；server 不区分接收者）；如未来需要切换为排除发起者，视为契约变更。
+- `emoji.received` fire-and-forget 语义（广播失败仅 log，不回 error 给发起者）属契约一部分；如未来需要切换为强一致（如广播失败回错给发起者），视为契约变更。
+- `emoji.received` self-broadcast 去重契约（client 端跳过 `payload.userId == 当前 user.id` 的 echo，与 `pet.state.changed` self-broadcast 双轨兜底**不同**）属契约一部分；如未来 client 改为"接收 self-echo 并触发某 UI 反馈"（如 ack indicator），视为契约变更。
+- **表情不持久化**契约（按数据库设计 §14.3，server 不写入任何表）属契约一部分；如未来引入 `emoji_events` 表 + 历史回放接口，视为契约变更。
+- **GET /emojis 不分页 + 不接受 query 参数 + 不返回 disabled 表情**契约属契约一部分；如未来引入分页 / 筛选 / disabled 表情对 admin 可见，视为契约变更。
 
 ---
 
@@ -1722,7 +1733,47 @@ JSON 示例：
 
 ### `GET /api/v1/emojis`
 
-#### 返回示例
+#### 接口元信息
+
+| 字段 | 值 |
+|---|---|
+| HTTP Method | GET |
+| Path | /api/v1/emojis |
+| 认证 | **需要** Bearer token（auth 中间件） |
+| 限频 | 默认（按 Story 4.5 rate_limit 默认值 60 次/分；表情列表是静态配置，client 应在 App 生命周期内缓存 —— 每用户每分钟实际调用 << 60 次） |
+| 幂等 | 天然幂等（GET 查询，无副作用） |
+| 节点 | 节点 6（Epic 17 落地 / Epic 18 客户端集成） |
+| 分页 | **不**分页（表情列表 4 ~ 20 个 short list，全量返回） |
+| Query 参数 | **无**（不接受任何 query string，不支持筛选 / 排序参数） |
+
+#### 请求
+
+无请求体（GET 接口）；仅需 `Authorization: Bearer <token>` Header。
+
+#### 服务端逻辑
+
+1. **认证 & 限频**：auth 中间件校验 Bearer token；rate_limit 中间件按默认配置限频（60 次/分按 user_id 计；已认证业务路由统一按 user_id 而非 IP，与 §6.1 / §6.2 / §10.x / §5.2 同语义）
+2. **查询**：`SELECT id, code, name, asset_url, sort_order FROM emoji_configs WHERE is_enabled = 1 ORDER BY sort_order ASC, id ASC`
+   - **次要排序键 `id ASC`**：保证 `sort_order` 相同时返回顺序确定（避免 client 端"同 sort_order 表情顺序在不同请求间不一致"问题）
+   - **`is_enabled = 1`** 过滤：disabled 表情**不**返回给 client（被 server 管理员临时下架 / WIP 阶段不放出的表情）
+3. **DTO 转换**：把 DB row 映射为 response item（`id` 字段**不**下发，client 不需要数据库主键；`code` 作为业务标识符；`is_enabled` 不下发；`created_at` / `updated_at` 不下发）
+4. **响应**：返回 `data.items` 数组，**不**分页（即使数组为空也返回 `items: []`，**不**返回 `null`）
+
+**事务边界规则**：本接口**不**需要 MySQL 事务（仅 1 个 SELECT 查询）。
+
+#### 响应体
+
+成功（code = 0）：
+
+| 字段 | 类型 | 必填 | 范围/约束 | 说明 |
+|---|---|---|---|---|
+| `data.items` | array | 必填 | 0 ≤ length ≤ 50 | 已 enabled 的表情列表，按 `sort_order` 升序 + 次要键 `id` 升序排列；列表可能为空（如 seed 未执行 / 全部 disabled）—— 空时返回 `items: []`，**不**返回 `null` |
+| `data.items[].code` | string | 必填 | 1 ≤ length ≤ 64；只允许 `[a-z0-9_-]`（与数据库 `emoji_configs.code VARCHAR(64)` + `UNIQUE KEY uk_code` 一致） | 表情业务标识符（如 `"wave"` / `"love"`）；client 用作 `emoji.send.payload.emojiCode` 入参；全局唯一（DB 唯一约束保证） |
+| `data.items[].name` | string | 必填 | 1 ≤ length ≤ 64 | 表情中文名（如 `"挥手"` / `"爱心"`），client 用作 UI 展示文字；DB 来源 `emoji_configs.name` |
+| `data.items[].assetUrl` | string | 必填 | 0 ≤ length ≤ 255 | 表情资源 URL（PNG / GIF / WebP / SVG 等图片资源）；MVP 阶段允许 placeholder URL（如 `https://placehold.co/64x64?text=Wave`）；可空字符串 `""`（首次 seed 未上传时；client 解析层应按 `String` 处理并降级为问号 fallback —— 与数据库 `emoji_configs.asset_url DEFAULT ''` 一致） |
+| `data.items[].sortOrder` | number (int) | 必填 | 0 ≤ value ≤ 2^31 - 1 | 表情显示顺序（升序）；DB 来源 `emoji_configs.sort_order`；client 接收时**不**需要二次排序（server 已按 `sort_order ASC, id ASC` 排序） |
+
+JSON 示例：
 
 ```json
 {
@@ -1747,6 +1798,42 @@ JSON 示例：
   "requestId": "req_xxx"
 }
 ```
+
+JSON 示例（空列表 edge case）：
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "items": []
+  },
+  "requestId": "req_xxx"
+}
+```
+
+> **注**：本接口**不**下发 `id` / `is_enabled` / `created_at` / `updated_at` 字段 —— `id` 是数据库主键 client 不需要（client 用 `code` 作为业务标识符）；`is_enabled` 已在 server 端过滤（仅下发 enabled 表情）；时间戳字段 client 无 UI 用途。
+>
+> **client 缓存契约**：表情列表是**静态配置**，client **应**在 App 生命周期内首次拉取后缓存，后续不再重复拉取（iOS Story 18.1 实装：表情面板首次显示 → GET /emojis → 缓存到 ViewModel / Singleton；后续表情面板显示直接读缓存）。如 server 端表情配置变更（admin 后台改 `is_enabled` / `sort_order` / 新增 emoji），client 需要重启 App 或主动刷新才能看到新值 —— 节点 6 MVP 阶段无 push 通知机制，可接受；后续若产品要求"实时刷新表情列表"，由对应 epic 决定是否引入 ETag / If-None-Match / WS 通知 emoji_configs.changed 等机制。
+
+#### 可能的错误码
+
+| code | message | 触发条件 |
+|---|---|---|
+| 1001 | 未登录 / token 无效 | auth 中间件拦截（无 Authorization 头 / token 非法 / token 过期 / token 解析失败） |
+| 1005 | 操作过于频繁 | rate_limit 中间件拦截（**已认证路由**按 `user_id` 限频，每用户每分钟 > 60 次；按 Story 4.5 默认值，配置可调） |
+| 1009 | 服务繁忙 | DB 异常（SELECT 执行返回 `err != nil`，含 driver / 网络 / 慢查询超时等）/ 内部 panic（见 Story 17.4 service 实装） |
+
+> **注**：本接口**不**触发 1002 参数错误（无 query / body 字段可校验）/ **不**触发 7001 表情不存在（这是列表查询，无单 emoji code 校验，7001 仅在 `emoji.send` WS 路径校验失败时触发，详见 §12.2 `### 发送表情` 错误响应段）/ **不**触发 6xxx 房间相关错误（本接口与房间无关）/ **不**触发 3xxx / 4xxx / 5xxx（步数 / 宝箱 / 装扮）。
+
+**关键约束**：
+
+- **不分页**：表情列表全量返回，最大长度 50（实际 MVP 阶段 4-20 个）；client 不需要处理"加载更多" / "下一页" UI；如未来表情数量增长到需要分页（业务上低概率），由对应 epic 重新评审契约
+- **不接受 query 参数**：本接口不支持任何 query string 筛选（如 `?category=greeting`）/ 排序（如 `?orderBy=name`）/ 分页（如 `?page=1`）；client 端如需 UI 层分类，自己实装本地分组 —— server 不引入分类字段（MVP 节点 6 不规划表情分类，KISS）
+- **响应空列表 `items: []` 与 `items: null` 语义不同**：server **永远**返回 `items: []`（空数组）而**不**返回 `null`；client 解析层按"数组"假设处理（与 §10.3 `data.members[]` / §5.1 `data` 数组字段处理一致）—— `null` 会触发 Swift Codable 解析失败（除非 client 把字段标 Optional，但本字段为必填）
+- **assetUrl 可空字符串 `""`**：与数据库 `emoji_configs.asset_url VARCHAR(255) NOT NULL DEFAULT ''` 一致；首次 seed 未上传 asset 时为空；client 解析层**应**按 `String` 处理（不是 Optional），并在 UI 层降级（如显示问号占位 / 不渲染图片）；**禁止** server 下发 `null` 触发 client 解析失败
+- **BIGINT 主键字段**（`emoji_configs.id`）**不**下发 → 无 §2.5 字符串化诉求；其余字段都是 string / int / int32，遵循 §2.5 全局约定（int 不字符串化）
+- **`sortOrder` 不字符串化**：是普通 int 顺序字段，**不**是主键，不受 §2.5 BIGINT 字符串化规则约束（与 §11.1 `data.items[].sortOrder` 同语义）
 
 ---
 
@@ -1893,6 +1980,21 @@ JSON 通用骨架：
 
 ### 发送表情
 
+**触发**：
+
+- iOS 客户端在房间页面用户选中表情面板（Story 18.1）中某个表情时，由 SendEmojiUseCase（Story 18.3）通过已建立的 WebSocket 连接（Story 12.2 WebSocketClient）发送 `emoji.send` text frame；client 在发送的**同时**触发本地立即动效（不等 server `emoji.received` 回信），与 server 广播解耦
+- 节点 6 阶段**仅** Story 18.3 一处触发；其他客户端流程（如自动重连 / 心跳）**都不**触发 `emoji.send`
+
+**字段**（基于 §12.2 通用消息信封 + 业务字段）：
+
+| 字段 | 类型 | 必填 | 范围/约束 | 说明 |
+|---|---|---|---|---|
+| `type` | string | 必填 | 固定值 `"emoji.send"` | 消息类型，遵循 §12.2 通用信封约束（全小写点分 + `[a-z0-9.]`） |
+| `requestId` | string | 选填 | 0 ≤ length ≤ 64 字符 | client 生成的请求 ID，遵循 §12.2 通用信封约束；server 处理失败时（如 7001 / 6004）回 `error` 消息**回带**该 `requestId`；server 处理成功后广播的 `emoji.received` **不**回带 `requestId`（广播类消息固定 `""`，详见 §12.3 通用信封）；client 端推荐格式 `"emoji_<seq>"` / `"emoji_<ts_ms>"`，方便与 `error` 响应配对 |
+| `payload.emojiCode` | string | 必填 | 1 ≤ length ≤ 64 字符；只允许 `[a-z0-9_-]`（与 §11.1 `data.items[].code` 同语义 + 数据库 `emoji_configs.code` 同语义） | 客户端选中的表情业务标识符；server 校验该 `emojiCode` 必须在 `emoji_configs` 中存在 + `is_enabled=1`，否则回 `error.payload.code = 7001`（见下方"错误响应"段） |
+
+JSON 示例（与本节字段表对齐）：
+
 ```json
 {
   "type": "emoji.send",
@@ -1903,9 +2005,79 @@ JSON 通用骨架：
 }
 ```
 
-> **业务消息延后锚定**：上文 `### 发送表情`（`emoji.send`）为节点 4 之前的协议草稿示例，**不**在节点 4 / Epic 10 范围内。该消息字段层契约的正式锚定由 **Story 17.1**（Epic 17 表情广播契约）负责，节点 6 落地。
+> **注**：本消息走 §12.2 client → server 通用信封（**不**带 `ts` 字段 —— 客户端发起方向不需要 client 时间戳，详见 §12.2 通用消息信封字段表 + 注），且 `payload` 仅 `emojiCode` 一个字段（保持最小契约）。
+
+**服务端逻辑**（Story 17.5 实装锚定）：
+
+1. **接收 & 解析**：server WS dispatcher（Story 10.3）按 `type = "emoji.send"` 路由到 EmojiHandler；解析 `payload.emojiCode` 字段
+2. **参数校验**：`emojiCode` 必填 + 类型为 string + 1 ≤ length ≤ 64 + 字符集 `[a-z0-9_-]`；任何不通过 → 回 `error.payload.code = 1002` "参数错误"（**响应类** error，`requestId` 回带 `emoji.send.requestId`），**不**广播
+3. **房间归属校验**（**权威源 = 收到 `emoji.send` frame 的 WS Session 上携带的 `roomID`** —— 该 `Session.roomID` 由 §12.1 握手 path `/ws/rooms/{roomId}` 写入、并已在 §12.1 校验顺序步骤 5 通过 `room_members WHERE user_id=? AND room_id=?` 校验，**是协议层钦定的"本次 WS 连接所属房间"权威源**；详见 §9.1 `Session` 字段表 + §12.1 校验顺序步骤 4 / 5）：`SELECT current_room_id FROM users WHERE id = ?`（当前 user.id 来自 WS 握手 token；查得后**必须**与 `Session.roomID` 比对 —— **不可仅判 `!= NULL`**，否则 stale Session 跨房间注入风险无法封堵，详见本步骤末"r1 review 锁定的反 stale-Session 校验" 注）
+   - **`current_room_id == NULL`**（用户当前不在任何房间 —— 与 §10.4 / §10.5 房间归属同义）→ 回 `error.payload.code = 6004` "用户不在房间中"（**响应类** error，`requestId` 回带 `emoji.send.requestId`），**不**广播
+   - **`current_room_id != NULL` 但 `current_room_id != Session.roomID`**（用户在房间 A 持有 stale Session、`users.current_room_id` 已切到房间 B —— 来源场景：(a) §10.5 leave 事务步骤 7 的 close 4007 是 best-effort cleanup，4007 frame 写入失败 / 客户端尚未读到时 leaver Session 在内存中残留；(b) 多设备 / 跨标签场景：用户 A 在设备 1 持房间 X Session、在设备 2 通过 HTTP join 房间 Y 后 `users.current_room_id` = Y、设备 1 Session 未收到任何 close 仍在；(c) 客户端实装 bug 持 stale socket 继续发送）→ 回 `error.payload.code = 6004` "用户不在房间中"（**响应类** error，`requestId` 回带 `emoji.send.requestId`），**不**广播；同时 server **应** log warn 级别记录该跨房间发送企图（含 `userId` / `Session.roomID` / `users.current_room_id`），便于排查多设备 stale Session 残留
+   - **`current_room_id != NULL` 且 `current_room_id == Session.roomID`** → 记录 `currentRoomId = Session.roomID` 进入步骤 4
+
+   > **r1 review 锁定的反 stale-Session 校验**：仅判 `current_room_id != NULL` **不足以**保证 `emoji.send` 广播范围正确。`GET /ws/rooms/{roomId}` 的 path 已经决定了"本次 WS 连接所属房间"，但 `users.current_room_id` 可在 WS 连接生命周期内被 HTTP `POST /rooms/{roomId}/leave` + `POST /rooms/{otherRoomId}/join` 改变；若仅以 `users.current_room_id` 为广播目标，stale Session（房间 A）发来的 `emoji.send` 会被广播到当前 `users.current_room_id` = 房间 B，造成**跨房间消息注入**。该校验改用 `Session.roomID` 作为广播目标 + 同时比对 `users.current_room_id == Session.roomID`，与 §10.4 / §10.5 HTTP 房间接口 ACL 行为对齐（HTTP 路径用 path roomId 校验，WS 路径同样用握手 path roomId 校验）。
+4. **表情合法性校验**：`SELECT 1 FROM emoji_configs WHERE code = ? AND is_enabled = 1`（按入参 `emojiCode` 查）
+   - **0 行**（`emojiCode` 不存在 / 或存在但 `is_enabled=0` —— 两种情况合并为同一错误，避免 server 暴露 enabled / disabled 状态信息）→ 回 `error.payload.code = 7001` "emoji not found"（**响应类** error，`requestId` 回带 `emoji.send.requestId`），**不**广播
+   - **1 行** → 进入步骤 5
+5. **广播（fire-and-forget）**：调用 `BroadcastToRoom(Session.roomID, {type: "emoji.received", payload: {userId, emojiCode}})`（**广播目标 = `Session.roomID`，不是 `users.current_room_id`** —— 二者在步骤 3 已校验相等，此处显式以 `Session.roomID` 为参表达"本次 WS 连接所属房间是广播权威源"，详见 §12.3 `### 收到表情广播`）；广播失败仅 log warning，**不**回 error 给发起者（与 Story 11.8 `member.joined` / Story 14.4 `pet.state.changed` 广播失败语义一致；**注**：与 `pet.state.changed` 的区别 —— `pet.state.changed` HTTP 路径仍返回 200 OK；`emoji.send` 是 WS 路径，无 HTTP 响应，server 端"成功"= 仅完成上述 5 步 + 广播尝试，**不**回 ack 消息给发起者；如发起者需要"server 确认收到"的信号，依赖广播范围**包含发起者自己**的语义 —— 发起者会收到自己的 `emoji.received`，那就是 server 确认信号）
+6. **不入库**：表情事件**不**持久化到任何表（按数据库设计 §14.3，MVP 不强制落库表情事件日志；与 `pets.current_state` UPDATE 持久化的 `pet.state.changed` 语义**不同**）
+
+**WS 广播 vs 客户端本地动效的关系（含发起者自己的 self-broadcast 去重规则）**：`emoji.send` 是 client → server 单向消息，**无**像 HTTP 那样的 server response 信号；server 处理后通过 `emoji.received` 广播事件通知（包含发起者自己）。client 端发出 `emoji.send` 后**应**立即在本地触发自己的动效（不等 server 广播 —— iOS Story 18.3 钦定），后续 server 广播到达时按以下规则去重：
+
+- **对"别人的表情"的权威信号**：以 WS 广播 `emoji.received` 为**唯一**信号（与 CLAUDE.md §"工作纪律 / 状态以 server 为准"一致）；client **不**通过任何其他渠道驱动别人的动效
+- **对"发起者自己的表情"的去重规则（与 §5.2 `pet.state.changed` self-broadcast 兜底规则**语义不同**）**：考虑到表情是 **transient UI 事件**（server 不持久化、UI 上动效结束即消失、状态对齐不存在"stale 风险"），client **应**对 `emoji.received.payload.userId == 当前 user.id` 走"跳过 / 不重复触发动效"路径（iOS Story 18.4 钦定）。理由：(a) 本地动效已在 SendEmojiUseCase 触发瞬间播完；(b) 重复触发会让发起者看到"两次同一动效"，UX 差；(c) 与 `pet.state.changed` self-broadcast **必须接收并 merge** 的语义**不同** —— `pet.state.changed` 是持久化状态变更，self-broadcast 是双轨之一防 stale；`emoji.received` 是 transient 事件，本地动效已是完整 UI 体验，self-broadcast 仅作为 server 端 "广播路径完整执行了" 的探测信号（client 端 log debug 即可，不驱动 UI）
+- **广播失败容忍**：如 `emoji.received` 广播因网络抖动 / Session 已 close 失败（含发起者自己 Session 失败 → 自己收不到 self-broadcast），fire-and-forget 仅 log warning；client 端不应假设每条 `emoji.send` 都能 server-acknowledged via self-broadcast，本地动效是发起者的**主要** UX 反馈（与 18.3 钦定一致）；网络极差时 server 也可能根本没收到 `emoji.send`（WS 连接断开）→ 同样仅本地动效 + 18.3 钦定弹温和 toast 提示"网络不佳，对方可能看不到"（toast 不阻塞 UI）
+
+**错误响应**：
+
+| code | message | 触发条件 | 失败后 client 推荐处理 |
+|---|---|---|---|
+| 1002 | 参数错误 | `payload.emojiCode` 字段缺失 / 类型非 string / length 不在 1 ~ 64 / 字符不在 `[a-z0-9_-]`（与 §3 错误码表 1002 一致） | client 端代码 bug（按 §11.1 缓存的表情列表选取，不应触发）；不重试，log error 上报 |
+| 6004 | 用户不在房间中 | service 层步骤 3 查到 (a) `users.current_room_id == NULL`，**或** (b) `users.current_room_id != NULL` 但 `users.current_room_id != Session.roomID`（即"用户已切到别的房间但仍在本 WS Session 上发送" stale-Session 跨房间企图，详见步骤 3 r1 review 锁定的反 stale-Session 校验）；两类合并报同一 `6004`，避免 server 暴露具体房间归属细节（与 §3 错误码表 6004 一致；该错误码原由 §10.4 / §10.5 房间 HTTP 接口触发，本接口是 WS 路径首次复用） | client 端房间状态与 server 不一致（本地以为在该房间，server 已踢出 / 已切到别的房间）；UX 提示用户"未在房间中"，回退到主界面 + 刷新 GET /home 状态；不重试本次发送 |
+| 7001 | emoji not found | service 层步骤 4 查到 `emojiCode` 不在 `emoji_configs` / 或存在但 `is_enabled=0`（与 §3 错误码表 7001 一致） | client 端缓存的表情列表与 server 不一致（如 admin 临时下架某表情但 client 未刷新缓存）；建议清除本地表情缓存 + 下次表情面板打开时重新 GET /emojis；本次发送已失败（不重试） |
+
+错误响应通过 §12.3 `error` 消息回送，遵循 `error` 消息字段表（`type: "error"` / `requestId` 回带 `emoji.send.requestId` / `payload.code` / `payload.message` / `ts`）。
+
+JSON 示例（7001 错误响应）：
+
+```json
+{
+  "type": "error",
+  "requestId": "msg_001",
+  "payload": {
+    "code": 7001,
+    "message": "emoji not found"
+  },
+  "ts": 1776920345000
+}
+```
+
+JSON 示例（6004 错误响应）：
+
+```json
+{
+  "type": "error",
+  "requestId": "msg_001",
+  "payload": {
+    "code": 6004,
+    "message": "用户不在房间中"
+  },
+  "ts": 1776920345000
+}
+```
+
+**关键约束**：
+
+- **client 端发送约束**：iOS client 在调用 `WebSocketClient.send` 前**应**校验 `emojiCode` 来自 §11.1 缓存的合法表情列表（取 `data.items[].code` 字段值），**禁止**直接 hardcode `emojiCode` 字面量（避免 client / server 不同步导致 7001 频发）；如 §11.1 GET /emojis 尚未拉取过 → client 应先拉取再启用表情面板（与 iOS Story 18.1 表情列表缓存契约一致）
+- **房间归属校验顺序 + 权威源**：server 端先做参数校验（1002）再做房间归属校验（6004）再做表情校验（7001）—— 这是契约层钦定的校验顺序，避免出现"参数不合法但报房间问题"误导 client；server 实装层（Story 17.5）严格按此顺序。**房间归属权威源 = `Session.roomID`（握手 path 写入，§12.1 步骤 5 已校验），不是 `users.current_room_id`**：步骤 3 必须比对 `users.current_room_id == Session.roomID`，仅判 `!= NULL` 不足以封堵 stale-Session 跨房间注入风险（详见 r1 review 锁定的反 stale-Session 校验注），与 §10.4 / §10.5 HTTP 房间接口"用 path roomId 校验" ACL 语义对齐
+- **不限频**：节点 6 阶段 server **不**对 `emoji.send` 做特殊限频（仅走 §12.1 / Story 10.4 心跳层 + Story 4.5 通用 rate_limit 中间件按 user_id 每分钟 60 次默认 —— **注**：rate_limit 中间件挂在 HTTP 路由，**不**挂 WS 路由，故 `emoji.send` 实际**不**走 1005 限频拦截；如需限频，由 future tech debt 处理）；epics.md §Story 17.5 已钦定"限频建议：同一用户每秒最多 5 个表情（防止刷屏，可在 Story 4.5 rate_limit 基础上扩展）—— MVP 可不做，但 tech debt 登记"，本契约层**不**预留限频错误码字段
+- **不入库**：表情事件**不**持久化（按数据库设计 §14.3）—— 与 `pet.state.changed` 持久化到 `pets.current_state` 不同；reconnect 后**不**重放历史表情事件（无历史可重放），与 `room.snapshot` 不下发"近期表情列表"语义一致
+- **client → server active message set 升级**：自本 story 起，`emoji.send` 正式加入 **client → server active message set**（继 Epic 10 `ping` 之后的首次扩展，详见 §12.3 末尾"server / client active message set 升级"块）
+
+> **业务消息延后锚定**：上文 `### 发送表情`（`emoji.send`）已由 **Story 17.1** 锚定字段表 + 触发条件 + 关键约束 —— 自此**接入** Epic 17 / 节点 6 client → server active message set（具体升级见 §12.3 末尾"server / client active message set 升级"块）。
 >
-> **Epic 10 阶段**（即本 story 范围 / Story 10.1 ~ 10.7）客户端 → 服务端**只**有 `ping` 一种合法消息；客户端**不**应在 Epic 10 阶段发送 `emoji.send`（即使协议草稿示例存在），server 收到非 `ping` 消息当前阶段**忽略**（log warn + 不 close 连接，避免兼容性问题；具体行为 Story 10.3 实装时锁定）。Epic 17 起按 Story 17.1 锚定将 `emoji.send` 加入合法 client-active 消息集合 —— 本声明仅冻结 Epic 10 阶段的 client-active message set，不阻止后续 epic 合法扩展。
+> **节点 6 阶段 client → server active message set**：`ping`（Epic 10 锚定）+ **`emoji.send`（本 story 锚定）**；其他 `type` 值 client **不**应发送，server 收到非 active set 内消息当前阶段**忽略**（log warn + 不 close 连接，避免兼容性问题；具体行为 Story 17.5 实装时锁定，与 Story 10.3 既有规则一致）。
 
 ### ping（心跳）
 
@@ -2258,7 +2430,24 @@ JSON 示例：
 >
 > - 节点 5 阶段 `pet.state.changed` payload 仅含 `userId` / `petId` / `currentState`，**不**含 `equips` / `equips[].renderConfig` 等装备字段（装备变更走独立路径：Epic 27 `POST /cosmetics/equip` / `POST /cosmetics/unequip` 接口；本消息**仅**广播 currentState 变化）。后续若产品需要"装备变更广播"语义，由对应 epic 单开 WS 消息（如 `pet.equips.changed`）而**不**扩展 `pet.state.changed` payload（保持每条业务 WS 消息单一职责）。
 
-### 收到表情广播
+### 收到表情广播（emoji.received）
+
+**触发**：
+
+- WS 客户端发送 `emoji.send`（详见 §12.2 `### 发送表情`）→ server 端 EmojiHandler 完成 5 步校验（鉴权 / 参数校验 / 房间归属校验 / 表情合法性校验 / 广播）全部通过后，service 层调用 `BroadcastToRoom(currentRoomId, {type: "emoji.received", payload: {userId, emojiCode}})` 广播给该房间内所有当前在线 Session（**包含**发起者自己 —— 与 `### 成员加入` `### 成员离开` 排除发起者**不同**语义，与 `### 宠物状态变更（pet.state.changed）` 包含发起者同语义）；广播失败 fire-and-forget（仅 log warning，**不**回 error 给发起者）
+- 节点 6 阶段**仅** Story 17.5 一处触发；任何 WS 层事件（含握手、心跳超时、断开重连、用户进出房间）**都不**触发 `emoji.received`；后续 epic 不在本路径加新触发条件（如假设性的"server 主动广播促销 emoji"等不在 MVP 范围）
+
+**字段**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `type` | string | 必填 | 固定值 `"emoji.received"` |
+| `requestId` | string | 必填 | 固定 `""`（主动推送类消息，遵循 §12.3 通用信封；**不**回带 `emoji.send.requestId` —— 广播 fanout 给房间内所有 Session，server 端无法对所有接收者都"配对" `emoji.send.requestId`；发起者自己的 self-broadcast 也走广播路径，故 `requestId` 同样固定 `""`） |
+| `payload.userId` | string | 必填 | 发送表情的 user 主键（BIGINT 字符串化，遵循 §2.5）；来自 `emoji.send` 当前 user.id（即 WS 握手 token 解码后的 user.id） |
+| `payload.emojiCode` | string | 必填 | 客户端发送的表情业务标识符；server 已在 §12.2 `### 发送表情` 服务端逻辑步骤 4 校验过该 `emojiCode` 必然存在于 `emoji_configs` 且 `is_enabled=1`（client 收到 `emoji.received` 时无需再次校验 —— server 端为 single source of truth）；与 §11.1 `data.items[].code` 同语义；client 用作查找 §11.1 缓存表情列表的 key，定位 `assetUrl` / `name` 等渲染所需字段 |
+| `ts` | number (int64) | 必填 | 服务端发送时间戳（ms）；遵循 §12.3 通用信封约束 |
+
+JSON 示例（与本节字段表对齐）：
 
 ```json
 {
@@ -2271,6 +2460,24 @@ JSON 示例：
   "ts": 1776920345000
 }
 ```
+
+**关键约束**：
+
+- 广播范围：**该房间内所有当前在线 Session**（**包含**发起者自己）—— 与 `### 成员加入` 排除加入者自己、`### 成员离开` 排除离开者自己的语义**不同**；与 `### 宠物状态变更（pet.state.changed）` 包含发起者**同**语义。原因：(a) `member.joined` / `member.left` 是"成员关系变化通知"，发起者已通过 HTTP response 知道结果，再收一份 WS 通知是冗余；(b) `emoji.received` 是"表情事件本身"，server **不**区分 broadcast 接收者是发起者 / 其他成员（统一发给房间内全员），让 client 端用单一 WS 入口处理表情事件，**简化 server 实装**。**发起者自己 self-broadcast 的 UI 处理职责（与 `pet.state.changed` 语义不同）**：client 端**应**对 `payload.userId == 当前 user.id` 走"跳过 / 不触发动效"路径（iOS Story 18.4 钦定）—— 表情是 transient UI 事件，本地动效已在 SendEmojiUseCase 触发瞬间（Story 18.3）播完，self-broadcast 仅作为 server 端 "广播路径完整执行了" 的探测信号（log debug，不驱动 UI）；这与 `pet.state.changed` "self-broadcast 与 HTTP 200 ack 任一先到都驱动 UI" 的双轨兜底**不同**（`pet.state.changed` 是持久化状态变更，self-broadcast 是状态对齐的双轨之一；`emoji.received` 是 transient 事件，无 stale 风险，跳过自己 echo 完全无副作用）
+- `payload.userId` / `payload.emojiCode` 都必填（**禁止** payload 为 `{}` 或缺任一字段）；缺字段视为契约违反，client 解析层**应**走"安全忽略 + log warn"路径（与 Story 10.1 `安全忽略未识别 type` 相同的容错策略，避免单条 malformed 消息把房间页搞崩）
+- client 收到 `emoji.received` 后**应**按以下规则处理（与 §12.3 `room.snapshot` client merge contract 字段级 merge **不同语义** —— 表情是 transient 事件，**不**进入 client roster / 持久化状态）：
+  - (a) `payload.userId == 当前 user.id`（self-broadcast）→ **跳过**（本地动效已播过）；log debug "self-emoji-broadcast received"
+  - (b) `payload.userId ∈ 当前房间 roster` 且 `payload.userId != 当前 user.id` → 在该成员 PetSpriteView 上方触发飞出动效（iOS Story 18.4 实装）
+  - (c) `payload.userId` 不在 roster（理论不该发生 —— server 广播范围 = `Session.roomID`（发起者本 WS 连接所属房间），发起者必然在该房间 roster 中；除非 race condition：发起者发完 emoji.send 后立即 leave 房间，self-broadcast 到达时 leaver 自己已不在房间 roster；但 server §12.2 步骤 3 已校验 `current_room_id == Session.roomID`、§10.5 leave 事务会先 close 4007 关闭 Session，self-broadcast 到达不了 leaver；故理论上无 race window）→ 安全忽略 + log warn "emoji.received from unknown roster member"
+  - (d) `payload.emojiCode` 不在 client 已缓存的表情列表（理论不该 —— server 已在 §12.2 服务端逻辑步骤 4 校验 emojiCode 合法；除非 race condition：用户 A 持 stale cache，用户 B 发送新 seed 的 emoji，A 收到 emoji.received 时本地 cache 找不到）→ 显示 fallback 占位（如问号 / 默认 emoji icon），**不**报错（与 §12.3 `pet.state.changed` `payload.currentState` 默认 fallback 渲染同语义）
+- **广播 fire-and-forget**：如该房间内某些 Session 因网络抖动 / 已 close / SessionManager 状态不一致导致广播失败，server **不**重试（仅 log warning）—— client 实装层（iOS Story 18.x）**不**应假设每条 `emoji.received` 都到达；表情是 transient 事件，**不**存在"状态对齐 fallback"路径（与 `pet.state.changed` 不同 —— `pet.state.changed` 有 reconnect 后 `room.snapshot` 全量重新对齐兜底；`emoji.received` 没有兜底，丢失即丢失，UX 表现为"对方看不到我的表情"，是可接受的弱网降级行为）。这条 fire-and-forget 语义与 Story 10.5 BroadcastToRoom primitive、Story 11.8 `member.joined` / `member.left` / Story 14.4 `pet.state.changed` 广播失败语义一致
+- `ts` 字段（int64 ms）来源是 server 端 `time.Now().UnixMilli()`（具体调用方式由 Story 17.5 实装层决定），与 `### 成员加入` / `### 成员离开` / `### 宠物状态变更` 的 `ts` 字段语义一致；用途**仅限**客户端日志关联 + UI 辅助展示，**禁止**用作业务排序 / 表情新旧判定（与 §12.2 line 1961 全局 WS envelope `ts` 字段约束一致）；表情新旧判定由 **同一 WS 连接内消息的物理到达顺序（FIFO 保证）** 决定，**不**依赖 `ts` 字段
+- **不持久化**：server 端**不**把 `emoji.received` 事件写入任何表（与 `pet.state.changed` 触发的 `pets.current_state` UPDATE **不同**；表情按数据库设计 §14.3 不入库）；client 端 reconnect 后**收不到**历史表情事件（无历史可重放，与 `room.snapshot` 不下发"近期表情列表"语义一致）；如未来产品要求"历史表情回放"或"未读提醒"，由对应 epic 决定是否引入 `emoji_events` 持久化表 + 接口
+
+> **Future Fields（节点 6 阶段为占位 / 后续 epic 落地）**：
+>
+> - 节点 6 阶段 `emoji.received` payload 仅含 `userId` / `emojiCode`，**不**含 `assetUrl` / `name` 等渲染字段（client 端通过 §11.1 缓存的表情列表查 `emojiCode` 对应的 `assetUrl` / `name` —— 避免每次广播都重复传递静态配置数据，减少 WS 流量）。后续若产品要求"广播携带动效配置"（如 server 控制每个表情的动画时长 / 路径），由对应 epic 单开 WS 消息或扩展 `emoji.received` payload，本 story 不预留字段。
+> - 节点 6 阶段**不**支持"表情自定义文案"（如类似 Slack reaction 的自定义文字），server 不广播自定义文本字段；如未来产品引入文本表情或 reaction，由对应 epic 决定是否新增字段或独立 WS 消息。
 
 ### pong（心跳响应）
 
@@ -2346,20 +2553,20 @@ JSON 示例（与本节字段表对齐，含 `requestId`）：
 >
 > **注（snapshot 构建失败的处理路径）**：握手完成后 Story 10.7 SnapshotBuilder 构建初始 `room.snapshot` 抛 error 时，server **不**走 "推 `error` 消息" 路径 —— 因为 §12.1 钦定 `room.snapshot` 是握手成功后必发的第一条消息，若仅推 `error` 而保持连接，client 会永远等待一个永不到达的 snapshot，房间页无法初始化、auto-reconnect 也不会触发。该场景统一走 close 路径：close **1011**（reason = `"snapshot build failed"`，详见 §12.1 close code 表 1011 行），客户端按 1011 语义自动重连（指数退避 + 最大重试次数限制）。错误码 `6005`（房间状态异常）保留给后续业务 epic 在房间已可用之后的运行时状态错误推送（如 Story 11.x / 14.x 业务流程中），**不**用于初始 snapshot 失败场景。
 
-> **业务消息延后锚定**：上文 `### 成员加入` / `### 成员离开` / `### 宠物状态变更` / `### 收到表情广播` 四个小节中，**前三个**（`member.joined` / `member.left` / `pet.state.changed`）已由 **Story 11.1**（Epic 11 房间业务契约，节点 4 中段；锚定 revision 见 `git log --grep='story-11-1'` 检出的 Story 11.1 收官 commit `chore(story-11-1): ...`，以及 `_bmad-output/implementation-artifacts/sprint-status.yaml` 中 `11-1-接口契约最终化` 状态行）/ **Story 14.1**（Epic 14 宠物状态同步契约，节点 5；锚定 revision 见 `git log --grep='story-14-1'` 检出的 Story 14.1 收官 commit `chore(story-14-1): ...`，以及 `_bmad-output/implementation-artifacts/sprint-status.yaml` 中 `14-1-接口契约最终化` 状态行）正式锚定字段表 + 触发条件 + 关键约束 —— 自此**接入** Epic 11 / Epic 14 / 节点 4 / 节点 5 server / client active message set。`### 收到表情广播`（`emoji.received`）保持"草稿示例"状态，待 Story 17.1 锚定。
+> **业务消息延后锚定**：上文 `### 成员加入` / `### 成员离开` / `### 宠物状态变更` / `### 收到表情广播` 四个小节已全部锚定 —— 已由 **Story 11.1**（Epic 11 房间业务契约，节点 4 中段；锚定 revision 见 `git log --grep='story-11-1'` 检出的 Story 11.1 收官 commit `chore(story-11-1): ...`，以及 `_bmad-output/implementation-artifacts/sprint-status.yaml` 中 `11-1-接口契约最终化` 状态行）/ **Story 14.1**（Epic 14 宠物状态同步契约，节点 5；锚定 revision 见 `git log --grep='story-14-1'` 检出的 Story 14.1 收官 commit `chore(story-14-1): ...`，以及 `_bmad-output/implementation-artifacts/sprint-status.yaml` 中 `14-1-接口契约最终化` 状态行）/ **Story 17.1**（Epic 17 表情广播契约，节点 6；锚定 revision 见 `git log --grep='story-17-1'` 检出的 Story 17.1 收官 commit `chore(story-17-1): ...`，以及 `_bmad-output/implementation-artifacts/sprint-status.yaml` 中 `17-1-接口契约最终化` 状态行）正式锚定字段表 + 触发条件 + 关键约束 —— 自此**接入** Epic 11 / Epic 14 / Epic 17 / 节点 4 / 节点 5 / 节点 6 server / client active message set。所有 §12.3 业务消息（`member.joined` / `member.left` / `pet.state.changed` / `emoji.received`）的字段层契约已 100% 锚定，节点 6 之后无新增业务消息字段层契约任务。
 >
 > 各消息字段层契约的正式锚定 epic 如下（**已升级状态以粗体标注**）：
 >
 > - `member.joined` / `member.left` → **Story 11.1（已锚定）**（Epic 11 房间业务契约，节点 4 中段）
 > - `pet.state.changed` → **Story 14.1（已锚定）**（Epic 14 宠物状态同步契约，节点 5）
-> - `emoji.received` → **Story 17.1**（Epic 17 表情广播契约，节点 6）
+> - `emoji.received` → **Story 17.1（已锚定）**（Epic 17 表情广播契约，节点 6）
+
+> **server / client active message set 升级**（自 Story 11.1 起生效，覆盖 Story 10.1 r10 钉死的"Epic 10 阶段冻结"边界；自 Story 14.1 起 server → client 集合再次扩展；自 Story 17.1 起 server → client + client → server 双向集合再次扩展）：
 >
-> **server / client active message set 升级**（自 Story 11.1 起生效，覆盖 Story 10.1 r10 钉死的"Epic 10 阶段冻结"边界；自 Story 14.1 起再次扩展）：
+> - **server → client active message set**：`room.snapshot` / `pong` / `error`（Epic 10 锚定）+ `member.joined` / `member.left`（Story 11.1 锚定）+ `pet.state.changed`（Story 14.1 锚定）+ **`emoji.received`（本 story 锚定）**
+> - **client → server active message set**：`ping`（Epic 10 锚定）+ **`emoji.send`（本 story 锚定，节点 6 起 client 首次获得新业务消息发送能力）**
 >
-> - **server → client active message set**：`room.snapshot` / `pong` / `error`（Epic 10 锚定）+ `member.joined` / `member.left`（Story 11.1 锚定）+ **`pet.state.changed`（本 story 锚定）**
-> - **client → server active message set**：`ping`（Epic 10 锚定）—— 节点 4 / 节点 5 阶段 client 不主动发新 WS 业务消息（`pet.state.changed` 是 server → client 单向广播，client 通过 HTTP `POST /pets/current/state-sync` 触发 server 广播，**不**直接发 WS 消息；`emoji.send` 由 Story 17.1 锚定加入，非节点 4 / 5）
->
-> 客户端 Story 12.3 / 12.4 / 15.2 解析层在节点 4 / 节点 5 阶段**应**对未识别的 `type` 值（如收到不该到达的 `emoji.received`）走"安全忽略 + log warn"路径，**不**因未识别消息 close 连接 / crash app（Story 10.1 既有规则，本 story 沿用）。
+> 客户端 Story 12.3 / 12.4 / 15.2 / 18.4 解析层在节点 4 / 节点 5 / 节点 6 阶段**应**对未识别的 `type` 值走"安全忽略 + log warn"路径，**不**因未识别消息 close 连接 / crash app（Story 10.1 既有规则，本 story 沿用）。
 
 ---
 
