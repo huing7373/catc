@@ -283,3 +283,4 @@
 | 2026-05-12 | [Generation gate 必须全覆盖 state-mutating message：`.roomSnapshot` 不能因"有 payload-level 校验"被豁免——整体覆盖型 message 的 stale 危害远大于 incremental delta（15-2 r3）](2026-05-12-generation-gate-must-cover-roomsnapshot-15-2-r3.md) | 1 | architecture | `72fb37e` |
 | 2026-05-13 | [Consumer 启动必须原子捕获 (stream, generation) —— 分两步读会被 prepareForReconnect 撕成"新 stream + 旧 gen"，让新 stream 所有消息被错误识别为 stale 丢弃（15-2 r4）](2026-05-13-consumer-must-atomically-snapshot-stream-and-generation-15-2-r4.md) | 1 | architecture | `0184339` |
 | 2026-05-13 | [room-scoped WS 消息必须以 `Session.roomID` 而非 `users.current_room_id` 做权威校验 + 广播目标（17-1 r1）](2026-05-13-ws-room-message-must-validate-session-roomid-17-1-r1.md) | 1 | security, architecture | `<pending>` |
+| 2026-05-13 | [冻结声明摘要必须与详细规约同步 & 错误响应表必须枚举 DB-error 1009 路径 & enabled 资源契约不允许空字符串（17-1 r2）](2026-05-13-emoji-contract-self-consistency-and-1009-and-asset-url-17-1-r2.md) | 3 | docs, error-handling | `<pending>` |
