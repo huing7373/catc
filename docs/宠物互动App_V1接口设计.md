@@ -936,7 +936,7 @@ JSON 示例（已解锁待开 edge case）：
 
 | 字段 | 类型 | 必填 | 范围/约束 | 说明 |
 |---|---|---|---|---|
-| `idempotencyKey` | string | 必填 | 1 ≤ length ≤ 128；只允许 `[A-Za-z0-9_:-]` | 幂等键；client **应**在每次点击"开箱"按钮时生成新的 key（如 `"chest_open_{userId}_{nanoTimestamp}"`），网络抖动重试时**复用同一 key**（避免重复扣步数 + 重复开箱）；server 端用此 key 在 Redis 缓存首次开箱结果（TTL 24h），命中即直接返回缓存（**不**触发新事务） |
+| `idempotencyKey` | string | 必填 | 1 ≤ length ≤ 128；只允许 `[A-Za-z0-9_:-]` | 幂等键；client **应**在每次点击"开箱"按钮时生成新的 key（如 `"chest_open_{userId}_{nanoTimestamp}"`），网络抖动重试时**复用同一 key**（避免重复扣步数 + 重复开箱）；server 端用此 key 在 Redis 做**双 TTL** 缓存：**sentinel `"__pending__"` TTL = 60s**（并发声明短窗口），**final response JSON TTL = 24h**（幂等重读长窗口）—— 命中 final JSON 即直接返回缓存（**不**触发新事务）；详见 §7.2.3 双 TTL 设计 + §7.2「client 重试策略」§1008 条款 |
 
 JSON 示例：
 
@@ -950,11 +950,15 @@ JSON 示例：
 
 1. **认证 & 限频**：auth 中间件校验 Bearer token；rate_limit 中间件按默认配置限频
 2. **参数校验**：`idempotencyKey` 必填 + length 1-128 + 字符集 `[A-Za-z0-9_:-]` —— 不满足 → 1002
-3. **Redis 幂等原子声明 + 命中分支**：用 Lua 脚本（或 `SET key value NX EX 86400`）对 `idem:{userId}:chest_open:{idempotencyKey}` 做**原子 claim**——
-   - **首次声明成功**（key 之前不存在，本次写入 sentinel 值 `"__pending__"` 占位）→ 继续步骤 4 进入事务
+3. **Redis 幂等原子声明 + 命中分支**：用 Lua 脚本（或 `SET key value NX EX 60`）对 `idem:{userId}:chest_open:{idempotencyKey}` 做**原子 claim**——
+   - **首次声明成功**（key 之前不存在，本次写入 sentinel 值 `"__pending__"` 占位，**TTL = 60s**）→ 继续步骤 4 进入事务
    - **已存在 sentinel `"__pending__"`**（有同 key 请求正在执行中、事务尚未提交、步骤 5 尚未回填真实结果）→ rollback claim 动作 → 返回 1008（幂等冲突，client 应稍后重试同 key —— 见关键约束）
-   - **已存在完整 response JSON**（同 key 首次开箱已成功，步骤 5 已回填）→ 直接返回缓存的完整响应（不开事务、不查 DB），**不**触发新开箱
+   - **已存在完整 response JSON**（同 key 首次开箱已成功，步骤 5 已回填 final JSON 并把 TTL 延长到 24h）→ 直接返回缓存的完整响应（不开事务、不查 DB），**不**触发新开箱
    - **注**：本步骤的"原子声明"是幂等性的**充要条件**——若仅做"GET 检查 + 后续 SET"两步分离，两个并发同 key 请求会同时 miss → 各自进事务 → 第二个事务在步骤 4a / 4d 上 FOR UPDATE 串行后仍可能看到不同状态（如步骤 4a 拿到 status=1 因 chest 已被首请求 DELETE，触发 4001 / 4002）→ 第二个 client 收到的是错误码而非首次成功结果，违反"同 key 重试安全"契约。必须用 `SET NX` 或 Lua CAS 形成单步原子；server 实装层（Story 20.6）由本契约钦定不可妥协
+   - **双 TTL 设计（关键决策，与 round 4 review 同步固化）**：sentinel `"__pending__"` 的 TTL **必须**为短时窗口 **60s**（仅用于"并发声明 + 进行中标记"短时语义）；步骤 5 SET 覆盖时把 TTL **延长**到 86400s（24h，长时幂等重读窗口）。两 TTL **不可合并**为单值：
+     - 若 sentinel TTL = 24h，步骤 5 SET / DEL 失败会让同 key 重试**最长卡死 24h**（破坏幂等承诺 / 让开箱功能"事故级"不可用 24h）—— 这是 round 3 contract 的核心缺陷
+     - 若 final-response TTL = 60s，幂等重读窗口太短，正常网络重试（≥ 1 分钟级别 retry）会 miss 缓存进入新事务，破坏"同 key 至多产生一次副作用"承诺
+     - 60s 是 sentinel 短窗口与"事务正常时延（毫秒级）"之间的平衡：事务正常完成时步骤 5 的 SET 一定先于 60s 覆盖；事务异常（DB 卡死 / 步骤 5 SET 失败 / DEL 失败）时 60s 内 sentinel 自然过期 → client 可在 60s 后用**新** key 自救（详见 §7.2.5 + §7.2「client 重试策略」）
    - **rate_limit 中间件位置**：rate_limit 在步骤 1 已执行，因此**重试请求即使命中 idempotency 缓存，本次调用仍计入 rate_limit 配额**（与节点 2 / 3 / 4 / 5 / 6 已认证业务路由一致）。client 在网络层重试时**应**自行做退避（指数退避 / 抖动）避免触发 1005；server 端**不**为本接口提供"重试免限频"特殊路径（中间件链不感知 idempotency 是契约简化决策，避免 rate_limit 中间件依赖路由级幂等状态）
 4. **MySQL 事务开始**（`txManager.WithTx(ctx, fn)` 包，所有 repo 调用用 `txCtx`）：
    a. **FOR UPDATE 锁 chest**：`SELECT id, status, unlock_at, open_cost_steps, version FROM user_chests WHERE user_id = ? FOR UPDATE`
@@ -976,7 +980,8 @@ JSON 示例：
 > - **本契约 finalize（Story 20.1）冻结的是"两段语义都生效，按节点切换"的状态**，**不是**§7.2 推翻 §14.1 / DB §8.3
    g. **刷新下一轮 chest**：`DELETE FROM user_chests WHERE id = ?`（旧 chest）→ `INSERT INTO user_chests (user_id, status, unlock_at, open_cost_steps, version) VALUES (?, 1, NOW() + INTERVAL 10 MINUTE, 1000, 0)`（新 chest）
    h. **事务提交**
-5. **Redis 回填幂等结果缓存**：`SET idem:{userId}:chest_open:{idempotencyKey} = <完整 response JSON>, EX 86400`（TTL 24h）—— **覆盖**步骤 3 写入的 `"__pending__"` sentinel。若事务在步骤 4 中 rollback（任何 a~h 子步骤失败）→ **必须**主动 `DEL idem:{userId}:chest_open:{idempotencyKey}` 删除 sentinel（**否则同 key 重试会持续返回 1008 直到 TTL 过期，违反"业务错误后用新 key 重试"契约对 sentinel 的清理预期**）；DEL 失败仅 log warn（同步骤 5 写失败处理，best-effort）
+5. **Redis 回填幂等结果缓存**：`SET idem:{userId}:chest_open:{idempotencyKey} = <完整 response JSON>, EX 86400`（TTL 延长到 24h —— **覆盖**步骤 3 写入的 60s sentinel）。若事务在步骤 4 中 rollback（任何 a~h 子步骤失败）→ **必须**主动 `DEL idem:{userId}:chest_open:{idempotencyKey}` 删除 sentinel（让同 key 在事务回滚后能立即重试；即使 DEL 失败，60s sentinel TTL 也会自然过期，client 可在 60s 后用新 key 自救）
+   - **SET / DEL 失败的 server 端补偿**：步骤 5 SET 或 DEL 任一失败 → server **异步重试** N 次（推荐 N = 3，指数退避 100ms / 500ms / 2s）；N 次全失败 → log.Error + 触发 metrics counter `chest_open_idem_cache_writeback_failed_total`（详见 §7.2.5 关键约束 server 端不变量）；**不**回滚已 commit 的事务、**不**对未 commit 的事务做补偿写入；client 端兜底由 60s sentinel TTL 自然过期 + §7.2「client 重试策略」承担
 6. **响应**：返回 `{reward, stepAccount, nextChest}` 三段嵌套 payload
 
 **事务边界规则**（与 数据库设计 §8.3 一致）：
@@ -984,11 +989,24 @@ JSON 示例：
 - 步骤 4 是单一 MySQL 事务，**不**跨 Redis（Redis 原子声明 sentinel 在事务**之前**——步骤 3；Redis 回填真实结果在事务**之后**——步骤 5；事务内部任何操作都不依赖 Redis）
 - **Redis claim 在事务前**：步骤 3 的 `SET NX` sentinel 是 single-key 原子操作，**先于** MySQL 事务执行；保证两请求同 key 时只有一个能进入事务，另一个直接走 1008 短路返回。这是契约层对"同 key 并发不进双事务"的硬保证（**不**靠 MySQL 行锁兜底——FOR UPDATE 在 4a 才执行，已晚于事务开启）
 - 加权抽奖（步骤 4e）使用 mocked `random.Reader` 接口（Story 20.6 实装时 inject），便于单测断言权重分布；本接口契约层**不**钦定具体算法（alias method / 线性扫描皆可）
-- **事务失败时 sentinel 清理**：步骤 4 任何子步骤（a~h）rollback → 步骤 5 改为 `DEL idem:{userId}:chest_open:{idempotencyKey}` 删除 sentinel；这是契约对"业务错误后用新 key 重试"承诺的兑现（若不删 sentinel，同 key 重试会持续返回 1008 直到 TTL 过期）
-- **Redis 回填失败处理**（步骤 5 SET 或 DEL 任一）：
-  - **成功路径 SET 失败**（事务已提交但缓存未回填）：事务已提交，**不**回滚；log **error**（非 warn —— 此 case 表征幂等承诺已局部退化，需告警值班）；client 收到 200 OK + 正确 reward。**关键约束**：此后同 key 重试将看到 sentinel `"__pending__"` 直到 sentinel TTL 过期（24h）→ 持续返回 1008；client **禁止**改用新 idempotencyKey 重试（否则资产已落盘 + 新 key 会再开事务造成重复扣 1000 步 + 重复发放装扮，违反"网络重试同 key 安全"承诺）；client **应**按 §7.2「client 重试策略」§1008 重试条款处理（同 key + 指数退避 N 次后仍 1008 → 放弃并提示用户「奖励已发放，请刷新查看；如未到账请联系客服」，**不**自动换 key 重试）。由于本 case 会让首次 reward 无法被同 key 再次读出（client 已收到首次 200，所以"读不出"在功能上不影响用户拿到奖励，只影响"重放幂等读"承诺），运营层面**应**保障 Redis 可用性 SLA ≥ 99.9% 把此 case 收敛到罕见事故级
-  - **失败路径 DEL 失败**（事务已回滚但 sentinel 未清理）：sentinel 残留至 TTL（24h）；期间同 key 请求收到 1008；client **同样禁止**改用新 idempotencyKey 自动重试（前次首次请求实际未成功，但 client 无法区分"事务确实失败"vs"事务成功但 SET 也失败"两种 case；若自动换 key 会在前者无效、在后者造成重复出箱）；client **应**按 §7.2「client 重试策略」§1008 重试条款，同 key + 指数退避 N 次后仍 1008 → 放弃并提示用户联系客服。该条款同样要求 Redis 可用性 SLA ≥ 99.9% 把 DEL 失败收敛到罕见事故级
-  - **server 端不变量**（实装锁定）：步骤 5 的 SET / DEL 均为 best-effort；server 端**不**为这两种失败提供自动修复机制（不补偿写、不延迟重试）；故 Story 20.6 实装需在 SET / DEL 失败时**强制 log.Error** + 触发 metrics counter `chest_open_idem_cache_writeback_failed_total`，便于运营层接 Alert 介入
+- **事务失败时 sentinel 清理**：步骤 4 任何子步骤（a~h）rollback → 步骤 5 改为 `DEL idem:{userId}:chest_open:{idempotencyKey}` 删除 sentinel；这是契约对"业务错误后立即可重试"承诺的兑现。**即使 DEL 失败也只卡死 60s**（sentinel TTL = 60s 短窗口；60s 后 sentinel 自然过期，同 key / 新 key 重试都可正常进事务）—— 此设计相比 round 3 的"TTL = 24h + DEL 失败卡 24h"是核心解锁点
+- **Redis 回填失败处理**（步骤 5 SET 或 DEL 任一；本节是**双 TTL 设计**的核心兜底，与 §7.2.3 sentinel TTL = 60s / final-cache TTL = 24h 配套）：
+  - **成功路径 SET 失败**（事务已提交但 final JSON 未覆盖 sentinel；sentinel 仍是 60s TTL 的 `"__pending__"`）：
+    - **事务**：已提交，**不**回滚；server 异步重试 SET 3 次（指数退避 100ms / 500ms / 2s），仍失败则 log.Error + counter `chest_open_idem_cache_writeback_failed_total`
+    - **client 视角**：收到 200 OK + 正确 reward，用户体验**无影响**
+    - **同 key 重试在 60s sentinel TTL 内**：持续命中 sentinel 返回 1008；client **应**按 §7.2「client 重试策略」§1008 条款同 key + 短退避（建议 2s / 4s / 8s 累计 ≤ 30s），不绕开 60s 窗口
+    - **60s sentinel 过期后**：sentinel 自然消失 → 同 key 重试**会进新事务**导致重复扣步数 + 重复出箱（这是 60s 窗口外的**已知坏行为**，发生概率 = Redis SET 失败率 × client 在 ≥ 60s 后仍同 key 重试的概率，预期罕见）；为规避此 case：client **应**在 §7.2「client 重试策略」明示「**60s 内**只允许同 key 重试；超过 60s 仍 1008 → 放弃**同** key 重试 + 显式换**新** idempotencyKey 重试，UI 同时提示『奖励可能已发放，请刷新页面；如未到账请联系客服』」—— **换新 key 的语义已从 round 3 的"禁止"软化为"60s 外允许 + UI 必须同步给用户"**
+    - **server 端 reconcile（tech debt 登记，MVP 阶段不实装）**：未来可加后台 job 定期扫 `chest_open_logs` + Redis 缓存做一致性校验，发现 SET 失败导致的"DB 已写 + Redis 无 final JSON"case 时补写 final JSON（仍需保留 sentinel-style 重放幂等）；本 MVP 阶段由 SLA + 用户客服流程兜底
+  - **失败路径 DEL 失败**（事务已回滚但 sentinel 未清理；sentinel 仍是 60s TTL 的 `"__pending__"`）：
+    - **事务**：已回滚，**无任何业务副作用**（步数未扣 / 装扮未发 / chest 未变）
+    - **client 视角**：收到错误码（1009 / 3002 / 4001 / 4002 等业务错误）；server 异步重试 DEL 3 次，仍失败则 log.Error + counter（同上）
+    - **同 key 重试在 60s sentinel TTL 内**：持续命中 sentinel 返回 1008；client **应**按 §7.2「client 重试策略」§1008 条款同 key + 短退避
+    - **60s sentinel 过期后**：sentinel 自然消失 → 同 key 重试可正常进事务（事务已回滚 + 无副作用，重新开事务**安全**，与换新 key 等价）；client **可**继续同 key 重试，也**可**换新 key（两者语义等价，因首发未生效）；推荐 client 在 60s 外换新 key 重试（语义更清晰）
+    - **24h lockout 已消除**：round 3 契约因 sentinel TTL = 24h 导致 DEL 失败会卡 24h；本轮把 sentinel TTL 缩短到 60s，DEL 失败的最坏后果 = 60s 内同 key 重试持续 1008，60s 后自动解除
+  - **server 端不变量**（实装锁定）：
+    - 步骤 5 SET / DEL 均为 best-effort，但**必须**做异步有限重试（N = 3，指数退避）
+    - 重试全失败 → **强制 log.Error** + 触发 counter `chest_open_idem_cache_writeback_failed_total`，便于运营层接 Alert 介入
+    - server 端**不**对已 commit 的事务做"反向补偿"（不允许 server 主动撤销 reward / 退步数），用户侧异常完全由 60s sentinel TTL + client 重试策略 + 客服流程承担
 
 #### 响应体
 
@@ -1085,12 +1103,39 @@ JSON 示例：
 - **idempotencyKey 字符集与长度**：`[A-Za-z0-9_:-]` + length 1-128；选用此字符集是为兼容主流 client 端 UUID / nanoid / ULID 等格式 + 允许 ":" 作为业务前缀分隔符（如 `"chest_open:user_1001:1714281600000"`）；**禁止**空字符串 `""`（character set 已隐含 length ≥ 1）；**禁止**包含 `/` / `?` / `&` 等 URL 保留字符（Redis key 不会因 URL 编码异常，但 client 实装时如果 idempotencyKey 串入了任何 URL / SQL / shell 上下文可能引发注入风险，故契约层在 character set 层面收紧）
 
 - **client 重试策略**：
-  - **网络层重试**（如 client 收到 5xx / timeout）→ 用**同** idempotencyKey 重试 + 指数退避（避免触发 1005，因 rate_limit 中间件**不**对 idempotency 命中请求免限频，重试计入用户级配额）；server 端走 Redis 缓存命中路径——如已回填则返回 200 + 首次结果，如仍是 sentinel `"__pending__"` 则返回 1008（client 应继续退避重试同 key，直到首次请求结果回填或 sentinel TTL 过期）
+  - **网络层重试**（如 client 收到 5xx / timeout）→ 用**同** idempotencyKey 重试 + 指数退避（避免触发 1005，因 rate_limit 中间件**不**对 idempotency 命中请求免限频，重试计入用户级配额）；server 端走 Redis 缓存命中路径——如已回填 final JSON 则返回 200 + 首次结果（TTL 24h 长窗口足够覆盖正常网络重试），如仍是 sentinel `"__pending__"` 则返回 1008（client 应继续退避重试同 key，**但仅在 sentinel TTL 60s 窗口内**；60s 后切换到「换新 key + UI 提示」逻辑，详见下方 §1008 重试条款）
   - **业务错误重试**（如收到 3002 / 4002）→ server 端事务 rollback 时已 DEL sentinel，sentinel 已清除——client **可**用同 key 也**可**用新 key 重试（语义等价，因 sentinel 已清，同 key 重试会走全流程）；推荐 client 用**新** idempotencyKey 重试（语义更清晰，避免与"网络重试"语义混淆）
-  - **1008 重试**（sentinel 命中并发执行中）→ client 应用**同** idempotencyKey + 退避重试（**不要**换 key，否则首次请求成功后回填的缓存命中不到，第二个 key 会再次进事务造成重复开箱）；建议 client 重试 3 次后仍 1008 则放弃并向用户报错（极端 case，首次请求长时间卡住或 sentinel 因 Redis 异常残留）
+  - **1008 重试**（sentinel 命中并发执行中）→ **核心规则**：sentinel TTL 是 **60s 短窗口**（见 §7.2.3 双 TTL 设计），重试策略分两段：
+    - **60s 内 / 首次请求发出后 ≤ 60s**：client **必须**用**同** idempotencyKey + 短退避重试（建议 2s / 4s / 8s，累计 ≤ 30s）；**禁止**换新 key（理由：首次请求可能正在事务中或已 commit 但 SET 正在重试，换新 key 会让第二次请求绕过 sentinel 重新进事务 → 重复扣步数 + 重复出箱）
+    - **60s 外 / 首次请求发出后 > 60s 仍 1008**：sentinel 应已过期；若仍 1008 说明 server 端补偿重试 SET 在持续刷新 sentinel TTL，或 Redis 异常 —— 此时 client **应**放弃同 key 重试 + 显式生成**新** idempotencyKey 重试一次；UI **必须**同步提示「奖励可能已发放，请刷新页面查看仓库；如未到账请联系客服」（提示文案是契约层硬要求，不允许 client 静默换 key 重试 —— 用户对"可能重复开箱"必须知情）
+    - **client 实装伪代码**（Story 20.6 / Epic 21 实装锚定）：
+      ```
+      key = generateIdempotencyKey()
+      firstAt = now()
+      retries = 0
+      loop:
+        resp = POST /chest/open {idempotencyKey: key}
+        if resp.code == 0: return resp.data  // 成功
+        if resp.code != 1008: return resp.code  // 非 1008 错误码按对应分支处理
+        // resp.code == 1008
+        if now() - firstAt < 60s:
+          // 60s 内同 key 退避重试
+          sleep(min(2s * 2^retries, 8s))
+          retries += 1
+          if retries >= 4: continue  // 持续重试到 60s 边界
+        else:
+          // 60s 外换新 key + UI 提示
+          showUserToast("奖励可能已发放，请刷新页面查看仓库；如未到账请联系客服")
+          key = generateIdempotencyKey()  // 显式换新 key
+          firstAt = now()
+          retries = 0
+          // 继续 loop（新 key 会重新走 sentinel claim）
+      ```
+    - **此条款替代 round 3 「禁止换新 key」绝对禁令**：round 3 把 sentinel TTL = 24h 视为给定 → 必须禁止换新 key 防止重复出箱；本轮把 sentinel TTL 缩短到 60s + 显式 UI 提示后，"60s 外允许换新 key"是契约层最简洁的兜底（牺牲极小概率的"60s 外仍 SET 失败"重复出箱风险，换取所有 client 卡死场景的 60s 自愈上限）
   - **重复点击防抖**：client UI 层应在用户点击"开箱"按钮后**立即禁用**按钮（loading 状态），直到收到 server 响应再启用；服务端层面 idempotencyKey + Redis 原子声明提供二次防护
 
-- **事务边界**：MySQL 事务在步骤 4 内（FOR UPDATE 锁 chest + step_account + UPDATE + INSERT 日志 + DELETE + INSERT chest），Redis 原子声明 sentinel 在事务**之前**（步骤 3），Redis 回填真实结果（成功路径 SET）或清理 sentinel（失败路径 DEL）在事务**之后**（步骤 5）；这种顺序保证：(a) 同 key 并发请求只有一个能 claim sentinel 进入事务，另一个走 1008 短路——**不**靠 MySQL 行锁兜底（FOR UPDATE 在 4a 才生效，已晚于事务开启）；(b) MySQL 事务失败 + DEL sentinel 失败 → sentinel 残留 TTL → 同 key 重试持续 1008（best-effort 退化，可接受）；(c) MySQL 事务成功 + Redis SET 失败 → client 收到 200 OK + 正确 reward → 同 key 重试看到 sentinel 返回 1008；**client 禁止自动换新 key 重试**（首次资产已落盘，换 key 重试会再开事务造成重复扣步数 + 重复出箱），应按 §7.2「client 重试策略」§1008 条款同 key 退避 N 次后**放弃 + 提示用户联系客服**；由此 case 极端罕见，运营层面要求 Redis 可用性 SLA ≥ 99.9% 收敛到事故级（**不**降级为"业务流程允许重复开箱"）
+- **事务边界**：MySQL 事务在步骤 4 内（FOR UPDATE 锁 chest + step_account + UPDATE + INSERT 日志 + DELETE + INSERT chest），Redis 原子声明 sentinel 在事务**之前**（步骤 3，TTL = 60s 短窗口），Redis 回填真实结果（成功路径 SET，TTL 延长至 24h）或清理 sentinel（失败路径 DEL）在事务**之后**（步骤 5）；这种顺序保证：(a) 同 key 并发请求只有一个能 claim sentinel 进入事务，另一个走 1008 短路——**不**靠 MySQL 行锁兜底（FOR UPDATE 在 4a 才生效，已晚于事务开启）；(b) MySQL 事务失败 + DEL sentinel 失败 → sentinel 残留**最多 60s** → 同 key 重试在窗口内持续 1008，60s 后 sentinel 过期 → 同 key 或新 key 重试都可正常进新事务（**事务已回滚，无副作用，重新进事务安全**）；(c) MySQL 事务成功 + Redis SET 失败 → client 收到 200 OK + 正确 reward → 同 key 重试在 60s 内看到 sentinel 返回 1008（按 §7.2「client 重试策略」§1008 同 key 退避），60s 后 sentinel 过期 → 同 key 重试**会进新事务造成重复扣步数 + 重复出箱**（已知 60s 外坏行为，极罕见）→ client **应**在 60s 外**显式换新 key + UI 提示** 兜底；运营层面要求 Redis 可用性 SLA ≥ 99.9% + server 端 SET 异步重试 3 次 + counter 告警 + （未来）后台 reconcile job 把"60s 外 SET 仍失败"case 收敛到罕见事故级
+  - **TTL 决策 vs round 3**：round 3 把 sentinel TTL 与 final-response TTL 合并为 24h，导致 SET / DEL 失败时 client 卡死时间窗口 = 24h（破坏幂等承诺 / 让开箱事故级不可用 24h）；本轮把 sentinel TTL 缩短到 60s，让卡死时间窗口可控；代价是 case (c) 的 60s 外引入"重复出箱"风险，由 §7.2「client 重试策略」60s 外换新 key + UI 提示 + （未来）server reconcile 兜底
 
 - **加权抽奖语义**：`drop_weight` 是抽奖权重（值越大越容易抽到），server 端按 `cumulative_weight / total_weight` 比例抽取；同 `drop_weight` 值的 cosmetic 抽到概率相等；`drop_weight = 0` 的 cosmetic（不应在 enabled 集合中）等价于不可抽到；加权抽取**仅**对 `is_enabled = 1` 行有效（disabled 行不参与抽奖）
 

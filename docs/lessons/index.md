@@ -298,3 +298,4 @@
 | 2026-05-14 | [POST /chest/open 幂等原子声明 & rate_limit 中间件不可绕开（20-1 r1）](2026-05-14-idempotency-atomic-claim-and-rate-limit-honesty.md) | 2 | architecture, docs | `<pending>` |
 | 2026-05-14 | [契约 finalize story 必须做跨文档一致性 & SQL PK / 列名 / 字段类型字面级校验（20-1 r2）](2026-05-14-contract-finalization-cross-doc-consistency-and-sql-pk.md) | 4 | docs | `<pending>` |
 | 2026-05-14 | [幂等缓存写回失败的 client 重试指引 / 数据完整性 vs 业务错误的错误码归类 / 跨节同名字段语义对齐（20-1 r3）](2026-05-14-idempotency-set-fail-retry-and-data-integrity-error-mapping-20-1-r3.md) | 3 | architecture, error-handling, docs | `<pending>` |
+| 2026-05-14 | [幂等 sentinel 短 TTL 设计消除 Redis 写回失败的 24h 卡死 / 不要把"防重复"的最大代价加在"幂等承诺"身上（20-1 r4）](2026-05-14-idempotency-sentinel-short-ttl-eliminates-redis-writeback-lockout-20-1-r4.md) | 2 | architecture, docs | `<pending>` |
