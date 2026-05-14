@@ -319,10 +319,10 @@
 | 2026-05-15 | [Stub endpoint 错误码不能复用通用 ErrServiceBusy —— HTTP status + log level 双层语义（20-8 r2）](2026-05-15-stub-endpoint-not-implemented-error-code-20-8-r2.md) | 2 | architecture, error-handling | `2ad1a21` |
 | 2026-05-15 | [dev 端点的 metrics 边界：从一开始就该排除，5xx 不污染 alert（20-8 r3）](2026-05-15-dev-endpoint-metrics-exempt-20-8-r3.md) | 1 | architecture | `3b56be3` |
 | 2026-05-15 | [dev 路径检查必须在 caller 侧（基于 raw URL）而非 callee 侧（基于已解析 route pattern）（20-8 r4）](2026-05-15-dev-path-check-caller-side-not-callee-side-20-8-r4.md) | 1 | architecture | `5c61f57` |
-| 2026-05-15 | [集成测试错误码断言必须忠实于事务步骤顺序（OpenChest 5d-5f unlock_at 检查在 step 检查之前 → race 失败码是 4002 而非 3002）（20-9 r1）](2026-05-15-integration-test-error-code-must-match-tx-step-order-20-9-r1.md) | 1 | testing | `<pending>` |
-| 2026-05-15 | [集成测试不准用真随机/真时钟做边界断言（deterministic picker stub + fixed clock 注入）（20-9 r2）](2026-05-15-integration-tests-deterministic-picker-and-fixed-clock-20-9-r2.md) | 2 | testing | `<pending>` |
-| 2026-05-15 | [集成测试 vs 单元测试责任划分（weighted picker 算法 vs wiring）（20-9 r3）](2026-05-15-integration-vs-unit-test-responsibility-split-weighted-picker-20-9-r3.md) | 1 | testing | `<pending>` |
-| 2026-05-15 | [并发集成测试必须用 start barrier 同步 goroutine 启动，否则 false-positive race coverage（20-9 r4）](2026-05-15-concurrent-test-needs-start-barrier-20-9-r4.md) | 1 | testing | `<pending>` |
-| 2026-05-15 | [并发测试 timing 断言 + bypass-resistant 真随机断言（20-9 r5）](2026-05-15-concurrent-timing-assertion-and-bypass-resistant-random-20-9-r5.md) | 3 | testing | `<pending>` |
-| 2026-05-15 | [集成测试 reliability over completeness：r2-r6 over-correction chain 终结（20-9 r6）](2026-05-15-test-reliability-over-completeness-20-9-r6.md) | 1 | testing | `<pending>` |
-| 2026-05-15 | [real picker wiring 弱断言：r6 整 case 删除 → r7 弱化断言反弹（20-9 r7）](2026-05-15-real-picker-wiring-weakest-assertion-20-9-r7.md) | 1 | testing | `<pending>` |
+| 2026-05-15 | [集成测试错误码断言必须忠实于事务步骤顺序（OpenChest 5d-5f unlock_at 检查在 step 检查之前 → race 失败码是 4002 而非 3002）（20-9 r1）](2026-05-15-integration-test-error-code-must-match-tx-step-order-20-9-r1.md) | 1 | testing | `09d28df` |
+| 2026-05-15 | [集成测试不准用真随机/真时钟做边界断言（deterministic picker stub + fixed clock 注入）（20-9 r2）](2026-05-15-integration-tests-deterministic-picker-and-fixed-clock-20-9-r2.md) | 2 | testing | `f1b3827` |
+| 2026-05-15 | [集成测试 vs 单元测试责任划分（weighted picker 算法 vs wiring）（20-9 r3）](2026-05-15-integration-vs-unit-test-responsibility-split-weighted-picker-20-9-r3.md) | 1 | testing | `db34c06` |
+| 2026-05-15 | [并发集成测试必须用 start barrier 同步 goroutine 启动，否则 false-positive race coverage（20-9 r4）](2026-05-15-concurrent-test-needs-start-barrier-20-9-r4.md) | 1 | testing | `4436239` |
+| 2026-05-15 | [并发测试 timing 断言 + bypass-resistant 真随机断言（20-9 r5）](2026-05-15-concurrent-timing-assertion-and-bypass-resistant-random-20-9-r5.md) | 3 | testing | `5238763` |
+| 2026-05-15 | [集成测试 reliability over completeness：r2-r6 over-correction chain 终结（20-9 r6）](2026-05-15-test-reliability-over-completeness-20-9-r6.md) | 1 | testing | `4df73f4` |
+| 2026-05-15 | [real picker wiring 弱断言：r6 整 case 删除 → r7 弱化断言反弹（20-9 r7）](2026-05-15-real-picker-wiring-weakest-assertion-20-9-r7.md) | 1 | testing | `92c8938` |

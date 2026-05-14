@@ -2,7 +2,7 @@
 date: 2026-05-15
 source_review: /tmp/epic-loop-review-20-9-r7.md (codex review round 7)
 story: 20-9-layer-2-集成测试-开箱事务全流程
-commit: <pending>
+commit: 92c8938
 lesson_count: 1
 ---
 
