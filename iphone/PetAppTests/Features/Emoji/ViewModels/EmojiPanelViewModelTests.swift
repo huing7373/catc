@@ -98,6 +98,35 @@ final class EmojiPanelViewModelTests: XCTestCase {
 
         XCTAssertEqual(vm.state, .failed("数据解析失败，请重试"))
     }
+
+    // MARK: - case#7 edge: localStoreFailure (transient) → state == .failed("登录信息读取异常，请重试")
+    // 防 round 2 回归：localStoreFailure 是 APIError.swift / AppErrorMapper 钦定的 transient 类，
+    // 不能与 .missingCredentials 合并到"登录已失效，请重启 App"。
+
+    func test_friendlyMessage_localStoreFailure_returnsRetryableMessage() async {
+        let mockUseCase = MockLoadEmojisUseCase()
+        let underlying = NSError(domain: "KeychainErrorDomain", code: -25291)
+        await mockUseCase.setStubResult(.failure(APIError.localStoreFailure(underlying: underlying)))
+        let vm = EmojiPanelViewModel(useCase: mockUseCase)
+
+        await vm.load()
+
+        XCTAssertEqual(vm.state, .failed("登录信息读取异常，请重试"))
+    }
+
+    // MARK: - case#8 edge: missingCredentials (terminal) → state == .failed("登录已失效，请重启 App")
+    // 与 case#7 配对：明确 .missingCredentials 仍走 terminal 文案 —— 防止未来"修复"误把
+    // .missingCredentials 也 retry 化（terminal 语义来自 APIError.swift §missingCredentials）。
+
+    func test_friendlyMessage_missingCredentials_returnsTerminalMessage() async {
+        let mockUseCase = MockLoadEmojisUseCase()
+        await mockUseCase.setStubResult(.failure(APIError.missingCredentials))
+        let vm = EmojiPanelViewModel(useCase: mockUseCase)
+
+        await vm.load()
+
+        XCTAssertEqual(vm.state, .failed("登录已失效，请重启 App"))
+    }
 }
 
 // MARK: - MockLoadEmojisUseCase (test-private actor)

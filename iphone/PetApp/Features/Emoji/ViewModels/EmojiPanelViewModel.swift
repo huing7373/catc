@@ -15,9 +15,11 @@
 // `mapError` (与 ErrorPresenter 同精神，但表情面板局部 RetryView 不走全局 toast/alert):
 //   - APIError.network → "网络异常，请检查后重试"
 //   - APIError.business(1009) → "服务器繁忙，请稍后再试"
-//   - APIError.business(1001) / .unauthorized → "登录已失效，请重启 App"
+//   - APIError.business(1001) / .unauthorized / .missingCredentials → "登录已失效，请重启 App" (terminal 类)
 //     (理论 ADR-0008 v2 装饰器已拦截 401，但兜底)
 //   - APIError.decoding → "数据解析失败，请重试"
+//   - APIError.localStoreFailure → "登录信息读取异常，请重试" (**transient** retry，与 AppErrorMapper §line 90-93 对齐；
+//     APIError.swift §.localStoreFailure 钦定 transient: keychain 抛错 retry 可能自愈，**不**与 .missingCredentials 合并)
 //   - 其他 (含 business 其他 code) → "加载失败，请重试"
 //
 // `retry()` 路径：等价 await load() (语义清晰：retry = 重试加载).
@@ -84,8 +86,15 @@ public final class EmojiPanelViewModel: ObservableObject {
             return "登录已失效，请重启 App"
         case .decoding:
             return "数据解析失败，请重试"
-        case .missingCredentials, .localStoreFailure:
+        case .missingCredentials:
+            // terminal: 本地 keychain 确认无 token，重启 App cold-start 走同一份 store 仍读不到，
+            // retry 无意义 —— 与 AppErrorMapper §line 85-88 ".alert(登录信息丢失)" 同语义.
             return "登录已失效，请重启 App"
+        case .localStoreFailure:
+            // **transient**: keychain.get 抛错 (sandbox 抽风 / OSStatus -25291 等)，retry 可能自愈.
+            // 与 AppErrorMapper §line 90-93 ".retry(登录信息读取异常)" 同语义 —— 不与 .missingCredentials 合并.
+            // 依据：APIError.swift §.localStoreFailure 钦定 transient + AppErrorMapper 分支已成定例.
+            return "登录信息读取异常，请重试"
         }
     }
 }
