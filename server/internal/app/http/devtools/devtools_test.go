@@ -59,7 +59,7 @@ func TestRegister_BuildDevTrue_PingDevReturns200(t *testing.T) {
 	t.Setenv("BUILD_DEV", "true")
 
 	r := newEngine()
-	devtools.Register(r, nil)
+	devtools.Register(r, nil, nil)
 
 	w := doGet(r, "/dev/ping-dev")
 
@@ -84,7 +84,7 @@ func TestRegister_BuildDevFalse_PingDevReturns404(t *testing.T) {
 	t.Setenv("BUILD_DEV", "")
 
 	r := newEngine()
-	devtools.Register(r, nil)
+	devtools.Register(r, nil, nil)
 
 	w := doGet(r, "/dev/ping-dev")
 
@@ -202,7 +202,7 @@ func TestRegister_WhenDisabled_EmitsNoLogs(t *testing.T) {
 	slog.SetDefault(slog.New(h))
 
 	r := newEngine()
-	devtools.Register(r, nil)
+	devtools.Register(r, nil, nil)
 
 	assert.Empty(t, h.Records(), "Register should emit ZERO log records when IsEnabled()==false")
 	// 间接验证路由未注册：/dev/ping-dev 返回 Gin NoRoute 404。
@@ -222,7 +222,7 @@ func TestRegister_WhenEnabled_EmitsExactlyOneWarn(t *testing.T) {
 	slog.SetDefault(slog.New(h))
 
 	r := newEngine()
-	devtools.Register(r, nil)
+	devtools.Register(r, nil, nil)
 
 	records := h.Records()
 	require.Len(t, records, 1, "Register should emit exactly one log record")
@@ -274,7 +274,7 @@ func TestRegister_BuildDevTrue_GrantStepsRegisteredWhenHandlerProvided(t *testin
 	})
 
 	r := newEngine()
-	devtools.Register(r, stubHandler)
+	devtools.Register(r, stubHandler, nil)
 
 	w := doPost(r, "/dev/grant-steps", `{"userId":1,"steps":5000}`)
 
@@ -288,7 +288,7 @@ func TestRegister_BuildDevTrue_GrantStepsSkippedWhenHandlerNil(t *testing.T) {
 	t.Setenv("BUILD_DEV", "true")
 
 	r := newEngine()
-	devtools.Register(r, nil) // nil handler
+	devtools.Register(r, nil, nil) // nil handler
 
 	// ping-dev 仍应注册（不依赖 devStepsHandler）
 	w1 := doGet(r, "/dev/ping-dev")
@@ -297,4 +297,51 @@ func TestRegister_BuildDevTrue_GrantStepsSkippedWhenHandlerNil(t *testing.T) {
 	// grant-steps 应跳过注册 → Gin NoRoute 404
 	w2 := doPost(r, "/dev/grant-steps", `{"userId":1,"steps":5000}`)
 	assert.Equal(t, http.StatusNotFound, w2.Code, "/dev/grant-steps with nil handler should be 404 (Gin NoRoute)")
+}
+
+// --- Story 20.7: dev force-unlock-chest 路由注册 / nil-tolerant ----------------
+
+// devChestHandlerFunc 是 devtools.DevChestHandler interface 的函数适配器（仅供测试用）。
+//
+// 实际生产 handler 是 *handler.DevChestHandler（struct）；测试中用 func 包装更简洁，
+// 同时避免 devtools_test 包反向 import handler 包导致 import cycle。
+type devChestHandlerFunc func(c *gin.Context)
+
+func (f devChestHandlerFunc) PostForceUnlockChest(c *gin.Context) { f(c) }
+
+// TestRegister_BuildDevTrue_ForceUnlockChestRegisteredWhenHandlerProvided 验证 Story 20.7 路由注册：
+// BUILD_DEV=true + 传入非 nil DevChestHandler → /dev/force-unlock-chest 路由存在 → POST 走到 handler。
+func TestRegister_BuildDevTrue_ForceUnlockChestRegisteredWhenHandlerProvided(t *testing.T) {
+	t.Setenv("BUILD_DEV", "true")
+
+	called := false
+	stubHandler := devChestHandlerFunc(func(c *gin.Context) {
+		called = true
+		c.JSON(http.StatusOK, map[string]any{"ok": true})
+	})
+
+	r := newEngine()
+	devtools.Register(r, nil /* devSteps */, stubHandler /* devChest */)
+
+	w := doPost(r, "/dev/force-unlock-chest", `{"userId":1}`)
+
+	assert.Equal(t, http.StatusOK, w.Code, "/dev/force-unlock-chest should be 200 when handler registered; body=%s", w.Body.String())
+	assert.True(t, called, "handler should be called; got called=false (路由未注册或被 NoRoute 拦截)")
+}
+
+// TestRegister_BuildDevTrue_ForceUnlockChestSkippedWhenHandlerNil 验证 nil-tolerant：
+// BUILD_DEV=true + 传入 nil → /dev/ping-dev 仍注册，/dev/force-unlock-chest 跳过 → 404。
+func TestRegister_BuildDevTrue_ForceUnlockChestSkippedWhenHandlerNil(t *testing.T) {
+	t.Setenv("BUILD_DEV", "true")
+
+	r := newEngine()
+	devtools.Register(r, nil, nil) // 两个 handler 都 nil
+
+	// ping-dev 仍应注册
+	w1 := doGet(r, "/dev/ping-dev")
+	assert.Equal(t, http.StatusOK, w1.Code, "/dev/ping-dev should be 200")
+
+	// force-unlock-chest 应跳过注册 → Gin NoRoute 404
+	w2 := doPost(r, "/dev/force-unlock-chest", `{}`)
+	assert.Equal(t, http.StatusNotFound, w2.Code, "/dev/force-unlock-chest with nil handler should be 404 (Gin NoRoute)")
 }

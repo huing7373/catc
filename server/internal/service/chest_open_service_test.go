@@ -139,6 +139,12 @@ func (s *stubOpenChestChestRepo) Delete(ctx context.Context, id uint64) error {
 	return nil
 }
 
+// UpdateUnlockAtByID Story 20.7 加（review r1 [P2] 改造后签名 userID → chestID）：
+// chest_open_service (20.6 OpenChest) 不调；保留以满足 interface。
+func (s *stubOpenChestChestRepo) UpdateUnlockAtByID(ctx context.Context, chestID uint64, newUnlockAt time.Time) error {
+	panic("stubOpenChestChestRepo.UpdateUnlockAtByID not configured (chest_open_service should not call it)")
+}
+
 // stubOpenChestStepAccountRepo: mysql.StepAccountRepo stub（覆盖 20.6 引入的 FindByUserIDForUpdate / Spend）
 type stubOpenChestStepAccountRepo struct {
 	findForUpdateFn func(ctx context.Context, userID uint64) (*mysql.StepAccount, error)

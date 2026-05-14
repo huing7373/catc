@@ -80,6 +80,46 @@ type ChestRepo interface {
 	//
 	// query 失败 → 返 raw error 透传（service 包成 1009）。
 	Delete(ctx context.Context, id uint64) error
+
+	// UpdateUnlockAtByID 把指定 chestID 的 user_chests 行的 unlock_at 列更新为 newUnlockAt。Story 20.7 引入；
+	// Story 20.7 review r1 [P2] 改造（原 UpdateUnlockAt(userID) → UpdateUnlockAtByID(chestID)）。
+	//
+	// **r1 [P2] 改造原因（并发 race）**：原 `WHERE user_id = ?` 实装在与 `/chest/open` 并发时
+	// 会跑偏到刷新出来的 next chest 行。具体 race：
+	//   T0  client A: POST /chest/open 进入事务 → FOR UPDATE 锁住 chest row id=X
+	//   T1  client B: POST /dev/force-unlock-chest → UPDATE WHERE user_id=? **阻塞**在 X 锁上
+	//   T2  A 事务内 Delete(id=X) + Create(new chest id=Y) → uk_user_id 仍 = user_id
+	//   T3  A commit → 锁释放
+	//   T4  B 的 UPDATE 恢复 → WHERE user_id=? **匹配到 Y**（new chest）→ 把下一轮 chest 直接推到 unlock_at=now
+	//   T5  用户拿到"连开 2 次"的非预期效果（dev 端点本意只 unlock current chest）
+	//
+	// **修复模式**：调用方必须先 `FindByUserIDForUpdate` 同事务内拿到当前 chest 的 id（FOR UPDATE 拿锁），
+	// 再调本方法 `WHERE id = ?`。FOR UPDATE 锁让 B 阻塞到 A commit 之后，commit 后 SELECT 拿到的
+	// 一定是 commit 后的"当前"chest（即新插入的 Y），B 再 UPDATE id=Y 也是把"当前"chest 推到 now —— 这是
+	// 用户希望的"force-unlock current"语义，**不再**误伤"未来"chest（因为 SELECT 是"读当前快照"）。
+	//
+	// **不**改 status / version / open_cost_steps 任一字段（Story 20.7 dev force-unlock 业务语义：
+	// 只动时间字段，让 Story 20.5 GET /chest/current 动态判定 "unlock_at <= now → unlockable" 生效）。
+	//
+	// **不**接 expectedVersion 乐观锁（dev 端点是"故意旁路"，与 Story 20.6 OpenChest 持锁路径独立；
+	// 不参与 version+1 串行化）。
+	//
+	// **rows_affected 语义**：
+	//   - rows_affected=1 → UPDATE 成功 → 返 nil
+	//   - rows_affected=0 → chestID 不存在（理论上 service 内 FindByUserIDForUpdate 成功拿到后到本
+	//     UPDATE 之间被并发 OpenChest 删除是不可能的 —— FOR UPDATE 锁覆盖到 commit）→ 返 ErrChestNotFound
+	//     哨兵；service 层 errors.Is 后翻译为 1003 ErrResourceNotFound
+	//     （epics.md §20.7 行 2947 钦定 "用户无 chest → 1003" 而非业务 4001）
+	//   - 其他 DB error（连接断 / SQL 错 / 死锁等）→ raw error 透传（service 层包成 1009）
+	//
+	// **必须用 UTC 时间**：调用方传入的 newUnlockAt 必须是 UTC（time.Now().UTC()）；
+	// 与 chest.UnlockAt 字段 UTC 语义对齐（chest_repo.go 顶部注释钦定，Story 4.6 / 20.5 / 20.6 同源）。
+	// repo 层**不**做 UTC 强转，由 service 层保证；本约束在 service.ForceUnlockChest 落地。
+	//
+	// **必须在事务内调用**（与 FindByUserIDForUpdate 同事务）；事务外调用 = race 风险
+	// （详见上面 r1 [P2] race 分析）。当前唯一调用方 dev_chest_service.ForceUnlockChest 在
+	// txManager.WithTx 闭包内调用。
+	UpdateUnlockAtByID(ctx context.Context, chestID uint64, newUnlockAt time.Time) error
 }
 
 // chestRepo 是 ChestRepo 的默认实装。
@@ -146,4 +186,26 @@ func (r *chestRepo) FindByUserIDForUpdate(ctx context.Context, userID uint64) (*
 func (r *chestRepo) Delete(ctx context.Context, id uint64) error {
 	db := tx.FromContext(ctx, r.db)
 	return db.WithContext(ctx).Delete(&UserChest{}, id).Error
+}
+
+// UpdateUnlockAtByID 实装：UPDATE user_chests SET unlock_at = ? WHERE id = ?。
+//
+// 走 PRIMARY KEY id 索引（取代原 WHERE user_id 的 uk_user_id 索引）；rows_affected=0 → ErrChestNotFound 哨兵。
+// 详见 interface doc 的 r1 [P2] race 分析 —— `WHERE id` 取代 `WHERE user_id` 的核心动机是防止
+// 与 OpenChest 的 Delete+Create 刷新链路并发时跑偏到 next chest。
+//
+// **GORM 实装**：用 `gorm.DB.Model(&UserChest{}).Where("id = ?", chestID).Update("unlock_at", newUnlockAt)`
+// 而非 `.Save(&chest)` —— Save 会写入全部字段（含 version / status / open_cost_steps）+
+// 触发 GORM autoUpdateTime:milli 自动更新 updated_at；Update("unlock_at", ...) 只动 unlock_at +
+// updated_at（GORM 会自动加 updated_at）+ rows_affected 通过 result.RowsAffected 取值精确。
+func (r *chestRepo) UpdateUnlockAtByID(ctx context.Context, chestID uint64, newUnlockAt time.Time) error {
+	db := tx.FromContext(ctx, r.db)
+	result := db.WithContext(ctx).Model(&UserChest{}).Where("id = ?", chestID).Update("unlock_at", newUnlockAt)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrChestNotFound
+	}
+	return nil
 }

@@ -293,6 +293,8 @@ func NewRouter(deps Deps) *gin.Engine {
 	// Story 7.5 加：dev 业务 handler；提前声明 nil，deps 完整时在 if 块内填充；
 	// devtools.Register 留 if 块外（IsEnabled() 不依赖 deps，单测 Deps{} 场景仍要挂 ping-dev）。
 	var devStepsHandler *handler.DevStepsHandler
+	// Story 20.7 加：dev chest handler；与 7.5 devStepsHandler 同模式。
+	var devChestHandler *handler.DevChestHandler
 
 	// Story 4.6 wire：仅当 deps 完整时挂业务路由。
 	//
@@ -358,6 +360,17 @@ func NewRouter(deps Deps) *gin.Engine {
 		// 复用 7.3 / 4.6 已 wire 的 userRepo / stepAccountRepo / stepSyncLogRepo / txMgr。
 		devStepSvc := service.NewDevStepService(deps.TxMgr, userRepo, stepAccountRepo, stepSyncLogRepo)
 		devStepsHandler = handler.NewDevStepsHandler(devStepSvc)
+
+		// Story 20.7 加：dev chest service + handler。即便 BUILD_DEV=false 也构造；
+		// 由 devtools.Register 内部 IsEnabled() 决定是否真注册路由 —— 与 7.5 同模式。
+		// 复用上面（行 316）已 wire 的 chestRepo（authSvc / homeSvc / chestSvc 同实例）+ deps.TxMgr。
+		//
+		// **Story 20.7 review r1 [P2] 改造**：接 txMgr —— 与 r1 之前的"单 UPDATE 不开事务"区分。
+		// 原 service 直接 UPDATE WHERE user_id 与 OpenChest 的 Delete+Create 链路并发会跑偏到 next chest
+		// （详见 service.DevChestService 顶部注释 r1 [P2] race 分析）。r1 改成"事务内 FOR UPDATE
+		// SELECT 拿 id → UPDATE WHERE id"两步同事务模式，必须注入 txMgr。
+		devChestSvc := service.NewDevChestService(deps.TxMgr, chestRepo)
+		devChestHandler = handler.NewDevChestHandler(devChestSvc)
 
 		// Story 11.3 加：room service + handler（4 步事务：FindByID 预检 → INSERT rooms →
 		// INSERT room_members → UPDATE users.current_room_id）。复用上面构造的 roomRepo /
@@ -579,17 +592,29 @@ func NewRouter(deps Deps) *gin.Engine {
 	}
 
 	// dev 模式下挂 /dev/* 路由组；未启用时本调用完全透明。
-	// devStepsHandler 在 deps 完整时由 if 块内填充，否则保持 nil（Register 内部跳过 grant-steps 路由）。
+	// devStepsHandler / devChestHandler 在 deps 完整时由 if 块内填充，否则保持 nil
+	// （Register 内部按 handler 是否 nil 跳过对应路由）。
 	//
-	// **关键 Go 接口 nil 陷阱**：直接传 `*handler.DevStepsHandler(nil)` 给 `devtools.DevStepsHandler`
-	// interface，interface header 是 (type=*handler.DevStepsHandler, value=nil) → **非 nil interface**，
-	// Register 内 `if devStepsHandler != nil` 判定会通过 → 调 PostGrantSteps 时 nil receiver panic。
-	// 显式分支确保 nil 指针 → nil interface。
-	if devStepsHandler == nil {
-		devtools.Register(r, nil)
-	} else {
-		devtools.Register(r, devStepsHandler) // Story 7.5 修改：透传 dev handler
+	// **关键 Go 接口 nil 陷阱**（与 Story 7.5 同）：直接传 `*handler.DevStepsHandler(nil)`
+	// 给 `devtools.DevStepsHandler` interface，interface header 是
+	// (type=*handler.DevStepsHandler, value=nil) → **非 nil interface**，Register 内
+	// `if devStepsHandler != nil` 判定会通过 → 调 PostGrantSteps 时 nil receiver panic。
+	//
+	// **Story 20.7 改 nil-collapse 写法**（替换 7.5 既有 2 分支 if-else）：
+	// Story 7.5 用 2 分支显式 if 兜底单个 handler 的 typed-nil 陷阱；本 story 加第二个
+	// 可选 handler → 2 分支变 2^2=4 分支；未来加 grant-cosmetic 又会变 2^3=8 分支。
+	// 改用 nil-collapse 写法 —— 每加 1 个 handler 只需 +1 行 var + +1 行 if，无指数爆炸。
+	// **关键 Go 知识**：`var x devtools.DevXxxHandler` 声明零值是真正的 nil interface
+	// (type=nil, value=nil)，不是 typed-nil 陷阱场景。
+	var stepsArg devtools.DevStepsHandler
+	if devStepsHandler != nil {
+		stepsArg = devStepsHandler
 	}
+	var chestArg devtools.DevChestHandler
+	if devChestHandler != nil {
+		chestArg = devChestHandler
+	}
+	devtools.Register(r, stepsArg, chestArg)
 
 	return r
 }

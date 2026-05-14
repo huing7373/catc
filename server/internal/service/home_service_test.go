@@ -91,6 +91,12 @@ func (s *stubHomeChestRepo) Delete(ctx context.Context, id uint64) error {
 	panic("stubHomeChestRepo.Delete not configured (home_service should not call it)")
 }
 
+// UpdateUnlockAtByID Story 20.7 加（review r1 [P2] 改造后签名 userID → chestID）：
+// home_service 不调；保留以满足 interface。
+func (s *stubHomeChestRepo) UpdateUnlockAtByID(ctx context.Context, chestID uint64, newUnlockAt time.Time) error {
+	panic("stubHomeChestRepo.UpdateUnlockAtByID not configured (home_service should not call it)")
+}
+
 // buildHomeService 用 4 个 stub repo 构造 HomeService。每个 case 独立设置 fn。
 func buildHomeService(
 	userFn func(ctx context.Context, id uint64) (*mysql.User, error),

@@ -4,6 +4,7 @@ import (
 	"context"
 	stderrors "errors"
 	"testing"
+	"time"
 
 	"github.com/huing/cat/server/internal/pkg/auth"
 	apperror "github.com/huing/cat/server/internal/pkg/errors"
@@ -111,8 +112,10 @@ func (s *stubStepAccountRepo) Spend(ctx context.Context, userID uint64, amount u
 }
 
 type stubChestRepo struct {
-	createFn       func(ctx context.Context, c *mysql.UserChest) error
-	findByUserIDFn func(ctx context.Context, userID uint64) (*mysql.UserChest, error)
+	createFn                func(ctx context.Context, c *mysql.UserChest) error
+	findByUserIDFn          func(ctx context.Context, userID uint64) (*mysql.UserChest, error)
+	findByUserIDForUpdateFn func(ctx context.Context, userID uint64) (*mysql.UserChest, error)
+	updateUnlockAtByIDFn    func(ctx context.Context, chestID uint64, newUnlockAt time.Time) error
 }
 
 func (s *stubChestRepo) Create(ctx context.Context, c *mysql.UserChest) error {
@@ -128,14 +131,33 @@ func (s *stubChestRepo) FindByUserID(ctx context.Context, userID uint64) (*mysql
 }
 
 // FindByUserIDForUpdate 是 Story 20.6 新加到 ChestRepo interface 的方法。
-// auth_service / chest_service (20.5) 都不调；本 stub 默认 panic。
+// auth_service / chest_service (20.5) 都不调；dev_chest_service (20.7) review r1 [P2] 后调用。
+// Story 20.7 review r1 [P2] 改造：本 stub 增加 findByUserIDForUpdateFn 字段供 dev_chest_service_test
+// 注入 race 修复后的"FOR UPDATE SELECT 拿 chest id"行为；fn 未设时维持 panic-default。
 func (s *stubChestRepo) FindByUserIDForUpdate(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
+	if s.findByUserIDForUpdateFn != nil {
+		return s.findByUserIDForUpdateFn(ctx, userID)
+	}
 	panic("stubChestRepo.FindByUserIDForUpdate not configured (auth_service / 20.5 should not call it)")
 }
 
 // Delete 同上：Story 20.6 引入。
 func (s *stubChestRepo) Delete(ctx context.Context, id uint64) error {
 	panic("stubChestRepo.Delete not configured (auth_service / 20.5 should not call it)")
+}
+
+// UpdateUnlockAtByID 是 Story 20.7 加到 ChestRepo interface 的方法（review r1 [P2] 改造后签名）。
+// 原 UpdateUnlockAt(userID) 在与 OpenChest 并发时会跑偏到 next chest（详见 chest_repo.go r1 [P2] 注释）；
+// 改成 UpdateUnlockAtByID(chestID)，调用方必须先 FindByUserIDForUpdate 同事务拿 id。
+//
+// auth_service / chest_service (20.5) / chest_open_service (20.6) 都不调；仅 dev_chest_service (20.7) 用。
+// 本 stub fn 未设 → panic-default，与 FindByUserIDForUpdate / Delete 同模式；
+// dev_chest_service_test 显式 set fn。
+func (s *stubChestRepo) UpdateUnlockAtByID(ctx context.Context, chestID uint64, newUnlockAt time.Time) error {
+	if s.updateUnlockAtByIDFn != nil {
+		return s.updateUnlockAtByIDFn(ctx, chestID, newUnlockAt)
+	}
+	panic("stubChestRepo.UpdateUnlockAtByID not configured (auth_service / 20.5 / 20.6 should not call it)")
 }
 
 // stubTxMgr.WithTx 直接调 fn —— mock 不真开事务（业务正确性靠 fn 内 repo 调用顺序断言；

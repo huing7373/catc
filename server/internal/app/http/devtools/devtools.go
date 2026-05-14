@@ -73,25 +73,40 @@ type DevStepsHandler interface {
 	PostGrantSteps(c *gin.Context)
 }
 
+// DevChestHandler 是 dev 宝箱端点的 handler 抽象（Story 20.7）。
+//
+// 用 interface 解耦避免 devtools 包反向 import handler 包：实际的 handler 实装在
+// internal/app/http/handler/dev_chest_handler.go；本 interface 仅为 Register 签名抽象，
+// 让 devtools 包保持"框架"角色，不依赖具体 handler 实装。
+//
+// **签名简化原则**：本 interface 只列 Register 签名所需的方法（PostForceUnlockChest）；
+// future 加 /dev/grant-cosmetic-batch (Epic 20.8) 时新建独立 DevCosmeticHandler interface
+// **不**追加到本 interface（"按业务模块独立 interface"原则，与 DevStepsHandler / DevChestHandler 平级）。
+type DevChestHandler interface {
+	PostForceUnlockChest(c *gin.Context)
+}
+
 // Register 把 /dev/* 路由组挂到传入的 gin.Engine 上（仅在 dev 模式启用时）。
 //
 // 未启用时完全透明：不注册路由、不打印日志；调用方拿到的 engine 与不调用本函数等价。
 //
-// 启用时的副作用：
-//  1. 输出一条 WARN：`DEV MODE ENABLED - DO NOT USE IN PRODUCTION`
-//     （携带 build_tag_devtools / env_build_dev 字段，便于日志排障溯源触发源）
-//  2. 创建 /dev 路由组并挂 DevOnlyMiddleware
-//  3. 注册 GET /dev/ping-dev → PingDevHandler（框架自带健康检查）
-//  4. （Story 7.5 加）若 devStepsHandler != nil，注册 POST /dev/grant-steps → devStepsHandler.PostGrantSteps
+// 启用时挂载以下端点：
+//   - GET  /dev/ping-dev              → PingDevHandler（Story 1.6 框架自带）
+//   - POST /dev/grant-steps           → devStepsHandler.PostGrantSteps（Story 7.5；devStepsHandler == nil 时跳过）
+//   - POST /dev/force-unlock-chest    → devChestHandler.PostForceUnlockChest（Story 20.7；devChestHandler == nil 时跳过）
 //
-// **devStepsHandler 可空设计**（nil-tolerant）：
-//   - 单元测试 NewRouter(Deps{}) 零值场景：bootstrap 不构造 DevStepsHandler → 传 nil
-//     → 本函数仅注册 ping-dev，跳过 /dev/grant-steps（避免 nil deref panic）
-//   - 生产路径：bootstrap 在 deps 完整时构造 devStepsHandler 透传 → 本函数注册全部 dev 端点
+// **多 handler 可空设计**（nil-tolerant）：
+//   - 单元测试 NewRouter(Deps{}) 零值场景：bootstrap 不构造业务 handler → 都传 nil
+//     → 本函数仅注册 ping-dev，跳过所有业务路由（避免 nil deref panic）
+//   - 生产路径：bootstrap 在 deps 完整时构造全部业务 handler 透传 → 本函数注册全部 dev 端点
+//
+// **签名扩展模式**：每加一个业务 dev 端点（grant-steps / force-unlock-chest /
+// grant-cosmetic-batch 等），按业务模块独立 interface 槽位扩 Register 签名。
+// 这让"哪些 dev 端点存在"在 Register 签名层就可见，避免运行时神秘失踪。
 //
 // Register **不是**幂等的：在同一 engine 上重复调用会让 Gin panic（路由重复注册）。
 // 但调用方只有 bootstrap.NewRouter() 一处，天然只调一次，不再额外防御。
-func Register(r *gin.Engine, devStepsHandler DevStepsHandler) {
+func Register(r *gin.Engine, devStepsHandler DevStepsHandler, devChestHandler DevChestHandler) {
 	if !IsEnabled() {
 		return
 	}
@@ -105,6 +120,10 @@ func Register(r *gin.Engine, devStepsHandler DevStepsHandler) {
 	if devStepsHandler != nil {
 		// Story 7.5 加：业务 dev 端点 /dev/grant-steps；nil-tolerant 跳过避免单测 panic。
 		g.POST("/grant-steps", devStepsHandler.PostGrantSteps)
+	}
+	if devChestHandler != nil {
+		// Story 20.7 加：业务 dev 端点 /dev/force-unlock-chest；nil-tolerant 跳过避免单测 panic。
+		g.POST("/force-unlock-chest", devChestHandler.PostForceUnlockChest)
 	}
 }
 

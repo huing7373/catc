@@ -160,3 +160,43 @@ func TestChestRepo_Delete_HappyPath(t *testing.T) {
 		t.Fatalf("Delete: %v", err)
 	}
 }
+
+// TestChestRepo_UpdateUnlockAtByID_HappyPath_UpdatesRowsAffectedOne: Story 20.7 引入；
+// review r1 [P2] 改造 —— 签名从 UpdateUnlockAt(userID) 改为 UpdateUnlockAtByID(chestID)，
+// WHERE 子句从 user_id 改为 id，防止与 OpenChest 并发时跑偏到 next chest。
+//
+// UPDATE user_chests SET unlock_at = ? WHERE id = ? → rows_affected=1 → 返 nil。
+//
+// GORM .Update("unlock_at", ...) 会生成 SET unlock_at=?, updated_at=? WHERE id=?，
+// 参数顺序 (newUnlockAt, updated_at(auto), chestID)。
+func TestChestRepo_UpdateUnlockAtByID_HappyPath_UpdatesRowsAffectedOne(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewChestRepo(gormDB)
+
+	newUnlockAt := time.Now().UTC().Add(-1 * time.Minute) // 模拟 dev force-unlock now()
+
+	mock.ExpectExec("UPDATE `user_chests` SET").
+		WithArgs(newUnlockAt, sqlmock.AnyArg() /* updated_at auto */, uint64(5001)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := repo.UpdateUnlockAtByID(context.Background(), 5001, newUnlockAt); err != nil {
+		t.Fatalf("UpdateUnlockAtByID: %v", err)
+	}
+}
+
+// TestChestRepo_UpdateUnlockAtByID_ChestNotFound_ReturnsSentinel: Story 20.7 edge case；
+// review r1 [P2] 改造后签名。
+// rows_affected=0 → 返 ErrChestNotFound 哨兵（service 层 errors.Is 后翻译 1003）。
+func TestChestRepo_UpdateUnlockAtByID_ChestNotFound_ReturnsSentinel(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewChestRepo(gormDB)
+
+	mock.ExpectExec("UPDATE `user_chests` SET").
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), uint64(99999)).
+		WillReturnResult(sqlmock.NewResult(0, 0)) // rows_affected=0
+
+	err := repo.UpdateUnlockAtByID(context.Background(), 99999, time.Now().UTC())
+	if !stderrors.Is(err, ErrChestNotFound) {
+		t.Errorf("err = %v, want ErrChestNotFound", err)
+	}
+}

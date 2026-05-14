@@ -494,6 +494,13 @@ func (f *faultChestRepo) Delete(ctx context.Context, id uint64) error {
 	return f.delegate.Delete(ctx, id)
 }
 
+// UpdateUnlockAtByID: Story 20.7 引入（review r1 [P2] 改造后签名 userID → chestID）；
+// auth_service 不调，透传给 delegate
+// （让本 fault wrapper 仍能在未来需要时正确转发；当前 unused 仍需满足 interface）。
+func (f *faultChestRepo) UpdateUnlockAtByID(ctx context.Context, chestID uint64, newUnlockAt time.Time) error {
+	return f.delegate.UpdateUnlockAtByID(ctx, chestID, newUnlockAt)
+}
+
 // queryCount 返 SELECT COUNT(*) FROM <table>（不带 WHERE 子句的简写）。
 //
 // 与 assertCount 不同：assertCount 同时断言 + 失败 t.Errorf；queryCount 只查不断言，
