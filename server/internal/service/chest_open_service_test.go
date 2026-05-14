@@ -133,6 +133,11 @@ func (s *stubOpenChestChestRepo) FindByID(ctx context.Context, chestID uint64) (
 	panic("stubOpenChestChestRepo.FindByID not configured (chest_open_service should not call it)")
 }
 
+// FindByIDForUpdate Story 20.7 review r4 [P2] 加：chest_open_service (20.6 OpenChest) 不调；保留以满足 interface。
+func (s *stubOpenChestChestRepo) FindByIDForUpdate(ctx context.Context, chestID uint64) (*mysql.UserChest, error) {
+	panic("stubOpenChestChestRepo.FindByIDForUpdate not configured (chest_open_service should not call it)")
+}
+
 func (s *stubOpenChestChestRepo) FindByUserIDForUpdate(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
 	s.findForUpdateCalls++
 	return s.findForUpdateFn(ctx, userID)

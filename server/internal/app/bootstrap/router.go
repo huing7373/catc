@@ -365,11 +365,12 @@ func NewRouter(deps Deps) *gin.Engine {
 		// 由 devtools.Register 内部 IsEnabled() 决定是否真注册路由 —— 与 7.5 同模式。
 		// 复用上面（行 316）已 wire 的 chestRepo（authSvc / homeSvc / chestSvc 同实例）。
 		//
-		// **Story 20.7 review r2 [P2] 改造**：移除 txMgr 注入 —— r1 的"事务内 FOR UPDATE + UPDATE"
-		// 对 race 修复无作用（FOR UPDATE 阻塞结束后 SELECT 返回 commit 后的 next chest，跟 r0 一样跑偏）。
-		// r2 改成 client 通过请求体传 chestID（GET /chest/current 拿到的 id），service 用 FindByID
-		// 校验存在 + 归属 + UPDATE，无须事务。详见 service.DevChestService 顶部注释 r2 [P2] 改造说明。
-		devChestSvc := service.NewDevChestService(chestRepo)
+		// **Story 20.7 review r4 [P2] 改造**：重新注入 txMgr —— r2 移除 txMgr 是基于"事务对 race
+		// 修复无作用"的判断，r4 用事务**不**是为修 race，而是为消除 RowsAffected==0 语义模糊性
+		// （详见 service.DevChestService 顶部注释 r4 [P2] 改造说明）。FindByIDForUpdate +
+		// UpdateUnlockAtByID 同事务执行，FOR UPDATE 行锁让 RowsAffected==0 唯一来源 = 值未变 =
+		// success（同毫秒重复 unlock 同 chest），跳出 r2-r3-r4 over-correction chain。
+		devChestSvc := service.NewDevChestService(deps.TxMgr, chestRepo)
 		devChestHandler = handler.NewDevChestHandler(devChestSvc)
 
 		// Story 11.3 加：room service + handler（4 步事务：FindByID 预检 → INSERT rooms →

@@ -91,6 +91,11 @@ func (s *stubHomeChestRepo) FindByUserIDForUpdate(ctx context.Context, userID ui
 	panic("stubHomeChestRepo.FindByUserIDForUpdate not configured (home_service should not call it)")
 }
 
+// FindByIDForUpdate Story 20.7 review r4 [P2] 加：home_service 不调；保留以满足 interface。
+func (s *stubHomeChestRepo) FindByIDForUpdate(ctx context.Context, chestID uint64) (*mysql.UserChest, error) {
+	panic("stubHomeChestRepo.FindByIDForUpdate not configured (home_service should not call it)")
+}
+
 // Delete Story 20.6 加：home_service 不调；保留以满足 interface。
 func (s *stubHomeChestRepo) Delete(ctx context.Context, id uint64) error {
 	panic("stubHomeChestRepo.Delete not configured (home_service should not call it)")

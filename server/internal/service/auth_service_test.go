@@ -116,6 +116,7 @@ type stubChestRepo struct {
 	findByUserIDFn          func(ctx context.Context, userID uint64) (*mysql.UserChest, error)
 	findByIDFn              func(ctx context.Context, chestID uint64) (*mysql.UserChest, error)
 	findByUserIDForUpdateFn func(ctx context.Context, userID uint64) (*mysql.UserChest, error)
+	findByIDForUpdateFn     func(ctx context.Context, chestID uint64) (*mysql.UserChest, error)
 	updateUnlockAtByIDFn    func(ctx context.Context, chestID uint64, newUnlockAt time.Time) error
 }
 
@@ -152,13 +153,24 @@ func (s *stubChestRepo) FindByUserIDForUpdate(ctx context.Context, userID uint64
 	panic("stubChestRepo.FindByUserIDForUpdate not configured (auth_service / 20.5 should not call it)")
 }
 
+// FindByIDForUpdate 是 Story 20.7 review r4 [P2] 新加到 ChestRepo interface 的方法。
+// 仅 dev_chest_service r4 改造后用（事务 + FOR UPDATE 锁定 chest 行）；
+// auth_service / chest_service (20.5) / chest_open_service (20.6) / home_service 都不调。
+// fn 未设 → panic-default；dev_chest_service_test 显式 set fn。
+func (s *stubChestRepo) FindByIDForUpdate(ctx context.Context, chestID uint64) (*mysql.UserChest, error) {
+	if s.findByIDForUpdateFn != nil {
+		return s.findByIDForUpdateFn(ctx, chestID)
+	}
+	panic("stubChestRepo.FindByIDForUpdate not configured (auth_service / 20.5 / 20.6 should not call it)")
+}
+
 // Delete 同上：Story 20.6 引入。
 func (s *stubChestRepo) Delete(ctx context.Context, id uint64) error {
 	panic("stubChestRepo.Delete not configured (auth_service / 20.5 should not call it)")
 }
 
 // UpdateUnlockAtByID 是 Story 20.7 加到 ChestRepo interface 的方法。
-// 历经 r1 [P2]（→ UpdateUnlockAtByID(chestID)）和 r2 [P2]（不再返 ErrChestNotFound）两次改造。
+// 历经 r1 / r2 / r3 / r4 四次改造（详见 chest_repo.go interface doc）。
 //
 // auth_service / chest_service (20.5) / chest_open_service (20.6) 都不调；仅 dev_chest_service (20.7) 用。
 // 本 stub fn 未设 → panic-default；dev_chest_service_test 显式 set fn。

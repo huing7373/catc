@@ -484,18 +484,29 @@ func (f *faultChestRepo) FindByUserID(ctx context.Context, userID uint64) (*mysq
 	return f.delegate.FindByUserID(ctx, userID)
 }
 
+// FindByID: Story 20.7 review r2 [P2] 引入；auth_service 不调，透传给 delegate
+// （让本 fault wrapper 仍能在未来需要时正确转发；当前 unused 仍需满足 interface）。
+func (f *faultChestRepo) FindByID(ctx context.Context, chestID uint64) (*mysql.UserChest, error) {
+	return f.delegate.FindByID(ctx, chestID)
+}
+
 // FindByUserIDForUpdate / Delete: Story 20.6 引入；auth_service 不调，透传给 delegate
 // （让本 fault wrapper 仍能在未来需要时正确转发；当前 unused 仍需满足 interface）。
 func (f *faultChestRepo) FindByUserIDForUpdate(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
 	return f.delegate.FindByUserIDForUpdate(ctx, userID)
 }
 
+// FindByIDForUpdate: Story 20.7 review r4 [P2] 引入；auth_service 不调，透传给 delegate。
+func (f *faultChestRepo) FindByIDForUpdate(ctx context.Context, chestID uint64) (*mysql.UserChest, error) {
+	return f.delegate.FindByIDForUpdate(ctx, chestID)
+}
+
 func (f *faultChestRepo) Delete(ctx context.Context, id uint64) error {
 	return f.delegate.Delete(ctx, id)
 }
 
-// UpdateUnlockAtByID: Story 20.7 引入（review r1 [P2] 改造后签名 userID → chestID）；
-// auth_service 不调，透传给 delegate
+// UpdateUnlockAtByID: Story 20.7 引入（review r1 [P2] 改造后签名 userID → chestID；r4 改造后语义：
+// caller 须在事务 + FindByIDForUpdate 之后调用）；auth_service 不调，透传给 delegate
 // （让本 fault wrapper 仍能在未来需要时正确转发；当前 unused 仍需满足 interface）。
 func (f *faultChestRepo) UpdateUnlockAtByID(ctx context.Context, chestID uint64, newUnlockAt time.Time) error {
 	return f.delegate.UpdateUnlockAtByID(ctx, chestID, newUnlockAt)
