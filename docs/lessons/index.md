@@ -304,3 +304,4 @@
 | 2026-05-14 | [DB 同事务幂等：禁止 post-rollback failed 异步补偿 + response_json 缓存禁止包含 requestId（20-1 r7）](2026-05-14-idempotency-no-async-failed-compensation-and-no-cached-requestId-20-1-r7.md) | 2 | architecture, docs | `<pending>` |
 | 2026-05-14 | [设计文档跨章节 summary 必须随 canonical 章节同步迭代（20-1 r8）](2026-05-14-design-doc-cross-section-summary-must-track-canonical-20-1-r8.md) | 1 | docs | `<pending>` |
 | 2026-05-14 | [time-derived 字段在幂等缓存里必须穷举剔除 + 文档 JSON 示例的数学一致性（20-1 r9）](2026-05-14-time-derived-fields-exhaustive-exclusion-from-idempotency-cache-20-1-r9.md) | 2 | docs, architecture | `<pending>` |
+| 2026-05-14 | [rate_limit middleware 必须让位于 idempotency 命中预检，cached replay 不消耗配额（20-1 r10）](2026-05-14-rate-limit-must-yield-to-idempotency-hit-precheck-20-1-r10.md) | 1 | architecture | `<pending>` |

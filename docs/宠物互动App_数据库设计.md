@@ -726,7 +726,7 @@ CREATE TABLE emoji_configs (
 
 ## 5.16 chest_open_idempotency_records
 
-开箱接口幂等记录表（**r5 review 锁定 DB 持久化方案，r6 review 把预声明纳入业务事务消除 pending 卡死悖论，r7 review 移除 best-effort failed upsert 简化为二态机**，详见 V1接口设计 §7.2 服务端逻辑步骤 3a / 3b / 3k / 5 + §13.3 + 关键约束「r7 移除 best-effort failed upsert 决策」段）。
+开箱接口幂等记录表（**r5 review 锁定 DB 持久化方案，r6 review 把预声明纳入业务事务消除 pending 卡死悖论，r7 review 移除 best-effort failed upsert 简化为二态机，r10 review 把 rate_limit 检查挪到 handler 内层、幂等命中预检在 rate_limit 之前**，详见 V1接口设计 §7.2 服务端逻辑步骤 3 / 5a / 5b / 5k / 7 + §13.3 + 关键约束「r7 移除 best-effort failed upsert 决策」+「rate_limit 位置 r10 调整」段）。
 
 ```sql
 CREATE TABLE chest_open_idempotency_records (
@@ -978,7 +978,7 @@ CREATE TABLE chest_open_idempotency_records (
 
 必须放入一个事务（**预声明 + 业务写入 + 最终化全部同事务**，r6 review 锁定）：
 
-- **预声明 `chest_open_idempotency_records` 行**（事务内**首条语句**：`INSERT ... ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`，借 `UNIQUE(user_id, idempotency_key)` 阻塞同 key 并发；详见 V1接口设计 §7.2 步骤 3a）
+- **预声明 `chest_open_idempotency_records` 行**（事务内**首条语句**：`INSERT ... ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`，借 `UNIQUE(user_id, idempotency_key)` 阻塞同 key 并发；详见 V1接口设计 §7.2 步骤 5a）
 - 校验宝箱状态与版本
 - 校验 `available_steps >= 1000`
 - 扣减 `available_steps`
@@ -987,7 +987,7 @@ CREATE TABLE chest_open_idempotency_records (
 - 插入一条 `user_cosmetic_items`
 - 写 `chest_open_logs`
 - 重建或刷新下一轮 `user_chests`
-- **最终化 `chest_open_idempotency_records.status = 'success'` + `response_json`**（r5 review 锁定，r6 review 维持，r7 review 收紧 schema 为二态机；详见 V1接口设计 §7.2 步骤 3k）
+- **最终化 `chest_open_idempotency_records.status = 'success'` + `response_json`**（r5 review 锁定，r6 review 维持，r7 review 收紧 schema 为二态机；详见 V1接口设计 §7.2 步骤 5k）
 
 > **节点 7 vs 节点 8 阶段差异（与 V1接口设计 §7.2 / §14.1 一致）**：本节描述的是**最终契约**（节点 8 / Epic 23 完成后稳态）。**节点 7 阶段（Story 20.6 / Epic 21 验收期）**「插入一条 `user_cosmetic_items`」步骤暂不执行 —— `chest_open_logs.reward_user_cosmetic_item_id` 写占位 `0`；详见 V1接口设计 §7.2.4h。Story 23.5 落地后回归本节最终契约语义。
 
