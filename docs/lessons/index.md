@@ -310,8 +310,8 @@
 | 2026-05-14 | [节点冻结声明 + 跨段 summary 必须随核心步骤迭代（20-1 r13）](2026-05-14-frozen-statement-must-mirror-time-derived-field-rule-20-1-r13.md) | 2 | docs, architecture | `b81a772` |
 | 2026-05-14 | [设计文档迭代时 stale 快照应"删除即删除"而非"super-note 警告并保留" + 跨文档引用副本必须随契约演进同步（20-1 r14）](2026-05-14-stale-snapshot-delete-vs-warn-in-iterating-design-doc-20-1-r14.md) | 2 | docs | `c25b4b4` |
 | 2026-05-14 | [跨接口字段语义对齐 + 错误码表收口（无可达路径就删除而非保留）（20-1 r15）](2026-05-14-cross-endpoint-field-alignment-and-error-table-pruning.md) | 2 | docs | `566071f` |
-| 2026-05-15 | [FOR UPDATE 后 UPDATE 必须 WHERE id 而非 WHERE user_id（避免与并发 Delete+Create 链路跑偏到 next row）（20-7 r1）](2026-05-15-for-update-then-update-where-id-not-where-user-id-20-7-r1.md) | 1 | architecture | `<pending>` |
-| 2026-05-15 | ["current chest" race 的彻底解：client 传 chest.id（server 不再猜 current）+ MySQL RowsAffected=0 不等同 NOT FOUND（20-7 r2）](2026-05-15-client-passes-id-server-doesnt-guess-current-and-rowsaffected-not-notfound-20-7-r2.md) | 2 | architecture, error-handling | `<pending>` |
-| 2026-05-15 | [domain-aware RowsAffected 语义（force-unlock 场景下 0=NotFound） & fix-review 迭代陷阱（over-correction chain）（20-7 r3）](2026-05-15-domain-aware-rowsaffected-and-over-correction-chain-20-7-r3.md) | 2 | error-handling, process | `<pending>` |
-| 2026-05-15 | [用事务把 RowsAffected 语义模糊性从源头消除 & over-correction chain 的终结模式（20-7 r4）](2026-05-15-transaction-eliminates-rowsaffected-ambiguity-20-7-r4.md) | 2 | architecture, process | `<pending>` |
-| 2026-05-15 | [dev 端点正确性 > contract 美感（承认契约变更而非回退根因修复）（20-7 r5）](2026-05-15-dev-endpoint-correctness-over-contract-aesthetics-20-7-r5.md) | 1 | architecture, docs, process | `<pending>` |
+| 2026-05-15 | [FOR UPDATE 后 UPDATE 必须 WHERE id 而非 WHERE user_id（避免与并发 Delete+Create 链路跑偏到 next row）（20-7 r1）](2026-05-15-for-update-then-update-where-id-not-where-user-id-20-7-r1.md) | 1 | architecture | `cd41759` |
+| 2026-05-15 | ["current chest" race 的彻底解：client 传 chest.id（server 不再猜 current）+ MySQL RowsAffected=0 不等同 NOT FOUND（20-7 r2）](2026-05-15-client-passes-id-server-doesnt-guess-current-and-rowsaffected-not-notfound-20-7-r2.md) | 2 | architecture, error-handling | `1d44ab2` |
+| 2026-05-15 | [domain-aware RowsAffected 语义（force-unlock 场景下 0=NotFound） & fix-review 迭代陷阱（over-correction chain）（20-7 r3）](2026-05-15-domain-aware-rowsaffected-and-over-correction-chain-20-7-r3.md) | 2 | error-handling, process | `dd1237c` |
+| 2026-05-15 | [用事务把 RowsAffected 语义模糊性从源头消除 & over-correction chain 的终结模式（20-7 r4）](2026-05-15-transaction-eliminates-rowsaffected-ambiguity-20-7-r4.md) | 2 | architecture, process | `dbc31d3` |
+| 2026-05-15 | [dev 端点正确性 > contract 美感（承认契约变更而非回退根因修复）（20-7 r5）](2026-05-15-dev-endpoint-correctness-over-contract-aesthetics-20-7-r5.md) | 1 | architecture, docs, process | `7ad289c` |

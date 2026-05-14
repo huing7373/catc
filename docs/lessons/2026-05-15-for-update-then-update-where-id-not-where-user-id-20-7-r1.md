@@ -2,7 +2,7 @@
 date: 2026-05-15
 source_review: codex review round 1 / /tmp/epic-loop-review-20-7-r1.md
 story: 20-7-dev-端点-post-dev-force-unlock-chest
-commit: <pending>
+commit: cd41759
 lesson_count: 1
 ---
 
