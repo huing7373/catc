@@ -1197,6 +1197,29 @@ public final class RealRoomViewModel: RoomViewModel {
         let useCase = self.sendEmojiUseCase
         let loader = self.emojiCatalogLoader
 
+        // Story 18.3 fix-review r2 [P2] —— cross-room race guard.
+        // V1 §12.2 钦定 emoji.send payload **不**含 roomId 字段 —— server 端按"当前 WS session 所属 room"路由,
+        // **无法**按 message 内的 roomId 分流. 因此 client 端必须自守门:
+        //
+        //   场景 (review r2 钦定): 用户在 room A 选 emoji "wave" → Step A 本地动效入队
+        //   → Task 启动 → Step B catalog await 挂起 (几十 ms)
+        //   → 期间用户手动离开 A 然后 join B (或 server 切 room) → AppState.currentRoomId 改写为 B
+        //   → WebSocketClient 重连到 B 的 session
+        //   → catalog await 返回 → useCase.execute(emojiCode: "wave") 调当前 WS 连接 (已是 B)
+        //   → server 端把这条 emoji.send 广播给 room B 的成员 (本来是 room A 选的)
+        //
+        // 守护策略 (与 12.4 r1 lesson "cross-room race needs stream-roomId capture" 同精神,
+        // 但本路径是 outgoing send 不是 incoming consume —— 守护点放在"send 前 recheck", 不需要 stream-lifecycle 层):
+        //   1) 入口 capture snapshot —— 在 Task { } 启动**之前**读 appState.currentRoomId.
+        //      这是 Step A 同 main-actor section, 与本地动效入队 atomic.
+        //   2) Task 体内 await 完 catalog 之后、调 useCase.execute 之前, 比对 appState.currentRoomId == snapshotRoomId.
+        //   3) 不等 → log info + return —— 跳过 WS send (本地动效已 Step A 入队, 不回滚 —— 保留用户视觉反馈).
+        //
+        // snapshotRoomId == nil 也是合法 case (Step A 后用户已 leave room): 直接命中"不等"分支 skip send,
+        // 由 useCase.execute 抛 .notConnected 走 toast 路径反而误导 (此场景不是网络问题).
+        let snapshotRoomId = self.appState?.currentRoomId
+        let snapshotAppState = self.appState   // 弱依赖 self.appState; 与 useCase / presenter 同精神
+
         Task { [weak self] in
             guard self != nil else { return }
 
@@ -1216,6 +1239,17 @@ public final class RealRoomViewModel: RoomViewModel {
                            "RealRoomViewModel.onEmojiSelected: catalog load failed: %{public}@; proceed with WS send anyway",
                            String(describing: error))
                 }
+            }
+
+            // Step B.5 (r2 fix): cross-room race recheck —— catalog await 之后、useCase.execute 之前比对 roomId.
+            // 必须在 main actor 读 currentRoomId (AppState @Published; 非 Sendable 跨 actor 读不保证一致).
+            let currentRoomIdNow = await MainActor.run { snapshotAppState?.currentRoomId }
+            guard currentRoomIdNow == snapshotRoomId else {
+                os_log(.info,
+                       "RealRoomViewModel.onEmojiSelected: roomId changed during async window (snapshot=%{public}@ → now=%{public}@); skip WS send (local animation already played, no rollback)",
+                       String(describing: snapshotRoomId),
+                       String(describing: currentRoomIdNow))
+                return
             }
 
             // Step C: WS fire-and-forget send.
