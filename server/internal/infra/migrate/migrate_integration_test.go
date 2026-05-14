@@ -2,10 +2,10 @@
 // +build integration
 
 // Story 4.3 集成测试：用 dockertest 起真实 mysql:8.0 容器跑 4 条 case：
-//   1. happy: migrate Up → 9 张表存在 → migrate Down → 9 张表全消失（仅 schema_migrations）
+//   1. happy: migrate Up → 10 张表存在 → migrate Down → 10 张表全消失（仅 schema_migrations）
 //   2. edge: 重复 migrate Up → ErrNoChange 被吞 → 返 nil（幂等）
 //   3. happy: Up 后通过 INFORMATION_SCHEMA 抽样验关键索引 / 字段类型 / 主键约束
-//   4. edge: Up 后 Status 返回 (version=9, dirty=false, nil)
+//   4. edge: Up 后 Status 返回 (version=11, dirty=false, nil)
 //
 // Story 7.2 扩展：把 4 条 case 的断言从 5 张表扩展到 6 张表
 //   （新增 user_step_sync_logs：日志表，含 idx_user_date / idx_user_created_at；
@@ -23,6 +23,12 @@
 // Story 17.3 扩展：在表 schema 不变（仍 9 张）基础上新增 0010_seed_emoji_configs；
 //   主要 case 跑 4 行 seed 的内容正确性 + INSERT IGNORE 幂等（不影响表数量断言）；
 //   StatusAfterUp 版本号断言从 v=9 改 v=10。
+//
+// Story 20.2 扩展：把 4 条 case 的断言从 9 张表扩展到 10 张表
+//   （新增 cosmetic_items：装扮配置表，含 UNIQUE uk_code + KEY idx_slot_rarity +
+//    KEY idx_enabled_weight；Epic 20 节点 7 宝箱业务链路 schema 根基，20.3 seed /
+//    20.5 GET /chest/current / 20.6 POST /chest/open 加权抽取各路径依赖）；
+//   StatusAfterUp 版本号断言从 v=10 改 v=11。
 //
 // Story 17.3 r1 review [P2] 重写 SeedIdempotent：原版走 Up→Down→Up 路径但 Down
 //   把整张表 DROP 掉 → 第二次 Up 跑空表 → 没真正触发 duplicate-code 路径。新版改
@@ -127,8 +133,8 @@ func migrationsPath(t *testing.T) string {
 	return abs
 }
 
-// TestMigrateIntegration_UpThenDown 起容器 → migrate Up → 9 张表存在 →
-// migrate Down → 9 张表全消失（仅 schema_migrations）。
+// TestMigrateIntegration_UpThenDown 起容器 → migrate Up → 10 张表存在 →
+// migrate Down → 10 张表全消失（仅 schema_migrations）。
 //
 // **Story 10.3 review r5 [P1] 扩展**：从 6 改 8（多了 0007_init_rooms +
 // 0008_init_room_members；把 Epic 11.2 的"建表"职责拆出来提前到 Story 10.3，
@@ -136,6 +142,9 @@ func migrationsPath(t *testing.T) string {
 //
 // **Story 17.2 扩展**：从 8 改 9（多了 0009_init_emoji_configs；Epic 17 节点 6
 // 表情广播链路 schema 根基）。
+//
+// **Story 20.2 扩展**：从 9 改 10（多了 0011_init_cosmetic_items；Epic 20 节点 7
+// 宝箱业务链路 schema 根基）。
 func TestMigrateIntegration_UpThenDown(t *testing.T) {
 	dsn, cleanup := startMySQL(t)
 	defer cleanup()
@@ -153,14 +162,14 @@ func TestMigrateIntegration_UpThenDown(t *testing.T) {
 		t.Fatalf("migrate Up: %v", err)
 	}
 
-	// 验证 9 张表存在
+	// 验证 10 张表存在
 	sqlDB, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	defer sqlDB.Close()
 
-	expectedTables := []string{"users", "user_auth_bindings", "pets", "user_step_accounts", "user_chests", "user_step_sync_logs", "rooms", "room_members", "emoji_configs"}
+	expectedTables := []string{"users", "user_auth_bindings", "pets", "user_step_accounts", "user_chests", "user_step_sync_logs", "rooms", "room_members", "emoji_configs", "cosmetic_items"}
 	for _, table := range expectedTables {
 		var count int
 		err := sqlDB.QueryRowContext(ctx, `
@@ -175,7 +184,7 @@ func TestMigrateIntegration_UpThenDown(t *testing.T) {
 		}
 	}
 
-	// migrate Down → 9 张表全消失
+	// migrate Down → 10 张表全消失
 	if err := mig.Down(ctx); err != nil {
 		t.Fatalf("migrate Down: %v", err)
 	}
@@ -329,12 +338,12 @@ func TestMigrateIntegration_UpTwice_Idempotent(t *testing.T) {
 	err = sqlDB.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM information_schema.tables
 		WHERE table_schema = 'cat_test' AND table_name IN
-		('users', 'user_auth_bindings', 'pets', 'user_step_accounts', 'user_chests', 'user_step_sync_logs', 'rooms', 'room_members', 'emoji_configs')`).Scan(&tableCount)
+		('users', 'user_auth_bindings', 'pets', 'user_step_accounts', 'user_chests', 'user_step_sync_logs', 'rooms', 'room_members', 'emoji_configs', 'cosmetic_items')`).Scan(&tableCount)
 	if err != nil {
 		t.Fatalf("count tables: %v", err)
 	}
-	if tableCount != 9 {
-		t.Errorf("after two Up calls, table count = %d, want 9 (Story 10.3 review r5 [P1] 加 rooms / room_members → Story 17.2 加 emoji_configs，总计 9 张表)", tableCount)
+	if tableCount != 10 {
+		t.Errorf("after two Up calls, table count = %d, want 10 (Story 10.3 review r5 [P1] 加 rooms / room_members → Story 17.2 加 emoji_configs → Story 20.2 加 cosmetic_items，总计 10 张表)", tableCount)
 	}
 }
 
@@ -546,13 +555,15 @@ func TestMigrateIntegration_TablesPresent_AfterUp(t *testing.T) {
 	}
 }
 
-// TestMigrateIntegration_StatusAfterUp 验证 Up 完成后 Status 返回 (version=10, dirty=false, nil)。
+// TestMigrateIntegration_StatusAfterUp 验证 Up 完成后 Status 返回 (version=11, dirty=false, nil)。
 // Story 7.2 扩展：从 5 改 6（多了 0006_init_user_step_sync_logs）
 // Story 10.3 review r5 [P1] 扩展：从 6 改 8（多了 0007_init_rooms +
 // 0008_init_room_members；把 Epic 11.2 的"建表"职责拆出来提前到 Story 10.3）
 // Story 17.2 扩展：从 8 改 9（多了 0009_init_emoji_configs；Epic 17 节点 6
 // 表情广播链路 schema 根基）
 // Story 17.3 扩展：从 9 改 10（多了 0010_seed_emoji_configs；Epic 17 节点 6 表情 seed）
+// Story 20.2 扩展：从 10 改 11（多了 0011_init_cosmetic_items；Epic 20 节点 7
+// 宝箱业务链路 schema 根基）
 func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	dsn, cleanup := startMySQL(t)
 	defer cleanup()
@@ -583,8 +594,8 @@ func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status after Up: %v", err)
 	}
-	if v != 10 {
-		t.Errorf("Status version = %d, want 10", v)
+	if v != 11 {
+		t.Errorf("Status version = %d, want 11", v)
 	}
 	if dirty {
 		t.Errorf("Status dirty = true, want false")
@@ -1257,5 +1268,307 @@ func TestMigrateIntegration_EmojiConfigs_SeedIdempotent(t *testing.T) {
 		if gotIsEnabled != want.isEnabled {
 			t.Errorf("emoji %q is_enabled = %d, want %d (ON DUPLICATE KEY UPDATE 应强制覆盖回 0010 seed 钦定值)", want.code, gotIsEnabled, want.isEnabled)
 		}
+	}
+}
+
+// TestMigrateIntegration_CosmeticItems_Schema 验证
+// migrations/0011_init_cosmetic_items.up.sql 钦定的 cosmetic_items 表 schema
+// 与数据库设计.md §5.8 + V1接口设计.md §7.2 + §8.1 一致：
+//
+//   - id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT
+//   - code VARCHAR(64) NOT NULL + UNIQUE KEY uk_code (code)
+//   - name VARCHAR(64) NOT NULL
+//   - slot TINYINT NOT NULL
+//   - rarity TINYINT NOT NULL
+//   - asset_url VARCHAR(255) NOT NULL DEFAULT ''
+//   - icon_url VARCHAR(255) NOT NULL DEFAULT ''
+//   - drop_weight INT UNSIGNED NOT NULL DEFAULT 0
+//   - is_enabled TINYINT NOT NULL DEFAULT 1
+//   - created_at / updated_at DATETIME(3)
+//   - KEY idx_slot_rarity (slot, rarity)
+//   - KEY idx_enabled_weight (is_enabled, drop_weight)
+//
+// **关键覆盖点**：
+//   - INT UNSIGNED（drop_weight）column_type 必须含 "unsigned"（与 INT 区别）；
+//     这是本 case 区别于 17.2 EmojiConfigs_Schema 的关键之处 —— emoji_configs.sort_order
+//     是 INT (signed)，cosmetic_items.drop_weight 是 INT UNSIGNED；
+//     INFORMATION_SCHEMA.COLUMNS.COLUMN_TYPE 字段会精确反映 "int unsigned" vs "int"
+//   - 双索引（idx_slot_rarity + idx_enabled_weight）列顺序断言（与 §5.8 钦定一致）
+//   - **不含** render_config 字段（节点 10 / Epic 29 才加；本 case 用 11 字段计数兜底
+//     防漂移 —— 如有人误加 render_config 字段会让计数变 12 失败）
+//
+// **背景（Story 20.2 引入）**：本 case 验证 0011 migration 落地的 schema
+// 与 §5.8 钦定 1:1 对齐；用于在 epics.md §Story 20.2 钦定的"单元测试覆盖 ≥3 case"
+// 中作为 schema-correctness 路径（happy / migrate up 后表存在 + 字段类型 +
+// 全部索引和约束都符合 §5.8）。
+func TestMigrateIntegration_CosmeticItems_Schema(t *testing.T) {
+	dsn, cleanup := startMySQL(t)
+	defer cleanup()
+
+	mig, err := migrate.New(dsn, migrationsPath(t))
+	if err != nil {
+		t.Fatalf("migrate.New: %v", err)
+	}
+	defer mig.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := mig.Up(ctx); err != nil {
+		t.Fatalf("migrate Up: %v", err)
+	}
+
+	sqlDB, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	// 1. INFORMATION_SCHEMA.TABLES：cosmetic_items 表存在
+	var tableCount int
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.tables
+		WHERE table_schema = 'cat_test' AND table_name = 'cosmetic_items'`).Scan(&tableCount)
+	if err != nil {
+		t.Errorf("query cosmetic_items table existence: %v", err)
+	} else if tableCount != 1 {
+		t.Errorf("cosmetic_items table count = %d, want 1", tableCount)
+	}
+
+	// 2. INFORMATION_SCHEMA.COLUMNS：11 列存在 + 类型对齐
+	//    **关键**：drop_weight 是 INT UNSIGNED → column_type 必须 = "int unsigned"
+	//    （与 emoji_configs.sort_order 的 "int" 区别）。
+	cosmeticCols := []struct {
+		col          string
+		wantDataType string
+		wantColType  string
+	}{
+		{"id", "bigint", "bigint unsigned"},
+		{"code", "varchar", "varchar(64)"},
+		{"name", "varchar", "varchar(64)"},
+		{"slot", "tinyint", "tinyint"},
+		{"rarity", "tinyint", "tinyint"},
+		{"asset_url", "varchar", "varchar(255)"},
+		{"icon_url", "varchar", "varchar(255)"},
+		{"drop_weight", "int", "int unsigned"},
+		{"is_enabled", "tinyint", "tinyint"},
+		{"created_at", "datetime", "datetime(3)"},
+		{"updated_at", "datetime", "datetime(3)"},
+	}
+	for _, c := range cosmeticCols {
+		var dt, ct string
+		err := sqlDB.QueryRowContext(ctx, `
+			SELECT data_type, column_type FROM information_schema.columns
+			WHERE table_schema = 'cat_test' AND table_name = 'cosmetic_items' AND column_name = ?`,
+			c.col).Scan(&dt, &ct)
+		if err != nil {
+			t.Errorf("query cosmetic_items.%s type: %v", c.col, err)
+			continue
+		}
+		if dt != c.wantDataType {
+			t.Errorf("cosmetic_items.%s data_type = %q, want %q", c.col, dt, c.wantDataType)
+		}
+		if ct != c.wantColType {
+			t.Errorf("cosmetic_items.%s column_type = %q, want %q", c.col, ct, c.wantColType)
+		}
+	}
+
+	// 3. INFORMATION_SCHEMA.COLUMNS：cosmetic_items 表总列数 == 11
+	//    兜底防有人误加 render_config 或其他字段；render_config 由 Epic 29 落地。
+	var colCount int
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema = 'cat_test' AND table_name = 'cosmetic_items'`).Scan(&colCount)
+	if err != nil {
+		t.Errorf("query cosmetic_items total column count: %v", err)
+	} else if colCount != 11 {
+		t.Errorf("cosmetic_items total column count = %d, want 11 (render_config 不在本 story 范围；如计数 = 12 说明有人误加 render_config 字段)", colCount)
+	}
+
+	// 4a. cosmetic_items.id PK = id
+	var pkCol string
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT column_name FROM information_schema.key_column_usage
+		WHERE table_schema = 'cat_test' AND table_name = 'cosmetic_items' AND constraint_name = 'PRIMARY'`).Scan(&pkCol)
+	if err != nil {
+		t.Errorf("query cosmetic_items PK: %v", err)
+	} else if pkCol != "id" {
+		t.Errorf("cosmetic_items PK column = %q, want 'id'", pkCol)
+	}
+
+	// 4b. UNIQUE KEY uk_code (code) 存在 + non_unique = 0
+	var ukCount int
+	var ukNonUnique int
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(*), MAX(non_unique) FROM information_schema.statistics
+		WHERE table_schema = 'cat_test' AND table_name = 'cosmetic_items' AND index_name = 'uk_code'`).Scan(&ukCount, &ukNonUnique)
+	if err != nil {
+		t.Errorf("query cosmetic_items.uk_code: %v", err)
+	} else {
+		if ukCount == 0 {
+			t.Errorf("cosmetic_items.uk_code: index not found")
+		}
+		if ukNonUnique != 0 {
+			t.Errorf("cosmetic_items.uk_code: non_unique = %d, want 0 (UNIQUE)", ukNonUnique)
+		}
+	}
+
+	// uk_code 单列 (code)
+	var ukCol string
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT column_name FROM information_schema.statistics
+		WHERE table_schema = 'cat_test' AND table_name = 'cosmetic_items' AND index_name = 'uk_code'
+		ORDER BY seq_in_index ASC LIMIT 1`).Scan(&ukCol)
+	if err != nil {
+		t.Errorf("query cosmetic_items.uk_code column: %v", err)
+	} else if ukCol != "code" {
+		t.Errorf("cosmetic_items.uk_code column = %q, want 'code'", ukCol)
+	}
+
+	// 4c. KEY idx_slot_rarity 存在 + 列顺序 (slot, rarity)
+	idxCases := []struct {
+		idxName  string
+		wantCols []string
+	}{
+		{"idx_slot_rarity", []string{"slot", "rarity"}},
+		{"idx_enabled_weight", []string{"is_enabled", "drop_weight"}},
+	}
+	for _, ic := range idxCases {
+		rows, err := sqlDB.QueryContext(ctx, `
+			SELECT column_name FROM information_schema.statistics
+			WHERE table_schema = 'cat_test' AND table_name = 'cosmetic_items' AND index_name = ?
+			ORDER BY seq_in_index ASC`, ic.idxName)
+		if err != nil {
+			t.Errorf("query cosmetic_items.%s columns: %v", ic.idxName, err)
+			continue
+		}
+		var cols []string
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				t.Errorf("scan %s column: %v", ic.idxName, err)
+				continue
+			}
+			cols = append(cols, c)
+		}
+		rows.Close()
+		if len(cols) != len(ic.wantCols) {
+			t.Errorf("cosmetic_items.%s column count = %d, want %d (cols=%v)", ic.idxName, len(cols), len(ic.wantCols), cols)
+			continue
+		}
+		for i, w := range ic.wantCols {
+			if cols[i] != w {
+				t.Errorf("cosmetic_items.%s column[%d] = %q, want %q", ic.idxName, i, cols[i], w)
+			}
+		}
+	}
+
+	// 5. INFORMATION_SCHEMA.COLUMNS.COLUMN_DEFAULT 默认值校验
+	defaultCases := []struct {
+		col         string
+		wantDefault string
+	}{
+		{"asset_url", ""},
+		{"icon_url", ""},
+		{"drop_weight", "0"},
+		{"is_enabled", "1"},
+	}
+	for _, c := range defaultCases {
+		var def sql.NullString
+		err := sqlDB.QueryRowContext(ctx, `
+			SELECT column_default FROM information_schema.columns
+			WHERE table_schema = 'cat_test' AND table_name = 'cosmetic_items' AND column_name = ?`,
+			c.col).Scan(&def)
+		if err != nil {
+			t.Errorf("query cosmetic_items.%s default: %v", c.col, err)
+			continue
+		}
+		if !def.Valid || def.String != c.wantDefault {
+			t.Errorf("cosmetic_items.%s default = %v, want %q", c.col, def, c.wantDefault)
+		}
+	}
+
+	// created_at / updated_at 默认值 = CURRENT_TIMESTAMP(3)
+	for _, col := range []string{"created_at", "updated_at"} {
+		var def sql.NullString
+		err := sqlDB.QueryRowContext(ctx, `
+			SELECT column_default FROM information_schema.columns
+			WHERE table_schema = 'cat_test' AND table_name = 'cosmetic_items' AND column_name = ?`,
+			col).Scan(&def)
+		if err != nil {
+			t.Errorf("query cosmetic_items.%s default: %v", col, err)
+			continue
+		}
+		if !def.Valid || !strings.Contains(strings.ToUpper(def.String), "CURRENT_TIMESTAMP") {
+			t.Errorf("cosmetic_items.%s default = %v, want substring 'CURRENT_TIMESTAMP'", col, def)
+		}
+	}
+}
+
+// TestMigrateIntegration_CosmeticItems_UniqueCode_Rejected 验证
+// migrations/0011_init_cosmetic_items.up.sql 钦定的 UNIQUE KEY uk_code (code)
+// 在运行时被 MySQL 真实拒绝重复 code 插入。
+//
+// **背景（Story 20.2 引入）**：epics.md §Story 20.2 钦定的"集成测试覆盖（dockertest）：
+// migrate up → SHOW CREATE TABLE 对比 schema → migrate down"路径在 CosmeticItems_Schema
+// case 用 INFORMATION_SCHEMA 字段层精确断言取代了不稳定的 SHOW CREATE TABLE 字符串比对；
+// 本 case 是额外的运行时 UNIQUE 拒绝验证 —— 是 Story 20.3 seed 用 INSERT IGNORE
+// 兜底 + Story 20.6 加权抽取按 code 索引命中 + admin 后台未来写入路径的 schema 层根基。
+//
+// **覆盖路径**：
+//  1. migrate up → cosmetic_items 表存在
+//  2. 插入 cosmetic_items (code='test_unique_cosmetic_a', name='TestA', slot=1, rarity=1,
+//     asset_url='https://example.com/test_a.png',
+//     icon_url='https://example.com/test_a_icon.png', drop_weight=100, is_enabled=1) → 成功
+//  3. 再次插入 cosmetic_items (code='test_unique_cosmetic_a', ...) → DB 拒绝
+//     （UNIQUE KEY uk_code (code) 兜底；same code 不能插两次）；
+//     err 必须含 "Duplicate entry"（MySQL 错误码 = 1062 ER_DUP_ENTRY）
+//
+// 用 database/sql 直跑 raw INSERT（**不**走 GORM）让测试结果**不**依赖 ORM
+// 行为差异（与 Story 11.2 落地的
+// TestMigrateIntegration_RoomMembers_UniqueUserID_Rejected + Story 17.2 落地的
+// TestMigrateIntegration_EmojiConfigs_UniqueCode_Rejected 同模式）。
+//
+// **测试专用 code 隔离**：用 `test_unique_cosmetic_a` 与未来 Story 20.3 seed 的
+// `hat_yellow / scarf_star / ...` 等业务字面量完全隔离；本 story 阶段 cosmetic_items
+// 表无 seed（20.3 owner），但提前用测试专用 code 防 20.3 seed 落地后本 case 第一次
+// INSERT 因 seed 已存在而失败（与 Story 17.3 解耦 wave seed 同模式）。
+func TestMigrateIntegration_CosmeticItems_UniqueCode_Rejected(t *testing.T) {
+	dsn, cleanup := startMySQL(t)
+	defer cleanup()
+
+	mig, err := migrate.New(dsn, migrationsPath(t))
+	if err != nil {
+		t.Fatalf("migrate.New: %v", err)
+	}
+	defer mig.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := mig.Up(ctx); err != nil {
+		t.Fatalf("migrate Up: %v", err)
+	}
+
+	sqlDB, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	// 步骤 2：首条 cosmetic_items (code='test_unique_cosmetic_a', ...) 必须成功
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO cosmetic_items (code, name, slot, rarity, asset_url, icon_url, drop_weight, is_enabled) VALUES ('test_unique_cosmetic_a', 'TestA', 1, 1, 'https://example.com/test_a.png', 'https://example.com/test_a_icon.png', 100, 1)`); err != nil {
+		t.Fatalf("first insert cosmetic_items (code='test_unique_cosmetic_a') should succeed: %v", err)
+	}
+
+	// 步骤 3：UNIQUE(code) 约束 —— 同 code 再插一次必须被拒
+	_, err = sqlDB.ExecContext(ctx,
+		`INSERT INTO cosmetic_items (code, name, slot, rarity, asset_url, icon_url, drop_weight, is_enabled) VALUES ('test_unique_cosmetic_a', 'TestA v2', 2, 2, 'https://example.com/test_a_v2.png', 'https://example.com/test_a_v2_icon.png', 50, 1)`)
+	if err == nil {
+		t.Fatalf("expected duplicate-entry error on second insert (code='test_unique_cosmetic_a') violating UNIQUE(code), got nil")
+	}
+	if !strings.Contains(err.Error(), "Duplicate entry") {
+		t.Errorf("UNIQUE(code) rejection error message = %q, want substring \"Duplicate entry\"", err.Error())
 	}
 }
