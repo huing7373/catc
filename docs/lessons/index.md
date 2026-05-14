@@ -303,3 +303,4 @@
 | 2026-05-14 | [同事务幂等的"预声明也必须事务内" & 时间派生字段不可缓存进 response_json（20-1 r6）](2026-05-14-idempotency-pre-claim-must-be-inside-business-tx-20-1-r6.md) | 2 | architecture | `<pending>` |
 | 2026-05-14 | [DB 同事务幂等：禁止 post-rollback failed 异步补偿 + response_json 缓存禁止包含 requestId（20-1 r7）](2026-05-14-idempotency-no-async-failed-compensation-and-no-cached-requestId-20-1-r7.md) | 2 | architecture, docs | `<pending>` |
 | 2026-05-14 | [设计文档跨章节 summary 必须随 canonical 章节同步迭代（20-1 r8）](2026-05-14-design-doc-cross-section-summary-must-track-canonical-20-1-r8.md) | 1 | docs | `<pending>` |
+| 2026-05-14 | [time-derived 字段在幂等缓存里必须穷举剔除 + 文档 JSON 示例的数学一致性（20-1 r9）](2026-05-14-time-derived-fields-exhaustive-exclusion-from-idempotency-cache-20-1-r9.md) | 2 | docs, architecture | `<pending>` |

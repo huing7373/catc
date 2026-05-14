@@ -748,7 +748,7 @@ CREATE TABLE chest_open_idempotency_records (
 - `user_id`：发起开箱请求的用户 id（与 `users.id` 对齐；不建外键，与本设计其他表保持一致）
 - `idempotency_key`：client 传入的幂等键；约束与 V1接口设计 §7.2 一致（`[A-Za-z0-9_:-]` + length 1-128）
 - `status`：**二态机**（r7 review 锁定，从 r6 三态机 `('pending', 'success', 'failed')` 简化）—— `pending`（声明已写入，业务事务**持锁执行中**；对其他事务不可见，它们在 InnoDB unique-key X-lock 上阻塞）/ `success`（业务事务已 commit，`response_json` 已落盘）。**无** `failed` 状态：事务 rollback 时 pending 行随之消失（事务原子性保证），同 key 重试在 INSERT 拿 `affected_rows = 1` 等价首次到达；server 端**禁止**写"post-rollback failed 占位行"（详见 V1接口设计 §7.2 r7 决策段：该补偿与 client 同 key 重试的合法 success 路径在 UNIQUE 约束上竞争，可能错误覆盖 success → failed，破坏数据一致性）
-- `response_json`：`status = 'success'` 时缓存的完整 V1 响应（`{code, message, data: {reward, stepAccount, nextChest.{id, status, unlockAt, openCostSteps}}}`）；**不**包含时间派生字段如 `nextChest.remainingSeconds`（r6 review 锁定：该字段由 server 在响应序列化时按 `max(0, ceil((unlock_at - now) / 1s))` 实时计算填入，避免同 key 重试回放 stale 倒计时）；**不**包含顶层 `requestId`（r7 review 锁定：`requestId` 是每次请求独立的 trace ID，缓存若包含会导致同 key 重试回放**首次**请求的 trace ID 给**本次**重试响应，破坏 log / trace 关联语义；server 在响应序列化时**重新填**当前请求的 `requestId`，与 `remainingSeconds` 同样作为"上层动态字段"处理）；`status = 'pending'` 时为 NULL
+- `response_json`：`status = 'success'` 时缓存的完整 V1 响应（`{code, message, data: {reward, stepAccount, nextChest.{id, unlockAt, openCostSteps}}}`）；**不**包含时间派生字段 `nextChest.status` 与 `nextChest.remainingSeconds`（r6 review 锁定 `remainingSeconds` 不缓存 + r9 review 锁定 `status` 同处理：两者都是 time-derived —— `status = (unlock_at > now) ? 1 : 2`、`remainingSeconds = max(0, ceil((unlock_at - now) / 1s))`；由 server 在响应序列化时按"当前时刻"**同源同时刻**实时计算填入，避免同 key 重试回放 stale 倒计时 / stale status，并保证两者内部一致 —— 例如重试发生在新 chest 已到期解锁时刻会自然返回 `status=2` + `remainingSeconds=0`，不会出现 stale `status=1` + 实时 `remainingSeconds=0` 不可能组合，与 V1接口设计 §7.1 GET /chest/current 同一秒查询完全对齐）；**不**包含顶层 `requestId`（r7 review 锁定：`requestId` 是每次请求独立的 trace ID，缓存若包含会导致同 key 重试回放**首次**请求的 trace ID 给**本次**重试响应，破坏 log / trace 关联语义；server 在响应序列化时**重新填**当前请求的 `requestId`，与 `status` / `remainingSeconds` 同样作为"上层动态字段"处理）；`status = 'pending'` 时为 NULL
 - `created_at` / `updated_at`：标准时间戳，`updated_at` 在 `status` 推进时自动更新
 
 ### 索引说明
@@ -758,16 +758,18 @@ CREATE TABLE chest_open_idempotency_records (
 
 ### 设计说明（**契约决策来源**）
 
-本表的引入是 Story 20-1 r5 / r6 / r7 review 锁定的契约层决定：
+本表的引入是 Story 20-1 r5 / r6 / r7 / r9 review 锁定的契约层决定：
 
 - **背景**：r3 / r4 review 把开箱幂等设计在 Redis（`idem:{userId}:chest_open:{idempotencyKey}` key + sentinel + final-response 双 TTL）；r5 review 指出 Redis 是非事务存储，与 MySQL 不能形成原子写 —— "MySQL 事务 commit 成功 + Redis SET 失败" case 下 client 无法区分"首次已生效"vs"首次未生效"，可能引发重复扣步数 + 重复出箱
 - **r5 决策**：把幂等记录从 Redis 上移到 MySQL；最终化 UPDATE 与业务事务**同事务原子写**；DB 成为"首次是否成功"的单一可信源
 - **r6 修订**：r5 把预声明 INSERT 写在业务事务**之前**作独立 INSERT —— 业务事务 rollback 时 pending 行**不**跟着回滚，同 key 重试永久卡 1008（事务 rollback 后状态语义错位悖论）。r6 把预声明 INSERT 也纳入业务事务，作为事务内**首条语句**，借 InnoDB unique-key X-lock 实现并发阻塞排队；rollback 同步清除 pending 行 → 同 key 重试等价于首次到达走全流程，**无 pending 残留卡死**
 - **r7 修订**：r6 保留了"post-rollback 可选 best-effort 写 `status='failed'` 占位行"作为 UX 优化（让 client 立即明确换 key）。r7 review 锁定该补偿与"client 立即同 key 重试 → 新事务 commit success"的合法路径在 UNIQUE 约束上 race —— compensation INSERT 因 unique 冲突触发 `ON DUPLICATE KEY UPDATE status='failed'` 会把后到达的 success 行错误覆盖为 failed，破坏数据一致性。r7 决策：彻底**移除** best-effort failed upsert；schema 简化为 `status ENUM('pending', 'success')` 二态机；`response_json` 缓存同时移除顶层 `requestId`（每次请求独立 trace ID，重试请求需重新填当前 trace ID）
+- **r9 修订**：r6 把 `nextChest.remainingSeconds` 锁定为"不缓存，回放时实时计算"，但**漏掉** `nextChest.status` 同样是 time-derived（与 §7.1 GET /chest/current 同一规则：`status = (unlock_at > now) ? 1 : 2`）—— 同 key 重试若发生在新 chest 已到期解锁的时刻，回放 stale `status=1 (counting)` 而仅重算 `remainingSeconds=0` 会形成自相矛盾的不可能组合（counting 状态 + 剩余 0 秒），且与 §7.1 GET 同一秒查询结果漂移。r9 决策：把 `nextChest.status` 也加入"不持久化到 `response_json` + 回放时**同源同时刻**实时计算"列表，与 `remainingSeconds` 同处理；`response_json` 缓存的 `nextChest` 字段集进一步缩窄为 `{id, unlockAt, openCostSteps}` 三字段
 - **lesson 文档**：
   - `docs/lessons/2026-05-14-db-same-tx-idempotency-replaces-redis-writeback-fragility-20-1-r5.md`（r5）
   - `docs/lessons/2026-05-14-idempotency-pre-claim-must-be-inside-business-tx-20-1-r6.md`（r6，pending 回滚悖论 + response_json 缓存不含时间派生字段）
   - `docs/lessons/2026-05-14-idempotency-no-async-failed-compensation-and-no-cached-requestId-20-1-r7.md`（r7，移除 best-effort failed upsert race + response_json 缓存不含 requestId）
+  - `docs/lessons/2026-05-14-time-derived-fields-exhaustive-exclusion-from-idempotency-cache-20-1-r9.md`（r9，nextChest.status 与 remainingSeconds 必须同源同时刻重算，防止 stale status 与实时 remainingSeconds 形成不可能组合）
 
 ### 阶段适用
 

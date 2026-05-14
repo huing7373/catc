@@ -978,15 +978,15 @@ JSON 示例：
 > - **server / iOS 实装者读到此处的 disambiguation 规则**：节点 7 阶段（Story 20.6 / Epic 21）**必须**遵循本步骤 h 的"不创建实例 + reward_user_cosmetic_item_id = 0"路径；节点 8 阶段（Story 23.5 落地后）由 Story 23.5 acceptance 修改本步骤为"先 INSERT user_cosmetic_items 拿到 id 再填入此处"，同时 §14.1 / DB §8.3 自然回归一致语义
 > - **本契约 finalize（Story 20.1）冻结的是"两段语义都生效，按节点切换"的状态**，**不是**§7.2 推翻 §14.1 / DB §8.3
    i. **刷新下一轮 chest**：`DELETE FROM user_chests WHERE id = ?`（旧 chest）→ `INSERT INTO user_chests (user_id, status, unlock_at, open_cost_steps, version) VALUES (?, 1, NOW() + INTERVAL 10 MINUTE, 1000, 0)`（新 chest）
-   j. **序列化可缓存 response payload**（**不**包含时间派生字段、**不**包含 `requestId` trace 字段）：在内存中构造 `{reward, stepAccount, nextChest}` 三段嵌套结构 —— **`nextChest` 内仅持久化 `{id, status, unlockAt, openCostSteps}` 四字段；`nextChest.remainingSeconds` 是时间派生字段、`requestId` 是每次请求独立的 trace ID（顶层信封字段），二者均由 server 端在响应序列化时实时填入（`remainingSeconds` 按 `max(0, ceil((unlock_at - now) / 1s))` 计算；`requestId` 填**当前**请求的 trace ID），不写入 `response_json` 缓存**（避免同 key 重试时回放 stale 倒计时与 GET /chest/current 实时计算结果漂移 + 避免重试请求返回首次请求的 `requestId` 破坏 log/trace 关联语义）；序列化在事务内完成是因为响应数据来自事务内的查询结果 + 业务语义需要原子持久化"首次的响应"，避免 commit 后再补 UPDATE 引入二次 commit 失败窗口
+   j. **序列化可缓存 response payload**（**不**包含时间派生字段、**不**包含 `requestId` trace 字段）：在内存中构造 `{reward, stepAccount, nextChest}` 三段嵌套结构 —— **`nextChest` 内仅持久化 `{id, unlockAt, openCostSteps}` 三字段；`nextChest.status` 与 `nextChest.remainingSeconds` 均是时间派生字段（与 §7.1 GET /chest/current 一致：`status = (unlock_at > now) ? 1 : 2`、`remainingSeconds = max(0, ceil((unlock_at - now) / 1s))`）、`requestId` 是每次请求独立的 trace ID（顶层信封字段），三者均由 server 端在响应序列化时实时填入（`status` / `remainingSeconds` 按上述公式；`requestId` 填**当前**请求的 trace ID），不写入 `response_json` 缓存**（避免同 key 重试时回放 stale `status` / stale 倒计时与 GET /chest/current 实时计算结果漂移 —— 尤其当重试发生在新 chest 已到期解锁的时刻，回放 `status=1 (counting)` 会与重新补算的 `remainingSeconds=0` 形成不可能组合；同时避免重试请求返回首次请求的 `requestId` 破坏 log/trace 关联语义）；序列化在事务内完成是因为响应数据来自事务内的查询结果 + 业务语义需要原子持久化"首次的响应"，避免 commit 后再补 UPDATE 引入二次 commit 失败窗口
    k. **更新 idempotency 记录**（**在 commit 之前**，与业务表写入同一事务原子提交）：`UPDATE chest_open_idempotency_records SET status = 'success', response_json = ?, updated_at = NOW(3) WHERE user_id = ? AND idempotency_key = ?`（行已在步骤 3a INSERT；本步骤仅做字段更新，写入 j 步序列化的可缓存 payload）
    l. **事务提交**
 4. **首次成功路径的响应组装**（步骤 3l commit 成功后）：
-   - 内存里的 `{reward, stepAccount, nextChest}` payload 上**补算** `nextChest.remainingSeconds = max(0, ceil((nextChest.unlockAt - now) / 1s))`（与 §7.1 GET /chest/current 同一公式；新 chest 刚 INSERT 后通常 ≈ 600）→ 返回 `200`
+   - 内存里的 `{reward, stepAccount, nextChest}` payload 上**补算** `nextChest.status = (nextChest.unlockAt > now) ? 1 : 2` + `nextChest.remainingSeconds = max(0, ceil((nextChest.unlockAt - now) / 1s))`（两个字段**同源同时刻**计算，与 §7.1 GET /chest/current 同一公式；新 chest 刚 INSERT 后通常 `status = 1` + `remainingSeconds ≈ 600`）→ 返回 `200`
 5. **事务后处理**（无 post-tx Redis 写回 / 无 best-effort post-rollback failed upsert）：
-   - **事务 commit 成功**（步骤 3a~3l 全部成功）→ idempotency 记录的 `status = 'success'` + `response_json`（**不含** `remainingSeconds` / **不含** `requestId`）已**原子**落盘；同 key 后续重试在步骤 3a 拿到 `affected_rows = 0` → 步骤 3b 命中 `status = 'success'` 分支，反序列化 `response_json` + 重新按"当前时刻"补算 `nextChest.remainingSeconds` + 填入**当前**请求的 `requestId` 后返回，**无任何 Redis 依赖**、**无 stale 倒计时**、**无 stale requestId**
+   - **事务 commit 成功**（步骤 3a~3l 全部成功）→ idempotency 记录的 `status = 'success'` + `response_json`（**不含** `nextChest.status` / **不含** `nextChest.remainingSeconds` / **不含** `requestId`）已**原子**落盘；同 key 后续重试在步骤 3a 拿到 `affected_rows = 0` → 步骤 3b 命中 `status = 'success'` 分支，反序列化 `response_json` + 重新按"当前时刻"补算 `nextChest.status = (unlock_at > now) ? 1 : 2` + `nextChest.remainingSeconds = max(0, ceil((unlock_at - now) / 1s))`（两字段同源同时刻计算保证内部一致；尤其重试发生在新 chest 已到期解锁的时刻会返回 `status = 2` + `remainingSeconds = 0`，与 §7.1 GET 同一秒查询完全对齐）+ 填入**当前**请求的 `requestId` 后返回，**无任何 Redis 依赖**、**无 stale status**、**无 stale 倒计时**、**无 stale requestId**
    - **事务 rollback**（步骤 3a~3k 任一子步骤失败 / 3l commit 失败）→ 整个事务回滚（**包括步骤 3a INSERT 的 `pending` 行也跟着回滚**，因为预声明与业务写入在同一事务）→ 同 key 重试在步骤 3a `affected_rows = 1`，重新走完整流程；本路径**无副作用**（chest 状态未变 / 步数未扣 / log 未写）、**无 pending 残留**（rollback 已彻底清除）；**无需任何 best-effort 异步补偿** —— 事务原子性已保证"rollback 路径无副作用 + 同 key 重试安全"，无 client 卡死风险，写 `status = 'failed'` 反而会与"client 立即同 key 重试 → 新事务 commit success"的合法路径在 UNIQUE 约束上竞争，把后到达的 success 行错误覆盖为 failed（r7 review 锁定的 race condition；详见本节末「关键约束」"r7 移除 best-effort failed upsert 决策"段）
-6. **响应**：返回 `{reward, stepAccount, nextChest}` 三段嵌套 payload（首次成功路径来自步骤 4 补算后的结果；重试 cached 路径来自步骤 3b 反序列化 + 补算 `remainingSeconds` + 填入当前 `requestId`）
+6. **响应**：返回 `{reward, stepAccount, nextChest}` 三段嵌套 payload（首次成功路径来自步骤 4 补算后的结果；重试 cached 路径来自步骤 3b 反序列化 + 补算 `nextChest.status` 与 `nextChest.remainingSeconds`（同源同时刻）+ 填入当前 `requestId`）
 
 **事务边界规则**（与 数据库设计 §8.3 一致）：
 
@@ -1004,7 +1004,7 @@ JSON 示例：
   - **server 端不变量**（实装锁定）：
     - 步骤 3a / 3k 任何 DB 错误（driver / 网络 / 约束冲突等）→ 整体回滚 → 返回 1009；**不**对已 commit 事务做反向补偿（不允许 server 主动撤销 reward / 退步数）
     - **禁止** server 在事务 rollback 后异步写 `failed` 占位行（r7 review 锁定 —— 该补偿与 client 同 key 重试的合法 success 路径在 UNIQUE 约束上竞争，可能错误覆盖 success → failed；事务原子性已保证 rollback 路径同 key 重试安全，无需补偿）
-    - **`response_json` 缓存内容钦定**（r7 review 锁定）：仅持久化 `{code, message, data: {reward.*, stepAccount.*, nextChest.{id, status, unlockAt, openCostSteps}}}`；**`nextChest.remainingSeconds` 不写入 `response_json`**（由 server 在响应序列化时按 `max(0, ceil((unlock_at - now) / 1s))` 实时计算填入）；**顶层 `requestId` 也不写入 `response_json`**（每次请求独立的 trace ID，重试请求必须返回当前请求的 `requestId` 以维持 log / trace 关联语义；详见 §7.2 字段表 `requestId` 行注解）。首次成功路径与同 key 重试 cached 路径走同一序列化逻辑，与 §7.1 GET /chest/current + §2 / §13 全局信封语义对齐，无任何 stale 漂移
+    - **`response_json` 缓存内容钦定**（r7 review 锁定，r9 review 进一步收紧时间派生字段范围）：仅持久化 `{code, message, data: {reward.*, stepAccount.*, nextChest.{id, unlockAt, openCostSteps}}}`；**`nextChest.status` + `nextChest.remainingSeconds` 均不写入 `response_json`**（与 §7.1 GET /chest/current 一致：两者都是 time-derived 字段 —— `status = (unlock_at > now) ? 1 : 2`、`remainingSeconds = max(0, ceil((unlock_at - now) / 1s))`；由 server 在响应序列化时按"当前时刻"**同源同时刻**实时计算填入，r9 review 锁定：若仅回放 stale `status=1` 而仅重算 `remainingSeconds`，则同 key 重试发生在新 chest 已解锁时刻会返回 `status=1` + `remainingSeconds=0` 不可能组合，与 §7.1 GET 同一秒查询结果漂移）；**顶层 `requestId` 也不写入 `response_json`**（每次请求独立的 trace ID，重试请求必须返回当前请求的 `requestId` 以维持 log / trace 关联语义；详见 §7.2 字段表 `requestId` 行注解）。首次成功路径与同 key 重试 cached 路径走同一序列化逻辑，与 §7.1 GET /chest/current + §2 / §13 全局信封语义对齐，无任何 stale 漂移
     - **彻底移除 Redis 在 chest_open idempotency 路径上的角色**（r4 的 sentinel / 双 TTL / SET / DEL / counter `chest_open_idem_cache_writeback_failed_total` 全部废弃；本接口的 Redis 仅在 rate_limit 中间件中保留，与 §4.5 一致）
 - **rate_limit 中间件位置**：rate_limit 在步骤 1 已执行，因此**重试请求即使命中 idempotency DB 记录，本次调用仍计入 rate_limit 配额**（与节点 2 / 3 / 4 / 5 / 6 已认证业务路由一致）。client 在网络层重试时**应**自行做退避（指数退避 / 抖动）避免触发 1005；server 端**不**为本接口提供"重试免限频"特殊路径（中间件链不感知 idempotency 是契约简化决策，避免 rate_limit 中间件依赖路由级幂等状态）
 - **为什么不用 Redis 做幂等声明**（r5 review 锁定 / r6 review 沿用）：Redis 是**非事务存储**，与 MySQL 不能形成原子写。r4 的"sentinel TTL = 60s + final-response TTL = 24h"双 TTL 方案在"事务 commit 成功 + Redis SET final-response 失败"的 case 下，sentinel 60s 自然过期后 **client 无法区分**两种语义："首次 commit 成功，资产已落盘"vs"首次事务回滚，资产未落盘"——前者 client 换新 key 重试会**重复扣 1000 步 + 重复出箱**，后者换新 key 是安全的；client 没有可观测信号做这个区分（server 异步 SET 重试失败 + log.Error 仅在 server 端可见）。把 idempotency 记录搬到 MySQL **同事务**写后（r5 锁定 DB 持久化路径，r6 进一步把预声明也纳入业务事务），"首次是否成功"由 DB 单一可信源决定（步骤 3k 在 commit 前更新 `status = 'success'` + 写 `response_json`；commit 原子）—— client 同 key 重试**始终安全**，无需区分 case，也无需 UI 提示"奖励可能已发放"。该方案彻底消除 Redis 写回失败导致的"60s 外重复出箱"风险
@@ -1038,7 +1038,7 @@ JSON 示例：
 | 字段 | 类型 | 必填 | 范围/约束 | 说明 |
 |---|---|---|---|---|
 | `data.nextChest.id` | string | 必填 | BIGINT 字符串化 | 下一轮宝箱主键（与刚开的宝箱 id 不同 —— 旧记录已 DELETE） |
-| `data.nextChest.status` | number (int) | 必填 | 节点 7 阶段固定 `1` (counting) | 下一轮状态；新 chest 必为 counting 状态 |
+| `data.nextChest.status` | number (int) | 必填 | 枚举 `1` (counting) / `2` (unlockable)（与 §7.1 GET /chest/current `data.status` 同义对齐） | 下一轮状态；**计算字段，不持久化到 idempotency `response_json` 缓存；server 在响应序列化时按 §7.1 服务端逻辑同一规则实时计算** —— `(unlock_at > now) ? 1 (counting) : 2 (unlockable)`；首次成功路径下新 chest 刚 INSERT（`unlock_at = now + 10 min`）后通常 = `1`；同 key 重试 cached 路径下按"当前时刻"重新补算（若重试发生在新 chest 已到期解锁的时刻，按现实时间应返回 `2` —— 不能回放首次时刻 stale `1`，否则会与 §7.1 GET 同一秒查询结果漂移 + 与 `remainingSeconds` 互相矛盾，如 `status=1` + `remainingSeconds=0` 这种不可能组合）；**禁止**实装时写死 `1` 字面量（会与 §7.1 GET 语义漂移）/ **禁止**把首次成功时刻计算的值写入 `response_json` 缓存（r9 review 锁定，与 `remainingSeconds` 一同处理） |
 | `data.nextChest.unlockAt` | string (ISO 8601 UTC) | 必填 | length = 20 | 下一轮解锁时间；server 端固定为开箱时刻 + 10 分钟 |
 | `data.nextChest.openCostSteps` | number (int) | 必填 | 节点 7 阶段固定 `1000` | 下一轮开启所需步数 |
 | `data.nextChest.remainingSeconds` | number (int) | 必填 | `0 ≤ value ≤ 600`（新 chest `unlock_at = now + 10 min`，故 ceil 上界 = 600） | 距 unlockAt 剩余秒数；**计算字段，不持久化到 idempotency `response_json` 缓存；server 在响应序列化时按 §7.1 服务端逻辑同一规则实时计算** —— `max(0, ceil((unlock_at - now) / 1s))`；首次成功路径下新 chest 刚 INSERT 后通常 = 600（响应序列化耗时 > 1s 可能下降为 599 / 598）；同 key 重试 cached 路径下按"当前时刻"重新补算（与 §7.1 GET 返回值保持一致，**不**回放首次时刻的 stale 值；详见服务端逻辑步骤 3j / 3b）；**禁止**实装时写死 600 字面量（会与 §7.1 GET 语义漂移）/ **禁止**把首次成功时刻计算的值写入 `response_json` 缓存（r6 review 锁定，防 stale 倒计时） |
@@ -1067,8 +1067,8 @@ JSON 示例：
     },
     "stepAccount": {
       "totalSteps": 12560,
-      "availableSteps": 740,
-      "consumedSteps": 400
+      "availableSteps": 11160,
+      "consumedSteps": 1400
     },
     "nextChest": {
       "id": "5002",
@@ -1112,7 +1112,7 @@ JSON 示例：
 - **client 重试策略**（r5 review 锁定 / r6 review 修订 / r7 review 简化；**取代** r4 的"60s sentinel + 60s 外换新 key + UI 提示"分段方案；DB 同事务幂等 + InnoDB 锁阻塞排队让所有 client 重试路径**始终安全**）：
   - **网络层重试**（如 client 收到 5xx / timeout）→ 用**同** idempotencyKey 重试 + 指数退避（避免触发 1005，因 rate_limit 中间件**不**对 idempotency 命中请求免限频，重试计入用户级配额）；server 端在步骤 3 处理：
     - 首个事务**仍在执行中** → 重试事务在步骤 3a INSERT 阻塞等待 InnoDB unique-key X-lock 释放（无 1008，client 端表现为请求耗时增加；建议 server / proxy 层 timeout 设 ≥ 5s 覆盖正常事务时延）；首个事务结束后 → commit 路径返回 200 + cached response / rollback 后路径在步骤 3a `affected_rows = 1` 继续走全流程
-    - 行已 `status = 'success'` → 返回 200 + cached response（与首次结果一致；`nextChest.remainingSeconds` 按当前时刻实时补算 + `requestId` 填本次重试请求的 trace ID，不复用首次时刻的 stale 值与 stale trace ID）
+    - 行已 `status = 'success'` → 返回 200 + cached response（与首次结果一致；`nextChest.status` + `nextChest.remainingSeconds` 均按当前时刻实时**同源同时刻**补算 + `requestId` 填本次重试请求的 trace ID，不复用首次时刻的 stale 值与 stale trace ID —— 尤其重试发生在新 chest 已到期解锁的时刻会自然返回 `status = 2` + `remainingSeconds = 0`，与 §7.1 GET 同一秒查询完全对齐）
     - 行**不存在**（首次事务已 rollback，pending 行自动消失）→ 步骤 3a `affected_rows = 1` → 走全流程（与首次到达等价）
   - **业务错误重试**（如收到 3002 / 4002）→ server 端业务事务 rollback 时 idempotency 行也跟着回滚 → 同 key 重试在步骤 3a `affected_rows = 1` 自然走全流程（与首次到达等价）。client **可**选用同 key 或新 key 重试；推荐**新** idempotencyKey 重试（语义更清晰，避免与"网络重试"语义混淆；DB 同事务幂等下两者都安全）
   - **1008 重试**（极窄 race 兜底路径：步骤 3b SELECT 读到 `status = 'pending'`；正常实装下几乎不会触发）→ client **必须**用**同** idempotencyKey + 指数退避重试（建议 2s / 4s / 8s，累计 ≤ 30s）。**没有 60s 边界**（r4 的 60s 边界来源于 Redis sentinel TTL，DB 持久化幂等已无此约束）；下一次重试通常会进入 InnoDB 锁等待或直接命中 `success` final 状态。**禁止**换新 key（理由：首次事务可能即将 commit；换新 key 会绕过 idempotency 直接进新事务 → 重复扣 1000 步 + 重复出箱）
@@ -2870,7 +2870,7 @@ JSON 示例（与本节字段表对齐，含 `requestId`）：
 
 同一用户、同一接口、同一 `idempotencyKey`：
 
-- 第一次成功，后续重复请求返回第一次结果（`status = 'success'`，server 直接返回缓存的 `response_json` + 实时补算时间派生字段如 `nextChest.remainingSeconds` + 实时填入**当前**请求的顶层 `requestId`）
+- 第一次成功，后续重复请求返回第一次结果（`status = 'success'`，server 直接返回缓存的 `response_json` + 实时**同源同时刻**补算时间派生字段 `nextChest.status` 与 `nextChest.remainingSeconds`（与 §7.1 GET /chest/current 一致）+ 实时填入**当前**请求的顶层 `requestId`）
 - 第一次处理中（事务尚未提交），同 key 并发请求被 InnoDB unique-key X-lock 阻塞排队等待首个事务结束（不返回 1008；首个事务结束后再分支到 `success` 或全流程）；仅在极窄 race 兜底路径下返回 **1008**
 - 第一次失败（事务回滚，pending 行也一起回滚），同 key 重试在事务内首条 INSERT 拿 `affected_rows = 1` 等价于首次到达走全流程；**无任何 server 端 best-effort 补偿写**（r7 review 锁定移除：rollback 路径的事务原子性已保证"无副作用 + 同 key 重试安全"，写 `failed` 占位行反而引入 race condition 把后到达的 success 行错误覆盖为 failed）
 
@@ -2884,7 +2884,7 @@ JSON 示例（与本节字段表对齐，含 `requestId`）：
 
 - `(user_id, idempotency_key)` UNIQUE 约束 → 原子声明 + 并发阻塞排队（InnoDB unique-key X-lock）
 - `status` ENUM('pending', 'success') → **二态机**（r7 review 锁定，从 r6 的三态机简化）；`pending` 仅在事务持锁期间出现（对锁等待者不可见），事务 commit 推进到 `success`，事务 rollback 让 pending 行消失（**无** `failed` 状态 —— 详见 §5.16 + V1接口设计 §7.2 r7 决策段）
-- `response_json` JSON NULL → 缓存首次成功响应，**不**包含时间派生字段（如 `nextChest.remainingSeconds`，由 server 在响应序列化时实时计算填入）/ **不**包含顶层 `requestId`（每次请求独立 trace ID，重试请求需重新填**当前**请求的 trace ID 以维持 log / trace 关联语义，r7 review 锁定）
+- `response_json` JSON NULL → 缓存首次成功响应，**不**包含时间派生字段（`nextChest.status` 与 `nextChest.remainingSeconds` 均是 time-derived，由 server 在响应序列化时按"当前时刻"**同源同时刻**实时计算填入；r9 review 锁定 `nextChest.status` 与 `remainingSeconds` 同处理 —— 防止重试发生在新 chest 已到期解锁时刻回放 stale `status=1` + 实时 `remainingSeconds=0` 不可能组合）/ **不**包含顶层 `requestId`（每次请求独立 trace ID，重试请求需重新填**当前**请求的 trace ID 以维持 log / trace 关联语义，r7 review 锁定）
 
 ---
 
