@@ -574,12 +574,16 @@ func TestChestOpenServiceIntegration_Concurrent100SameKey_OnlyOneOpens(t *testin
     }
     results := make([]result, N)
 
+    // r4 codex 修正：必须用 start barrier 同步释放所有 goroutine，否则 spawn 循环本身
+    // 可能比 goroutine 业务调用还慢 → 并发退化为顺序 → false-positive race coverage
+    start := make(chan struct{})
     var wg sync.WaitGroup
     wg.Add(N)
     for i := 0; i < N; i++ {
         i := i
         go func() {
             defer wg.Done()
+            <-start // 等所有 goroutine ready
             out, err := svc.OpenChest(context.Background(), service.OpenChestInput{
                 UserID:         userID,
                 IdempotencyKey: idempotencyKey,
@@ -591,6 +595,7 @@ func TestChestOpenServiceIntegration_Concurrent100SameKey_OnlyOneOpens(t *testin
             results[i] = result{rewardID: out.Reward.CosmeticItemID, nextID: out.NextChest.ID}
         }()
     }
+    close(start) // 统一释放
     wg.Wait()
 
     // 断言 1：所有 100 都成功（无 1009 / 3002）
@@ -666,6 +671,9 @@ func TestChestOpenServiceIntegration_Concurrent100DifferentKeys_StepLimitOnlyOne
     }
     results := make([]result, N)
 
+    // r4 codex 修正：必须用 start barrier 同步释放所有 goroutine，否则 spawn 循环本身
+    // 可能比 goroutine 业务调用还慢 → 并发退化为顺序 → FOR UPDATE 真实争抢未触发
+    start := make(chan struct{})
     var wg sync.WaitGroup
     wg.Add(N)
     for i := 0; i < N; i++ {
@@ -673,6 +681,7 @@ func TestChestOpenServiceIntegration_Concurrent100DifferentKeys_StepLimitOnlyOne
         key := fmt.Sprintf("conc_diff_%03d", i)
         go func() {
             defer wg.Done()
+            <-start // 等所有 goroutine ready
             _, err := svc.OpenChest(context.Background(), service.OpenChestInput{
                 UserID: userID, IdempotencyKey: key,
             })
@@ -688,6 +697,7 @@ func TestChestOpenServiceIntegration_Concurrent100DifferentKeys_StepLimitOnlyOne
             }
         }()
     }
+    close(start) // 统一释放
     wg.Wait()
 
     // 统计：1 个 succeeded，99 个 errCode=4002（ErrChestNotUnlocked，详见函数头 race 注释）
@@ -1063,13 +1073,13 @@ func TestChestOpenServiceIntegration_WeightedPickDistribution_1000Opens(t *testi
 
 - [x] **Task 8（AC8）**：实装 `TestChestOpenServiceIntegration_Concurrent100SameKey_OnlyOneOpens`
   - [x] 8.1 buildChestOpenServiceIntegration setup
-  - [x] 8.2 100 个 goroutine + sync.WaitGroup 并发同 idempotencyKey
+  - [x] 8.2 100 个 goroutine + sync.WaitGroup 并发同 idempotencyKey；**必须**用 `start := make(chan struct{})` release barrier + 每个 goroutine 进业务前 `<-start` 阻塞、spawn 循环结束后 `close(start)` 统一释放（r4 codex 修正：否则 fast runner 上 spawn 循环本身可能比 goroutine 业务调用还慢 → 并发退化为顺序 → 无法触发 ClaimPending UNIQUE 串行化 + cached replay 真实 race contention → false-positive coverage）
   - [x] 8.3 断言所有 100 都成功（任一失败 → t.Fatalf）+ 全部相同 reward.CosmeticItemID + nextID
   - [x] 8.4 DB 断言：step_account.available_steps=500 / chest_open_logs=1 / idem 1 行 status=success / user_chests=1
 
 - [x] **Task 9（AC9）**：实装 `TestChestOpenServiceIntegration_Concurrent100DifferentKeys_StepLimitOnlyOneOpens`
   - [x] 9.1 setup with 1500 步数（仅够 1 次）
-  - [x] 9.2 100 个 goroutine 各用 fmt.Sprintf("conc_diff_%03d", i) 不同 key 并发调用
+  - [x] 9.2 100 个 goroutine 各用 fmt.Sprintf("conc_diff_%03d", i) 不同 key 并发调用；**必须**用 `start := make(chan struct{})` release barrier 同步启动（r4 codex 修正：同 AC8，否则无法触发 FOR UPDATE 行锁真实 race contention → 1 succeeded + 99 × 4002 的断言可能在某些环境上 trivially pass）
   - [x] 9.3 统计：1 个 succeeded + 99 个 errCode == **ErrChestNotUnlocked（4002）**（r1 codex 修正：5d unlock_at 检查在 5e step 检查之前 → race 后失败码是 4002，详见 AC9 注释）
   - [x] 9.4 DB 断言：step_account.available_steps=500 / chest_open_logs=1 / **idem 仅 1 行**（99 个失败事务 ROLLBACK 干净）
 

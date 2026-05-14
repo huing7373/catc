@@ -701,12 +701,16 @@ func TestChestOpenServiceIntegration_Concurrent100SameKey_OnlyOneOpens(t *testin
 	}
 	results := make([]result, N)
 
+	// start barrier: 所有 goroutine 起好后再统一释放，避免 fast runner 上 spawn 循环本身
+	// 比 goroutine 业务调用还慢、导致并发退化为顺序执行（false-positive race coverage）
+	start := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(N)
 	for i := 0; i < N; i++ {
 		i := i
 		go func() {
 			defer wg.Done()
+			<-start // 等所有 goroutine ready
 			out, err := svc.OpenChest(context.Background(), service.OpenChestInput{
 				UserID:         userID,
 				IdempotencyKey: idempotencyKey,
@@ -718,6 +722,7 @@ func TestChestOpenServiceIntegration_Concurrent100SameKey_OnlyOneOpens(t *testin
 			results[i] = result{rewardID: out.Reward.CosmeticItemID, nextID: out.NextChest.ID}
 		}()
 	}
+	close(start) // 释放所有 goroutine 同时进入业务逻辑
 	wg.Wait()
 
 	// 断言 1: 全部 100 goroutine 都成功（任一 err → fail）
@@ -796,6 +801,10 @@ func TestChestOpenServiceIntegration_Concurrent100DifferentKeys_StepLimitOnlyOne
 	}
 	results := make([]result, N)
 
+	// start barrier: 同上，确保 100 个事务几乎同时进入 FindByUserIDForUpdate(userID)
+	// 真正制造 FOR UPDATE 行锁排队 → 否则 fast runner 上可能 goroutine 串行启动 +
+	// 第一个事务已 commit + chest.unlock_at 已刷新前，后续事务来不及进入争抢
+	start := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(N)
 	for i := 0; i < N; i++ {
@@ -803,6 +812,7 @@ func TestChestOpenServiceIntegration_Concurrent100DifferentKeys_StepLimitOnlyOne
 		key := fmt.Sprintf("conc_diff_%03d", i)
 		go func() {
 			defer wg.Done()
+			<-start // 等所有 goroutine ready
 			_, err := svc.OpenChest(context.Background(), service.OpenChestInput{
 				UserID: userID, IdempotencyKey: key,
 			})
@@ -818,6 +828,7 @@ func TestChestOpenServiceIntegration_Concurrent100DifferentKeys_StepLimitOnlyOne
 			}
 		}()
 	}
+	close(start) // 释放所有 goroutine 同时进入业务逻辑
 	wg.Wait()
 
 	// race 期望（详见函数头注释）：

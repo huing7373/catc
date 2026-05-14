@@ -322,3 +322,4 @@
 | 2026-05-15 | [集成测试错误码断言必须忠实于事务步骤顺序（OpenChest 5d-5f unlock_at 检查在 step 检查之前 → race 失败码是 4002 而非 3002）（20-9 r1）](2026-05-15-integration-test-error-code-must-match-tx-step-order-20-9-r1.md) | 1 | testing | `<pending>` |
 | 2026-05-15 | [集成测试不准用真随机/真时钟做边界断言（deterministic picker stub + fixed clock 注入）（20-9 r2）](2026-05-15-integration-tests-deterministic-picker-and-fixed-clock-20-9-r2.md) | 2 | testing | `<pending>` |
 | 2026-05-15 | [集成测试 vs 单元测试责任划分（weighted picker 算法 vs wiring）（20-9 r3）](2026-05-15-integration-vs-unit-test-responsibility-split-weighted-picker-20-9-r3.md) | 1 | testing | `<pending>` |
+| 2026-05-15 | [并发集成测试必须用 start barrier 同步 goroutine 启动，否则 false-positive race coverage（20-9 r4）](2026-05-15-concurrent-test-needs-start-barrier-20-9-r4.md) | 1 | testing | `<pending>` |
