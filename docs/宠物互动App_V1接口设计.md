@@ -400,7 +400,7 @@ JSON 示例（服务端始终返回 `null`；获取真实房间归属请改用 `
 | `data.chest.status` | number | `1`（counting） | 宝箱状态枚举（1=counting, 2=unlockable —— 见 §7.1 status 枚举 + 数据库设计 §6.7 user_chests.status）；节点 2 阶段所有宝箱在登录初始化后均为 `1`（counting），到 `unlockAt` 后服务端**动态判定**为 `2`（unlockable）—— 见 Story 4.8 happy path 第 2 case。**节点 2 不存在 `opened` 状态**：开箱功能在节点 7 / Epic 20 才上线，届时开箱后会立即重建下一轮 chest（仍为 `counting`），故 `/home` 永远不返回 opened 状态 |
 | `data.chest.unlockAt` | string (ISO 8601 UTC) | now + 10 min | 解锁时间 |
 | `data.chest.openCostSteps` | number | `1000` | 开启所需步数（节点 2 固定 1000） |
-| `data.chest.remainingSeconds` | number | 600 ~ 0 | 距离 unlockAt 的剩余秒数；> 0 表示 counting，≤ 0 表示已可开启 |
+| `data.chest.remainingSeconds` | number | 600 ~ 0 | 距离 unlockAt 的剩余秒数；> 0 表示 counting，= 0 表示已可开启（与 `status = 2` 等价 —— client 可二选一判定）；**server 端按 `max(0, ceil((unlock_at - now) / 1s))` 计算，到 0 时不会出现负数**（与 §7.1 GET /chest/current `data.remainingSeconds` 同语义同公式 —— 跨接口字段对齐，client 解析层应按 `Int` 处理，避免 Swift `UInt` 在收到负数时 crash 的防御性需求消失） |
 | `data.room.currentRoomId` | string \| null | `null` | 当前房间主键；**节点 2 阶段强制 `null`**（节点 4 由 Story 11.10 注入真实数据） |
 
 JSON 示例（节点 2 阶段示例 — 首次登录后立即调用）：
@@ -1043,7 +1043,7 @@ JSON 示例：
   - **r11 决策**：**1008 错误码不在节点 7 阶段本接口（POST /chest/open）实际触发**；语义保留以下两层：
     - **全局错误码定义不变**（§3 错误码表 `1008 = 幂等冲突` 定义保留，未来节点 11 `POST /compose/upgrade` 或其他幂等接口若引入"非 X-lock 阻塞 + 应用层 pending 跟踪"等不同实现路径，可能复用 1008 触发；本 story 20-1 不锚定此类未来场景）
     - **步骤 5b 兜底分支**：万一 driver / 网络 / 数据 corruption 导致读到 `status = 'pending'`（理论上不可能），返回 **1009**（非 1008）以与"DB 异常 / 数据完整性异常"语义对齐 —— 1008 表征"已知幂等冲突"，1009 表征"server 端未知异常"，对 client 的语义指引更准确
-  - **错误码表更新**（§7.2 错误码表 1008 行）：触发条件文字标注"节点 7 阶段本接口实际无可达路径（详见 r11 决策段）；保留 1008 语义为全局可复用"
+  - **错误码表更新**（§7.2 错误码表 r15 review 锁定）：**1008 行已从 §7.2 错误码表移除**（与 server 实际行为对齐：本接口不触发 1008，错误码表不再列出 dead path 防止 client / 测试方实装 1008 分支）；移除后 §7.2 错误码表下方新增一段「注（r15 review 锁定）」说明 1008 在本接口的退役决策 + 全局保留。1008 在 §3 全局错误码表中**保留定义**为全局可复用语义
 
 
 - **为什么不用 Redis 做幂等声明**（r5 review 锁定 / r6 review 沿用）：Redis 是**非事务存储**，与 MySQL 不能形成原子写。r4 的"sentinel TTL = 60s + final-response TTL = 24h"双 TTL 方案在"事务 commit 成功 + Redis SET final-response 失败"的 case 下，sentinel 60s 自然过期后 **client 无法区分**两种语义："首次 commit 成功，资产已落盘"vs"首次事务回滚，资产未落盘"——前者 client 换新 key 重试会**重复扣 1000 步 + 重复出箱**，后者换新 key 是安全的；client 没有可观测信号做这个区分（server 异步 SET 重试失败 + log.Error 仅在 server 端可见）。把 idempotency 记录搬到 MySQL **同事务**写后（r5 锁定 DB 持久化路径，r6 进一步把预声明也纳入业务事务），"首次是否成功"由 DB 单一可信源决定（步骤 5k 在 commit 前更新 `status = 'success'` + 写 `response_json`；commit 原子）—— client 同 key 重试**始终安全**，无需区分 case，也无需 UI 提示"奖励可能已发放"。该方案彻底消除 Redis 写回失败导致的"60s 外重复出箱"风险
@@ -1130,13 +1130,14 @@ JSON 示例：
 | 1001 | 未登录 / token 无效 | auth 中间件拦截（无 Authorization 头 / token 非法 / token 过期 / token 解析失败） |
 | 1002 | 参数错误 | `idempotencyKey` 缺失 / length < 1 或 > 128 / 字符集含 `[A-Za-z0-9_:-]` 之外的字符 |
 | 1005 | 操作过于频繁 | **r10 review 锁定 + r11 review 修订**：本接口的 rate_limit 检查在**服务端逻辑步骤 4**（handler 内层，**不**在 middleware 链上），**对所有未命中 committed success 的请求做**（按 `user_id` 限频，每用户每分钟 > 60 次）—— 包括 (a) 真新请求 + (b) **pending 阶段同 key 重试**（因 MVCC 让 autocommit SELECT 看不到首事务的 pending 行，pending 阶段重试在步骤 3 表现为"未命中"，故会走步骤 4 消耗 quota；r11 review 修订 r10 关于"pending 命中免配额"的承诺，详见本节末「关键约束」「rate_limit 位置 r10 调整 + r11 修订」+「MVCC 下 pending 不可见 r11 决策」两段）。**仅命中 `status = 'success'` 的 committed replay 跳过步骤 4 限频**，不触发 1005 —— 这保证用户首次成功后 client 用同 key 退避重试始终能读到 cached success，不会被限频卡死。**client 应使用 ≥ 200ms 退避**覆盖业务事务时长，避免在 pending 窗口内密集重试打满 quota；若仍撞 1005，client 应等 60s 限频窗口后再试同 key（详见 §7.2「client 重试策略」段） |
-| 1008 | 幂等冲突 | **r11 review 锁定**：节点 7 阶段本接口（POST /chest/open）**实际无可达路径** —— (a) 步骤 3 在 MVCC 下不可能观察到 pending 行（前述「MVCC 下 pending 不可见 r11 决策」段）→ 步骤 3 永远不返回 1008；(b) 步骤 5b 在 X-lock serialize 排队下，第二事务拿到 `affected_rows = 0` 时首事务必然已 commit + status 已推进到 'success' → 步骤 5b 永远观察到 `status = 'success'`，不会返回 1008（万一 driver 层 read-uncommitted bug 等异常读到 pending → 返回 1009 而非 1008，详见步骤 5b 兜底分支 + 1009 行）。**1008 全局错误码定义保留**（§3 错误码表）供未来其他幂等接口可能的不同实现路径复用；本 story 20-1 在节点 7 阶段不再触发 1008（详见本节末「关键约束」「1008 错误码 r11 退役决策」段） |
-| 1009 | 服务繁忙 | DB 异常（业务事务失败 / SELECT 返回 err / INSERT 返回 err 等）/ 步数 UPDATE 乐观锁 version 不匹配导致 affected_rows = 0（并发冲突，client 可重试）/ 加权抽奖时 enabled cosmetic_items 为空（seed 未执行 —— 数据完整性异常）/ **`user_step_accounts` 行缺失**（理论上 Story 4.6 登录初始化必创建，缺失视为数据完整性异常，与"步数不足"语义区分）/ **步骤 5b 兜底分支读到 status='pending'**（**r11 review 锁定**：理论上不可能，但保留 1009 语义兜底覆盖 driver 层 read-uncommitted bug / 数据 corruption 等极异常情形 —— 该路径**不**映射 1008，因 1008 在 r11 设计下已退役，详见 1008 行）。**注（r7 review 锁定）**：1009 触发条件**不**包含"idempotency 行 `status = 'failed'`"—— `failed` 状态已从 ENUM 移除（参见数据库设计 §5.16 + 本节末关键约束 r7 决策段），事务 rollback 路径下同 key 重试在步骤 5a 拿 `affected_rows = 1` 走全流程而**非**返回 1009 |
+| 1009 | 服务繁忙 | DB 异常（业务事务失败 / SELECT 返回 err / INSERT 返回 err 等）/ 步数 UPDATE 乐观锁 version 不匹配导致 affected_rows = 0（并发冲突，client 可重试）/ 加权抽奖时 enabled cosmetic_items 为空（seed 未执行 —— 数据完整性异常）/ **`user_step_accounts` 行缺失**（理论上 Story 4.6 登录初始化必创建，缺失视为数据完整性异常，与"步数不足"语义区分）/ **步骤 5b 兜底分支读到 status='pending'**（**r11 review 锁定**：理论上不可能，但保留 1009 语义兜底覆盖 driver 层 read-uncommitted bug / 数据 corruption 等极异常情形 —— 该路径**不**映射 1008，因 1008 在 r11 设计下已退役 + r15 review 锁定从 §7.2 错误码表移除，详见本表下方「注（r15 review 锁定）」段）。**注（r7 review 锁定）**：1009 触发条件**不**包含"idempotency 行 `status = 'failed'`"—— `failed` 状态已从 ENUM 移除（参见数据库设计 §5.16 + 本节末关键约束 r7 决策段），事务 rollback 路径下同 key 重试在步骤 5a 拿 `affected_rows = 1` 走全流程而**非**返回 1009 |
 | 3002 | 可用步数不足 | `user_step_accounts.available_steps < 1000`（开箱所需，行存在但余额不足）；client 收到 3002 时应展示"步数不足，请先走路赚步数"+ 引导用户走步 / 主动同步步数（Story 21.5 锚定的"开箱前主动同步步数"流程可减少此 case）。**注**：`user_step_accounts` 行**不存在**的 case **不**映射 3002，走 1009（详见上行 1009 触发条件） |
 | 4001 | 当前宝箱不存在 | 用户在 user_chests 表中无任何行（理论上 Story 4.6 登录初始化必然创建首个 chest）—— 表征数据完整性异常 |
 | 4002 | 宝箱尚未解锁 | 当前 chest 状态判定为 counting（数据库 status = 1 AND `unlock_at > now`）；client 不应让 4002 触发（Story 21 应在 button 可点状态校验上规避：仅 `status = 2` 时按钮可点），如果触发说明 client 端 button 状态校验有 bug 或 server / client 时钟漂移严重；client 收到 4002 时应主动重新调一次 GET /chest/current 校正本地状态 |
 
 > **注**：本接口**不**触发 4003（4003 在 §3 表保留但本 MVP 暂未使用；如未来引入"宝箱开启条件不满足"细分业务场景如"先完成新手任务"，由对应 epic 锚定）/ **不**触发 5xxx（5xxx 是合成 / 装扮事务相关，与开箱无关）/ **不**触发 6xxx / 7xxx。
+
+> **注（r15 review 锁定）**：本接口在节点 7 阶段**不**触发 **1008 幂等冲突** —— r11 review 锁定 1008 在本接口实现路径下无可达触发（步骤 3 受 MVCC 限制不可能观察到 pending；步骤 5b 受 InnoDB X-lock serialize 限制必然观察到 `status = 'success'`，详见本节末「关键约束」「1008 错误码 r11 退役决策」段 + 步骤 5b 兜底分支）。**错误码表故意省略 1008 行**以与 server 实际行为保持一致（避免 client / 测试方实装 1008 分支处理 dead path）。1008 在 §3 全局错误码表中**保留定义**，供未来其他幂等接口（如节点 11 `POST /compose/upgrade`）若采用不同实现路径时复用。
 
 #### 关键约束
 

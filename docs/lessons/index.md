@@ -309,3 +309,4 @@
 | 2026-05-14 | [Story 文件自身需 in-flight 同步追踪契约迭代 + scope 验证段禁止留无时间标签全局断言（20-1 r12）](2026-05-14-story-file-must-track-canonical-contract-drift-20-1-r12.md) | 2 | docs, architecture | `<pending>` |
 | 2026-05-14 | [节点冻结声明 + 跨段 summary 必须随核心步骤迭代（20-1 r13）](2026-05-14-frozen-statement-must-mirror-time-derived-field-rule-20-1-r13.md) | 2 | docs, architecture | `<pending>` |
 | 2026-05-14 | [设计文档迭代时 stale 快照应"删除即删除"而非"super-note 警告并保留" + 跨文档引用副本必须随契约演进同步（20-1 r14）](2026-05-14-stale-snapshot-delete-vs-warn-in-iterating-design-doc-20-1-r14.md) | 2 | docs | `<pending>` |
+| 2026-05-14 | [跨接口字段语义对齐 + 错误码表收口（无可达路径就删除而非保留）（20-1 r15）](2026-05-14-cross-endpoint-field-alignment-and-error-table-pruning.md) | 2 | docs | `<pending>` |
