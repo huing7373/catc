@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"strconv"
+
 	"github.com/gin-gonic/gin"
 
 	apperror "github.com/huing/cat/server/internal/pkg/errors"
@@ -31,7 +33,11 @@ func NewDevChestHandler(svc service.DevChestService) *DevChestHandler {
 
 // PostForceUnlockChestRequest 是 POST /dev/force-unlock-chest 请求体的 Go mirror。
 //
-// epics.md §Story 20.7 行 2941 钦定：`{userId: int64}`。
+// **r2 [P2] 改造**：增加 chestId 字段 —— 详见 service.DevChestService r2 改造说明。
+// client 必须先 GET /chest/current 拿到 chest.id（response.data.id 已 BIGINT 字符串化），
+// 再 POST 这个 id 来。server 不再猜"current"语义。
+//
+// # 字段约定
 //
 // **userId 用 *uint64 指针类型**（不挂 binding:"required"）：
 //   - validator/v10 把 0 视为 zero value 会误判 "required"，与 7.5 PostGrantStepsRequest 同模式
@@ -39,18 +45,24 @@ func NewDevChestHandler(svc service.DevChestService) *DevChestHandler {
 //   - userId=0 在 MySQL users 表里**不存在**（AUTO_INCREMENT 从 1 起），handler 显式拒
 //     让错误更早 + 错误消息更精确（"userId 必须 > 0"）
 //
+// **chestId 用 *string 指针类型**（BIGINT 字符串化；V1 §2.5 全局约定）：
+//   - 与 ChestDTO.id / GET /chest/current.data.id（chest_handler.go 行 227）保持同类型
+//   - handler 用 strconv.ParseUint 解析；解析失败 / 0 / 缺失 → 1002
+//   - 与 V1 §10.4 roomId path 参数解析模式同（room_handler.JoinRoom 行 176）
+//
 // **不**接 unlockAt 字段（dev 产品语义是"立刻可开"；未来如需"滚动倒计时 demo"加独立端点）。
 // **不**接 idempotencyKey 字段（dev 端点是"故意可重复"语义；重复调都把 unlock_at 推到本次 now）。
 type PostForceUnlockChestRequest struct {
-	UserID *uint64 `json:"userId"`
+	UserID  *uint64 `json:"userId"`
+	ChestID *string `json:"chestId"`
 }
 
 // PostForceUnlockChest 处理 POST /dev/force-unlock-chest（Story 20.7）。
 //
 // 流程：
 //  1. ShouldBindJSON 兜一层（字段类型错 → 1002）
-//  2. 手动校验：userId 非 nil（缺失 → 1002）+ != 0（非法 → 1002）
-//  3. 调 svc.ForceUnlockChest(ctx, *userId) —— ctx = c.Request.Context()
+//  2. 手动校验：userId 非 nil + != 0；chestId 非 nil + 长度 1-20 + ParseUint 成功 + != 0
+//  3. 调 svc.ForceUnlockChest(ctx, *userId, chestID) —— ctx = c.Request.Context()
 //  4. 成功 → response.Success(c, postForceUnlockChestResponseDTO(...), "ok")
 //  5. 失败 → c.Error(err) + return（middleware envelope；ADR-0006 单一 envelope 生产者）
 //
@@ -62,7 +74,7 @@ func (h *DevChestHandler) PostForceUnlockChest(c *gin.Context) {
 		return
 	}
 
-	// === required 字段校验（指针 nil → 字段未传 → 1002）===
+	// === userId 校验（指针 nil → 字段未传 → 1002）===
 	if req.UserID == nil {
 		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "userId 必填"))
 		return
@@ -72,24 +84,47 @@ func (h *DevChestHandler) PostForceUnlockChest(c *gin.Context) {
 		return
 	}
 
-	if err := h.svc.ForceUnlockChest(c.Request.Context(), *req.UserID); err != nil {
+	// === chestId 校验（BIGINT 字符串化；与 room_handler.JoinRoom 同模式）===
+	if req.ChestID == nil {
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "chestId 必填"))
+		return
+	}
+	if l := len(*req.ChestID); l < 1 || l > 20 {
+		// BIGINT UNSIGNED max = 20 位十进制
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "chestId 长度非法"))
+		return
+	}
+	chestID, err := strconv.ParseUint(*req.ChestID, 10, 64)
+	if err != nil {
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "chestId 非法"))
+		return
+	}
+	if chestID == 0 {
+		// 防御性：长度已限 1 ≤ length 但 "0" 字面值仍能 parse；业务上 chestID 必为正整数
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "chestId 必须 > 0"))
+		return
+	}
+
+	if err := h.svc.ForceUnlockChest(c.Request.Context(), *req.UserID, chestID); err != nil {
 		_ = c.Error(err) // service 已 wrap *AppError；ErrorMappingMiddleware 写 envelope
 		return
 	}
 
 	// 成功响应 —— 简单 ack，不返当前 chest 状态（如要查 chest 用 GET /chest/current；端点单一职责）
-	response.Success(c, postForceUnlockChestResponseDTO(*req.UserID), "ok")
+	response.Success(c, postForceUnlockChestResponseDTO(*req.UserID, chestID), "ok")
 }
 
 // postForceUnlockChestResponseDTO 拼装 ack response。
 //
-// **schema 选择**：返 `{userId}` 简单 ack —— 不返当前 chest 状态。
+// **schema 选择**：返 `{userId, chestId}` 简单 ack —— 不返当前 chest 状态。
 //   - 调用方（demo / 自动化测试 / Epic 21 iOS）调本端点后再调 GET /chest/current
 //     验证 status=2，而不是依赖本端点 response —— 端点单一职责（force-unlock 只负责"做了"，
 //     get-current 只负责"读了"）
+//   - chestId 用 string 类型（BIGINT 字符串化，与请求体同；V1 §2.5 全局约定）
 //   - 与 Story 7.5 postGrantStepsResponseDTO 同模式（dev 端点统一 ack 风格）
-func postForceUnlockChestResponseDTO(userID uint64) gin.H {
+func postForceUnlockChestResponseDTO(userID uint64, chestID uint64) gin.H {
 	return gin.H{
-		"userId": userID,
+		"userId":  userID,
+		"chestId": strconv.FormatUint(chestID, 10),
 	}
 }

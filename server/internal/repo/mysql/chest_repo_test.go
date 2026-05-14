@@ -161,15 +161,54 @@ func TestChestRepo_Delete_HappyPath(t *testing.T) {
 	}
 }
 
-// TestChestRepo_UpdateUnlockAtByID_HappyPath_UpdatesRowsAffectedOne: Story 20.7 引入；
-// review r1 [P2] 改造 —— 签名从 UpdateUnlockAt(userID) 改为 UpdateUnlockAtByID(chestID)，
-// WHERE 子句从 user_id 改为 id，防止与 OpenChest 并发时跑偏到 next chest。
+// TestChestRepo_FindByID_HappyPath: Story 20.7 review r2 [P2] 引入。
+// SELECT user_chests WHERE id = ? 返 1 行 → 验证字段填充。
+func TestChestRepo_FindByID_HappyPath(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewChestRepo(gormDB)
+
+	utcUnlock := time.Now().UTC().Add(10 * time.Minute)
+	rows := sqlmock.NewRows([]string{
+		"id", "user_id", "status", "unlock_at", "open_cost_steps", "version",
+		"created_at", "updated_at",
+	}).AddRow(5001, 1001, 1, utcUnlock, 1000, 0, nil, nil)
+	mock.ExpectQuery(`SELECT \* FROM .user_chests. WHERE id = \? ORDER BY .user_chests.\..id. LIMIT \?`).
+		WithArgs(uint64(5001), 1).
+		WillReturnRows(rows)
+
+	got, err := repo.FindByID(context.Background(), 5001)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if got == nil || got.ID != 5001 || got.UserID != 1001 {
+		t.Errorf("got = %+v, want id=5001 user_id=1001", got)
+	}
+}
+
+// TestChestRepo_FindByID_NotFound_ReturnsErrChestNotFound: Story 20.7 review r2 [P2] 引入。
+func TestChestRepo_FindByID_NotFound_ReturnsErrChestNotFound(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewChestRepo(gormDB)
+
+	rows := sqlmock.NewRows([]string{"id"}) // 0 行
+	mock.ExpectQuery(`SELECT \* FROM .user_chests. WHERE id = \? ORDER BY .user_chests.\..id. LIMIT \?`).
+		WithArgs(uint64(99999), 1).
+		WillReturnRows(rows)
+
+	got, err := repo.FindByID(context.Background(), 99999)
+	if got != nil {
+		t.Errorf("got = %+v, want nil on NotFound", got)
+	}
+	if !stderrors.Is(err, ErrChestNotFound) {
+		t.Errorf("err = %v, want ErrChestNotFound", err)
+	}
+}
+
+// TestChestRepo_UpdateUnlockAtByID_HappyPath_RowsAffectedOne: Story 20.7 引入；
+// review r2 [P2] 改造 —— 不再依赖 RowsAffected 区分 NotFound。
 //
 // UPDATE user_chests SET unlock_at = ? WHERE id = ? → rows_affected=1 → 返 nil。
-//
-// GORM .Update("unlock_at", ...) 会生成 SET unlock_at=?, updated_at=? WHERE id=?，
-// 参数顺序 (newUnlockAt, updated_at(auto), chestID)。
-func TestChestRepo_UpdateUnlockAtByID_HappyPath_UpdatesRowsAffectedOne(t *testing.T) {
+func TestChestRepo_UpdateUnlockAtByID_HappyPath_RowsAffectedOne(t *testing.T) {
 	gormDB, mock := newGormWithMock(t)
 	repo := NewChestRepo(gormDB)
 
@@ -184,10 +223,13 @@ func TestChestRepo_UpdateUnlockAtByID_HappyPath_UpdatesRowsAffectedOne(t *testin
 	}
 }
 
-// TestChestRepo_UpdateUnlockAtByID_ChestNotFound_ReturnsSentinel: Story 20.7 edge case；
-// review r1 [P2] 改造后签名。
-// rows_affected=0 → 返 ErrChestNotFound 哨兵（service 层 errors.Is 后翻译 1003）。
-func TestChestRepo_UpdateUnlockAtByID_ChestNotFound_ReturnsSentinel(t *testing.T) {
+// TestChestRepo_UpdateUnlockAtByID_RowsAffectedZero_ReturnsNil: Story 20.7 review r2 [P2] 改造。
+// rows_affected=0（MySQL 在值未变 / 行不存在时都可能返 0）→ 返 nil（不再翻译为 ErrChestNotFound）。
+// 存在性校验由 service 层用 FindByID 前置完成；本方法不再做存在性判断。
+//
+// **r1 → r2 反向 case**：r1 在此返 ErrChestNotFound，r2 返 nil。
+// 修复 MySQL "RowsAffected=0 在值未变时也成立" 导致的"同一毫秒重复 unlock 同 chest 误返 1003"bug。
+func TestChestRepo_UpdateUnlockAtByID_RowsAffectedZero_ReturnsNil(t *testing.T) {
 	gormDB, mock := newGormWithMock(t)
 	repo := NewChestRepo(gormDB)
 
@@ -196,7 +238,7 @@ func TestChestRepo_UpdateUnlockAtByID_ChestNotFound_ReturnsSentinel(t *testing.T
 		WillReturnResult(sqlmock.NewResult(0, 0)) // rows_affected=0
 
 	err := repo.UpdateUnlockAtByID(context.Background(), 99999, time.Now().UTC())
-	if !stderrors.Is(err, ErrChestNotFound) {
-		t.Errorf("err = %v, want ErrChestNotFound", err)
+	if err != nil {
+		t.Errorf("err = %v, want nil (r2 [P2] 不再返 ErrChestNotFound; 存在性由 service.FindByID 前置)", err)
 	}
 }

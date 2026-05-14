@@ -363,13 +363,13 @@ func NewRouter(deps Deps) *gin.Engine {
 
 		// Story 20.7 加：dev chest service + handler。即便 BUILD_DEV=false 也构造；
 		// 由 devtools.Register 内部 IsEnabled() 决定是否真注册路由 —— 与 7.5 同模式。
-		// 复用上面（行 316）已 wire 的 chestRepo（authSvc / homeSvc / chestSvc 同实例）+ deps.TxMgr。
+		// 复用上面（行 316）已 wire 的 chestRepo（authSvc / homeSvc / chestSvc 同实例）。
 		//
-		// **Story 20.7 review r1 [P2] 改造**：接 txMgr —— 与 r1 之前的"单 UPDATE 不开事务"区分。
-		// 原 service 直接 UPDATE WHERE user_id 与 OpenChest 的 Delete+Create 链路并发会跑偏到 next chest
-		// （详见 service.DevChestService 顶部注释 r1 [P2] race 分析）。r1 改成"事务内 FOR UPDATE
-		// SELECT 拿 id → UPDATE WHERE id"两步同事务模式，必须注入 txMgr。
-		devChestSvc := service.NewDevChestService(deps.TxMgr, chestRepo)
+		// **Story 20.7 review r2 [P2] 改造**：移除 txMgr 注入 —— r1 的"事务内 FOR UPDATE + UPDATE"
+		// 对 race 修复无作用（FOR UPDATE 阻塞结束后 SELECT 返回 commit 后的 next chest，跟 r0 一样跑偏）。
+		// r2 改成 client 通过请求体传 chestID（GET /chest/current 拿到的 id），service 用 FindByID
+		// 校验存在 + 归属 + UPDATE，无须事务。详见 service.DevChestService 顶部注释 r2 [P2] 改造说明。
+		devChestSvc := service.NewDevChestService(chestRepo)
 		devChestHandler = handler.NewDevChestHandler(devChestSvc)
 
 		// Story 11.3 加：room service + handler（4 步事务：FindByID 预检 → INSERT rooms →

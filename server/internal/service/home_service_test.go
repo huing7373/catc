@@ -81,6 +81,11 @@ func (s *stubHomeChestRepo) FindByUserID(ctx context.Context, userID uint64) (*m
 	return s.findByUserIDFn(ctx, userID)
 }
 
+// FindByID Story 20.7 review r2 [P2] 加：home_service 不调；保留以满足 interface。
+func (s *stubHomeChestRepo) FindByID(ctx context.Context, chestID uint64) (*mysql.UserChest, error) {
+	panic("stubHomeChestRepo.FindByID not configured (home_service should not call it)")
+}
+
 // FindByUserIDForUpdate Story 20.6 加：home_service 不调；保留以满足 interface。
 func (s *stubHomeChestRepo) FindByUserIDForUpdate(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
 	panic("stubHomeChestRepo.FindByUserIDForUpdate not configured (home_service should not call it)")
