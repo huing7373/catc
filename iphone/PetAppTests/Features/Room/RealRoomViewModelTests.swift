@@ -3582,6 +3582,78 @@ final class RealRoomViewModelTests: XCTestCase {
         XCTAssertEqual(vm.currentUserId, "u_test",
                        "同 userId 多次 hydrate 后 currentUserId 保持稳定（removeDuplicates 行为）")
     }
+
+    // MARK: - Story 18.3 fix-review round 1 P2: activeEmojis 必须在 room 切换 / 离开时清空
+
+    /// 验证 A → nil（离开房间）路径下 vm.activeEmojis 必须清空.
+    /// 旧实装在 onLeaveTap 路径下仅清 members / memberPetStates；activeEmojis 残留
+    /// → 用户回到 home 再进同一/别的 room（同 vm 实例复用）时 RoomScaffoldView 渲染 stale emoji.
+    func testLeaveRoomClearsActiveEmojis() async {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        let useCase = DefaultSendEmojiUseCase(webSocketClient: mockWS)
+        let vm = RealRoomViewModel()
+        vm.bind(
+            appState: appState,
+            webSocketClient: mockWS,
+            sendEmojiUseCase: useCase,
+            emojiCatalogLoader: nil
+        )
+        vm.currentUserId = "u1"
+        await Task.yield()
+
+        // 1. 进入 room A
+        appState.setCurrentRoomId("room_A")
+        await Task.yield()
+
+        // 2. 在 room A 选 2 个 emoji 入队 (Step A 同步入队)
+        vm.onEmojiSelected(code: "wave")
+        vm.onEmojiSelected(code: "heart")
+        XCTAssertEqual(vm.activeEmojis.count, 2,
+                       "room A 内 2 次 onEmojiSelected 后 activeEmojis 必须有 2 项")
+
+        // 3. 离开 room → nil
+        appState.setCurrentRoomId(nil)
+        await Task.yield()
+        await Task.yield()
+
+        // 4. 关键断言：activeEmojis 必须清空 (与 members / memberPetStates 同精神)
+        XCTAssertEqual(vm.activeEmojis, [],
+                       "A→nil 离开房间必须清空 activeEmojis (旧实装残留 → 回房间后 stale 渲染)")
+    }
+
+    /// 验证 A → B（直接切换房间）路径下 vm.activeEmojis 必须清空.
+    /// 这是最关键的 stale 路径 —— 没有经过 nil reset 中间态;
+    /// 旧实装下 room A 选过的 emoji 会残留入 room B 的渲染队列.
+    func testDirectRoomToRoomSwitchClearsActiveEmojis() async {
+        let appState = AppState()
+        let mockWS = WebSocketClientMock()
+        let useCase = DefaultSendEmojiUseCase(webSocketClient: mockWS)
+        let vm = RealRoomViewModel()
+        vm.bind(
+            appState: appState,
+            webSocketClient: mockWS,
+            sendEmojiUseCase: useCase,
+            emojiCatalogLoader: nil
+        )
+        vm.currentUserId = "u1"
+        await Task.yield()
+
+        // 1. 进入 room A + 选 1 个 emoji 入队
+        appState.setCurrentRoomId("room_A")
+        await Task.yield()
+        vm.onEmojiSelected(code: "wave")
+        XCTAssertEqual(vm.activeEmojis.count, 1)
+
+        // 2. 直接切到 room B (不先置 nil)
+        appState.setCurrentRoomId("room_B")
+        await Task.yield()
+        await Task.yield()
+
+        // 3. 关键断言：activeEmojis 必须清空
+        XCTAssertEqual(vm.activeEmojis, [],
+                       "A→B 直接切换必须清空 activeEmojis (旧实装 room B 会渲染 room A 的 emoji)")
+    }
 }
 
 // MARK: - Story 15.5 inline mock for AC3 delegate tests

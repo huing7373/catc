@@ -23,6 +23,7 @@ public final class MockRoomViewModel: RoomViewModel {
         case leaveTap
         case copyTap
         case ownPetTap   // Story 18.2 新增
+        case emojiSelected(code: String)   // Story 18.3 新增
     }
 
     @Published public var invocations: [Invocation] = []
@@ -77,6 +78,22 @@ public final class MockRoomViewModel: RoomViewModel {
         os_log(.debug, "MockRoomViewModel.onOwnPetTap")
         invocations.append(.ownPetTap)
         self.showEmojiPanel = true
+    }
+
+    /// Story 18.3 AC6: 选中表情 mock 实装 —— 与 RealRoomViewModel.onEmojiSelected Step A 行为对齐
+    /// (入队 activeEmojis), 让单测 / Preview / UITest 视觉路径一致.
+    /// **不**调任何 WS / UseCase (Mock 永远不持 webSocketClient / sendEmojiUseCase).
+    /// **不**关 sheet (sheet 关闭由 RoomScaffoldView .sheet onSelect 闭包驱动, 与 18.2 同一处).
+    public override func onEmojiSelected(code: String) {
+        os_log(.debug, "MockRoomViewModel.onEmojiSelected: code=%{public}@", code)
+        invocations.append(.emojiSelected(code: code))
+        let emoji = RoomActiveEmoji(
+            id: UUID(),
+            userId: self.currentUserId ?? "",
+            emojiCode: code,
+            createdAt: Date()
+        )
+        self.activeEmojis.append(emoji)
     }
 
     // MARK: - mock 数据

@@ -364,10 +364,20 @@ struct RootView: View {
                 // 详见 docs/lessons/2026-05-11-uitest-skip-real-ws-and-error-presenter-wiring.md.
                 // Story 12.7 r14 [P1] fix：注入 home refresh closure（onLeaveTap stale path 触发）.
                 // UITEST 路径下传 nil（与 leaveRoomUseCase / webSocketClient / errorPresenter 同 gate）.
+                // Story 18.3 AC8: 注入 sendEmojiUseCase + emojiCatalogLoader 让 onEmojiSelected 走完整链路
+                //   (本地动效 + V1 §12.2 缓存校验 + WS fire-and-forget send + 失败 toast).
+                // UITEST 路径下 sendEmojiUseCase 仍 nil (与 webSocketClient / leaveRoomUseCase 同 gate):
+                //   - sendEmojiUseCase 内部依赖 webSocketClient, UITEST 路径下 wsClient = nil → 无 client 可注入,
+                //     onEmojiSelected 走 nil-fallback 仍触发本地动效但跳过 WS send.
+                //   - emojiCatalogLoader 用 container.loadEmojisUseCase (stable singleton, UITEST mock 路径也 OK
+                //     因 UITEST_MOCK_EMOJI=1 时 loadEmojisUseCase 已注入 UITestMockEmojiRepository → 校验仍可命中
+                //     mock fixture).
                 realRoomVM.bind(
                     appState: appState,
                     webSocketClient: isUITestSkipGuestLogin ? nil : container.webSocketClient,
                     leaveRoomUseCase: isUITestSkipGuestLogin ? nil : container.makeLeaveRoomUseCase(appState: appState),
+                    sendEmojiUseCase: isUITestSkipGuestLogin ? nil : container.makeSendEmojiUseCase(),
+                    emojiCatalogLoader: container.loadEmojisUseCase,
                     errorPresenter: isUITestSkipGuestLogin ? nil : container.errorPresenter,
                     refreshHomeOnStaleNavigation: isUITestSkipGuestLogin ? nil : refreshHomeClosure
                 )

@@ -492,6 +492,13 @@ public final class AppContainer: ObservableObject {
         EmojiPanelViewModel(useCase: loadEmojisUseCase)
     }
 
+    /// Story 18.3 AC8: 构造 SendEmojiUseCase (每次调用返回新实例; webSocketClient 单例由 container 持有).
+    /// caller=RootView 在 RealRoomViewModel.bind(...) 时注入.
+    /// 与 makeStepRepository / makeRoomRepository 同模式 (UseCase 内部不持状态, 多次构造廉价).
+    public func makeSendEmojiUseCase() -> SendEmojiUseCaseProtocol {
+        DefaultSendEmojiUseCase(webSocketClient: webSocketClient)
+    }
+
     #if DEBUG
     /// Story 18.1 AC8: UITest 路径下从 launch env JSON 字符串解析 emoji fixture.
     /// 缺省 / 解析失败时走 4 项内置 fixture (wave / love / laugh / cry); 与 V1 §11.1 字段名 1:1.

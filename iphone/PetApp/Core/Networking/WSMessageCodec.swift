@@ -10,7 +10,7 @@
 //   - payload 解码失败 → return .unknown(rawType: type) + log warn（同样不破坏 stream；防 server malformed payload 把房间页搞崩）
 //
 // 节点 4 阶段 incoming 已知 type 集合：room.snapshot / pong / error（Epic 10 钦定）
-// 节点 4 阶段 outgoing 已知 type 集合：ping（V1 §12.2）
+// 节点 4 阶段 outgoing 已知 type 集合：ping（V1 §12.2）；节点 6 阶段扩展：emoji.send（V1 §12.2 行 1985-2089，Story 17.1 锚定 + 18.3 落地）
 
 import Foundation
 import os.log
@@ -128,20 +128,31 @@ public enum WSMessageCodec {
     // MARK: - Outgoing
 
     /// 编码 client → server 消息 → text frame（UTF-8 JSON string）.
-    /// 节点 4 阶段仅 ping case；future 扩展加 case 即可.
+    /// 节点 4 阶段仅 ping case；节点 6 阶段扩展 emoji.send（Story 17.1 锚定 + 18.3 落地）.
     public static func encode(_ message: WSOutgoingMessage) throws -> String {
         let json: [String: Any]
+        let rawType: String
         switch message {
         case .ping(let requestId):
+            rawType = "ping"
             json = [
                 "type": "ping",
                 "requestId": requestId,
                 "payload": [String: Any]()  // V1 §12.2 ping payload 固定空对象
             ]
+        case .emojiSend(let requestId, let emojiCode):
+            // Story 18.3 AC1: V1 §12.2 行 2000-2008 wire schema 严格对齐.
+            // sortedKeys 让 JSON 输出 key 顺序确定（与 ping 同精神, testing 友好）.
+            rawType = "emoji.send"
+            json = [
+                "type": "emoji.send",
+                "requestId": requestId,
+                "payload": ["emojiCode": emojiCode]
+            ]
         }
         let data = try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
         guard let text = String(data: data, encoding: .utf8) else {
-            throw WSError.decodingFailed(rawType: "ping")
+            throw WSError.decodingFailed(rawType: rawType)
         }
         return text
     }

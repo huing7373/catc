@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-05-14 (story 18-2 → done via /story-done)
+# last_updated: 2026-05-14 (story 18-3 review via bmad-dev-story)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-05-14  # Story 18.2 → done via /story-done
+last_updated: 2026-05-14  # Story 18.3 review via bmad-dev-story
 # Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
 # 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
@@ -196,7 +196,7 @@ development_status:
   epic-18: in-progress
   18-1-表情面板-swiftui: done
   18-2-点击自己猫触发表情面板: done
-  18-3-选中表情-本地立即动效-ws-发送-emoji-send: backlog
+  18-3-选中表情-本地立即动效-ws-发送-emoji-send: review
   18-4-接收-emoji-received-在对应成员猫上方播放飞出动效: backlog
   epic-18-retrospective: optional
   epic-19: backlog

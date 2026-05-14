@@ -49,6 +49,18 @@ public final class RealRoomViewModel: RoomViewModel {
     /// Story 12.7 AC6: ErrorPresenter 注入（默认 nil；用于 onLeaveTap 错误兜底；caller=RootView 注入 container.errorPresenter）.
     private weak var errorPresenter: ErrorPresenter?
 
+    /// Story 18.3 AC5: SendEmojiUseCase 注入 (默认 nil; 旧 wire 路径不破).
+    /// caller=RootView 通过 bind(... sendEmojiUseCase: container.makeSendEmojiUseCase() ...) 注入.
+    /// nil 时 onEmojiSelected 仅触发本地动效, 跳过 WS send (与 leaveRoomUseCase nil-fallback 同精神).
+    private var sendEmojiUseCase: SendEmojiUseCaseProtocol?
+
+    /// Story 18.3 AC5: LoadEmojisUseCase 注入 (用于 V1 §12.2 行 2074 emojiCode 缓存校验).
+    /// caller=RootView 通过 bind(... emojiCatalogLoader: container.loadEmojisUseCase ...) 注入.
+    /// **注**: LoadEmojisUseCaseProtocol 是 protocol (existential 不支持 weak), 本字段用 strong ref;
+    /// 持有的是 DefaultLoadEmojisUseCase actor 单例 instance, 生命周期 = container 生命周期 > vm 生命周期,
+    /// strong ref 不会延长 vm 生命周期 (vm deinit 时字段释放, 单例 instance 仍由 container 持).
+    private var emojiCatalogLoader: LoadEmojisUseCaseProtocol?
+
     /// Story 12.7 r14 [P1] fix（codex review）：home refresh hook（同 RealHomeViewModel 模式）.
     /// 触发条件：LeaveRoomUseCase 抛 RoomNavigationStaleError —— server 端已让用户离开 room 但
     /// client UI 因 navigation race 没写 currentRoomId=nil（且用户可能已 rejoin）.
@@ -148,6 +160,8 @@ public final class RealRoomViewModel: RoomViewModel {
         appState: AppState,
         webSocketClient: WebSocketClient? = nil,
         leaveRoomUseCase: LeaveRoomUseCaseProtocol? = nil,
+        sendEmojiUseCase: SendEmojiUseCaseProtocol? = nil,           // Story 18.3 AC5 新增
+        emojiCatalogLoader: LoadEmojisUseCaseProtocol? = nil,        // Story 18.3 AC5 新增
         errorPresenter: ErrorPresenter? = nil,
         refreshHomeOnStaleNavigation: (@MainActor @Sendable () -> Void)? = nil
     ) {
@@ -164,6 +178,13 @@ public final class RealRoomViewModel: RoomViewModel {
         }
         if let presenter = errorPresenter {
             self.errorPresenter = presenter
+        }
+        // Story 18.3 AC5: 注入 sendEmojiUseCase / emojiCatalogLoader（与 leaveRoomUseCase 同模式 "if let injected, override existing"）.
+        if let useCase = sendEmojiUseCase {
+            self.sendEmojiUseCase = useCase
+        }
+        if let loader = emojiCatalogLoader {
+            self.emojiCatalogLoader = loader
         }
         // r14 [P1] fix: 注入 refresh hook（caller 不传时保留 nil 让 UITEST / preview 路径不触发）.
         if let refresh = refreshHomeOnStaleNavigation {
@@ -385,6 +406,13 @@ public final class RealRoomViewModel: RoomViewModel {
                         self.members = []
                         self.memberPetStates = [:]
                     }
+                    // **fix-review round 1 P2（Story 18.3）**：清空 transient emoji 队列.
+                    // activeEmojis 是 room-scoped transient UI state（非 scaffold seeded）→ 无条件清.
+                    // 防御 leave-rejoin / 同 vm 复用场景下 stale emoji 渲染到新房间.
+                    // nil-client UITest 路径下入队链路（onEmojiSelected）需要 sendEmojiUseCase != nil 才走真实 send,
+                    // 但本地入队 Step A 不依赖 client; 仍可能有残留 → 无条件清是安全且语义最一致的选择.
+                    // 详见 docs/lessons/2026-05-14-room-transient-state-must-reset-on-room-transition.md.
+                    self.activeEmojis = []
                     //
                     // **fix-review round 2 P1**：若 client 之前被 disconnect 过（leave-rejoin 路径：
                     //   A → nil → A'），其 `messages` stream 已被 finish；必须先调 `prepareForReconnect()`
@@ -491,6 +519,11 @@ public final class RealRoomViewModel: RoomViewModel {
                         self.members = []
                         self.memberPetStates = [:]
                     }
+                    // **fix-review round 1 P2（Story 18.3）**：清空 transient emoji 队列.
+                    // A→B 是最关键的 stale 路径 —— 没有经过 nil reset 中间态; 旧实装下 room A 选过的
+                    // emoji 残留入 room B 的渲染队列. 与 members/memberPetStates 同精神, 无条件清.
+                    // 详见 docs/lessons/2026-05-14-room-transient-state-must-reset-on-room-transition.md.
+                    self.activeEmojis = []
                     self.webSocketClient?.prepareForReconnect()
                     // **fix-review round 1 P2（Story 12.7）**：保持 wsState 上一态 `.connected`（room A
                     // 阶段已 set；A→B 切换"用户仍在房间内"语义维持）—— 失败 catch 路径会把它纠正为
@@ -554,6 +587,10 @@ public final class RealRoomViewModel: RoomViewModel {
                     self.webSocketClient?.disconnect()
                     self.members = []
                     self.memberPetStates = [:]
+                    // **fix-review round 1 P2（Story 18.3）**：清空 transient emoji 队列.
+                    // 用户离开后回到 home 再进同房间 / 别的房间, stale emoji 不该残留.
+                    // 详见 docs/lessons/2026-05-14-room-transient-state-must-reset-on-room-transition.md.
+                    self.activeEmojis = []
                     self.wsState = .disconnected
                     os_log(.debug, "RealRoomViewModel: %{public}@ → nil (cleared roster + WS disconnected)", prev)
                 }
@@ -1123,6 +1160,89 @@ public final class RealRoomViewModel: RoomViewModel {
     public override func onOwnPetTap() {
         os_log(.debug, "RealRoomViewModel.onOwnPetTap")
         self.showEmojiPanel = true
+    }
+
+    /// Story 18.3 AC5: 选中表情 → 0 延迟本地动效 + V1 §12.2 emojiCode 缓存校验 + WS fire-and-forget.
+    /// epics.md 行 2685-2691 钦定: 本地动效**先**触发 (不等 WS), WS 用 Task 包裹并行调用, 失败弹 toast 不回滚动效.
+    ///
+    /// 三步分解:
+    ///   Step A (同步): 本地 activeEmojis.append 触发 SwiftUI 渲染 (0 延迟 primary UX feedback).
+    ///   Step B (Task 异步): V1 §12.2 行 2074 emojiCode 缓存校验 (loader 未注入时跳过).
+    ///   Step C (Task 异步): WS fire-and-forget send; 失败仅 toast 不回滚本地动效.
+    ///
+    /// 错误降级: catch WSError → errorPresenter.presentToast (transient); 禁止 present(error) 全屏 retry overlay.
+    /// 文案 "网络不佳，对方可能看不到" 与 epics.md 行 2691 钦定 1:1 一致.
+    public override func onEmojiSelected(code: String) {
+        os_log(.debug, "RealRoomViewModel.onEmojiSelected: code=%{public}@", code)
+
+        // Step A: 本地立即动效 (0 延迟; **先**执行).
+        // currentUserId == nil 是 fail-safe 路径 (理论不该; RoomScaffoldView Button 只在 currentUserId 非空时渲染);
+        // 用空字符串 userId 入队让动效仍触发, 不报错; log info 便于追溯.
+        let effectiveUserId = self.currentUserId ?? ""
+        if effectiveUserId.isEmpty {
+            os_log(.info, "RealRoomViewModel.onEmojiSelected: currentUserId is nil; using empty userId for activeEmoji")
+        }
+        let emoji = RoomActiveEmoji(
+            id: UUID(),
+            userId: effectiveUserId,
+            emojiCode: code,
+            createdAt: Date()
+        )
+        self.activeEmojis.append(emoji)
+
+        // Step B + C: V1 §12.2 缓存校验 + WS fire-and-forget (Task 包裹, 不阻塞主线程).
+        // 局部捕获 presenter / useCase / loader: 避免 Task 体内 self.errorPresenter 在 vm 重 bind 时 race
+        // (与 onLeaveTap fix-review r3 P1 同精神).
+        let presenter = self.errorPresenter
+        let useCase = self.sendEmojiUseCase
+        let loader = self.emojiCatalogLoader
+
+        Task { [weak self] in
+            guard self != nil else { return }
+
+            // Step B: V1 §12.2 行 2074 emojiCode 缓存校验 (loader = nil 时跳过, 兼容旧 wire).
+            if let loader = loader {
+                do {
+                    let catalog = try await loader.execute()
+                    guard catalog.contains(where: { $0.code == code }) else {
+                        os_log(.info,
+                               "RealRoomViewModel.onEmojiSelected: emojiCode %{public}@ not in catalog; skip WS send (local animation still played)",
+                               code)
+                        return
+                    }
+                } catch {
+                    // catalog load 失败本身不阻塞 WS send; log info 然后继续 send (transport 层若网络有问题会另抛 toast).
+                    os_log(.info,
+                           "RealRoomViewModel.onEmojiSelected: catalog load failed: %{public}@; proceed with WS send anyway",
+                           String(describing: error))
+                }
+            }
+
+            // Step C: WS fire-and-forget send.
+            guard let useCase = useCase else {
+                os_log(.info,
+                       "RealRoomViewModel.onEmojiSelected: sendEmojiUseCase = nil; skip WS send (local animation still played)")
+                return
+            }
+            do {
+                try await useCase.execute(emojiCode: code)
+                os_log(.debug,
+                       "RealRoomViewModel.onEmojiSelected: emoji.send sent successfully: %{public}@",
+                       code)
+            } catch let wsError as WSError {
+                // V1 §12.2 弱网降级: 本地动效已播 (Step A); WS 失败仅 toast 提示, 不回滚 activeEmojis.
+                os_log(.info,
+                       "RealRoomViewModel.onEmojiSelected: WS send failed with WSError: %{public}@; presenting toast",
+                       String(describing: wsError))
+                await MainActor.run { presenter?.presentToast("网络不佳，对方可能看不到") }
+            } catch {
+                // catch-all 兜底, 同 transient toast 路径 (lesson 2026-04-27-business-error-transient-vs-terminal).
+                os_log(.info,
+                       "RealRoomViewModel.onEmojiSelected: WS send failed with unexpected error: %{public}@; presenting toast",
+                       String(describing: error))
+                await MainActor.run { presenter?.presentToast("网络不佳，对方可能看不到") }
+            }
+        }
     }
 
     deinit {

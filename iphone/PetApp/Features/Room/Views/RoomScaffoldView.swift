@@ -69,6 +69,20 @@ public struct RoomScaffoldView: View {
                 .padding(.top, 8)          // safe area top 已自动 respect；只补呼吸空间. 详见 HomeView.swift:90 注释.
                 .padding(.bottom, 100)     // 浮动 TabBar 让出空间
             }
+
+            // Story 18.3 AC7 占位渲染: 让 activeEmojis 队列在屏幕上可见 (单元测试已覆盖 / MCP 验证可见).
+            // Story 18.4 落地后整体替换为 EmojiAnimationLayer (含 anchor / 1.5s 移除 / 飞出动画).
+            // 占位 ForEach 渲染 Text(emojiCode): 不做 anchor 计算; 每个 emoji 单独 a11y identifier
+            // `activeEmoji_<uuid>` 让 UITest 定位 (动态 UUID 通过 NSPredicate matching 命中);
+            // 文本内容用 emojiCode 让 UITest 用 staticTexts["wave"] 断言 (与 EmojiPanelView fixture 同 code).
+            //
+            // `.allowsHitTesting(false)`: 占位 ZStack 层级在 ScrollView 之上, 默认会拦截 tap; 必须显式
+            // 关闭让下方 ScrollView 内 PetSpriteView Button / 复制按钮等 hit events 正常分发到底层
+            // (与 18.4 完整动画路径同精神 —— 动效层永远不抢交互).
+            //
+            // 占位 View 在 activeEmojis 为空时返回 EmptyView (避免占用 ZStack frame 干扰 layout / a11y).
+            EmojiAnimationLayerPlaceholder(activeEmojis: state.activeEmojis)
+                .allowsHitTesting(false)
         }
         // Story 18.2 AC4: EmojiPanelView sheet 挂载（ZStack 外层，与 LinearGradient 同级）.
         // 双向绑定 $state.showEmojiPanel：自己 PetSpriteView Button 点击置 true → sheet 弹出;
@@ -77,9 +91,11 @@ public struct RoomScaffoldView: View {
         .sheet(isPresented: $state.showEmojiPanel) {
             EmojiPanelView(
                 viewModel: emojiPanelViewModelFactory(),
-                onSelect: { _ in
-                    // Story 18.2 路径仅关 sheet (18.3 才接 SendEmojiUseCase, 届时改为 `code in state.onEmojiSelected(code: code)`).
-                    // `_` 显式忽略 emojiCode 参数, 让 dev 不误以为有遗漏.
+                onSelect: { code in
+                    // Story 18.3 AC7: 先触发本地动效 + WS fire-and-forget (Step A 同步入队, Step B/C Task 异步), 再关 sheet.
+                    // 顺序关键: 先 onEmojiSelected 让 activeEmojis 在 sheet 关闭动画期间已入队 → UX 视觉自然.
+                    // 反向顺序 (先关 sheet 再 onEmojiSelected) 会让 SwiftUI publisher 合并主线程 emit 让动效晚一拍出现.
+                    state.onEmojiSelected(code: code)
                     state.showEmojiPanel = false
                 }
             )
@@ -439,6 +455,44 @@ public struct RoomScaffoldView: View {
         )
         .accessibilityIdentifier(AccessibilityID.Room.leaveButton)
         .padding(.top, 4)
+    }
+}
+
+// MARK: - Story 18.3 AC7: EmojiAnimationLayerPlaceholder 占位渲染
+
+/// Story 18.3 占位渲染: activeEmojis 队列可视化 (简单"VStack(ForEach) 居中显示 emojiCode 文本");
+/// Story 18.4 替换为完整 EmojiAnimationLayer (含 anchor 计算 / 1.5s 自动移除 / 缩放 + 透明 + 上移 / 同时多 emoji 独立动画).
+///
+/// **关键约束**：
+///   - 必须让 `activeEmojis` 入队的 emoji 在屏幕上**可见** (UITest 用 `app.staticTexts["wave"]` 或
+///     `NSPredicate(format: "identifier BEGINSWITH 'activeEmoji_'")` 验证).
+///   - a11y identifier `activeEmoji_<uuid>` 是 UITest 断言锚点 (动态 UUID 通过 NSPredicate 匹配;
+///     连点 N 次 → N 个不同 UUID 节点都可被 UITest 看到).
+///   - 18.4 落地后整体替换本占位为完整 EmojiAnimationLayer; `activeEmojis` 字段 + Identifiable struct
+///     + 入队语义 + onEmojiSelected 调用链**不需要改**.
+///
+/// **关键 layout 选择**: `activeEmojis.isEmpty` 时返回 `EmptyView()` —— 让占位**完全脱离 layout 流**,
+///   不在 RoomScaffoldView ZStack 中占据任何 frame. 否则 VStack 即使内容为空, ZStack 默认 alignment
+///   也会让它扩展到 ZStack 全屏 size; 即使加 `.allowsHitTesting(false)`, XCUITest 的
+///   `Computed hit point {-1, -1}` 仍会误判 sub-view (如 `roomMember_0_petSprite` Button) 被遮挡.
+///   `EmptyView()` 在 SwiftUI 中是 0-size + 不进 view hierarchy 的特殊 View, 让 ZStack 完全跳过本层.
+///   一旦 `activeEmojis` 非空, VStack 正常居中渲染 emoji 文本.
+struct EmojiAnimationLayerPlaceholder: View {
+    let activeEmojis: [RoomActiveEmoji]
+
+    @ViewBuilder
+    var body: some View {
+        if activeEmojis.isEmpty {
+            EmptyView()
+        } else {
+            VStack {
+                ForEach(activeEmojis) { emoji in
+                    Text(emoji.emojiCode)
+                        .font(.title2)
+                        .accessibilityIdentifier("activeEmoji_\(emoji.id.uuidString)")
+                }
+            }
+        }
     }
 }
 
