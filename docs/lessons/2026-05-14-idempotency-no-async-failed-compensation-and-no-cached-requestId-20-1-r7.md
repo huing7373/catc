@@ -2,7 +2,7 @@
 date: 2026-05-14
 source_review: "codex review round 7 on Story 20-1 接口契约最终化 (HEAD=817eba6)"
 story: 20-1-接口契约最终化
-commit: <pending>
+commit: a3a84d9
 lesson_count: 2
 ---
 

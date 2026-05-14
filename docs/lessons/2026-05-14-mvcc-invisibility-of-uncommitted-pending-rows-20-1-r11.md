@@ -2,7 +2,7 @@
 date: 2026-05-14
 source_review: codex review round 11 on docs/宠物互动App_V1接口设计.md §7.2 (POST /chest/open) idempotency flow refactor
 story: 20-1-接口契约最终化
-commit: <pending>
+commit: c0c21a0
 lesson_count: 2
 ---
 

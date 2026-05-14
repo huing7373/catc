@@ -2,7 +2,7 @@
 date: 2026-05-14
 source_review: "file: /tmp/epic-loop-review-20-1-r3.md (codex review round 3 for story 20-1-接口契约最终化)"
 story: 20-1-接口契约最终化
-commit: <pending>
+commit: 9b929ed
 lesson_count: 3
 ---
 

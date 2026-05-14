@@ -2,7 +2,7 @@
 date: 2026-05-14
 source_review: codex review round 5 on Story 20-1 接口契约最终化 (chest_open idempotency contract finalization)
 story: 20-1-接口契约最终化
-commit: <pending>
+commit: ca0c3de
 lesson_count: 1
 ---
 

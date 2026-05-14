@@ -295,18 +295,18 @@
 | 2026-05-14 | [Outgoing WS send 必须在 async window 后 recheck snapshot roomId（payload 不带 roomId 的 emoji.send）（18-3 r2）](2026-05-14-emoji-send-cross-room-race-needs-snapshot-roomid-guard-18-3-r2.md) | 1 | architecture | `0cad4e6` |
 | 2026-05-14 | [SwiftUI PreferenceKey 多源订阅 onPreferenceChange 替换式赋值 + transient queue 每个入队点都挂 owner 端 expire（18-4 r1）](2026-05-14-swiftui-preferencekey-merge-vs-replace-on-roster-change.md) | 2 | architecture, perf | `682e6de` |
 | 2026-05-14 | [Xcode SDK 与 simulator runtime 版本错位会让所有 scheme-based xcodebuild 失败，必须装匹配 runtime（非 sub-agent 绕过）（epic-18 retro A1）](2026-05-14-xcode-sdk-runtime-version-mismatch-blocks-scheme-build.md) | 1 | config | `3cd2ef4` |
-| 2026-05-14 | [POST /chest/open 幂等原子声明 & rate_limit 中间件不可绕开（20-1 r1）](2026-05-14-idempotency-atomic-claim-and-rate-limit-honesty.md) | 2 | architecture, docs | `<pending>` |
-| 2026-05-14 | [契约 finalize story 必须做跨文档一致性 & SQL PK / 列名 / 字段类型字面级校验（20-1 r2）](2026-05-14-contract-finalization-cross-doc-consistency-and-sql-pk.md) | 4 | docs | `<pending>` |
-| 2026-05-14 | [幂等缓存写回失败的 client 重试指引 / 数据完整性 vs 业务错误的错误码归类 / 跨节同名字段语义对齐（20-1 r3）](2026-05-14-idempotency-set-fail-retry-and-data-integrity-error-mapping-20-1-r3.md) | 3 | architecture, error-handling, docs | `<pending>` |
-| 2026-05-14 | [幂等 sentinel 短 TTL 设计消除 Redis 写回失败的 24h 卡死 / 不要把"防重复"的最大代价加在"幂等承诺"身上（20-1 r4）](2026-05-14-idempotency-sentinel-short-ttl-eliminates-redis-writeback-lockout-20-1-r4.md) | 2 | architecture, docs | `<pending>` |
-| 2026-05-14 | [为什么 Redis 不能做"资产事务幂等"的可信源 & DB 同事务幂等才是 finalize 解（20-1 r5）](2026-05-14-db-same-tx-idempotency-replaces-redis-writeback-fragility-20-1-r5.md) | 1 | architecture | `<pending>` |
-| 2026-05-14 | [同事务幂等的"预声明也必须事务内" & 时间派生字段不可缓存进 response_json（20-1 r6）](2026-05-14-idempotency-pre-claim-must-be-inside-business-tx-20-1-r6.md) | 2 | architecture | `<pending>` |
-| 2026-05-14 | [DB 同事务幂等：禁止 post-rollback failed 异步补偿 + response_json 缓存禁止包含 requestId（20-1 r7）](2026-05-14-idempotency-no-async-failed-compensation-and-no-cached-requestId-20-1-r7.md) | 2 | architecture, docs | `<pending>` |
-| 2026-05-14 | [设计文档跨章节 summary 必须随 canonical 章节同步迭代（20-1 r8）](2026-05-14-design-doc-cross-section-summary-must-track-canonical-20-1-r8.md) | 1 | docs | `<pending>` |
-| 2026-05-14 | [time-derived 字段在幂等缓存里必须穷举剔除 + 文档 JSON 示例的数学一致性（20-1 r9）](2026-05-14-time-derived-fields-exhaustive-exclusion-from-idempotency-cache-20-1-r9.md) | 2 | docs, architecture | `<pending>` |
-| 2026-05-14 | [rate_limit middleware 必须让位于 idempotency 命中预检，cached replay 不消耗配额（20-1 r10）](2026-05-14-rate-limit-must-yield-to-idempotency-hit-precheck-20-1-r10.md) | 1 | architecture | `<pending>` |
-| 2026-05-14 | [MVCC 决定 autocommit SELECT 看不到首事务未 commit 的 pending 行 + cached success 路径必须覆盖所有 time-derived 字段（20-1 r11）](2026-05-14-mvcc-invisibility-of-uncommitted-pending-rows-20-1-r11.md) | 2 | architecture, docs | `<pending>` |
-| 2026-05-14 | [Story 文件自身需 in-flight 同步追踪契约迭代 + scope 验证段禁止留无时间标签全局断言（20-1 r12）](2026-05-14-story-file-must-track-canonical-contract-drift-20-1-r12.md) | 2 | docs, architecture | `<pending>` |
-| 2026-05-14 | [节点冻结声明 + 跨段 summary 必须随核心步骤迭代（20-1 r13）](2026-05-14-frozen-statement-must-mirror-time-derived-field-rule-20-1-r13.md) | 2 | docs, architecture | `<pending>` |
-| 2026-05-14 | [设计文档迭代时 stale 快照应"删除即删除"而非"super-note 警告并保留" + 跨文档引用副本必须随契约演进同步（20-1 r14）](2026-05-14-stale-snapshot-delete-vs-warn-in-iterating-design-doc-20-1-r14.md) | 2 | docs | `<pending>` |
-| 2026-05-14 | [跨接口字段语义对齐 + 错误码表收口（无可达路径就删除而非保留）（20-1 r15）](2026-05-14-cross-endpoint-field-alignment-and-error-table-pruning.md) | 2 | docs | `<pending>` |
+| 2026-05-14 | [POST /chest/open 幂等原子声明 & rate_limit 中间件不可绕开（20-1 r1）](2026-05-14-idempotency-atomic-claim-and-rate-limit-honesty.md) | 2 | architecture, docs | `3e4725f` |
+| 2026-05-14 | [契约 finalize story 必须做跨文档一致性 & SQL PK / 列名 / 字段类型字面级校验（20-1 r2）](2026-05-14-contract-finalization-cross-doc-consistency-and-sql-pk.md) | 4 | docs | `dfd9fbe` |
+| 2026-05-14 | [幂等缓存写回失败的 client 重试指引 / 数据完整性 vs 业务错误的错误码归类 / 跨节同名字段语义对齐（20-1 r3）](2026-05-14-idempotency-set-fail-retry-and-data-integrity-error-mapping-20-1-r3.md) | 3 | architecture, error-handling, docs | `9b929ed` |
+| 2026-05-14 | [幂等 sentinel 短 TTL 设计消除 Redis 写回失败的 24h 卡死 / 不要把"防重复"的最大代价加在"幂等承诺"身上（20-1 r4）](2026-05-14-idempotency-sentinel-short-ttl-eliminates-redis-writeback-lockout-20-1-r4.md) | 2 | architecture, docs | `719c4b2` |
+| 2026-05-14 | [为什么 Redis 不能做"资产事务幂等"的可信源 & DB 同事务幂等才是 finalize 解（20-1 r5）](2026-05-14-db-same-tx-idempotency-replaces-redis-writeback-fragility-20-1-r5.md) | 1 | architecture | `ca0c3de` |
+| 2026-05-14 | [同事务幂等的"预声明也必须事务内" & 时间派生字段不可缓存进 response_json（20-1 r6）](2026-05-14-idempotency-pre-claim-must-be-inside-business-tx-20-1-r6.md) | 2 | architecture | `817eba6` |
+| 2026-05-14 | [DB 同事务幂等：禁止 post-rollback failed 异步补偿 + response_json 缓存禁止包含 requestId（20-1 r7）](2026-05-14-idempotency-no-async-failed-compensation-and-no-cached-requestId-20-1-r7.md) | 2 | architecture, docs | `a3a84d9` |
+| 2026-05-14 | [设计文档跨章节 summary 必须随 canonical 章节同步迭代（20-1 r8）](2026-05-14-design-doc-cross-section-summary-must-track-canonical-20-1-r8.md) | 1 | docs | `b5a6c45` |
+| 2026-05-14 | [time-derived 字段在幂等缓存里必须穷举剔除 + 文档 JSON 示例的数学一致性（20-1 r9）](2026-05-14-time-derived-fields-exhaustive-exclusion-from-idempotency-cache-20-1-r9.md) | 2 | docs, architecture | `9d5929d` |
+| 2026-05-14 | [rate_limit middleware 必须让位于 idempotency 命中预检，cached replay 不消耗配额（20-1 r10）](2026-05-14-rate-limit-must-yield-to-idempotency-hit-precheck-20-1-r10.md) | 1 | architecture | `50f3421` |
+| 2026-05-14 | [MVCC 决定 autocommit SELECT 看不到首事务未 commit 的 pending 行 + cached success 路径必须覆盖所有 time-derived 字段（20-1 r11）](2026-05-14-mvcc-invisibility-of-uncommitted-pending-rows-20-1-r11.md) | 2 | architecture, docs | `c0c21a0` |
+| 2026-05-14 | [Story 文件自身需 in-flight 同步追踪契约迭代 + scope 验证段禁止留无时间标签全局断言（20-1 r12）](2026-05-14-story-file-must-track-canonical-contract-drift-20-1-r12.md) | 2 | docs, architecture | `99da3ea` |
+| 2026-05-14 | [节点冻结声明 + 跨段 summary 必须随核心步骤迭代（20-1 r13）](2026-05-14-frozen-statement-must-mirror-time-derived-field-rule-20-1-r13.md) | 2 | docs, architecture | `b81a772` |
+| 2026-05-14 | [设计文档迭代时 stale 快照应"删除即删除"而非"super-note 警告并保留" + 跨文档引用副本必须随契约演进同步（20-1 r14）](2026-05-14-stale-snapshot-delete-vs-warn-in-iterating-design-doc-20-1-r14.md) | 2 | docs | `c25b4b4` |
+| 2026-05-14 | [跨接口字段语义对齐 + 错误码表收口（无可达路径就删除而非保留）（20-1 r15）](2026-05-14-cross-endpoint-field-alignment-and-error-table-pruning.md) | 2 | docs | `566071f` |
