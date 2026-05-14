@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-05-14  # Story 20.1 review (dev-story 完成)
+last_updated: 2026-05-14  # Story 20.1 story-done (review → done)
 # Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
 # 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
@@ -205,7 +205,7 @@ development_status:
   19-3-文档同步与-tech-debt-登记: backlog
   epic-19-retrospective: optional
   epic-20: in-progress
-  20-1-接口契约最终化: review
+  20-1-接口契约最终化: done
   20-2-cosmetic_items-migration: backlog
   20-3-cosmetic_items-seed: backlog
   20-4-chest_open_logs-migration: backlog
