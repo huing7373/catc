@@ -2,10 +2,10 @@
 // +build integration
 
 // Story 4.3 集成测试：用 dockertest 起真实 mysql:8.0 容器跑 4 条 case：
-//   1. happy: migrate Up → 10 张表存在 → migrate Down → 10 张表全消失（仅 schema_migrations）
+//   1. happy: migrate Up → 11 张表存在 → migrate Down → 11 张表全消失（仅 schema_migrations）
 //   2. edge: 重复 migrate Up → ErrNoChange 被吞 → 返 nil（幂等）
 //   3. happy: Up 后通过 INFORMATION_SCHEMA 抽样验关键索引 / 字段类型 / 主键约束
-//   4. edge: Up 后 Status 返回 (version=11, dirty=false, nil)
+//   4. edge: Up 后 Status 返回 (version=13, dirty=false, nil)
 //
 // Story 7.2 扩展：把 4 条 case 的断言从 5 张表扩展到 6 张表
 //   （新增 user_step_sync_logs：日志表，含 idx_user_date / idx_user_created_at；
@@ -34,6 +34,13 @@
 //   主要 case 跑 15 行 seed 的内容正确性 + AR18 各品质数量约束 + common 至少覆盖
 //   4 个不同 slot + ON DUPLICATE KEY UPDATE 强制覆盖语义（不影响表数量断言）；
 //   StatusAfterUp 版本号断言从 v=11 改 v=12。
+//
+// Story 20.4 扩展：把 4 条 case 的断言从 10 张表扩展到 11 张表
+//   （新增 chest_open_logs：append-only 开箱日志表，含 KEY idx_user_id_created_at +
+//    KEY idx_reward_cosmetic_item_id；Epic 20 节点 7 宝箱业务链路 schema 根基，20.6
+//    POST /chest/open 事务步骤 5h 写一条 chest_open_logs 行 / 20.9 Layer 2 集成测试
+//    断言 chest_open_logs 行数 + 字段值 / 未来运营查询路径依赖）；
+//   StatusAfterUp 版本号断言从 v=12 改 v=13。
 //
 // Story 17.3 r1 review [P2] 重写 SeedIdempotent：原版走 Up→Down→Up 路径但 Down
 //   把整张表 DROP 掉 → 第二次 Up 跑空表 → 没真正触发 duplicate-code 路径。新版改
@@ -138,8 +145,8 @@ func migrationsPath(t *testing.T) string {
 	return abs
 }
 
-// TestMigrateIntegration_UpThenDown 起容器 → migrate Up → 10 张表存在 →
-// migrate Down → 10 张表全消失（仅 schema_migrations）。
+// TestMigrateIntegration_UpThenDown 起容器 → migrate Up → 11 张表存在 →
+// migrate Down → 11 张表全消失（仅 schema_migrations）。
 //
 // **Story 10.3 review r5 [P1] 扩展**：从 6 改 8（多了 0007_init_rooms +
 // 0008_init_room_members；把 Epic 11.2 的"建表"职责拆出来提前到 Story 10.3，
@@ -150,6 +157,10 @@ func migrationsPath(t *testing.T) string {
 //
 // **Story 20.2 扩展**：从 9 改 10（多了 0011_init_cosmetic_items；Epic 20 节点 7
 // 宝箱业务链路 schema 根基）。
+//
+// **Story 20.4 扩展**：从 10 改 11（多了 0013_init_chest_open_logs；Epic 20 节点 7
+// 宝箱开箱日志表，append-only 无 updated_at / 无 UNIQUE；为 20.6 开箱事务步骤 5h
+// INSERT chest_open_logs / 20.9 Layer 2 集成测试 / 未来运营查询路径提供 schema 根基）。
 func TestMigrateIntegration_UpThenDown(t *testing.T) {
 	dsn, cleanup := startMySQL(t)
 	defer cleanup()
@@ -167,14 +178,14 @@ func TestMigrateIntegration_UpThenDown(t *testing.T) {
 		t.Fatalf("migrate Up: %v", err)
 	}
 
-	// 验证 10 张表存在
+	// 验证 11 张表存在（Story 20.4 加 chest_open_logs）
 	sqlDB, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	defer sqlDB.Close()
 
-	expectedTables := []string{"users", "user_auth_bindings", "pets", "user_step_accounts", "user_chests", "user_step_sync_logs", "rooms", "room_members", "emoji_configs", "cosmetic_items"}
+	expectedTables := []string{"users", "user_auth_bindings", "pets", "user_step_accounts", "user_chests", "user_step_sync_logs", "rooms", "room_members", "emoji_configs", "cosmetic_items", "chest_open_logs"}
 	for _, table := range expectedTables {
 		var count int
 		err := sqlDB.QueryRowContext(ctx, `
@@ -189,7 +200,7 @@ func TestMigrateIntegration_UpThenDown(t *testing.T) {
 		}
 	}
 
-	// migrate Down → 10 张表全消失
+	// migrate Down → 11 张表全消失（Story 20.4 加 chest_open_logs）
 	if err := mig.Down(ctx); err != nil {
 		t.Fatalf("migrate Down: %v", err)
 	}
@@ -343,12 +354,12 @@ func TestMigrateIntegration_UpTwice_Idempotent(t *testing.T) {
 	err = sqlDB.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM information_schema.tables
 		WHERE table_schema = 'cat_test' AND table_name IN
-		('users', 'user_auth_bindings', 'pets', 'user_step_accounts', 'user_chests', 'user_step_sync_logs', 'rooms', 'room_members', 'emoji_configs', 'cosmetic_items')`).Scan(&tableCount)
+		('users', 'user_auth_bindings', 'pets', 'user_step_accounts', 'user_chests', 'user_step_sync_logs', 'rooms', 'room_members', 'emoji_configs', 'cosmetic_items', 'chest_open_logs')`).Scan(&tableCount)
 	if err != nil {
 		t.Fatalf("count tables: %v", err)
 	}
-	if tableCount != 10 {
-		t.Errorf("after two Up calls, table count = %d, want 10 (Story 10.3 review r5 [P1] 加 rooms / room_members → Story 17.2 加 emoji_configs → Story 20.2 加 cosmetic_items，总计 10 张表)", tableCount)
+	if tableCount != 11 {
+		t.Errorf("after two Up calls, table count = %d, want 11 (Story 10.3 review r5 [P1] 加 rooms / room_members → Story 17.2 加 emoji_configs → Story 20.2 加 cosmetic_items → Story 20.4 加 chest_open_logs，总计 11 张表)", tableCount)
 	}
 }
 
@@ -560,7 +571,7 @@ func TestMigrateIntegration_TablesPresent_AfterUp(t *testing.T) {
 	}
 }
 
-// TestMigrateIntegration_StatusAfterUp 验证 Up 完成后 Status 返回 (version=11, dirty=false, nil)。
+// TestMigrateIntegration_StatusAfterUp 验证 Up 完成后 Status 返回 (version=13, dirty=false, nil)。
 // Story 7.2 扩展：从 5 改 6（多了 0006_init_user_step_sync_logs）
 // Story 10.3 review r5 [P1] 扩展：从 6 改 8（多了 0007_init_rooms +
 // 0008_init_room_members；把 Epic 11.2 的"建表"职责拆出来提前到 Story 10.3）
@@ -570,6 +581,8 @@ func TestMigrateIntegration_TablesPresent_AfterUp(t *testing.T) {
 // Story 20.2 扩展：从 10 改 11（多了 0011_init_cosmetic_items；Epic 20 节点 7
 // 宝箱业务链路 schema 根基）
 // Story 20.3 扩展：从 11 改 12（多了 0012_seed_cosmetic_items；Epic 20 节点 7 cosmetic seed）
+// Story 20.4 扩展：从 12 改 13（多了 0013_init_chest_open_logs；Epic 20 节点 7
+// 宝箱开箱日志表，append-only schema 根基）
 func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	dsn, cleanup := startMySQL(t)
 	defer cleanup()
@@ -600,8 +613,8 @@ func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status after Up: %v", err)
 	}
-	if v != 12 {
-		t.Errorf("Status version = %d, want 12", v)
+	if v != 13 {
+		t.Errorf("Status version = %d, want 13", v)
 	}
 	if dirty {
 		t.Errorf("Status dirty = true, want false")
@@ -2022,5 +2035,287 @@ func TestMigrateIntegration_CosmeticItems_SeedForceOverwrite(t *testing.T) {
 		if gotIsEnabled != want.isEnabled {
 			t.Errorf("cosmetic %q is_enabled = %d, want %d (ON DUPLICATE KEY UPDATE 应强制覆盖回 0012 seed 钦定值)", want.code, gotIsEnabled, want.isEnabled)
 		}
+	}
+}
+
+// TestMigrateIntegration_ChestOpenLogs_Schema 验证
+// migrations/0013_init_chest_open_logs.up.sql 钦定的 chest_open_logs 表 schema
+// 与数据库设计.md §5.7 + V1接口设计.md §7.2 一致：
+//
+//   - id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT
+//   - user_id BIGINT UNSIGNED NOT NULL
+//   - chest_id BIGINT UNSIGNED NOT NULL
+//   - cost_steps INT UNSIGNED NOT NULL（**关键**：column_type 必须含 "unsigned"，
+//     与 emoji_configs.sort_order 的 "int" / cosmetic_items.drop_weight 的
+//     "int unsigned" 一脉相承）
+//   - reward_user_cosmetic_item_id BIGINT UNSIGNED NOT NULL
+//   - reward_cosmetic_item_id BIGINT UNSIGNED NOT NULL
+//   - reward_rarity TINYINT NOT NULL
+//   - created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+//   - KEY idx_user_id_created_at (user_id, created_at)
+//   - KEY idx_reward_cosmetic_item_id (reward_cosmetic_item_id)
+//
+// **关键覆盖点**：
+//   - **无** UpdatedAt 字段 —— 总列数 == 8（不是 9）；append-only 日志表语义
+//     兜底防有人误加 updated_at（与 Story 7.2 落地的 user_step_sync_logs 同模式）
+//   - **无** UNIQUE 约束 —— 检查 INFORMATION_SCHEMA.STATISTICS 中
+//     chest_open_logs 表的 non_unique = 0 的索引必须为空 / 仅有 PRIMARY；
+//     日志表允许同 user_id 多次开箱
+//   - 双索引（idx_user_id_created_at + idx_reward_cosmetic_item_id）列顺序断言
+//     （与 §5.7 钦定一致）
+//   - BIGINT UNSIGNED 字段（id / user_id / chest_id / reward_user_cosmetic_item_id /
+//     reward_cosmetic_item_id）column_type 必须含 "unsigned"
+//   - INT UNSIGNED 字段（cost_steps）column_type 必须含 "unsigned"
+//
+// **背景（Story 20.4 引入）**：本 case 验证 0013 migration 落地的 schema
+// 与 §5.7 钦定 1:1 对齐；用于在 epics.md §Story 20.4 钦定的"单元测试覆盖 ≥3 case"
+// 中作为 schema-correctness 路径（happy / migrate up 后表存在 + 字段类型 +
+// 全部索引和约束都符合 §5.7）。
+func TestMigrateIntegration_ChestOpenLogs_Schema(t *testing.T) {
+	dsn, cleanup := startMySQL(t)
+	defer cleanup()
+
+	mig, err := migrate.New(dsn, migrationsPath(t))
+	if err != nil {
+		t.Fatalf("migrate.New: %v", err)
+	}
+	defer mig.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := mig.Up(ctx); err != nil {
+		t.Fatalf("migrate Up: %v", err)
+	}
+
+	sqlDB, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	// 1. INFORMATION_SCHEMA.TABLES：chest_open_logs 表存在
+	var tableCount int
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.tables
+		WHERE table_schema = 'cat_test' AND table_name = 'chest_open_logs'`).Scan(&tableCount)
+	if err != nil {
+		t.Errorf("query chest_open_logs table existence: %v", err)
+	} else if tableCount != 1 {
+		t.Errorf("chest_open_logs table count = %d, want 1", tableCount)
+	}
+
+	// 2. INFORMATION_SCHEMA.COLUMNS：8 列存在 + 类型对齐
+	//    **关键**：cost_steps 是 INT UNSIGNED → column_type 必须 = "int unsigned"
+	//    （与 cosmetic_items.drop_weight 同模式 —— 都是 INT UNSIGNED → "int unsigned"）。
+	//    BIGINT UNSIGNED 字段 column_type = "bigint unsigned"（与 0001 users.id 同模式）。
+	chestCols := []struct {
+		col          string
+		wantDataType string
+		wantColType  string
+	}{
+		{"id", "bigint", "bigint unsigned"},
+		{"user_id", "bigint", "bigint unsigned"},
+		{"chest_id", "bigint", "bigint unsigned"},
+		{"cost_steps", "int", "int unsigned"},
+		{"reward_user_cosmetic_item_id", "bigint", "bigint unsigned"},
+		{"reward_cosmetic_item_id", "bigint", "bigint unsigned"},
+		{"reward_rarity", "tinyint", "tinyint"},
+		{"created_at", "datetime", "datetime(3)"},
+	}
+	for _, c := range chestCols {
+		var dt, ct string
+		err := sqlDB.QueryRowContext(ctx, `
+			SELECT data_type, column_type FROM information_schema.columns
+			WHERE table_schema = 'cat_test' AND table_name = 'chest_open_logs' AND column_name = ?`,
+			c.col).Scan(&dt, &ct)
+		if err != nil {
+			t.Errorf("query chest_open_logs.%s type: %v", c.col, err)
+			continue
+		}
+		if dt != c.wantDataType {
+			t.Errorf("chest_open_logs.%s data_type = %q, want %q", c.col, dt, c.wantDataType)
+		}
+		if ct != c.wantColType {
+			t.Errorf("chest_open_logs.%s column_type = %q, want %q", c.col, ct, c.wantColType)
+		}
+	}
+
+	// 3. INFORMATION_SCHEMA.COLUMNS：chest_open_logs 表总列数 == 8
+	//    **关键**：兜底防有人误加 updated_at 字段（append-only 日志表无 UPDATE 语义；
+	//    与 0006 user_step_sync_logs 同模式）；如计数 = 9 说明有人误加 updated_at。
+	var colCount int
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema = 'cat_test' AND table_name = 'chest_open_logs'`).Scan(&colCount)
+	if err != nil {
+		t.Errorf("query chest_open_logs total column count: %v", err)
+	} else if colCount != 8 {
+		t.Errorf("chest_open_logs total column count = %d, want 8 (append-only 日志表无 updated_at；如计数 = 9 说明有人误加 updated_at 字段)", colCount)
+	}
+
+	// 4a. chest_open_logs PK = id
+	var pkCol string
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT column_name FROM information_schema.key_column_usage
+		WHERE table_schema = 'cat_test' AND table_name = 'chest_open_logs' AND constraint_name = 'PRIMARY'`).Scan(&pkCol)
+	if err != nil {
+		t.Errorf("query chest_open_logs PK: %v", err)
+	} else if pkCol != "id" {
+		t.Errorf("chest_open_logs PK column = %q, want 'id'", pkCol)
+	}
+
+	// 4b. **无**其他 UNIQUE 索引（non_unique=0 仅 PRIMARY 一行；
+	//     chest_open_logs 是 append-only 日志表，允许同 user_id 多次开箱）。
+	//     INFORMATION_SCHEMA.STATISTICS 按 (index_name) 去重计数 non_unique=0 的索引
+	//     —— 应只有 PRIMARY 一个；如多于 1 说明有人误加 UNIQUE 约束。
+	var uniqueIdxCount int
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics
+		WHERE table_schema = 'cat_test' AND table_name = 'chest_open_logs' AND non_unique = 0`).Scan(&uniqueIdxCount)
+	if err != nil {
+		t.Errorf("query chest_open_logs unique index count: %v", err)
+	} else if uniqueIdxCount != 1 {
+		t.Errorf("chest_open_logs unique index count = %d, want 1 (仅 PRIMARY；append-only 日志表禁止 UNIQUE 约束)", uniqueIdxCount)
+	}
+
+	// 4c. KEY idx_user_id_created_at + KEY idx_reward_cosmetic_item_id 存在 + 列顺序
+	idxCases := []struct {
+		idxName  string
+		wantCols []string
+	}{
+		{"idx_user_id_created_at", []string{"user_id", "created_at"}},
+		{"idx_reward_cosmetic_item_id", []string{"reward_cosmetic_item_id"}},
+	}
+	for _, ic := range idxCases {
+		rows, err := sqlDB.QueryContext(ctx, `
+			SELECT column_name FROM information_schema.statistics
+			WHERE table_schema = 'cat_test' AND table_name = 'chest_open_logs' AND index_name = ?
+			ORDER BY seq_in_index ASC`, ic.idxName)
+		if err != nil {
+			t.Errorf("query chest_open_logs.%s columns: %v", ic.idxName, err)
+			continue
+		}
+		var cols []string
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				t.Errorf("scan %s column: %v", ic.idxName, err)
+				continue
+			}
+			cols = append(cols, c)
+		}
+		rows.Close()
+		if len(cols) != len(ic.wantCols) {
+			t.Errorf("chest_open_logs.%s column count = %d, want %d (cols=%v)", ic.idxName, len(cols), len(ic.wantCols), cols)
+			continue
+		}
+		for i, w := range ic.wantCols {
+			if cols[i] != w {
+				t.Errorf("chest_open_logs.%s column[%d] = %q, want %q", ic.idxName, i, cols[i], w)
+			}
+		}
+	}
+
+	// 5. INFORMATION_SCHEMA.COLUMNS.COLUMN_DEFAULT：
+	//    - created_at DEFAULT 含 substring "CURRENT_TIMESTAMP"
+	//    - **不**检查 user_id / chest_id / cost_steps / reward_user_cosmetic_item_id /
+	//      reward_cosmetic_item_id / reward_rarity 的 DEFAULT（NOT NULL 但 DDL 不
+	//      预设 DEFAULT；由 service 层显式提供值）
+	{
+		var def sql.NullString
+		err := sqlDB.QueryRowContext(ctx, `
+			SELECT column_default FROM information_schema.columns
+			WHERE table_schema = 'cat_test' AND table_name = 'chest_open_logs' AND column_name = 'created_at'`).Scan(&def)
+		if err != nil {
+			t.Errorf("query chest_open_logs.created_at default: %v", err)
+		} else if !def.Valid || !strings.Contains(strings.ToUpper(def.String), "CURRENT_TIMESTAMP") {
+			t.Errorf("chest_open_logs.created_at default = %v, want substring 'CURRENT_TIMESTAMP'", def)
+		}
+	}
+}
+
+// TestMigrateIntegration_ChestOpenLogs_AppendOnly 验证
+// migrations/0013_init_chest_open_logs.up.sql 钦定的 append-only 日志表语义：
+// 同一 user_id + 同一 chest_id 的多行 INSERT 必须**全部成功**（无 UNIQUE 拒绝）。
+//
+// **背景（Story 20.4 引入）**：epics.md §Story 20.4 钦定的"集成测试覆盖
+// （dockertest）：migrate up → SHOW CREATE TABLE 对比 schema → migrate down"路径
+// 在 ChestOpenLogs_Schema case 用 INFORMATION_SCHEMA 字段层精确断言取代了
+// 不稳定的 SHOW CREATE TABLE 字符串比对；本 case 是额外的运行时 append-only
+// 语义验证 —— 与 20.2 落地的 TestMigrateIntegration_CosmeticItems_UniqueCode_Rejected
+// 形成对照：后者验证有 UNIQUE 的运行时拒绝，本 case 验证无 UNIQUE 的多行允许。
+//
+// **覆盖路径**：
+//  1. migrate up → chest_open_logs 表存在
+//  2. 插入 chest_open_logs (user_id=1, chest_id=1, cost_steps=1000,
+//     reward_user_cosmetic_item_id=0, reward_cosmetic_item_id=10, reward_rarity=1) → 成功
+//     （reward_user_cosmetic_item_id=0 是节点 7 阶段语义占位，本 case 即模拟 20.6 INSERT 行为）
+//  3. 再次插入 chest_open_logs (user_id=1, chest_id=2, cost_steps=1000,
+//     reward_user_cosmetic_item_id=0, reward_cosmetic_item_id=11, reward_rarity=2) → 成功
+//     （同 user_id，不同 chest_id —— 用户开箱多轮场景）
+//  4. 再次插入 chest_open_logs (user_id=1, chest_id=1, cost_steps=1000,
+//     reward_user_cosmetic_item_id=0, reward_cosmetic_item_id=12, reward_rarity=1) → 成功
+//     （同 user_id + 同 chest_id —— 防御性 case，确保无任何 UNIQUE 阻塞）
+//  5. SELECT COUNT(*) FROM chest_open_logs WHERE user_id=1 → count = 3
+//     （3 行全部成功插入，证实 append-only 语义）
+//
+// 用 database/sql 直跑 raw INSERT（**不**走 GORM）让测试结果**不**依赖 ORM
+// 行为差异（与 Story 11.2 / 17.2 / 20.2 落地的 UNIQUE 拒绝 case 同模式）。
+//
+// 测试用 user_id / chest_id 与未来 20.6 / 20.9 业务用 id 完全隔离 —— 用 user_id=1
+// + chest_id=1/2 是 dockertest 容器内独立 mysql 实例，与 prod 数据无关；
+// 容器测试结束后自动 purge（startMySQL t.Cleanup）。
+func TestMigrateIntegration_ChestOpenLogs_AppendOnly(t *testing.T) {
+	dsn, cleanup := startMySQL(t)
+	defer cleanup()
+
+	mig, err := migrate.New(dsn, migrationsPath(t))
+	if err != nil {
+		t.Fatalf("migrate.New: %v", err)
+	}
+	defer mig.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := mig.Up(ctx); err != nil {
+		t.Fatalf("migrate Up: %v", err)
+	}
+
+	sqlDB, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	// 步骤 2：首条插入 (user=1, chest=1) → 必须成功
+	//        reward_user_cosmetic_item_id=0 模拟节点 7 阶段 Story 20.6 INSERT 行为
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO chest_open_logs (user_id, chest_id, cost_steps, reward_user_cosmetic_item_id, reward_cosmetic_item_id, reward_rarity) VALUES (1, 1, 1000, 0, 10, 1)`); err != nil {
+		t.Fatalf("first insert chest_open_logs (user=1, chest=1) should succeed: %v", err)
+	}
+
+	// 步骤 3：同 user_id 不同 chest_id (user=1, chest=2) → 必须成功（多轮开箱场景）
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO chest_open_logs (user_id, chest_id, cost_steps, reward_user_cosmetic_item_id, reward_cosmetic_item_id, reward_rarity) VALUES (1, 2, 1000, 0, 11, 2)`); err != nil {
+		t.Fatalf("second insert chest_open_logs (user=1, chest=2) should succeed (append-only, no UNIQUE): %v", err)
+	}
+
+	// 步骤 4：同 user_id + 同 chest_id (user=1, chest=1) → 必须成功
+	//        防御性 case：确保无任何 UNIQUE(user_id, chest_id) 误加
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO chest_open_logs (user_id, chest_id, cost_steps, reward_user_cosmetic_item_id, reward_cosmetic_item_id, reward_rarity) VALUES (1, 1, 1000, 0, 12, 1)`); err != nil {
+		t.Fatalf("third insert chest_open_logs (user=1, chest=1 dup) should succeed (append-only, no UNIQUE): %v", err)
+	}
+
+	// 步骤 5：SELECT COUNT(*) WHERE user_id=1 → 3（证实 append-only 语义）
+	var count int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM chest_open_logs WHERE user_id = 1`).Scan(&count); err != nil {
+		t.Fatalf("SELECT COUNT chest_open_logs WHERE user_id=1: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("after 3 inserts, chest_open_logs count for user_id=1 = %d, want 3 (append-only 日志表 3 行全部成功，无任何 UNIQUE 阻塞)", count)
 	}
 }
