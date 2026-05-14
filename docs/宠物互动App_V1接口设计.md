@@ -65,6 +65,16 @@
 - `emoji.received` self-broadcast 去重契约（client 端跳过 `payload.userId == 当前 user.id` 的 echo，与 `pet.state.changed` self-broadcast 双轨兜底**不同**）属契约一部分；如未来 client 改为"接收 self-echo 并触发某 UI 反馈"（如 ack indicator），视为契约变更。
 - **表情不持久化**契约（按数据库设计 §14.3，server 不写入任何表）属契约一部分；如未来引入 `emoji_events` 表 + 历史回放接口，视为契约变更。
 - **GET /emojis 不分页 + 不接受 query 参数 + 不返回 disabled 表情**契约属契约一部分；如未来引入分页 / 筛选 / disabled 表情对 admin 可见，视为契约变更。
+- 自 2026-05-14（Story 20.1 完成日，对应 git commit hash 见 commit message）起，§7.1（GET /api/v1/chest/current）/ §7.2（POST /api/v1/chest/open）两个节点 7 宝箱 REST 接口的 schema 进入**冻结**状态。
+- 任何字段名 / 字段类型 / `status` 枚举值（1 / 2）/ 错误码（1001 / 1002 / 1005 / 1008 / 1009 / 3002 / 4001 / 4002）触发条件 / `idempotencyKey` 字符集（`[A-Za-z0-9_:-]` + length 1-128）/ **Redis 幂等原子声明语义（`SET NX` sentinel `"__pending__"` 在事务前 + 三态分支：首次声明 → 进事务 / sentinel 命中 → 1008 / 完整 JSON 命中 → 200 + 首次结果）** / **rate_limit 中间件不免 idempotency 命中请求**（重试计入用户级配额，client 须自行退避）/ **事务 rollback 时必须 DEL sentinel 兑现"业务错误后用新 key 重试"语义** / MySQL 事务边界 / 加权抽取语义 / **节点 7 阶段 `reward.userCosmeticItemId` 占位值 `"0"` 契约** / `nextChest` 永远非 null 且 server 端固定 status=1 / unlock_at=now+10min 的修改都必须（**冻结边界说明**：`reward.userCosmeticItemId` 字段值**从节点 8 Story 23.5 起切换为真实主键**这一升级**不**视为契约变更 —— 字段类型 / 名 / 必填性都不变，仅服务端语义升级；Story 23.5 落地时应在 §7.2.6 标注升级日期 + commit hash；1008 / 1005 / 4003 等"触发条件"冻结在**抽象层** —— "走 §3 错误码表对应映射"这一不变量；删除 idempotencyKey + Redis 幂等机制 / 把原子声明退化为非原子两步 / 切换为非加权抽奖 / 修改 nextChest 创建时机才视为契约变更）：
+  1. 触发 iOS Epic 21 重新评审（影响 Story 21.1 ~ 21.5 所有首页宝箱组件 + 倒计时 + 开箱 + 奖励弹窗 + 主动同步步数 story）
+  2. 触发 server Epic 20 已完成 story 的回归（影响 Story 20.2 ~ 20.9 已落地的 migration / seed / handler / service / 集成测试）
+  3. 触发下游 Epic 23 的契约 story（23.1）回归（节点 8 入仓事务基于本骨架扩展）
+  4. 在本 story 文件 + epics.md 同步标注变更原因 + 影响范围
+- `user_chests.open_cost_steps` 默认值 **1000** 属契约一部分：**prod 部署必须使用默认值**，不允许通过配置 / migration 覆盖；**dev / test 环境**可通过 fixture 覆盖（仅用于单测 / 调试 / fixture），**不**视为契约变更；**修改默认值本身**视为契约变更走完整冻结流程。
+- `user_chests.status` 枚举（`1 = counting` / `2 = unlockable`）属契约一部分；新增枚举值（如 `3 = opened`）视为契约变更（**注**：当前设计中 opened 状态不存在 —— 开箱后立即创建下一轮 chest，opened 是 transient state，仅在事务内瞬间存在）。
+- `cosmetic_items` 表 seed 数量约束（epics.md AR18 钦定 common ≥ 8 / rare ≥ 4 / epic ≥ 2 / legendary ≥ 1）属契约一部分；admin 后台增删 cosmetic_items 行**不**视为契约变更，但删到不足 AR18 约束视为线上事故。
+- `drop_weight` 加权抽奖算法（按 `cumulative_weight / total_weight` 比例抽取，仅 `is_enabled = 1` 行参与）属契约一部分；切换为非加权 / 加权但不按 drop_weight 排序 视为契约变更。
 
 ---
 
@@ -801,7 +811,49 @@ JSON 示例：
 
 ### `GET /api/v1/chest/current`
 
-#### 返回示例
+#### 接口元信息
+
+| 字段 | 值 |
+|---|---|
+| HTTP Method | GET |
+| Path | /api/v1/chest/current |
+| 认证 | **需要** Bearer token（auth 中间件） |
+| 限频 | 默认（按 Story 4.5 rate_limit 默认值 60 次/分按 user_id 计） |
+| 幂等 | 天然幂等（GET 查询，无副作用） |
+| 节点 | 节点 7（Epic 20 落地 / Epic 21 客户端集成） |
+| 分页 | 无（单条 chest 查询） |
+| Query 参数 | **无**（不接受任何 query string） |
+
+#### 请求
+
+无请求体（GET 接口）；仅需 `Authorization: Bearer <token>` Header。
+
+#### 服务端逻辑
+
+1. **认证 & 限频**：auth 中间件校验 Bearer token；rate_limit 中间件按默认配置限频
+2. **查询当前 chest**：`SELECT id, status, unlock_at, open_cost_steps FROM user_chests WHERE user_id = ? LIMIT 1`
+   - 用户没有 chest 行（理论不该发生，因 Story 4.6 登录初始化已创建首个 chest）→ 4001
+3. **动态判定 status**（**不**更新 DB —— 仅在 response 计算，节省写入；真正状态变更在开箱时 Story 20.6 触发）：
+   - 数据库 `status = 1 (counting)` AND `unlock_at <= now` → 返回 `status = 2 (unlockable)`, `remainingSeconds = 0`
+   - 数据库 `status = 1 (counting)` AND `unlock_at > now` → 返回 `status = 1`, `remainingSeconds = max(0, ceil((unlock_at - now) / 1s))`
+   - 数据库 `status = 2 (unlockable)` → 返回 `status = 2`, `remainingSeconds = 0`（已解锁待开）
+4. **响应**：返回 `{id, status, unlockAt, openCostSteps, remainingSeconds}` 5 字段
+
+**事务边界规则**：本接口**不**需要 MySQL 事务（仅 1 个 SELECT 查询 + 内存判定）。
+
+#### 响应体
+
+成功（code = 0）：
+
+| 字段 | 类型 | 必填 | 范围/约束 | 说明 |
+|---|---|---|---|---|
+| `data.id` | string | 必填 | BIGINT 字符串化(与 §2.5 全局约定 + 数据库 `user_chests.id BIGINT UNSIGNED` 一致) | 当前宝箱主键 |
+| `data.status` | number (int) | 必填 | 枚举 `1` / `2` | 当前宝箱状态：`1 = counting`（未解锁，倒计时中），`2 = unlockable`（已解锁，可点击开箱）；与数据库 §6.7 `user_chests.status` 同义；与 §5.1 `data.chest.status` 同义；**节点 7 起 server 端按服务端逻辑步骤 3 动态判定，不再以 DB 原始值返回** |
+| `data.unlockAt` | string (ISO 8601 UTC) | 必填 | length = 20(如 `"2026-04-23T10:20:00Z"`) | 宝箱解锁时间；与数据库 `user_chests.unlock_at` 同义；client 用作本地倒计时显示基线 |
+| `data.openCostSteps` | number (int) | 必填 | 节点 7 阶段固定 `1000` | 开启所需步数；与数据库 `user_chests.open_cost_steps` 同义；与 §5.1 `data.chest.openCostSteps` 同义；MVP 阶段固定为 1000，未来如调整需视为契约变更 |
+| `data.remainingSeconds` | number (int) | 必填 | `0 ≤ value ≤ 2^31 - 1` | 距离 unlockAt 的剩余秒数；> 0 表示 counting，= 0 表示已可开启（与 `status = 2` 等价 —— client 可二选一判定）；server 端按 `ceil((unlock_at - now) / 1s)` 计算，到 0 时**不**会出现负数（见服务端逻辑步骤 3 的 `max(0, ...)` 兜底）；client 应基于此本地 `Timer` 每秒递减做 UI 倒计时显示，到 0 时**主动**重新 GET 一次以确认 server 端 status 已切换为 2（避免 server / client 时钟漂移导致 UI 与 server 端状态错位） |
+
+JSON 示例（`remainingSeconds = 253` 表示距解锁还有 253 秒）：
 
 ```json
 {
@@ -818,10 +870,49 @@ JSON 示例：
 }
 ```
 
+JSON 示例（已解锁待开 edge case）：
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "id": "5001",
+    "status": 2,
+    "unlockAt": "2026-04-23T10:20:00Z",
+    "openCostSteps": 1000,
+    "remainingSeconds": 0
+  },
+  "requestId": "req_xxx"
+}
+```
+
 #### status 枚举
 
-- `1 = counting`
-- `2 = unlockable`
+- `1 = counting`（未解锁，倒计时中）
+- `2 = unlockable`（已解锁，可点击开箱）
+
+> **注**：本接口**不**下发 `created_at` / `updated_at` / `version` 字段 —— client 无 UI 用途；`version` 是 server 端 user_chests 表乐观锁版本号，仅在开箱事务内用（Story 20.6 实装层决定），client 不需要感知。
+
+#### 可能的错误码
+
+| code | message | 触发条件 |
+|---|---|---|
+| 1001 | 未登录 / token 无效 | auth 中间件拦截（无 Authorization 头 / token 非法 / token 过期 / token 解析失败） |
+| 1005 | 操作过于频繁 | rate_limit 中间件拦截（**已认证路由**按 `user_id` 限频，每用户每分钟 > 60 次；按 Story 4.5 默认值，配置可调） |
+| 1009 | 服务繁忙 | DB 异常（SELECT 执行返回 `err != nil`，含 driver / 网络 / 慢查询超时等）/ 内部 panic |
+| 4001 | 当前宝箱不存在 | 用户在 user_chests 表中无任何行（理论上 Story 4.6 登录初始化必然创建首个 chest，此错误表征数据完整性异常 —— 如 DB 数据被 admin 误删 / migration 顺序错乱等）；client 收到 4001 时应展示"系统异常，请重新登录"+ log error 上报（不应静默） |
+
+> **注**：本接口**不**触发 1002 参数错误（无 query / body 字段可校验）/ **不**触发 4002 / 4003（4002 / 4003 是开箱时机相关错误，仅在 §7.2 POST /chest/open 触发）/ **不**触发 3xxx / 5xxx / 6xxx / 7xxx。
+
+#### 关键约束
+
+- **status 动态判定 vs DB 原始值**：server 端 status 字段值由"DB 原始值 + 当前时间"动态计算，**不**等同于 DB `user_chests.status` 列值；client 收到 `status = 2` 不可推断 DB 行也是 `status = 2`（DB 可能仍为 `status = 1` 但 `unlock_at <= now`）；该设计是为节省一次 UPDATE 写入（每次 GET 都更新 DB 状态会严重放大写入压力，而 status = unlockable 是无副作用的查询时态判定）。真正的 DB 状态变更仅在开箱事务（Story 20.6）成功后发生（删旧 chest + 新建下一轮 status = 1 chest）
+- **remainingSeconds 不会为负**：服务端按 `max(0, ceil((unlock_at - now) / 1s))` 计算；即使 server 时钟跳变 / `unlock_at` 略早于 now，也只会返回 0；client 解析层**应**按 `Int` 处理（不是 `UInt` —— Swift 端 `UInt` 在解析时若收到负数会 crash，虽 server 保证不发但 client 应防御性按 `Int`）
+- **本地倒计时与 server 状态校对**：client **应**在 `remainingSeconds` 倒到 0 时**主动**调一次 GET /chest/current 校正 status（避免本地时钟漂移导致 UI 误判）；如果 GET 返回 `status = 1` 且 `remainingSeconds > 0`（如本地早跳到 0，但 server 仍认为未解锁）→ client 以 server 响应为准重置本地 Timer；如果 GET 返回 `status = 2` 且 `remainingSeconds = 0`（与本地一致）→ UI 切换"点击开箱"按钮可点状态
+- **首次登录后 1 秒内调本接口**：刚 Story 4.6 登录初始化的 chest `unlock_at = now + 10 min`；首次 GET 返回 `status = 1`, `remainingSeconds ≈ 600`，与 `GET /home` 节点 2 阶段示例一致（§5.1 行 423-425）
+- **BIGINT 主键字符串化**：`data.id` 遵循 §2.5 全局约定字符串化；其他字段（`status` / `openCostSteps` / `remainingSeconds`）是 int，**不**字符串化
+- **client 缓存策略**：本接口数据有时效性（每秒变化），client **不应**做长时间本地缓存；建议每次进入首页 / 从其他页面返回首页时主动重新调一次（不依赖任何 cache 中间件 / ETag）
 
 ---
 
@@ -829,7 +920,25 @@ JSON 示例：
 
 ### `POST /api/v1/chest/open`
 
+#### 接口元信息
+
+| 字段 | 值 |
+|---|---|
+| HTTP Method | POST |
+| Path | /api/v1/chest/open |
+| 认证 | **需要** Bearer token（auth 中间件） |
+| 限频 | 默认（按 Story 4.5 rate_limit 默认值 60 次/分按 user_id 计 —— 开箱业务上单用户不会高频触发，此限频是兜底） |
+| 幂等 | **支持**（通过 request body `idempotencyKey` 字段 + Redis 缓存实现；详见服务端逻辑） |
+| 节点 | 节点 7（Epic 20 落地 / Epic 21 客户端集成） |
+| 事务边界 | **MySQL 事务**（FOR UPDATE 行锁 + 多表写入；详见服务端逻辑） |
+
 #### 请求体
+
+| 字段 | 类型 | 必填 | 范围/约束 | 说明 |
+|---|---|---|---|---|
+| `idempotencyKey` | string | 必填 | 1 ≤ length ≤ 128；只允许 `[A-Za-z0-9_:-]` | 幂等键；client **应**在每次点击"开箱"按钮时生成新的 key（如 `"chest_open_{userId}_{nanoTimestamp}"`），网络抖动重试时**复用同一 key**（避免重复扣步数 + 重复开箱）；server 端用此 key 在 Redis 缓存首次开箱结果（TTL 24h），命中即直接返回缓存（**不**触发新事务） |
+
+JSON 示例：
 
 ```json
 {
@@ -839,16 +948,76 @@ JSON 示例：
 
 #### 服务端逻辑
 
-- 校验当前宝箱存在
-- 校验宝箱已经解锁
-- 校验可用步数大于等于 1000
-- 扣除 1000 步数
-- 抽取一个装扮配置
-- 创建一条装扮实例
-- 写开箱日志
-- 刷新下一轮宝箱
+1. **认证 & 限频**：auth 中间件校验 Bearer token；rate_limit 中间件按默认配置限频
+2. **参数校验**：`idempotencyKey` 必填 + length 1-128 + 字符集 `[A-Za-z0-9_:-]` —— 不满足 → 1002
+3. **Redis 幂等原子声明 + 命中分支**：用 Lua 脚本（或 `SET key value NX EX 86400`）对 `idem:{userId}:chest_open:{idempotencyKey}` 做**原子 claim**——
+   - **首次声明成功**（key 之前不存在，本次写入 sentinel 值 `"__pending__"` 占位）→ 继续步骤 4 进入事务
+   - **已存在 sentinel `"__pending__"`**（有同 key 请求正在执行中、事务尚未提交、步骤 5 尚未回填真实结果）→ rollback claim 动作 → 返回 1008（幂等冲突，client 应稍后重试同 key —— 见关键约束）
+   - **已存在完整 response JSON**（同 key 首次开箱已成功，步骤 5 已回填）→ 直接返回缓存的完整响应（不开事务、不查 DB），**不**触发新开箱
+   - **注**：本步骤的"原子声明"是幂等性的**充要条件**——若仅做"GET 检查 + 后续 SET"两步分离，两个并发同 key 请求会同时 miss → 各自进事务 → 第二个事务在步骤 4a / 4d 上 FOR UPDATE 串行后仍可能看到不同状态（如步骤 4a 拿到 status=1 因 chest 已被首请求 DELETE，触发 4001 / 4002）→ 第二个 client 收到的是错误码而非首次成功结果，违反"同 key 重试安全"契约。必须用 `SET NX` 或 Lua CAS 形成单步原子；server 实装层（Story 20.6）由本契约钦定不可妥协
+   - **rate_limit 中间件位置**：rate_limit 在步骤 1 已执行，因此**重试请求即使命中 idempotency 缓存，本次调用仍计入 rate_limit 配额**（与节点 2 / 3 / 4 / 5 / 6 已认证业务路由一致）。client 在网络层重试时**应**自行做退避（指数退避 / 抖动）避免触发 1005；server 端**不**为本接口提供"重试免限频"特殊路径（中间件链不感知 idempotency 是契约简化决策，避免 rate_limit 中间件依赖路由级幂等状态）
+4. **MySQL 事务开始**（`txManager.WithTx(ctx, fn)` 包，所有 repo 调用用 `txCtx`）：
+   a. **FOR UPDATE 锁 chest**：`SELECT id, status, unlock_at, open_cost_steps, version FROM user_chests WHERE user_id = ? FOR UPDATE`
+      - 没有 chest 行 → rollback → 4001
+   b. **判定 unlockable**：动态判定逻辑与 §7.1 服务端逻辑步骤 3 一致 —— `(status = 1 AND unlock_at <= now) OR status = 2` 视为可开启；否则 → rollback → 4002
+   c. **FOR UPDATE 锁 user_step_accounts**：`SELECT total_steps, available_steps, consumed_steps, version FROM user_step_accounts WHERE user_id = ? FOR UPDATE`
+      - 没有行（理论不该，Story 4.6 已初始化）→ rollback → 3002（按"步数不足"映射）
+      - `available_steps < 1000` → rollback → 3002
+   d. **扣步数 + 加 consumed**：`UPDATE user_step_accounts SET available_steps = available_steps - 1000, consumed_steps = consumed_steps + 1000, version = version + 1 WHERE id = ? AND version = ?`（乐观锁）
+      - `affected_rows = 0`（version 不匹配，并发写入）→ rollback → 1009（按"数据冲突重试"映射；rollback 时步骤 5 走 DEL sentinel 分支清理 → client 用同 key 重试会重新 claim sentinel + 走全流程；推荐 client 用新 idempotencyKey 重试以语义清晰，与"网络层重试"区分）
+   e. **加权抽取 cosmetic_item**：`SELECT id, code, name, slot, rarity, asset_url, icon_url FROM cosmetic_items WHERE is_enabled = 1` → 按 `drop_weight` 加权抽取 1 条 → 拿到 `cosmetic_item_id`
+      - 没有任何 enabled cosmetic_items（seed 未执行）→ rollback → 1009
+   f. **写 chest_open_logs**：`INSERT INTO chest_open_logs (user_id, chest_id, cost_steps, reward_user_cosmetic_item_id, reward_cosmetic_item_id, reward_rarity, created_at) VALUES (?, ?, 1000, 0, ?, ?, NOW())` —— **节点 7 阶段 `reward_user_cosmetic_item_id` 固定为 `0`**（占位值，因不创建 user_cosmetic_items 实例；节点 8 Story 23.5 修改本步骤为先 INSERT user_cosmetic_items 拿到 id 再填入此处）
+   g. **刷新下一轮 chest**：`DELETE FROM user_chests WHERE id = ?`（旧 chest）→ `INSERT INTO user_chests (user_id, status, unlock_at, open_cost_steps, version) VALUES (?, 1, NOW() + INTERVAL 10 MINUTE, 1000, 0)`（新 chest）
+   h. **事务提交**
+5. **Redis 回填幂等结果缓存**：`SET idem:{userId}:chest_open:{idempotencyKey} = <完整 response JSON>, EX 86400`（TTL 24h）—— **覆盖**步骤 3 写入的 `"__pending__"` sentinel。若事务在步骤 4 中 rollback（任何 a~h 子步骤失败）→ **必须**主动 `DEL idem:{userId}:chest_open:{idempotencyKey}` 删除 sentinel（**否则同 key 重试会持续返回 1008 直到 TTL 过期，违反"业务错误后用新 key 重试"契约对 sentinel 的清理预期**）；DEL 失败仅 log warn（同步骤 5 写失败处理，best-effort）
+6. **响应**：返回 `{reward, stepAccount, nextChest}` 三段嵌套 payload
 
-#### 返回示例
+**事务边界规则**（与 数据库设计 §8.3 一致）：
+
+- 步骤 4 是单一 MySQL 事务，**不**跨 Redis（Redis 原子声明 sentinel 在事务**之前**——步骤 3；Redis 回填真实结果在事务**之后**——步骤 5；事务内部任何操作都不依赖 Redis）
+- **Redis claim 在事务前**：步骤 3 的 `SET NX` sentinel 是 single-key 原子操作，**先于** MySQL 事务执行；保证两请求同 key 时只有一个能进入事务，另一个直接走 1008 短路返回。这是契约层对"同 key 并发不进双事务"的硬保证（**不**靠 MySQL 行锁兜底——FOR UPDATE 在 4a 才执行，已晚于事务开启）
+- 加权抽奖（步骤 4e）使用 mocked `random.Reader` 接口（Story 20.6 实装时 inject），便于单测断言权重分布；本接口契约层**不**钦定具体算法（alias method / 线性扫描皆可）
+- **事务失败时 sentinel 清理**：步骤 4 任何子步骤（a~h）rollback → 步骤 5 改为 `DEL idem:{userId}:chest_open:{idempotencyKey}` 删除 sentinel；这是契约对"业务错误后用新 key 重试"承诺的兑现（若不删 sentinel，同 key 重试会持续返回 1008 直到 TTL 过期）
+- **Redis 回填失败处理**（步骤 5 SET 或 DEL 任一）：
+  - 成功路径 SET 失败：事务已提交，**不**回滚；log warn；client 收到 200 OK + 正确 reward；同 key 重试将看到 sentinel `"__pending__"` → 收到 1008；client 应改用**新** idempotencyKey 重试（首次结果已落盘 + 已下发，资产无重复出箱风险——此处可接受"sentinel 残留 TTL 24h"的极端 case，符合 MVP 实际部署 Redis 可用性目标）
+  - 失败路径 DEL 失败：sentinel 残留至 TTL（24h）；期间同 key 请求收到 1008；client 应改用新 idempotencyKey；同样符合 best-effort 幂等性退化语义
+
+#### 响应体
+
+成功（code = 0）：
+
+**`data.reward` 字段表**（开箱奖励，节点 7 阶段仅展示不入仓）：
+
+| 字段 | 类型 | 必填 | 范围/约束 | 说明 |
+|---|---|---|---|---|
+| `data.reward.userCosmeticItemId` | string | 必填 | **节点 7 阶段固定字符串 `"0"`**（占位值；节点 8 Story 23.5 起为真实 BIGINT 字符串化主键） | 玩家装扮实例 id；client UI 层**禁止**展示此字段（节点 7 是占位 / 节点 8 仅用于后端审计 + 跨端关联，UI 无展示需求）；client 解析层**应**按 `String` 处理（不是 Optional）；client **禁止**通过 `userCosmeticItemId == "0"` 动态判断节点 ——业务路径以部署版本决定，避免节点 8 升级后 dead branch |
+| `data.reward.cosmeticItemId` | string | 必填 | BIGINT 字符串化(与 §2.5 全局约定 + 数据库 `cosmetic_items.id BIGINT UNSIGNED` 一致)；length ≥ 1 | 装扮配置 id（**不是**玩家实例 id —— 与 `userCosmeticItemId` 区分清楚）；与 §8.1 / §8.2 `cosmeticItemId` 同义；与 数据库 §5.8 `cosmetic_items.id` 同义 |
+| `data.reward.name` | string | 必填 | 1 ≤ length ≤ 64；与数据库 `cosmetic_items.name VARCHAR(64)` 一致 | 装扮名称（如 `"星星围巾"`），client UI 层用作奖励弹窗文字 |
+| `data.reward.slot` | number (int) | 必填 | 枚举 `1` / `2` / `3` / `4` / `5` / `6` / `7` / `99`（与数据库 §6.8 `cosmetic_items.slot` 同义：1=hat / 2=gloves / 3=glasses / 4=neck / 5=back / 6=body / 7=tail / 99=other） | 部位枚举；client UI 层可用作图标分类 / 排序辅助 |
+| `data.reward.rarity` | number (int) | 必填 | 枚举 `1` / `2` / `3` / `4`（与数据库 §6.9 `cosmetic_items.rarity` 同义：1=common / 2=rare / 3=epic / 4=legendary） | 品质枚举；client UI 层用作奖励弹窗颜色 / 边框 / 特效 |
+| `data.reward.assetUrl` | string | 必填 | 1 ≤ length ≤ 255；不允许空字符串 `""`（开箱奖励必须有 asset） | 装扮资源 URL（PNG / GIF / WebP / SVG 等图片资源）；MVP 阶段允许 placeholder URL（如 `https://placehold.co/128x128?text=Hat-Yellow`，由 Story 20.3 seed 决定）；与 §8.1 / §8.2 `assetUrl` 同义；与 数据库 §5.8 `cosmetic_items.asset_url` 同义 |
+| `data.reward.iconUrl` | string | 必填 | 1 ≤ length ≤ 255；不允许空字符串 `""`（开箱奖励必须有 icon） | 装扮图标 URL（小尺寸预览图，奖励弹窗 + 仓库列表展示用）；与 §8.1 / §8.2 `iconUrl` 同义；与 数据库 §5.8 `cosmetic_items.icon_url` 同义 |
+
+**`data.stepAccount` 字段表**（开箱后步数余额，与 §6.2 GET /steps/account 字段同义）：
+
+| 字段 | 类型 | 必填 | 范围/约束 | 说明 |
+|---|---|---|---|---|
+| `data.stepAccount.totalSteps` | number (int) | 必填 | `0 ≤ value ≤ 2^31 - 1` | 累计步数；与 §6.2 `totalSteps` 同义 + 数据库 `user_step_accounts.total_steps` 同义；开箱不修改此字段 |
+| `data.stepAccount.availableSteps` | number (int) | 必填 | `0 ≤ value ≤ 2^31 - 1` | 可用步数（扣除 1000 之后的值）；与 §6.2 `availableSteps` 同义 + 数据库 `user_step_accounts.available_steps` 同义；client 用此更新主界面步数余额 UI |
+| `data.stepAccount.consumedSteps` | number (int) | 必填 | `0 ≤ value ≤ 2^31 - 1` | 已消耗步数（加 1000 之后的值）；与 §6.2 `consumedSteps` 同义 + 数据库 `user_step_accounts.consumed_steps` 同义 |
+
+**`data.nextChest` 字段表**（开箱后立即创建的下一轮宝箱，字段集与 §7.1 完全一致）：
+
+| 字段 | 类型 | 必填 | 范围/约束 | 说明 |
+|---|---|---|---|---|
+| `data.nextChest.id` | string | 必填 | BIGINT 字符串化 | 下一轮宝箱主键（与刚开的宝箱 id 不同 —— 旧记录已 DELETE） |
+| `data.nextChest.status` | number (int) | 必填 | 节点 7 阶段固定 `1` (counting) | 下一轮状态；新 chest 必为 counting 状态 |
+| `data.nextChest.unlockAt` | string (ISO 8601 UTC) | 必填 | length = 20 | 下一轮解锁时间；server 端固定为开箱时刻 + 10 分钟 |
+| `data.nextChest.openCostSteps` | number (int) | 必填 | 节点 7 阶段固定 `1000` | 下一轮开启所需步数 |
+| `data.nextChest.remainingSeconds` | number (int) | 必填 | 节点 7 阶段固定 `600`（10 min = 600 sec） | 距 unlockAt 剩余秒数；server 端固定下发 600 |
+
+JSON 示例：
 
 ```json
 {
@@ -856,12 +1025,13 @@ JSON 示例：
   "message": "ok",
   "data": {
     "reward": {
-      "userCosmeticItemId": "91001",
+      "userCosmeticItemId": "0",
       "cosmeticItemId": "24",
       "name": "星星围巾",
       "slot": 4,
       "rarity": 2,
-      "assetUrl": "https://..."
+      "assetUrl": "https://placehold.co/512x512?text=Scarf-Star",
+      "iconUrl": "https://placehold.co/128x128?text=Scarf-Star"
     },
     "stepAccount": {
       "totalSteps": 12560,
@@ -879,6 +1049,51 @@ JSON 示例：
   "requestId": "req_xxx"
 }
 ```
+
+> **注**：示例中 `reward.userCosmeticItemId` 为 `"0"`（节点 7 阶段占位值）；节点 8 Story 23.5 落地后将更新为真实主键并由 Story 23.5 acceptance 钦定。
+
+#### 可能的错误码
+
+| code | message | 触发条件 |
+|---|---|---|
+| 1001 | 未登录 / token 无效 | auth 中间件拦截（无 Authorization 头 / token 非法 / token 过期 / token 解析失败） |
+| 1002 | 参数错误 | `idempotencyKey` 缺失 / length < 1 或 > 128 / 字符集含 `[A-Za-z0-9_:-]` 之外的字符 |
+| 1005 | 操作过于频繁 | rate_limit 中间件拦截（**已认证路由**按 `user_id` 限频，每用户每分钟 > 60 次） |
+| 1008 | 幂等冲突 | Redis sentinel `"__pending__"` 命中——同 idempotencyKey 的另一个请求正在执行（事务尚未提交、首次结果尚未回填）；server 端短路返回 1008，**不**进事务；client 应稍后用**同**一 idempotencyKey 重试（首次请求完成后会回填真实结果，重试将命中缓存返回 200 + reward）。**注**：当 idempotencyKey 命中已完整的 response JSON（首次开箱已成功）时 server 直接返回 200 + 首次结果，**不**返回 1008——1008 仅表征"并发执行中"，不表征"已完成"|
+| 1009 | 服务繁忙 | DB 异常（事务失败 / SELECT 返回 err / INSERT 返回 err 等）/ Redis 异常（如 EVAL 失败但事务已开始，详见服务端逻辑步骤 5 注解）/ 步数 UPDATE 乐观锁 version 不匹配导致 affected_rows = 0（并发冲突，client 可重试）/ 加权抽奖时 enabled cosmetic_items 为空（seed 未执行 —— 数据完整性异常） |
+| 3002 | 可用步数不足 | `user_step_accounts.available_steps < 1000`（开箱所需）；client 收到 3002 时应展示"步数不足，请先走路赚步数"+ 引导用户走步 / 主动同步步数（Story 21.5 锚定的"开箱前主动同步步数"流程可减少此 case） |
+| 4001 | 当前宝箱不存在 | 用户在 user_chests 表中无任何行（理论上 Story 4.6 登录初始化必然创建首个 chest）—— 表征数据完整性异常 |
+| 4002 | 宝箱尚未解锁 | 当前 chest 状态判定为 counting（数据库 status = 1 AND `unlock_at > now`）；client 不应让 4002 触发（Story 21 应在 button 可点状态校验上规避：仅 `status = 2` 时按钮可点），如果触发说明 client 端 button 状态校验有 bug 或 server / client 时钟漂移严重；client 收到 4002 时应主动重新调一次 GET /chest/current 校正本地状态 |
+
+> **注**：本接口**不**触发 4003（4003 在 §3 表保留但本 MVP 暂未使用；如未来引入"宝箱开启条件不满足"细分业务场景如"先完成新手任务"，由对应 epic 锚定）/ **不**触发 5xxx（5xxx 是合成 / 装扮事务相关，与开箱无关）/ **不**触发 6xxx / 7xxx。
+
+#### 关键约束
+
+- **节点 7 vs 节点 8 阶段 `userCosmeticItemId` 占位**：
+  - **节点 7 阶段（Epic 20 / Epic 21 / 节点 7 demo 验收）**：开箱奖励**不入仓**（不创建 `user_cosmetic_items` 实例，仅展示弹窗）；`reward.userCosmeticItemId` 字段**固定为字符串 `"0"`**（占位值；不下发 `null` 防 Swift Codable 解析失败 / 不下发数字 `0` 防 client 误把它当合法主键算术运算）
+  - **节点 8 阶段（Epic 23 完成后）**：开箱事务由 Story 23.5 修改 → 创建 `user_cosmetic_items` 实例 → `chest_open_logs.reward_user_cosmetic_item_id` 填真实 id → API 层 `reward.userCosmeticItemId` 返回真实 BIGINT 字符串化主键
+  - **client 处理规则**：iOS 端 `ChestRewardDTO` Codable struct 严格按 `String` 解析（不是 `Optional<String>`）；client UI 层**禁止**展示 `userCosmeticItemId` 字段值；client **可**在内部 log 该字段供 debug，但**不**作为业务路径分支判断（避免节点 8 升级后 dead branch）
+  - **契约层升级路径**：节点 7 → 节点 8 升级**不**视为契约变更（`userCosmeticItemId` 类型 / 字段名 / 必填性都不变，只是 server 端语义从"占位"变成"真实主键"）；Story 23.5 落地时**应**在本 §7.2.6 中标注升级日期 + commit hash
+
+- **idempotencyKey 字符集与长度**：`[A-Za-z0-9_:-]` + length 1-128；选用此字符集是为兼容主流 client 端 UUID / nanoid / ULID 等格式 + 允许 ":" 作为业务前缀分隔符（如 `"chest_open:user_1001:1714281600000"`）；**禁止**空字符串 `""`（character set 已隐含 length ≥ 1）；**禁止**包含 `/` / `?` / `&` 等 URL 保留字符（Redis key 不会因 URL 编码异常，但 client 实装时如果 idempotencyKey 串入了任何 URL / SQL / shell 上下文可能引发注入风险，故契约层在 character set 层面收紧）
+
+- **client 重试策略**：
+  - **网络层重试**（如 client 收到 5xx / timeout）→ 用**同** idempotencyKey 重试 + 指数退避（避免触发 1005，因 rate_limit 中间件**不**对 idempotency 命中请求免限频，重试计入用户级配额）；server 端走 Redis 缓存命中路径——如已回填则返回 200 + 首次结果，如仍是 sentinel `"__pending__"` 则返回 1008（client 应继续退避重试同 key，直到首次请求结果回填或 sentinel TTL 过期）
+  - **业务错误重试**（如收到 3002 / 4002）→ server 端事务 rollback 时已 DEL sentinel，sentinel 已清除——client **可**用同 key 也**可**用新 key 重试（语义等价，因 sentinel 已清，同 key 重试会走全流程）；推荐 client 用**新** idempotencyKey 重试（语义更清晰，避免与"网络重试"语义混淆）
+  - **1008 重试**（sentinel 命中并发执行中）→ client 应用**同** idempotencyKey + 退避重试（**不要**换 key，否则首次请求成功后回填的缓存命中不到，第二个 key 会再次进事务造成重复开箱）；建议 client 重试 3 次后仍 1008 则放弃并向用户报错（极端 case，首次请求长时间卡住或 sentinel 因 Redis 异常残留）
+  - **重复点击防抖**：client UI 层应在用户点击"开箱"按钮后**立即禁用**按钮（loading 状态），直到收到 server 响应再启用；服务端层面 idempotencyKey + Redis 原子声明提供二次防护
+
+- **事务边界**：MySQL 事务在步骤 4 内（FOR UPDATE 锁 chest + step_account + UPDATE + INSERT 日志 + DELETE + INSERT chest），Redis 原子声明 sentinel 在事务**之前**（步骤 3），Redis 回填真实结果（成功路径 SET）或清理 sentinel（失败路径 DEL）在事务**之后**（步骤 5）；这种顺序保证：(a) 同 key 并发请求只有一个能 claim sentinel 进入事务，另一个走 1008 短路——**不**靠 MySQL 行锁兜底（FOR UPDATE 在 4a 才生效，已晚于事务开启）；(b) MySQL 事务失败 + DEL sentinel 失败 → sentinel 残留 TTL → 同 key 重试持续 1008（best-effort 退化，可接受）；(c) MySQL 事务成功 + Redis SET 失败 → client 收到 200 OK + 正确 reward → 同 key 重试看到 sentinel 返回 1008，需 client 换新 key（资产已落盘，新 key 重试会再开事务造成重复出箱——故 MVP 阶段**禁止**业务流程允许重复开箱；本 case 极端罕见，符合 Epic 20 acceptance 不要求 Redis 99.999% 可用的目标）
+
+- **加权抽奖语义**：`drop_weight` 是抽奖权重（值越大越容易抽到），server 端按 `cumulative_weight / total_weight` 比例抽取；同 `drop_weight` 值的 cosmetic 抽到概率相等；`drop_weight = 0` 的 cosmetic（不应在 enabled 集合中）等价于不可抽到；加权抽取**仅**对 `is_enabled = 1` 行有效（disabled 行不参与抽奖）
+
+- **跨字段同义对齐**：
+  - `data.stepAccount.{totalSteps, availableSteps, consumedSteps}` 与 §6.2 GET /steps/account 同义字段对齐（字段名 / 类型 / 语义完全一致）
+  - `data.nextChest.{id, status, unlockAt, openCostSteps, remainingSeconds}` 与 §7.1 GET /chest/current 同义字段对齐
+  - `data.reward.{cosmeticItemId, name, slot, rarity, assetUrl, iconUrl}` 与 §8.1 GET /cosmetics/catalog 同义字段对齐（节点 8 Story 23.1 锚定 §8.1 时应保证字段名 / 类型一致）
+  - `data.reward.userCosmeticItemId` 节点 7 占位 `"0"` / 节点 8 起与 §8.2 GET /cosmetics/inventory 中 `items[].userCosmeticItemId` 字段同义对齐
+
+- **BIGINT 主键字符串化**：`reward.userCosmeticItemId` / `reward.cosmeticItemId` / `nextChest.id` 均遵循 §2.5 字符串化（即使 `userCosmeticItemId = "0"` 也是字符串）
 
 ---
 
