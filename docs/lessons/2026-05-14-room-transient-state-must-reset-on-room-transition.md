@@ -2,7 +2,7 @@
 date: 2026-05-14
 source_review: /tmp/epic-loop-review-18-3-r1.md (codex round 1)
 story: 18-3-选中表情-本地立即动效-ws-发送-emoji-send
-commit: <pending>
+commit: 484e757
 lesson_count: 1
 ---
 
