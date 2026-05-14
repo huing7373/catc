@@ -144,6 +144,27 @@ struct RootView: View {
     /// `_roomViewModel = StateObject(wrappedValue:)` 是 SwiftUI 推荐的 @StateObject custom init 写法.
     init() {
         #if DEBUG
+        // Story 18.2 AC7: `--uitest-emoji-panel-room-host` launch arg 路径 —— MockRoomViewModel
+        // (currentUserId: "u1", members: u1 自己 + u2 他人 + u3 他人) 让 RoomScaffoldView UI 测试
+        // 锚定 self vs other PetSpriteView Button 行为. 仅 DEBUG; 与 18.1 stub host view 同精神
+        // (但区别: 18.1 是独立全屏 host view 路径, 18.2 走正常 MainTabView/HomeContainer 但用 Mock vm).
+        // 同时与 UITEST_SKIP_GUEST_LOGIN=1 + UITEST_FORCE_IN_ROOM=1 配合 (这两个 env 让 launch bootstrap
+        // 立即成功并切到 inRoom 态).
+        if ProcessInfo.processInfo.arguments.contains("--uitest-emoji-panel-room-host") {
+            let mock = MockRoomViewModel(
+                roomCodeForCopy: RoomScaffoldDefaults.roomCodeForCopy,
+                hostCatName: RoomScaffoldDefaults.hostCatName,
+                members: [
+                    RoomMember(id: "u1", name: "我", level: 8, status: "在玩耍", isHost: true),
+                    RoomMember(id: "u2", name: "他", level: 7, status: "在散步", isHost: false),
+                    RoomMember(id: "u3", name: "她", level: 9, status: "在玩耍", isHost: false),
+                ],
+                userIsHost: true,
+                currentUserId: "u1"   // 自己 = u1 (members[0])
+            )
+            self._roomViewModel = StateObject(wrappedValue: mock)
+            return
+        }
         if ProcessInfo.processInfo.environment["UITEST_ROOM_THREE_MEMBERS"] == "1" {
             // 3 个 fixed members（房主 + 2 普通）—— 与 UITest case 对齐：roomMember_0/1/2 可见 + 1 空位 roomMember_3.
             let mock = MockRoomViewModel(
@@ -198,6 +219,11 @@ struct RootView: View {
                     currentTheme: currentTheme,
                     sessionStore: container.sessionStore,
                     resetIdentityViewModel: currentResetIdentityViewModel(),
+                    // Story 18.2 AC5: factory 闭包 wire 入口 —— HomeContainerRoomViewBridge 通过
+                    // `\.emojiPanelViewModelFactory` environment value 拿到, 传给 RoomScaffoldView init.
+                    // 每次 sheet 弹出 RoomScaffoldView 调一次 factory → new EmojiPanelViewModel (useCase
+                    // 是 container.loadEmojisUseCase 单例 → cache 跨 sheet 共享, 18.1 缓存契约一致).
+                    emojiPanelViewModelFactory: { [container] in container.makeEmojiPanelViewModel() },
                     onReadyAppear: {
                         #if DEBUG
                         // lazy 注入：第一次 .onAppear 时从已稳定的 container 拿 keychainStore，
@@ -629,6 +655,9 @@ private struct LaunchedContentView: View {
     let currentTheme: ThemeName
     let sessionStore: SessionStore?
     let resetIdentityViewModel: ResetIdentityViewModel?
+    /// Story 18.2 AC5: EmojiPanelViewModel 工厂闭包；通过 `\.emojiPanelViewModelFactory` environment
+    /// value 注入 .ready 子树, HomeContainerRoomViewBridge 读取后传给 RoomScaffoldView init.
+    let emojiPanelViewModelFactory: () -> EmojiPanelViewModel
     let onReadyAppear: () -> Void
     let onReadyTask: () async -> Void
     /// Story 8.5 review round 2 [P2] fix: launch state 离开 `.ready` 时回调（同步路径）.
@@ -649,6 +678,7 @@ private struct LaunchedContentView: View {
         currentTheme: ThemeName,
         sessionStore: SessionStore?,
         resetIdentityViewModel: ResetIdentityViewModel?,
+        emojiPanelViewModelFactory: @escaping () -> EmojiPanelViewModel,
         onReadyAppear: @escaping () -> Void,
         onReadyTask: @escaping () async -> Void = { },
         onLeaveReady: @escaping () -> Void = { }
@@ -664,6 +694,7 @@ private struct LaunchedContentView: View {
         self.currentTheme = currentTheme
         self.sessionStore = sessionStore
         self.resetIdentityViewModel = resetIdentityViewModel
+        self.emojiPanelViewModelFactory = emojiPanelViewModelFactory
         self.onReadyAppear = onReadyAppear
         self.onReadyTask = onReadyTask
         self.onLeaveReady = onLeaveReady
@@ -687,6 +718,9 @@ private struct LaunchedContentView: View {
                     .environment(\.theme, currentTheme.theme)
                     .environment(\.sessionStore, sessionStore)
                     .environment(\.resetIdentityViewModel, resetIdentityViewModel)
+                    // Story 18.2 AC5: factory 闭包注入 .ready 子树 environment,
+                    // HomeContainerRoomViewBridge 通过 `\.emojiPanelViewModelFactory` 读取并传给 RoomScaffoldView init.
+                    .environment(\.emojiPanelViewModelFactory, emojiPanelViewModelFactory)
                     .onAppear { onReadyAppear() }
                     .task {
                         await onReadyTask()

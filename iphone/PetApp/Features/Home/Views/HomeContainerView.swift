@@ -47,11 +47,17 @@ public struct HomeContainerView: View {
 ///
 /// 为何抽出来：保 RoomViewModel 通过 EnvironmentObject 注入；与 HomeViewModel 注入路径同精神.
 /// Story 12.1 落地时改用 RealRoomViewModel 替换基类（RootView wire 决定）.
+/// Story 18.2: 通过 `\.emojiPanelViewModelFactory` environment value 拿到 RootView 注入的工厂闭包,
+///   传给 RoomScaffoldView init（避免在 bridge / Container 任一层持有 AppContainer 依赖）.
 private struct HomeContainerRoomViewBridge: View {
     @EnvironmentObject var roomViewModel: RoomViewModel
+    @Environment(\.emojiPanelViewModelFactory) var emojiPanelViewModelFactory
 
     var body: some View {
-        RoomScaffoldView(state: roomViewModel)
+        RoomScaffoldView(
+            state: roomViewModel,
+            emojiPanelViewModelFactory: emojiPanelViewModelFactory
+        )
     }
 }
 
@@ -126,5 +132,41 @@ extension EnvironmentValues {
     var sessionStore: SessionStore? {
         get { self[SessionStoreKey.self] }
         set { self[SessionStoreKey.self] = newValue }
+    }
+}
+
+/// Story 18.2 AC5: `EmojiPanelViewModel` 工厂闭包注入入口（RootView 写入；HomeContainerRoomViewBridge 读取）.
+///
+/// 为何走 EnvironmentValues 而非 RoomScaffoldView caller 直接构造：HomeContainerView 是 MainTabView
+/// 内嵌子视图，中间隔 TabView 容器；RoomScaffoldView 实际由 HomeContainerRoomViewBridge 构造，
+/// 直接给 RoomScaffoldView 传 AppContainer 会让 bridge / Container 都引入 AppContainer 依赖.
+/// 用 environment 模式让 RootView 一次性 write `{ container.makeEmojiPanelViewModel() }`，
+/// 路径所有节点保持单向 wire（无需每层 init 参数透传）.
+///
+/// 默认值: 返回 placeholder EmojiPanelViewModel（永远 loading 态；caller 若忘记 wire 时 sheet 弹出
+/// 仅显示 ProgressView，**不**导致 crash）.
+/// 详见 docs/lessons/2026-04-27-environment-value-default-must-not-crash.md（与既有 EnvironmentValues
+/// 默认值同精神：默认值是 fail-safe，不是"正常使用"路径）.
+private struct EmojiPanelViewModelFactoryKey: EnvironmentKey {
+    @MainActor
+    static var defaultValue: () -> EmojiPanelViewModel {
+        return { EmojiPanelViewModel(useCase: NeverReturnsLoadEmojisUseCase()) }
+    }
+}
+
+extension EnvironmentValues {
+    var emojiPanelViewModelFactory: () -> EmojiPanelViewModel {
+        get { self[EmojiPanelViewModelFactoryKey.self] }
+        set { self[EmojiPanelViewModelFactoryKey.self] = newValue }
+    }
+}
+
+/// Story 18.2 AC5: environment 默认 fallback 用 UseCase —— execute() 永久挂起,
+/// 让 EmojiPanelViewModel.state 永远停 loading（让 caller 忘 wire 时不 crash 而是显示 ProgressView）.
+/// 与 EmojiPanelView.swift 内 `NeverReturnsUseCase` 同精神（私有给 #Preview 用）.
+private struct NeverReturnsLoadEmojisUseCase: LoadEmojisUseCaseProtocol {
+    func execute() async throws -> [EmojiConfig] {
+        try await Task.sleep(nanoseconds: UInt64.max)
+        return []
     }
 }

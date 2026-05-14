@@ -3521,6 +3521,67 @@ final class RealRoomViewModelTests: XCTestCase {
         XCTAssertEqual(vm.wsState, .disconnected,
                        "stale stream guard 同时挡 wsState mutate（与 case#H5 同精神）")
     }
+
+    // MARK: - Story 18.2 AC2: currentUserId 订阅 + onOwnPetTap override
+
+    /// Story 18.2 AC2 case#H1: bind(appState:) 后 currentUserId 立即与 appState.currentUser.id 同步.
+    /// 验证订阅同步 emit 当前 hydrated currentUser → vm.currentUserId == "u_test"（makeHydrated 默认 id）.
+    func testBindAppStateCurrentUserIdHydrates() async {
+        let appState = AppState.makeHydrated()   // user.id = "u_test"（AppStateTestHelpers）
+        let vm = RealRoomViewModel()
+        vm.bind(appState: appState)
+        // 让 Combine 主线程 sink 跑完（与既有订阅 case 同模式）
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(vm.currentUserId, "u_test",
+                       "bind 后 currentUserId 必须从 appState.currentUser.id 同步派生")
+    }
+
+    /// Story 18.2 AC2 case#H2: appState.currentUser = nil（reset 路径）→ vm.currentUserId 自动 nil 同步.
+    /// 防 reset 后老 self 残留 → RoomScaffoldView "自己位"判定不会卡在已注销的 userId.
+    func testAppStateCurrentUserResetSyncsCurrentUserIdNil() async {
+        let appState = AppState.makeHydrated()
+        let vm = RealRoomViewModel()
+        vm.bind(appState: appState)
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(vm.currentUserId, "u_test")
+
+        appState.reset()
+        await Task.yield()
+        await Task.yield()
+        XCTAssertNil(vm.currentUserId,
+                     "appState.reset() 后 vm.currentUserId 必须同步 nil（防 self 残留）")
+    }
+
+    /// Story 18.2 AC2 case#H3: onOwnPetTap → showEmojiPanel = true（不调任何 server / WS）.
+    /// 纯本地状态切换；与 18.3 SendEmojiUseCase 路径解耦（18.3 才落地 server 调用）.
+    func testRealOnOwnPetTapSetsShowEmojiPanelTrue() {
+        let vm = RealRoomViewModel()
+        XCTAssertFalse(vm.showEmojiPanel, "初始 showEmojiPanel 必须为 false")
+        vm.onOwnPetTap()
+        XCTAssertTrue(vm.showEmojiPanel,
+                      "onOwnPetTap 后 showEmojiPanel 必须切 true → sheet 弹出")
+    }
+
+    /// Story 18.2 AC2 case#H4: currentUserId 订阅 `.removeDuplicates()` 防同值重复 publish.
+    /// 同一 userId 被 currentUser hydrate 多次仍只触发一次 publish（验证 distinct 行为；
+    /// 本测试断言"vm.currentUserId 在多次同值 set 后值依然一致"作为弱断言验证）.
+    func testCurrentUserIdSubscriptionRemovesDuplicates() async {
+        let appState = AppState.makeHydrated()
+        let vm = RealRoomViewModel()
+        vm.bind(appState: appState)
+        await Task.yield()
+        XCTAssertEqual(vm.currentUserId, "u_test")
+
+        // 同值 hydrate 多次（如 /home 被多次调用刷新）
+        appState.applyHomeData(makeSampleHomeData(currentRoomId: nil))
+        appState.applyHomeData(makeSampleHomeData(currentRoomId: nil))
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(vm.currentUserId, "u_test",
+                       "同 userId 多次 hydrate 后 currentUserId 保持稳定（removeDuplicates 行为）")
+    }
 }
 
 // MARK: - Story 15.5 inline mock for AC3 delegate tests

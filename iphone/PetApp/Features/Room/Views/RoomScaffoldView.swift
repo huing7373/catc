@@ -31,8 +31,19 @@ public struct RoomScaffoldView: View {
     /// 复制 feedback timer 句柄（防多次点击 race；与 HomeView resetTask 同模式）.
     @State private var copyFeedbackTask: Task<Void, Never>?
 
-    public init(state: RoomViewModel) {
+    /// Story 18.2 AC4: EmojiPanelViewModel 工厂闭包 (caller 注入).
+    /// caller=RootView 传 `{ container.makeEmojiPanelViewModel() }`;
+    /// Preview / UITest stub host 传 `{ EmojiPanelViewModel(useCase: MockLoadEmojisUseCase(...)) }`.
+    /// 闭包注入而非直接持 EmojiPanelViewModel 实例: 避免 RoomScaffoldView 持有 vm 生命周期 (sheet 每次弹出
+    /// 走 .sheet 闭包 → 闭包内 new vm → SwiftUI .sheet 内 @StateObject 持有 vm 直到 sheet dismiss).
+    private let emojiPanelViewModelFactory: () -> EmojiPanelViewModel
+
+    public init(
+        state: RoomViewModel,
+        emojiPanelViewModelFactory: @escaping () -> EmojiPanelViewModel
+    ) {
         self.state = state
+        self.emojiPanelViewModelFactory = emojiPanelViewModelFactory
     }
 
     public var body: some View {
@@ -58,6 +69,22 @@ public struct RoomScaffoldView: View {
                 .padding(.top, 8)          // safe area top 已自动 respect；只补呼吸空间. 详见 HomeView.swift:90 注释.
                 .padding(.bottom, 100)     // 浮动 TabBar 让出空间
             }
+        }
+        // Story 18.2 AC4: EmojiPanelView sheet 挂载（ZStack 外层，与 LinearGradient 同级）.
+        // 双向绑定 $state.showEmojiPanel：自己 PetSpriteView Button 点击置 true → sheet 弹出;
+        // swipe-down dismiss 自动置 false; onSelect 闭包选中表情后显式置 false (与 ADR-0010 §3.2 钦定一致).
+        // ADR-0009 §3.3 sheet 白名单语义扩展（JoinRoomModal 是参考样板；EmojiPanel 同属 "Tab 内部次级 sheet"）.
+        .sheet(isPresented: $state.showEmojiPanel) {
+            EmojiPanelView(
+                viewModel: emojiPanelViewModelFactory(),
+                onSelect: { _ in
+                    // Story 18.2 路径仅关 sheet (18.3 才接 SendEmojiUseCase, 届时改为 `code in state.onEmojiSelected(code: code)`).
+                    // `_` 显式忽略 emojiCode 参数, 让 dev 不误以为有遗漏.
+                    state.showEmojiPanel = false
+                }
+            )
+            .presentationDetents([.medium])
+            .presentationCornerRadius(28)
         }
     }
 
@@ -341,11 +368,27 @@ public struct RoomScaffoldView: View {
             // Story 15.1 review r1 fix：用 `size: 40` 让 PetSpriteView 真正按 40pt 渲染；
             // 之前 `.frame(width: 40, height: 40).clipped()` 只裁不缩 → SF Symbol 180×180
             // 被裁成"截断的猫头"。详见 docs/lessons/2026-05-12-swiftui-frame-clipped-does-not-scale.md.
-            PetSpriteView(
-                state: (state.memberPetStates[member.id] ?? .rest).motionState,
-                size: 40
-            )
-            .frame(width: 40, height: 40)
+            //
+            // Story 18.2 AC4: 自己成员位 → PetSpriteView 套 Button (可点 → 弹 emoji panel);
+            // 他人位 / state.currentUserId == nil (fail-safe, appState 未 hydrate) → 原 PetSpriteView (不可点).
+            // `.buttonStyle(.plain)` 防 SwiftUI 默认 Button 蓝色 tint 干扰 PetSpriteView SF Symbol 视觉.
+            if member.id == state.currentUserId {
+                Button(action: { state.onOwnPetTap() }) {
+                    PetSpriteView(
+                        state: (state.memberPetStates[member.id] ?? .rest).motionState,
+                        size: 40
+                    )
+                    .frame(width: 40, height: 40)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier(AccessibilityID.Room.ownPetSpriteButton(at: index))
+            } else {
+                PetSpriteView(
+                    state: (state.memberPetStates[member.id] ?? .rest).motionState,
+                    size: 40
+                )
+                .frame(width: 40, height: 40)
+            }
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 16).fill(theme.colors.surface))
@@ -454,25 +497,56 @@ struct MiniCatView: View {
 // MARK: - Preview (AC6: #Preview 4 配置 candy/dark x 4/2/1 成员)
 
 #if DEBUG
+/// Story 18.2: #Preview / 测试场景下 EmojiPanelViewModel mock 工厂 helper.
+/// 不依赖 container / 真实 LoadEmojisUseCase —— Preview 路径下 sheet 弹出时 viewModel.load() 自动调
+/// MockLoadEmojisUseCase 拿 4 项内置 fixture（与 18.1 stub host 同精神）.
+@MainActor
+private func previewEmojiPanelViewModelFactory() -> EmojiPanelViewModel {
+    EmojiPanelViewModel(useCase: PreviewLoadEmojisUseCase())
+}
+
+private struct PreviewLoadEmojisUseCase: LoadEmojisUseCaseProtocol {
+    func execute() async throws -> [EmojiConfig] {
+        return [
+            EmojiConfig(code: "wave", name: "挥手", assetUrl: "https://placehold.co/64x64?text=Wave", sortOrder: 1),
+            EmojiConfig(code: "love", name: "爱心", assetUrl: "https://placehold.co/64x64?text=Love", sortOrder: 2),
+            EmojiConfig(code: "laugh", name: "大笑", assetUrl: "https://placehold.co/64x64?text=Laugh", sortOrder: 3),
+            EmojiConfig(code: "cry", name: "哭泣", assetUrl: "https://placehold.co/64x64?text=Cry", sortOrder: 4),
+        ]
+    }
+}
+
 #Preview("RoomScaffoldView — 4 members / candy") {
-    RoomScaffoldView(state: MockRoomViewModel())
+    RoomScaffoldView(
+        state: MockRoomViewModel(),
+        emojiPanelViewModelFactory: previewEmojiPanelViewModelFactory
+    )
         .environment(\.theme, ThemeName.candy.theme)
 }
 
 #Preview("RoomScaffoldView — 4 members / dark") {
-    RoomScaffoldView(state: MockRoomViewModel())
+    RoomScaffoldView(
+        state: MockRoomViewModel(),
+        emojiPanelViewModelFactory: previewEmojiPanelViewModelFactory
+    )
         .environment(\.theme, ThemeName.dark.theme)
 }
 
 #Preview("RoomScaffoldView — 2 members + 2 empty / candy") {
-    RoomScaffoldView(state: MockRoomViewModel(members: MockRoomViewModel.twoMembersMock))
+    RoomScaffoldView(
+        state: MockRoomViewModel(members: MockRoomViewModel.twoMembersMock),
+        emojiPanelViewModelFactory: previewEmojiPanelViewModelFactory
+    )
         .environment(\.theme, ThemeName.candy.theme)
 }
 
 #Preview("RoomScaffoldView — host alone / candy") {
-    RoomScaffoldView(state: MockRoomViewModel(
-        members: [RoomMember(id: "u1", name: "小花", level: 8, status: "在玩耍", isHost: true)]
-    ))
+    RoomScaffoldView(
+        state: MockRoomViewModel(
+            members: [RoomMember(id: "u1", name: "小花", level: 8, status: "在玩耍", isHost: true)]
+        ),
+        emojiPanelViewModelFactory: previewEmojiPanelViewModelFactory
+    )
     .environment(\.theme, ThemeName.candy.theme)
 }
 #endif

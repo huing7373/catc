@@ -134,6 +134,11 @@ public enum AccessibilityID {
         public static let leaveButton = "leaveButton"
         /// `roomMember_<index>` 模式（index 0..3）；caller 走 `AccessibilityID.Room.member(at: index)` helper.
         public static func member(at index: Int) -> String { "roomMember_\(index)" }
+        /// Story 18.2 AC5: 自己成员位 PetSpriteView Button 的 a11y identifier helper.
+        /// 命名模式: `roomMember_<index>_petSprite` (与 member(at:) 同前缀 + `_petSprite` 后缀).
+        /// caller (RoomScaffoldView): `Button { ... }.accessibilityIdentifier(AccessibilityID.Room.ownPetSpriteButton(at: index))`.
+        /// UITest: `app.buttons["roomMember_0_petSprite"].tap()` 触发自己 PetSpriteView 点击.
+        public static func ownPetSpriteButton(at index: Int) -> String { "roomMember_\(index)_petSprite" }
         /// Story 37.3 落地的占位 view a11y identifier（RoomViewPlaceholder.swift）.
         public static let viewPlaceholder = "roomViewPlaceholder"
     }

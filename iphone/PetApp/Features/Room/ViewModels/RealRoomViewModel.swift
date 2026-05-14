@@ -68,6 +68,11 @@ public final class RealRoomViewModel: RoomViewModel {
     /// Story 12.1 新增：`appState.$currentRoomId` 订阅（roomId nil ↔ non-nil 切换驱动 WS connect/disconnect + members 清空）.
     private var roomIdConnectSubscription: AnyCancellable?
 
+    /// Story 18.2 AC2: `appState.$currentUser` → `currentUserId` 派生订阅.
+    /// 触发时机: bind(appState:webSocketClient:) 启动后立刻订阅 + AppState.reset 时 nil 同步.
+    /// `.removeDuplicates()` 防 hydrate 多次 emit 同值触发重复 publish.
+    private var currentUserIdSubscription: AnyCancellable?
+
     /// Story 12.1 新增：WebSocket messages stream consumer task（订阅 webSocketClient.messages → 解析 → 派生 members）.
     private var messageConsumerTask: Task<Void, Never>?
 
@@ -117,6 +122,8 @@ public final class RealRoomViewModel: RoomViewModel {
         // 调用 startConsumingMessages 唯一起 task，避免 init + sink 双起 task 争抢 AsyncStream（同一 stream
         // 多 iterator 是未定义行为；表现为消息丢失 → snapshot 不被 consume）.
         subscribeRoomIdConnect(to: appState)
+        // Story 18.2 AC2: 订阅 currentUser → currentUserId 派生 (self vs other 判定唯一来源).
+        subscribeCurrentUserId(to: appState)
     }
 
     /// AppState + WebSocketClient 异步注入入口（与 Story 37.8 bind 同模式扩展两路）.
@@ -146,6 +153,8 @@ public final class RealRoomViewModel: RoomViewModel {
     ) {
         let codeAlreadySubscribed = roomCodeSubscription != nil
         let connectAlreadySubscribed = roomIdConnectSubscription != nil
+        // Story 18.2 AC2: currentUserId 订阅幂等 gate（与 codeAlreadySubscribed 同模式）.
+        let currentUserIdAlreadySubscribed = currentUserIdSubscription != nil
         self.appState = appState
 
         // Story 12.7 AC6: 若 caller 注入了 leaveRoomUseCase / errorPresenter，覆盖既有引用
@@ -187,6 +196,10 @@ public final class RealRoomViewModel: RoomViewModel {
 
         if !codeAlreadySubscribed {
             subscribeRoomCode(to: appState)
+        }
+        // Story 18.2 AC2: currentUserId 订阅幂等启动（与 codeAlreadySubscribed 同精神）.
+        if !currentUserIdAlreadySubscribed {
+            subscribeCurrentUserId(to: appState)
         }
         if !connectAlreadySubscribed {
             // 首次订阅：sink 同步 emit 会按 (nil, currentRoomId) 决定是否启 task.
@@ -285,6 +298,22 @@ public final class RealRoomViewModel: RoomViewModel {
             .sink { [weak self] roomId in
                 guard let self else { return }
                 self.roomCodeForCopy = roomId ?? RoomScaffoldDefaults.roomCodeForCopy
+            }
+    }
+
+    /// Story 18.2 AC2: 订阅 appState.$currentUser → 派生 currentUserId.
+    /// `.map { $0?.id }.removeDuplicates()` 防 hydrate 多次 emit 同值触发重复 publish.
+    /// `.receive(on: DispatchQueue.main)` 让 sink 跑在 main actor 上 + sink 内 [weak self] 防 retain cycle
+    /// （与 roomCodeSubscription / roomIdConnectSubscription 同模式）.
+    /// AppState.currentUser nil（reset 路径）→ vm.currentUserId 自动 nil 同步,
+    /// 让 RoomScaffoldView "自己位"判定不再卡在已注销的 userId.
+    private func subscribeCurrentUserId(to appState: AppState) {
+        currentUserIdSubscription = appState.$currentUser
+            .map { $0?.id }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] newUserId in
+                self?.currentUserId = newUserId
             }
     }
 
@@ -1089,7 +1118,18 @@ public final class RealRoomViewModel: RoomViewModel {
         // 实际 UIPasteboard 复制由 RoomScaffoldView 内 SwiftUI @State + 调用本方法时一起触发（Story 37.8 落地）.
     }
 
+    /// Story 18.2 AC2: 自己 PetSpriteView Button 点击 → sheet 弹出.
+    /// 本 story 路径**不**调任何 server / WS (18.3 落地的 onSelect 闭包才调 SendEmojiUseCase).
+    public override func onOwnPetTap() {
+        os_log(.debug, "RealRoomViewModel.onOwnPetTap")
+        self.showEmojiPanel = true
+    }
+
     deinit {
         messageConsumerTask?.cancel()
+        // Story 18.2 AC2: 订阅清理（与 messageConsumerTask 同精神；AnyCancellable.cancel() 幂等）.
+        // roomCodeSubscription / roomIdConnectSubscription 是 AnyCancellable，会随 self deinit 自动释放,
+        // 但显式 cancel 让 deinit 路径不再依赖 ARC 时序，与既有 messageConsumerTask?.cancel() 同模式.
+        currentUserIdSubscription?.cancel()
     }
 }

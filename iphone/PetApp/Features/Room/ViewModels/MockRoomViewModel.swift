@@ -22,34 +22,41 @@ public final class MockRoomViewModel: RoomViewModel {
     public enum Invocation: Equatable {
         case leaveTap
         case copyTap
+        case ownPetTap   // Story 18.2 新增
     }
 
     @Published public var invocations: [Invocation] = []
 
     /// 默认构造 — 4 成员（房主 + 3 普通成员）满员场景，对齐 ui_design room.jsx 默认 demo 数据.
     /// 全部默认值走 RoomScaffoldDefaults（与 RealRoomViewModel init seed 同源）.
+    /// Story 18.2: currentUserId 默认 "u1" 与 RoomScaffoldDefaults.members[0].id 对齐
+    /// → "self = host" 语义在默认 Mock 路径下自然 hold.
     public override init() {
         super.init()
         self.roomCodeForCopy = RoomScaffoldDefaults.roomCodeForCopy
         self.hostCatName = RoomScaffoldDefaults.hostCatName
         self.members = RoomScaffoldDefaults.members
         self.userIsHost = RoomScaffoldDefaults.userIsHost
+        self.currentUserId = "u1"   // Story 18.2 (与 RoomScaffoldDefaults.members[0].id 对齐)
     }
 
     /// 测试 / Preview 灵活构造 — 可注入任意 members 数（0/1/2/3/4）+ 自定 roomCode + hostCatName.
     /// 用于单元测试 case#1 (4 成员)、case#2 (2 成员) 等；与 HomeViewScaffoldTests 同模式.
     /// 默认形参全部从 RoomScaffoldDefaults 取（与无参 init() 同源）.
+    /// Story 18.2: 增 currentUserId 参数（默认 "u1" 与 RoomScaffoldDefaults.members[0].id 对齐）.
     public init(
         roomCodeForCopy: String = RoomScaffoldDefaults.roomCodeForCopy,
         hostCatName: String = RoomScaffoldDefaults.hostCatName,
         members: [RoomMember] = RoomScaffoldDefaults.members,
-        userIsHost: Bool = RoomScaffoldDefaults.userIsHost
+        userIsHost: Bool = RoomScaffoldDefaults.userIsHost,
+        currentUserId: String? = "u1"   // Story 18.2
     ) {
         super.init()
         self.roomCodeForCopy = roomCodeForCopy
         self.hostCatName = hostCatName
         self.members = members
         self.userIsHost = userIsHost
+        self.currentUserId = currentUserId   // Story 18.2
     }
 
     // MARK: - override abstract methods
@@ -62,6 +69,14 @@ public final class MockRoomViewModel: RoomViewModel {
     public override func onCopyTap() {
         os_log(.debug, "MockRoomViewModel.onCopyTap")
         invocations.append(.copyTap)
+    }
+
+    /// Story 18.2: 自己 PetSpriteView Button 点击回调 mock 实装.
+    /// 记录 invocation + 立刻置 showEmojiPanel = true 让 SwiftUI sheet 弹出 + UITest 可锚定.
+    public override func onOwnPetTap() {
+        os_log(.debug, "MockRoomViewModel.onOwnPetTap")
+        invocations.append(.ownPetTap)
+        self.showEmojiPanel = true
     }
 
     // MARK: - mock 数据

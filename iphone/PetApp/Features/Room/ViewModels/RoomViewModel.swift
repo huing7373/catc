@@ -2,11 +2,17 @@
 // Story 37.8 AC1: RoomScaffoldView 基类 ViewModel（class 层次 + 4 字段 + 2 abstract method）.
 // Story 12.1 AC1: 扩 2 个 @Published 字段（wsState / memberPetStates）让基类一次容纳所有
 //   RealRoomViewModel 真实 WS 实装会写入的状态字段；MockRoomViewModel 仍可任意 set 用于测试 / Preview.
+// Story 18.2 AC1: 扩 2 个 @Published 字段（showEmojiPanel / currentUserId）+ 1 abstract method
+//   （onOwnPetTap）支持"点击自己猫触发表情面板"路径.
 //
 // 设计：与 HomeViewModel 同精神（class 而非 final + abstract method 用 fatalError 强制 override）.
-// 字段范围（Story 12.1 后）：6 字段
+// 字段范围（Story 18.2 后）：8 字段
 //   - roomCodeForCopy / hostCatName / members / userIsHost（Story 37.8 落地）
-//   - wsState / memberPetStates（Story 12.1 落地；RealRoomViewModel WS 路径写入）.
+//   - wsState / memberPetStates（Story 12.1 落地；RealRoomViewModel WS 路径写入）
+//   - showEmojiPanel / currentUserId（Story 18.2 落地；表情面板 sheet 双向绑定 + self/other 判定 SoT）.
+// abstract method 范围（Story 18.2 后）：3 abstract method
+//   - onLeaveTap / onCopyTap（Story 37.8 落地）
+//   - onOwnPetTap（Story 18.2 落地）.
 //
 // import 备注（继承 Story 2.2 lesson 2026-04-25-swift-explicit-import-combine.md）：
 // `ObservableObject` / `@Published` 来自 Combine，不能依赖 SwiftUI transitive import.
@@ -41,6 +47,21 @@ public class RoomViewModel: ObservableObject {
     /// 但**字段必须就位**，否则 Story 14.x / 15.x 落地时还要回工 RealRoomViewModel.
     @Published public var memberPetStates: [String: HomePetState] = [:]
 
+    /// Story 18.2: EmojiPanelView sheet 双向绑定状态.
+    /// 视图层 `RoomScaffoldView.sheet(isPresented: $state.showEmojiPanel)` 双向绑定.
+    /// - true: 自己 PetSpriteView Button 被点 → onOwnPetTap() 设 → sheet 弹出
+    /// - false: SwiftUI swipe-down dismiss 自动设 / onSelect 闭包选中表情后显式设
+    /// 唯一 owner = ViewModel @Published (避免 SwiftUI @State 双写漂移; ADR-0010 §3.2 钦定).
+    /// 与 HomeViewModel.showJoinModal 同模式.
+    @Published public var showEmojiPanel: Bool = false
+
+    /// Story 18.2: 当前用户的 userId (self vs other 判定的 single source of truth).
+    /// - RealRoomViewModel: 订阅 `appState.$currentUser.map { $0?.id }.removeDuplicates()` 派生
+    /// - MockRoomViewModel: 通过 init 参数 currentUserId 注入 (默认 "u1" 与 RoomScaffoldDefaults.members[0].id 对齐)
+    /// - View 层 `memberRow` 内 `member.id == state.currentUserId` 区分自己行 / 他人行
+    /// nil 语义: appState.currentUser 尚未 hydrate / 已 reset; 此时所有成员行均**不**渲染 Button (防御性 fail-safe).
+    @Published public var currentUserId: String? = nil
+
     public init() {}
 
     // MARK: - abstract method（基类 fatalError 占位，子类必 override）
@@ -57,5 +78,12 @@ public class RoomViewModel: ObservableObject {
     /// RealRoomViewModel: 调 UIPasteboard.general.string = roomCodeForCopy + 同 mock 行为.
     public func onCopyTap() {
         fatalError("RoomViewModel.onCopyTap must be overridden by subclass")
+    }
+
+    /// Story 18.2: 自己 PetSpriteView Button 点击回调.
+    /// MockRoomViewModel: 记录 invocation + showEmojiPanel = true.
+    /// RealRoomViewModel: showEmojiPanel = true (不调任何 server; 18.3 才在 onSelect 闭包内调 SendEmojiUseCase).
+    public func onOwnPetTap() {
+        fatalError("RoomViewModel.onOwnPetTap must be overridden by subclass")
     }
 }
