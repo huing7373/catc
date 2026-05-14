@@ -308,3 +308,4 @@
 | 2026-05-14 | [MVCC 决定 autocommit SELECT 看不到首事务未 commit 的 pending 行 + cached success 路径必须覆盖所有 time-derived 字段（20-1 r11）](2026-05-14-mvcc-invisibility-of-uncommitted-pending-rows-20-1-r11.md) | 2 | architecture, docs | `<pending>` |
 | 2026-05-14 | [Story 文件自身需 in-flight 同步追踪契约迭代 + scope 验证段禁止留无时间标签全局断言（20-1 r12）](2026-05-14-story-file-must-track-canonical-contract-drift-20-1-r12.md) | 2 | docs, architecture | `<pending>` |
 | 2026-05-14 | [节点冻结声明 + 跨段 summary 必须随核心步骤迭代（20-1 r13）](2026-05-14-frozen-statement-must-mirror-time-derived-field-rule-20-1-r13.md) | 2 | docs, architecture | `<pending>` |
+| 2026-05-14 | [设计文档迭代时 stale 快照应"删除即删除"而非"super-note 警告并保留" + 跨文档引用副本必须随契约演进同步（20-1 r14）](2026-05-14-stale-snapshot-delete-vs-warn-in-iterating-design-doc-20-1-r14.md) | 2 | docs | `<pending>` |
