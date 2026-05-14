@@ -1,6 +1,6 @@
 # Story 18.3: 选中表情 → 本地立即动效 + WS 发送 emoji.send（并行）（首次落地 WSOutgoingMessage.emojiSend case + WSMessageCodec encode 扩展 + SendEmojiUseCase + RoomViewModel.activeEmojis 队列 + RoomScaffoldView 触发 + 0 延迟本地动效 + fire-and-forget toast 降级）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
