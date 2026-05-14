@@ -921,7 +921,7 @@ CREATE TABLE chest_open_idempotency_records (
 
 - `UNIQUE(user_id, idempotency_key)`
 
-兼任原子声明依据：V1接口设计 §7.2 步骤 3 用 `INSERT ... ON DUPLICATE KEY UPDATE id = id` 借此 UNIQUE 做 single-statement 原子 claim；同 `(user_id, idempotency_key)` 的并发请求只有一个能拿到 `affected_rows = 1` 进入业务事务（r5 review 锁定）。
+兼任原子声明依据 + 并发阻塞排队依据：V1接口设计 §7.2 步骤 3a 在业务事务内首条语句用 `INSERT ... ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)` 借此 UNIQUE 做 single-statement 原子 claim；同 `(user_id, idempotency_key)` 的并发请求被 InnoDB unique-key X-lock 阻塞排队，首个事务结束（commit / rollback）后其他事务再继续 —— commit → 行已存在 → `affected_rows = 0` 短路；rollback → 行已消失 → `affected_rows = 1` 走全流程（r5 review 锁定 / r6 review 修订 / r7 review 简化；canonical 文案见 §5.16 索引说明）。
 
 ## 7.2 高优先级普通索引
 
