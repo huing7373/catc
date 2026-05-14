@@ -314,3 +314,4 @@
 | 2026-05-15 | ["current chest" race 的彻底解：client 传 chest.id（server 不再猜 current）+ MySQL RowsAffected=0 不等同 NOT FOUND（20-7 r2）](2026-05-15-client-passes-id-server-doesnt-guess-current-and-rowsaffected-not-notfound-20-7-r2.md) | 2 | architecture, error-handling | `<pending>` |
 | 2026-05-15 | [domain-aware RowsAffected 语义（force-unlock 场景下 0=NotFound） & fix-review 迭代陷阱（over-correction chain）（20-7 r3）](2026-05-15-domain-aware-rowsaffected-and-over-correction-chain-20-7-r3.md) | 2 | error-handling, process | `<pending>` |
 | 2026-05-15 | [用事务把 RowsAffected 语义模糊性从源头消除 & over-correction chain 的终结模式（20-7 r4）](2026-05-15-transaction-eliminates-rowsaffected-ambiguity-20-7-r4.md) | 2 | architecture, process | `<pending>` |
+| 2026-05-15 | [dev 端点正确性 > contract 美感（承认契约变更而非回退根因修复）（20-7 r5）](2026-05-15-dev-endpoint-correctness-over-contract-aesthetics-20-7-r5.md) | 1 | architecture, docs, process | `<pending>` |

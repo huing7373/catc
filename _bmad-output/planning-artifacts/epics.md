@@ -2938,15 +2938,17 @@ So that demo 时不必等 10 分钟倒计时.
 **Acceptance Criteria:**
 
 **Given** Epic 1 Story 1.6 Dev Tools 框架已就绪 + Story 20.5 chest 状态机可读
-**When** 仅在 BUILD_DEV=true 模式调用 `POST /dev/force-unlock-chest {userId: int64}`
-**Then** service 直接 UPDATE user_chests SET unlock_at = now WHERE user_id=?
+**When** 仅在 BUILD_DEV=true 模式调用 `POST /dev/force-unlock-chest {userId: int64, chestId: string}`[^20-7-contract]
+**Then** service 用事务 + FOR UPDATE 锁定 chestId 对应的 user_chests 行（校验 user_id==userId 防越权）→ UPDATE unlock_at = now()
 **And** 生产构建下访问该端点返回 404
 **And** 接口**不**要求 auth
 **And** **单元测试覆盖**（≥3 case）:
-- happy: dev mode + 用户存在 → unlock_at 更新为 now
-- edge: dev mode + 用户无 chest → 1003
+- happy: dev mode + 用户存在 + chestId 有效 → unlock_at 更新为 now
+- edge: dev mode + chestId 不存在 / 越权 → 1003
 - edge: 非 dev mode → 路由返回 404
-**And** **集成测试覆盖**（dockertest + BUILD_DEV=true）: 用户 chest unlock_at 在未来 → /dev/force-unlock-chest → GET /chest/current 返回 status=2
+**And** **集成测试覆盖**（dockertest + BUILD_DEV=true）: 用户 chest unlock_at 在未来 → GET /chest/current 拿 chest.id → /dev/force-unlock-chest 带该 id → GET /chest/current 返回 status=2
+
+[^20-7-contract]: **r2-r5 契约变更说明**（dev 端点正确性 > contract 美感）：本 story 初版 AC 钦定 request schema 为 `{userId}`，让 server 内部推断 "current chest"。但 r1 实装时发现该推断在并发场景下 race —— FindByUserIDForUpdate 的 FOR UPDATE 阻塞后看到的可能是 OpenChest 刚 INSERT 的 next chest 而非 client 看到的那个。r2 起把"哪个 chest"的决策权移交 client（必传 chestId），r4 用事务 + FOR UPDATE 锁定行后 UPDATE，r5 review 终审仍维持该设计。代价是 stale-ID 失败模式（dev 端点专给 demo / 自动化 e2e 用，自动化脚本 GET → POST 串行执行 stale 概率极低，stale 时返 1003 让 client 重 GET 即可恢复）。详见 `docs/lessons/2026-05-15-dev-endpoint-correctness-over-contract-aesthetics-20-7-r5.md`。
 
 ### Story 20.8: dev 端点 POST /dev/grant-cosmetic-batch（节点 8 完成后开放）
 

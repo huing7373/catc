@@ -1435,3 +1435,4 @@ claude-opus-4-7[1m]
 |---|---|---|
 | 2026-05-15 | Story 20.7 created (backlog → ready-for-dev) | backlog → ready-for-dev |
 | 2026-05-15 | Story 20.7 dev-story 完成 —— service 3 + handler 6 + repo 2 + devtools 2 + bootstrap 1 = 14 case；集成 2 case（docker skip）；build/test/devtools/integration 四模式全绿 | ready-for-dev → in-progress → review |
+| 2026-05-15 | r5 [P2] codex review 指出 chestId 从 optional 变 required 是 contract regression；分诊为 **fix-with-doc-only**（不回退代码） —— r2-r4 的"client 传 chestId + 事务 + FOR UPDATE"设计正确（race 根因解决方案 > contract 美感），但承认契约变更需文档化：更新 dev_chest_handler.go PostForceUnlockChestRequest doc 加契约变更通告 + 更新 epics.md §20.7 AC 反映新 schema `{userId, chestId}` + 加脚注链回 lesson + 归档 lesson `docs/lessons/2026-05-15-dev-endpoint-correctness-over-contract-aesthetics-20-7-r5.md` | review (维持) |

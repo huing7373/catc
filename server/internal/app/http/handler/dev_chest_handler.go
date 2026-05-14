@@ -37,6 +37,30 @@ func NewDevChestHandler(svc service.DevChestService) *DevChestHandler {
 // client 必须先 GET /chest/current 拿到 chest.id（response.data.id 已 BIGINT 字符串化），
 // 再 POST 这个 id 来。server 不再猜"current"语义。
 //
+// # ⚠️ 契约变更通告（Story 20.7 r2 起，r5 文档化）
+//
+// **本字段 schema 自 r2 起从 `{userId}` 变为 `{userId, chestId}` —— chestId 字段从
+// optional / not present 变成 *必填*。epics.md §20.7 行 2941 早期钦定的
+// `POST /dev/force-unlock-chest {userId: int64}` 与本实装语义不一致。**
+//
+// **变更原因**（r2 race 修复决策；r5 review 终审仍维持）：
+//   - r1 实装"server 端推断 current chest"在并发场景下 race —— FindByUserIDForUpdate
+//     的 FOR UPDATE 阻塞后看到的可能是 OpenChest 刚 INSERT 的 next chest，而非 client
+//     看到的那个 chest，跑偏到错的 row
+//   - 选项 A（codex r5 建议）：回退 chestId，让 server 内部找 current → race 复活
+//   - 选项 B（本实装维持）：让 client 传具体 chestId，server 用事务 + FOR UPDATE
+//     保证 unlock 正好是 client 看到的那个 chest → race 根因解决
+//   - 选项 B 是正确的工程决策 —— **dev 端点正确性 > contract 美感**
+//
+// **stale-ID 失败模式**（选项 B 引入的代价；可接受）：
+//   - 若 client 缓存了旧 chest.id 后被 OpenChest 鬼掉，POST 时 server 返 1003，
+//     提示 client 重 GET /chest/current 拿新 id
+//   - dev 端点仅供 demo / 自动化 e2e / 手工调试 —— 自动化脚本应 GET → POST 串行
+//     执行（chest id 时延 < 1ms 内 stale 概率极低，除非中间有 /chest/open 并发）
+//   - 1003 失败 = 让 client 重 GET 一次拿新 id 即可恢复；不是阻塞性 bug
+//
+// 详见 docs/lessons/2026-05-15-dev-endpoint-correctness-over-contract-aesthetics-20-7-r5.md
+//
 // # 字段约定
 //
 // **userId 用 *uint64 指针类型**（不挂 binding:"required"）：
