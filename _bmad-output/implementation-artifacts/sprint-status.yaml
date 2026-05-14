@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-05-14 (story 18-4 dev-story; in-progress → review)
+# last_updated: 2026-05-14 (story 18-4 story-done; review → done)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -197,7 +197,7 @@ development_status:
   18-1-表情面板-swiftui: done
   18-2-点击自己猫触发表情面板: done
   18-3-选中表情-本地立即动效-ws-发送-emoji-send: done
-  18-4-接收-emoji-received-在对应成员猫上方播放飞出动效: review
+  18-4-接收-emoji-received-在对应成员猫上方播放飞出动效: done
   epic-18-retrospective: optional
   epic-19: backlog
   19-1-跨端集成测试场景-表情发送-接收动效-e2e: backlog

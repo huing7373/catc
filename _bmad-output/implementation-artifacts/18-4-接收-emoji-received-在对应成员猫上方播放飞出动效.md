@@ -1,6 +1,6 @@
 # Story 18.4: 接收 emoji.received → 在对应成员猫上方播放飞出动效（去重自己 userId；首次落地 WSMessage.emojiReceived case + WSMessageCodec decode 路由 + RoomViewModel.applyEmojiReceived + EmojiAnimationLayer 完整动画 + 1.5s 自动 expire + per-member anchor + center 降级 + catalog miss fallback）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
