@@ -2,7 +2,7 @@
 date: 2026-05-14
 source_review: epic-18 retrospective action item A1（非 fix-review；环境 quirk 修复）
 story: epic-18-action-item-a1
-commit: <pending>
+commit: 3cd2ef4
 lesson_count: 1
 ---
 

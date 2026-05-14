@@ -294,4 +294,4 @@
 | 2026-05-14 | [Room-scoped transient UI state 必须在 room 切换/离开时重置（与 members / memberPetStates 同精神）（18-3 r1）](2026-05-14-room-transient-state-must-reset-on-room-transition.md) | 1 | architecture | `484e757` |
 | 2026-05-14 | [Outgoing WS send 必须在 async window 后 recheck snapshot roomId（payload 不带 roomId 的 emoji.send）（18-3 r2）](2026-05-14-emoji-send-cross-room-race-needs-snapshot-roomid-guard-18-3-r2.md) | 1 | architecture | `0cad4e6` |
 | 2026-05-14 | [SwiftUI PreferenceKey 多源订阅 onPreferenceChange 替换式赋值 + transient queue 每个入队点都挂 owner 端 expire（18-4 r1）](2026-05-14-swiftui-preferencekey-merge-vs-replace-on-roster-change.md) | 2 | architecture, perf | `682e6de` |
-| 2026-05-14 | [Xcode SDK 与 simulator runtime 版本错位会让所有 scheme-based xcodebuild 失败，必须装匹配 runtime（非 sub-agent 绕过）（epic-18 retro A1）](2026-05-14-xcode-sdk-runtime-version-mismatch-blocks-scheme-build.md) | 1 | config | `<pending>` |
+| 2026-05-14 | [Xcode SDK 与 simulator runtime 版本错位会让所有 scheme-based xcodebuild 失败，必须装匹配 runtime（非 sub-agent 绕过）（epic-18 retro A1）](2026-05-14-xcode-sdk-runtime-version-mismatch-blocks-scheme-build.md) | 1 | config | `3cd2ef4` |
