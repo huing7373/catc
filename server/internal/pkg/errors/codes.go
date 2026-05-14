@@ -11,6 +11,7 @@ const (
 	ErrConflict            = 1007 // 数据冲突
 	ErrIdempotencyConflict = 1008 // 幂等冲突
 	ErrServiceBusy         = 1009 // 服务繁忙（panic / 非 AppError 兜底）
+	ErrNotImplemented      = 1010 // 接口未实装（dev / stub / preview 阶段端点专用 —— middleware 翻 HTTP 501 + WARN log）
 )
 
 // 认证 / 账号错误码（2xxx）。
@@ -80,6 +81,7 @@ var DefaultMessages = map[int]string{
 	ErrConflict:            "数据冲突",
 	ErrIdempotencyConflict: "幂等冲突",
 	ErrServiceBusy:         "服务繁忙",
+	ErrNotImplemented:      "接口未实装",
 
 	// 2xxx 认证
 	ErrGuestAccountNotFound: "游客账号不存在",

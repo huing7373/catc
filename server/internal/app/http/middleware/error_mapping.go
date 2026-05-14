@@ -76,10 +76,15 @@ const ResponseErrorCodeKey = "response_error_code"
 // # HTTP status 取舍
 //
 // 本中间件**统一决策** HTTP status，规则简单：
-//   - AppError.Code == ErrServiceBusy（1009）→ HTTP 500：panic 兜底 + 非
+//   - AppError.Code == ErrServiceBusy（1009）→ HTTP 500 + ERROR log：panic 兜底 + 非
 //     AppError 兜底都归此码，属系统级问题，应触发 LB / 监控告警
-//   - 其他业务码（任意非 1009 的 AppError）→ HTTP 200：业务码与 HTTP status
-//     正交，客户端永远先看 envelope.code。V1接口设计 §2.4 钦定
+//   - AppError.Code == ErrNotImplemented（1010）→ HTTP 501 + WARN log：dev / stub /
+//     preview 阶段端点专用，**不是**系统错误 —— endpoint 物理可达但功能未激活，
+//     不污染监控 / 不触发告警；e2e 工具按 HTTP 501 (Not Implemented) 标准语义识别
+//     "endpoint 还没激活"。生产 endpoint **不应**返 1010；若误用，节点 8 owner
+//     激活时应把 1010 替换为业务码或 nil
+//   - 其他业务码（任意非 1009 / 1010 的 AppError）→ HTTP 200 + WARN log：业务码与 HTTP
+//     status 正交，客户端永远先看 envelope.code。V1接口设计 §2.4 钦定
 //
 // Recovery 中间件**故意不**自己设置 500 status（避免 WriteHeaderNow 让
 // Writer.Written() 提前为 true），把 status 决策权完全留给本中间件。
@@ -107,12 +112,20 @@ func ErrorMappingMiddleware() gin.HandlerFunc {
 			ae = apperror.Wrap(firstErr, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
 		}
 
-		// status 决策：ErrServiceBusy → 500（系统级），其他 → 200（业务级）
+		// status / log level 决策：
+		//   - ErrServiceBusy (1009) → 500 + ERROR：系统级问题，触发监控告警
+		//   - ErrNotImplemented (1010) → 501 + WARN：dev/stub 端点未激活，不是系统错误，
+		//     不污染监控；HTTP 501 标准语义让 e2e 工具能识别"endpoint 未激活"
+		//   - 其他业务码 → 200 + WARN：业务码与 HTTP status 正交（V1 §2.4）
 		httpStatus := http.StatusOK
 		logLevel := slog.LevelWarn
-		if ae.Code == apperror.ErrServiceBusy {
+		switch ae.Code {
+		case apperror.ErrServiceBusy:
 			httpStatus = http.StatusInternalServerError
 			logLevel = slog.LevelError
+		case apperror.ErrNotImplemented:
+			httpStatus = http.StatusNotImplemented
+			logLevel = slog.LevelWarn
 		}
 
 		if c.Writer.Written() {

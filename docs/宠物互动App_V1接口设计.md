@@ -141,6 +141,7 @@ Authorization: Bearer <token>
 1007    数据冲突
 1008    幂等冲突
 1009    服务繁忙
+1010    接口未实装（dev / stub / preview 阶段端点专用 —— middleware 翻 HTTP 501 + WARN log）
 
 2001    游客账号不存在
 2002    微信已绑定其他账号

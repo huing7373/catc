@@ -173,6 +173,47 @@ func TestErrorMapping_PanicHandledViaRecovery(t *testing.T) {
 	}
 }
 
+// TestErrorMapping_HandlerReturnsNotImplemented 验证 ErrNotImplemented(1010) →
+// HTTP 501 + WARN log（**不**是 ERROR；与 ErrServiceBusy(1009) 的 HTTP 500 + ERROR 区分开）。
+//
+// 这是 dev / stub / preview 阶段端点专用错误码 —— Story 20.8 r2 引入。
+// HTTP 501 "Not Implemented" 是标准语义，e2e 工具能识别"endpoint 未激活"；
+// WARN log 不污染 ERROR dashboard / 不触发告警。
+func TestErrorMapping_HandlerReturnsNotImplemented(t *testing.T) {
+	r, buf := newErrorMappingRouter(t, func(c *gin.Context) {
+		_ = c.Error(apperror.New(apperror.ErrNotImplemented, "endpoint not yet implemented (node-7 stub)"))
+		c.Abort()
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	// 1010 → HTTP 501 (Not Implemented，标准语义)
+	if w.Code != http.StatusNotImplemented {
+		t.Errorf("status = %d, want 501 (ErrNotImplemented → HTTP 501)", w.Code)
+	}
+	e := mustEnvelope(t, w.Body.Bytes())
+	if e.Code != apperror.ErrNotImplemented {
+		t.Errorf("envelope.code = %d, want %d (1010)", e.Code, apperror.ErrNotImplemented)
+	}
+	if e.Message != "endpoint not yet implemented (node-7 stub)" {
+		t.Errorf("envelope.message = %q, want %q", e.Message, "endpoint not yet implemented (node-7 stub)")
+	}
+
+	logStr := buf.String()
+	if !strings.Contains(logStr, `"error_code":1010`) {
+		t.Errorf("log 应含 error_code=1010；实际 log:\n%s", logStr)
+	}
+	// 关键断言：ErrNotImplemented 走 WARN 级别（**不是** ERROR）—— 不污染监控
+	if !strings.Contains(logStr, `"level":"WARN"`) {
+		t.Errorf("ErrNotImplemented 应 WARN 级别（不污染 ERROR dashboard）；实际 log:\n%s", logStr)
+	}
+	if strings.Contains(logStr, `"level":"ERROR"`) {
+		t.Errorf("ErrNotImplemented 严禁 ERROR 级别（会触发假告警）；实际 log:\n%s", logStr)
+	}
+}
+
 func TestErrorMapping_NoErrorIsNoOp(t *testing.T) {
 	r, _ := newErrorMappingRouter(t, func(c *gin.Context) {
 		response.Success(c, gin.H{"hello": "world"}, "ok")

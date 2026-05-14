@@ -76,17 +76,20 @@ func doPostJSON(r *gin.Engine, path string, body string) *httptest.ResponseRecor
 // 必须覆盖 5 case + 加分 case
 // ============================================================
 
-// 1. HappyPath_ServiceReturnsServiceBusy_Forwards503: body 合法 {"userId":1001,"rarity":1,"count":10}
-//    → 透传到 stub service → 节点 7 stub 返 *AppError(ErrServiceBusy=1009) → middleware 翻 HTTP 503 +
-//    envelope.code=1009。
+// 1. HappyPath_ServiceReturnsNotImplemented_Forwards501: body 合法 {"userId":1001,"rarity":1,"count":10}
+//    → 透传到 stub service → 节点 7 stub 返 *AppError(ErrNotImplemented=1010) → middleware 翻 HTTP 501 +
+//    envelope.code=1010。
 //
 //    **设计**：节点 7 阶段端点是 stub，**没有真正的 200 happy path**（lesson:
-//    docs/lessons/2026-05-15-stub-endpoint-explicit-failure.md）。本 case 验"handler 把合法参数原样透传到
-//    service，并把 service 的 1009 错误转 envelope" —— 这是节点 7 阶段"真实可用"的最深路径。
+//    docs/lessons/2026-05-15-stub-endpoint-not-implemented-error-code.md）。本 case 验"handler 把合法参数原样
+//    透传到 service，并把 service 的 1010 错误转 envelope" —— 这是节点 7 阶段"真实可用"的最深路径。
+//
+//    **r2 改造**：从 ErrServiceBusy(1009 → HTTP 500 + ERROR log) 改为 ErrNotImplemented(1010 → HTTP 501
+//    + WARN log)。HTTP 501 是标准"Not Implemented"语义；e2e 工具可按 501 正确识别。
 //
 //    节点 8 / Story 23.5 激活时本 case 必须改回"stub service 返 nil → 200 + envelope.code=0 + data 透传"
 //    happy path 语义。
-func TestDevCosmeticHandler_PostGrantCosmeticBatch_HappyPath_ServiceReturnsServiceBusy_Forwards503(t *testing.T) {
+func TestDevCosmeticHandler_PostGrantCosmeticBatch_HappyPath_ServiceReturnsNotImplemented_Forwards501(t *testing.T) {
 	called := false
 	svc := &stubDevCosmeticService{
 		grantCosmeticBatchFn: func(ctx context.Context, userID uint64, rarity int8, count int32) error {
@@ -100,7 +103,7 @@ func TestDevCosmeticHandler_PostGrantCosmeticBatch_HappyPath_ServiceReturnsServi
 			if count != 10 {
 				t.Errorf("svc count = %d, want 10 (透传校验)", count)
 			}
-			return apperror.New(apperror.ErrServiceBusy, "dev/grant-cosmetic-batch not yet implemented (node-7 stub; awaits Story 23.5 to activate)")
+			return apperror.New(apperror.ErrNotImplemented, "dev/grant-cosmetic-batch not yet implemented (node-7 stub; awaits Story 23.5 to activate)")
 		},
 	}
 	r := newDevCosmeticHandlerRouter(svc)
@@ -110,12 +113,12 @@ func TestDevCosmeticHandler_PostGrantCosmeticBatch_HappyPath_ServiceReturnsServi
 	if !called {
 		t.Errorf("service should be called when params are valid (handler 必须把合法参数透传到 service)")
 	}
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500 (1009 走 500; ADR-0006 + ErrorMappingMiddleware §HTTP-status 决策)；body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501 (1010 走 501; ErrorMappingMiddleware §HTTP-status 决策)；body=%s", w.Code, w.Body.String())
 	}
 	env := decodeDevCosmeticEnvelope(t, w.Body.Bytes())
-	if env.Code != apperror.ErrServiceBusy {
-		t.Errorf("envelope.code = %d, want %d (1009; 节点 7 stub explicit failure)", env.Code, apperror.ErrServiceBusy)
+	if env.Code != apperror.ErrNotImplemented {
+		t.Errorf("envelope.code = %d, want %d (1010; 节点 7 stub explicit failure)", env.Code, apperror.ErrNotImplemented)
 	}
 	if !strings.Contains(env.Message, "node-7 stub") && !strings.Contains(env.Message, "not yet implemented") {
 		t.Errorf("envelope.message = %q, want contains 'node-7 stub' or 'not yet implemented' (让调用方明确知道 stub 状态)", env.Message)

@@ -12,18 +12,23 @@ import (
 	"github.com/huing/cat/server/internal/service"
 )
 
-// Story 20.8 dev_cosmetic_service 单元测试（节点 7 阶段 explicit-failure 版本）。
+// Story 20.8 dev_cosmetic_service 单元测试（节点 7 阶段 explicit-failure 版本；r2 改用 ErrNotImplemented）。
 //
-// **节点 7 阶段 stub** —— service 内部 slog.WarnContext + return apperror.ErrServiceBusy (1009)
-// → middleware 自动翻 HTTP 503。**绝不返 success**，避免 silent false-positive 让 e2e 调试链路
-// 无故拉长（lesson: docs/lessons/2026-05-15-stub-endpoint-explicit-failure.md）。
+// **节点 7 阶段 stub** —— service 内部 slog.WarnContext + return apperror.ErrNotImplemented (1010)
+// → middleware 自动翻 HTTP 501 (Not Implemented) + WARN log。**绝不返 success**，避免 silent
+// false-positive 让 e2e 调试链路无故拉长（lesson:
+// docs/lessons/2026-05-15-stub-endpoint-not-implemented-error-code.md）。
+//
+// **r2 改造**：从 ErrServiceBusy (1009 → HTTP 500 + ERROR log) 改为 ErrNotImplemented
+// (1010 → HTTP 501 + WARN log) —— 1009 的 ERROR log 会污染监控 + 触发假告警；1010 的 501
+// 是标准"Not Implemented"语义，e2e 工具能正确识别 + WARN log 不污染 ERROR dashboard。
 //
 // **无 repo 依赖** → **无 stub repo 需要**（与 7.5 / 20.7 单测大量 stub repo 不同）。
 //
 // 3 case（前缀 TestDevCosmeticService_GrantCosmeticBatch_<场景>）：
-//   1. HappyPathStub_ReturnsServiceBusy_LogsWarn（验 1009 + WARN 日志结构化字段）
-//   2. BoundaryCases_AlwaysReturnsServiceBusy（表驱动 rarity × count 共 12 组合都返 1009）
-//   3. StubIgnoresInvalidParams_StillReturnsServiceBusy（验"service 不做参数防御，所有调用都失败"）
+//   1. HappyPathStub_ReturnsNotImplemented_LogsWarn（验 1010 + WARN 日志结构化字段）
+//   2. BoundaryCases_AlwaysReturnsNotImplemented（表驱动 rarity × count 共 12 组合都返 1010）
+//   3. StubIgnoresInvalidParams_StillReturnsNotImplemented（验"service 不做参数防御，所有调用都失败"）
 
 // captureSlog 替换 slog.Default() 为 slogtest handler，返回 handler + cleanup。
 func captureSlog(t *testing.T) *slogtest.Handler {
@@ -35,36 +40,39 @@ func captureSlog(t *testing.T) *slogtest.Handler {
 	return h
 }
 
-// assertServiceBusyError 断言 err 是 *AppError + Code == 1009 + Message 含"node-7 stub"或"not yet implemented"
+// assertNotImplementedError 断言 err 是 *AppError + Code == 1010 + Message 含"node-7 stub"或"not yet implemented"
 // 提示，让节点 8 激活时一旦改成 return nil，本断言会让本 case 失败提醒同步更新测试。
-func assertServiceBusyError(t *testing.T, err error) {
+//
+// **r2 改造**：从 ErrServiceBusy(1009) 改为 ErrNotImplemented(1010) —— 见 dev_cosmetic_service.go
+// r2 改造说明（1009 ERROR log 污染监控；1010 WARN log + HTTP 501 是标准"Not Implemented"语义）。
+func assertNotImplementedError(t *testing.T, err error) {
 	t.Helper()
 	if err == nil {
-		t.Fatalf("err = nil, want *AppError(ErrServiceBusy=1009) (stub 必须 explicit-failure，禁止 silent false-positive)")
+		t.Fatalf("err = nil, want *AppError(ErrNotImplemented=1010) (stub 必须 explicit-failure，禁止 silent false-positive)")
 	}
 	var ae *apperror.AppError
 	if !stderrors.As(err, &ae) {
-		t.Fatalf("err = %v, want *apperror.AppError (stub 必须返 *AppError 让 middleware 翻 HTTP 503)", err)
+		t.Fatalf("err = %v, want *apperror.AppError (stub 必须返 *AppError 让 middleware 翻 HTTP 501)", err)
 	}
-	if ae.Code != apperror.ErrServiceBusy {
-		t.Errorf("err.Code = %d, want %d (ErrServiceBusy → middleware 翻 HTTP 503)", ae.Code, apperror.ErrServiceBusy)
+	if ae.Code != apperror.ErrNotImplemented {
+		t.Errorf("err.Code = %d, want %d (ErrNotImplemented → middleware 翻 HTTP 501 + WARN log)", ae.Code, apperror.ErrNotImplemented)
 	}
 	if !strings.Contains(ae.Message, "node-7 stub") && !strings.Contains(ae.Message, "not yet implemented") {
 		t.Errorf("err.Message = %q, want contains 'node-7 stub' or 'not yet implemented' (让运维明确知道 stub 状态)", ae.Message)
 	}
 }
 
-// 1. HappyPathStub_ReturnsServiceBusy_LogsWarn：合法 (userID=1001, rarity=1, count=10) →
-// 返 *AppError(ErrServiceBusy=1009) + 触发 WARN 日志（含 phase=node-7-stub 字段）。
+// 1. HappyPathStub_ReturnsNotImplemented_LogsWarn：合法 (userID=1001, rarity=1, count=10) →
+// 返 *AppError(ErrNotImplemented=1010) + 触发 WARN 日志（含 phase=node-7-stub 字段）。
 //
 //   - 验"stub explicit failure（不返 nil！）"
 //   - 验 WARN 日志触发（含 phase=node-7-stub 字段；标识 stub 状态以便运维 grep）
-func TestDevCosmeticService_GrantCosmeticBatch_HappyPathStub_ReturnsServiceBusy_LogsWarn(t *testing.T) {
+func TestDevCosmeticService_GrantCosmeticBatch_HappyPathStub_ReturnsNotImplemented_LogsWarn(t *testing.T) {
 	h := captureSlog(t)
 	svc := service.NewDevCosmeticService()
 
 	err := svc.GrantCosmeticBatch(context.Background(), 1001, 1, 10)
-	assertServiceBusyError(t, err)
+	assertNotImplementedError(t, err)
 
 	records := h.Records()
 	if len(records) == 0 {
@@ -108,10 +116,10 @@ func TestDevCosmeticService_GrantCosmeticBatch_HappyPathStub_ReturnsServiceBusy_
 	}
 }
 
-// 2. BoundaryCases_AlwaysReturnsServiceBusy：表驱动 rarity ∈ {1,2,3,4} × count ∈ {1,10,100}
-// 共 12 组合全部返 *AppError(ErrServiceBusy)（验 stub 无差别 reject，节点 8 激活前没有合法 happy
+// 2. BoundaryCases_AlwaysReturnsNotImplemented：表驱动 rarity ∈ {1,2,3,4} × count ∈ {1,10,100}
+// 共 12 组合全部返 *AppError(ErrNotImplemented)（验 stub 无差别 reject，节点 8 激活前没有合法 happy
 // path —— 不能让任何 demo / e2e 误以为"stub 偶尔放行了"）。
-func TestDevCosmeticService_GrantCosmeticBatch_BoundaryCases_AlwaysReturnsServiceBusy(t *testing.T) {
+func TestDevCosmeticService_GrantCosmeticBatch_BoundaryCases_AlwaysReturnsNotImplemented(t *testing.T) {
 	svc := service.NewDevCosmeticService()
 	ctx := context.Background()
 
@@ -124,16 +132,16 @@ func TestDevCosmeticService_GrantCosmeticBatch_BoundaryCases_AlwaysReturnsServic
 			c := c
 			t.Run("rarity="+string(rune('0'+r))+"_count="+itoa(c), func(t *testing.T) {
 				err := svc.GrantCosmeticBatch(ctx, 1001, r, c)
-				assertServiceBusyError(t, err)
+				assertNotImplementedError(t, err)
 			})
 		}
 	}
 }
 
-// 3. StubIgnoresInvalidParams_StillReturnsServiceBusy：传 rarity=99 / count=0 / userID=0
-// 等"handler 应该拦截但 service 不防御"的参数 → service stub 仍然无差别 return 1009
+// 3. StubIgnoresInvalidParams_StillReturnsNotImplemented：传 rarity=99 / count=0 / userID=0
+// 等"handler 应该拦截但 service 不防御"的参数 → service stub 仍然无差别 return 1010
 // （验"stub 不做 service 层参数防御，所有调用都失败"，与 7.5 dev grant 的 "steps<0 panic" 模式有区别）。
-func TestDevCosmeticService_GrantCosmeticBatch_StubIgnoresInvalidParams_StillReturnsServiceBusy(t *testing.T) {
+func TestDevCosmeticService_GrantCosmeticBatch_StubIgnoresInvalidParams_StillReturnsNotImplemented(t *testing.T) {
 	svc := service.NewDevCosmeticService()
 	ctx := context.Background()
 
@@ -143,20 +151,20 @@ func TestDevCosmeticService_GrantCosmeticBatch_StubIgnoresInvalidParams_StillRet
 		rarity int8
 		count  int32
 	}{
-		{name: "rarity=99 (handler 应拦截; service stub 仍 1009)", userID: 1001, rarity: 99, count: 10},
-		{name: "rarity=0 (handler 应拦截; service stub 仍 1009)", userID: 1001, rarity: 0, count: 10},
-		{name: "rarity=-1 (handler 应拦截; service stub 仍 1009)", userID: 1001, rarity: -1, count: 10},
-		{name: "count=0 (handler 应拦截; service stub 仍 1009)", userID: 1001, rarity: 1, count: 0},
-		{name: "count=-1 (handler 应拦截; service stub 仍 1009)", userID: 1001, rarity: 1, count: -1},
-		{name: "count=1000 (handler 应拦截; service stub 仍 1009)", userID: 1001, rarity: 1, count: 1000},
-		{name: "userID=0 (handler 应拦截; service stub 仍 1009)", userID: 0, rarity: 1, count: 10},
+		{name: "rarity=99 (handler 应拦截; service stub 仍 1010)", userID: 1001, rarity: 99, count: 10},
+		{name: "rarity=0 (handler 应拦截; service stub 仍 1010)", userID: 1001, rarity: 0, count: 10},
+		{name: "rarity=-1 (handler 应拦截; service stub 仍 1010)", userID: 1001, rarity: -1, count: 10},
+		{name: "count=0 (handler 应拦截; service stub 仍 1010)", userID: 1001, rarity: 1, count: 0},
+		{name: "count=-1 (handler 应拦截; service stub 仍 1010)", userID: 1001, rarity: 1, count: -1},
+		{name: "count=1000 (handler 应拦截; service stub 仍 1010)", userID: 1001, rarity: 1, count: 1000},
+		{name: "userID=0 (handler 应拦截; service stub 仍 1010)", userID: 0, rarity: 1, count: 10},
 	}
 
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			err := svc.GrantCosmeticBatch(ctx, tc.userID, tc.rarity, tc.count)
-			assertServiceBusyError(t, err)
+			assertNotImplementedError(t, err)
 		})
 	}
 }

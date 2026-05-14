@@ -18,11 +18,15 @@ import (
 //
 // **节点 7 阶段（本 story 范围）：stub 显式失败实装**
 //   - 路由 /dev/grant-cosmetic-batch + handler 框架（DTO + 1002 参数校验）+ service 接口 final
-//   - service 实装内部 slog.WarnContext 输出"endpoint called in node-7 stub phase, returns 503 by design"
-//     警告，然后 **return apperror.New(ErrServiceBusy, "...")**（1009 + middleware 自动翻 HTTP 503）
+//   - service 实装内部 slog.WarnContext 输出"endpoint called in node-7 stub phase, returns 501 by design"
+//     警告，然后 **return apperror.New(ErrNotImplemented, "...")**（1010 + middleware 自动翻 HTTP 501 + WARN log）
 //   - **关键设计**：stub 期不能返 200 success —— silent false-positive 会让 e2e / demo 拿到"调用成功 +
 //     仓库空"的矛盾态，调试链路无故拉长。explicit failure 让调用方在请求层立刻看到"endpoint 还没激活"
-//   - 全套单测（service 3 case + handler 6 case + devtools 2 case + bootstrap 1 case），断言 1009
+//   - **r2 改造**：从 ErrServiceBusy(1009 → HTTP 500 + ERROR log) 改为 ErrNotImplemented(1010 → HTTP 501 +
+//     WARN log) —— 1009 是"系统繁忙/panic 兜底"语义会触发 LB/监控告警 + 每次 stub 调用记 ERROR 污染监控；
+//     1010 是"endpoint 未实装"语义，HTTP 501 是标准"Not Implemented"，e2e 工具能正确识别 +
+//     WARN log 不污染 ERROR dashboard
+//   - 全套单测（service 3 case + handler 6 case + devtools 2 case + bootstrap 1 case），断言 1010 + HTTP 501
 //   - **不**新建 user_cosmetic_items_repo / **不**新建 migration / **不**改 cosmetic_item_repo
 //
 // **节点 8 / Epic 23.5 阶段（**不**在本 story 范围 —— 由 23.5 owner 在本 service 内激活）：真实写库**
@@ -38,8 +42,8 @@ import (
 //
 // **节点 7 阶段（本 story）**：
 //   - rarity / count 越界由 handler 1002 拦截，service 不收到
-//   - service stub 实装 **永远 return ErrServiceBusy (1009)**：endpoint 物理可达但功能未激活
-//     → middleware 自动翻 HTTP 503，调用方明确知道"endpoint not yet active"
+//   - service stub 实装 **永远 return ErrNotImplemented (1010)**：endpoint 物理可达但功能未激活
+//     → middleware 自动翻 HTTP 501 + WARN log，调用方明确知道"endpoint not yet implemented"
 //
 // **节点 8 阶段（激活后）**：
 //   - 真实写库 happy path → return nil
@@ -50,9 +54,9 @@ import (
 type DevCosmeticService interface {
 	// GrantCosmeticBatch 给指定 userID 批量发放 count 个 rarity 品质的 cosmetic_items 实例。
 	//
-	// **节点 7 阶段 stub 行为**：slog.WarnContext 记录调用 + **return apperror.ErrServiceBusy (1009)**
-	// → middleware 自动翻 HTTP 503。endpoint 物理可达（路由 / handler / DTO 校验完整），但 service 层
-	// 显式拒绝 —— 让调用方立刻知道"endpoint not yet active in node-7 phase"，避免 silent false-positive。
+	// **节点 7 阶段 stub 行为**：slog.WarnContext 记录调用 + **return apperror.ErrNotImplemented (1010)**
+	// → middleware 自动翻 HTTP 501 + WARN log。endpoint 物理可达（路由 / handler / DTO 校验完整），但 service 层
+	// 显式拒绝 —— 让调用方立刻知道"endpoint not yet implemented in node-7 phase"，避免 silent false-positive。
 	//
 	// **节点 8 激活后行为**：事务内或事务外（节点 8 owner 决定）：
 	//  1. cosmeticItemRepo.FindRandomByRarity(ctx, rarity, count) 返回 count 个 cosmetic_item_id（来自 enabled 池）
@@ -89,14 +93,19 @@ func NewDevCosmeticService() DevCosmeticService {
 	return &devCosmeticServiceImpl{}
 }
 
-// GrantCosmeticBatch 节点 7 阶段 stub 实装：WARN 日志 + return ErrServiceBusy (1009)。
+// GrantCosmeticBatch 节点 7 阶段 stub 实装：WARN 日志 + return ErrNotImplemented (1010)。
 //
 // **设计原则**：stub endpoint **绝不返 success** —— silent false-positive 会让 e2e / demo
-// 链路在"调用成功 + 仓库空"的矛盾态里调试很久才发现根因。显式返 1009 → middleware 翻 HTTP 503，
-// 调用方立刻看到"endpoint not yet active in node-7 phase, awaits Story 23.5 to activate"。
+// 链路在"调用成功 + 仓库空"的矛盾态里调试很久才发现根因。显式返 1010 → middleware 翻 HTTP 501
+// (Not Implemented，标准语义) + WARN log，调用方立刻看到"endpoint not yet implemented in node-7
+// phase, awaits Story 23.5 to activate"。
 //
-// WARN log 级别保留（不是 ERROR）—— 节点 7 阶段被调用是预期"未激活路径"，不是系统错误；
-// 运维 / dev 可通过 `phase=node-7-stub` grep 找出还在 stub 状态的端点。
+// **r2 改造**：从 ErrServiceBusy (1009 → HTTP 500 + ERROR log) 改为 ErrNotImplemented
+// (1010 → HTTP 501 + WARN log)。原因：
+//   - 1009 的 HTTP 500 + ERROR log 是"系统繁忙/panic 兜底"语义，会触发 LB / 监控告警
+//   - dev 端点 stub 阶段每次调用都记 ERROR → 污染监控 + 假告警，与"endpoint 未激活"语义不符
+//   - 1010 的 HTTP 501 是标准"Not Implemented"语义，e2e 工具能按 501 正确识别
+//   - WARN log 不污染 ERROR dashboard，但仍可通过 `phase=node-7-stub` grep 找出 stub 端点
 //
 // **节点 8 激活后** 替换为：
 //
@@ -108,12 +117,12 @@ func NewDevCosmeticService() DevCosmeticService {
 //	slog.InfoContext(ctx, "dev grant cosmetic batch applied", ...)
 //	return nil
 func (s *devCosmeticServiceImpl) GrantCosmeticBatch(ctx context.Context, userID uint64, rarity int8, count int32) error {
-	slog.WarnContext(ctx, "dev grant-cosmetic-batch called in node-7 stub phase, returns 503 by design (endpoint not yet active; awaits Story 23.5 to activate after Story 23.2 user_cosmetic_items migration)",
+	slog.WarnContext(ctx, "dev grant-cosmetic-batch called in node-7 stub phase, returns 501 by design (endpoint not yet implemented; awaits Story 23.5 to activate after Story 23.2 user_cosmetic_items migration)",
 		"user_id", userID,
 		"rarity", rarity,
 		"count", count,
 		"phase", "node-7-stub",
 		"todo", "activate real writes in Story 23.5 (after Story 23.2 user_cosmetic_items migration)",
 	)
-	return apperror.New(apperror.ErrServiceBusy, "dev/grant-cosmetic-batch not yet implemented (node-7 stub; awaits Story 23.5 to activate)")
+	return apperror.New(apperror.ErrNotImplemented, "dev/grant-cosmetic-batch not yet implemented (node-7 stub; awaits Story 23.5 to activate)")
 }
