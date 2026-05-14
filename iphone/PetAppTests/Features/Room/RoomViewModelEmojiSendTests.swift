@@ -206,6 +206,39 @@ final class RoomViewModelEmojiSendTests: XCTestCase {
         XCTAssertEqual(mockWS.sentMessages.count, 0)
     }
 
+    // MARK: - case#3d edge (r1 fix-review P2): self path 1.5s expire
+
+    /// Story 18.4 fix-review r1 [P2] —— self path 1.5s expire 必须与 applyEmojiReceived 同款.
+    ///
+    /// 旧实装: onEmojiSelected Step A 入队 activeEmojis 但**永不**移除 → 重复 send 后 activeEmojis 累积
+    /// invisible FloatingEmojiCellView + accessibility 节点 (1.5s fade 完后 opacity 0 但 view 仍在 ForEach).
+    ///
+    /// 修复后: self 入队也启动 1.5s Task → removeAll {$0.id == capturedSelfEmojiId};
+    /// 与 applyEmojiReceived 的 expire 块完全等价 (epics.md 行 2715-2716 钦定动画时长 1.5s; 数据 owner = vm).
+    ///
+    /// 断言: onEmojiSelected → vm.activeEmojis.count == 1; sleep 1.7s 后 vm.activeEmojis.isEmpty.
+    /// (1.7s 留 200ms 缓冲, 与 RoomViewModelEmojiReceivedTests.test_realApplyEmojiReceived_autoExpiresAfter15Seconds 同 timing).
+    /// 不依赖 WS / catalog (sendEmojiUseCase / emojiCatalogLoader 都 nil; Step B/C 路径走 nil-fallback skip; 不影响 expire 验证).
+    func test_realOnEmojiSelected_autoExpiresLocalEmojiAfter15Seconds() async throws {
+        let vm = RealRoomViewModel()
+        let appState = AppState()
+        vm.bind(
+            appState: appState,
+            webSocketClient: nil,           // nil → Step C skip
+            sendEmojiUseCase: nil,           // nil → Step C skip
+            emojiCatalogLoader: nil         // nil → Step B skip
+        )
+        vm.currentUserId = "u_self"
+
+        vm.onEmojiSelected(code: "wave")
+        XCTAssertEqual(vm.activeEmojis.count, 1,
+                       "入队后立即 activeEmojis.count == 1 (Step A 同步)")
+
+        try await Task.sleep(nanoseconds: 1_700_000_000)   // 1.7s 缓冲
+        XCTAssertTrue(vm.activeEmojis.isEmpty,
+                      "1.7s 后 self 触发的 activeEmoji 必须自动 expire 移除 (与 applyEmojiReceived 同款 1.5s Task)")
+    }
+
     // MARK: - case#4 edge: WS 失败 → activeEmojis 不回滚 + toast "网络不佳..."
 
     /// Story 18.3 AC5 弱网降级: WS send 失败 (.notConnected) → 本地动效仍播 (Step A 已完成不回滚)

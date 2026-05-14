@@ -293,3 +293,4 @@
 | 2026-05-14 | [Feature ViewModel 自建 mapError 必须镜像 AppErrorMapper 的 transient / terminal 二分（.localStoreFailure ≠ .missingCredentials）（18-1 r2）](2026-05-14-viewmodel-error-mapping-must-mirror-apperrormapper-transient-vs-terminal-18-1-r2.md) | 1 | error-handling | `e323183` |
 | 2026-05-14 | [Room-scoped transient UI state 必须在 room 切换/离开时重置（与 members / memberPetStates 同精神）（18-3 r1）](2026-05-14-room-transient-state-must-reset-on-room-transition.md) | 1 | architecture | `484e757` |
 | 2026-05-14 | [Outgoing WS send 必须在 async window 后 recheck snapshot roomId（payload 不带 roomId 的 emoji.send）（18-3 r2）](2026-05-14-emoji-send-cross-room-race-needs-snapshot-roomid-guard-18-3-r2.md) | 1 | architecture | `0cad4e6` |
+| 2026-05-14 | [SwiftUI PreferenceKey 多源订阅 onPreferenceChange 替换式赋值 + transient queue 每个入队点都挂 owner 端 expire（18-4 r1）](2026-05-14-swiftui-preferencekey-merge-vs-replace-on-roster-change.md) | 2 | architecture, perf | `<pending>` |

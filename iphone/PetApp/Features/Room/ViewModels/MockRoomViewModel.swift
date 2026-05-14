@@ -24,6 +24,7 @@ public final class MockRoomViewModel: RoomViewModel {
         case copyTap
         case ownPetTap   // Story 18.2 新增
         case emojiSelected(code: String)   // Story 18.3 新增
+        case emojiReceived(userId: String, code: String)   // Story 18.4 新增
     }
 
     @Published public var invocations: [Invocation] = []
@@ -91,6 +92,22 @@ public final class MockRoomViewModel: RoomViewModel {
             id: UUID(),
             userId: self.currentUserId ?? "",
             emojiCode: code,
+            createdAt: Date()
+        )
+        self.activeEmojis.append(emoji)
+    }
+
+    /// Story 18.4 AC5: 接收 emoji.received mock 实装 —— 入队 activeEmojis (与 Real 行为对齐),
+    /// invocations 记录 .emojiReceived 让单测 + UI test 验证 ViewModel 收到广播.
+    /// **不**做 self-broadcast 去重 (MockRoomViewModel 无 currentUserId 业务逻辑; 去重测试走 Real path).
+    /// **不**做 1.5s 自动移除 (Mock 用于测试 + Preview, 自动移除让断言时机难控; expire 测试走 Real path).
+    public override func applyEmojiReceived(_ payload: EmojiReceivedPayload) {
+        os_log(.debug, "MockRoomViewModel.applyEmojiReceived: userId=%{public}@, code=%{public}@", payload.userId, payload.emojiCode)
+        invocations.append(.emojiReceived(userId: payload.userId, code: payload.emojiCode))
+        let emoji = RoomActiveEmoji(
+            id: UUID(),
+            userId: payload.userId,
+            emojiCode: payload.emojiCode,
             createdAt: Date()
         )
         self.activeEmojis.append(emoji)

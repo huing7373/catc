@@ -736,7 +736,7 @@ public final class RealRoomViewModel: RoomViewModel {
             // **roomSnapshot**）—— 都是会 mutate vm 状态的 message，旧 generation 投递必须丢弃.
             // .pong / .error / .unknown 是无副作用 case（仅 log / 无 mutate），无需挡.
             switch message {
-            case .memberJoined, .memberLeft, .petStateChanged, .connectionStateChanged, .roomSnapshot:
+            case .memberJoined, .memberLeft, .petStateChanged, .emojiReceived, .connectionStateChanged, .roomSnapshot:
                 os_log(.debug,
                        "RealRoomViewModel: discard stale event from old stream (myGen=%{public}d, currentGen=%{public}d)",
                        streamGen, currentGen)
@@ -809,6 +809,21 @@ public final class RealRoomViewModel: RoomViewModel {
                 return
             }
             applyPetStateChanged(payload)
+        case .emojiReceived(let payload):
+            // Story 18.4: emoji.received 守护与 .petStateChanged / .memberJoined / .memberLeft 同精神 ——
+            // payload 不带 room.id (V1 §12.3 行 2446-2449 钦定两字段 userId + emojiCode), server 端按 fanout 范围保证只
+            // 投递到该房间 sessions; 但 client 在 A→B 切换 / leave-rejoin 路径下旧 consumer task 已 dequeue 的 late
+            // message 可能在 cancel 前 deliver 到 main actor, 此时 lastObservedRoomId 已是 B 但 message 来自 room A
+            // 的 stream → streamRoomId (启动时捕获 = A) 与 lastObservedRoomId (= B) 不匹配 → 丢弃 + log debug.
+            guard streamRoomId != nil, streamRoomId == lastObservedRoomId else {
+                os_log(.debug,
+                       "RealRoomViewModel: discard stale emoji.received (userId=%{public}@, streamRoomId=%{public}@, current=%{public}@)",
+                       payload.userId,
+                       streamRoomId ?? "<nil>",
+                       lastObservedRoomId ?? "<nil>")
+                return
+            }
+            applyEmojiReceived(payload)
         case .connectionStateChanged(let state):
             // Story 12.5：client-internal 状态变更.
             // **不**调 `setCurrentRoomId(_:)` —— wsState 变更不影响 currentRoomId（房间归属仅由
@@ -1190,6 +1205,22 @@ public final class RealRoomViewModel: RoomViewModel {
         )
         self.activeEmojis.append(emoji)
 
+        // Story 18.4 fix-review r1 [P2] —— self path 1.5s expire 必须与 applyEmojiReceived 同款.
+        // 旧实装只在 applyEmojiReceived (remote 路径) 加了 expire Task; onEmojiSelected (self 路径) append 后从不移除 →
+        // 重复 send 累积 invisible FloatingEmojiCellView + accessibility 节点 (fade 后 opacity 0 但 view 仍在 ForEach).
+        // 修复: self 入队也启动 1.5s removeAll Task; 与 applyEmojiReceived 的 expire 块完全等价 (epics.md 行 2715-2716
+        //   钦定动画时长 1.5s; activeEmojis 数据 owner = vm, 同 owner 同 lifecycle).
+        // weak self 防 race; activeEmojis 可能已在 room transition 时被清空 → removeAll 是 no-op
+        //   (lesson 2026-05-14-room-transient-state-must-reset-on-room-transition).
+        // lesson: docs/lessons/2026-05-14-swiftui-preferencekey-merge-vs-replace-on-roster-change.md (同一 lesson 覆盖两 finding).
+        let capturedSelfEmojiId = emoji.id
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await MainActor.run {
+                self?.activeEmojis.removeAll { $0.id == capturedSelfEmojiId }
+            }
+        }
+
         // Step B + C: V1 §12.2 缓存校验 + WS fire-and-forget (Task 包裹, 不阻塞主线程).
         // 局部捕获 presenter / useCase / loader: 避免 Task 体内 self.errorPresenter 在 vm 重 bind 时 race
         // (与 onLeaveTap fix-review r3 P1 同精神).
@@ -1275,6 +1306,56 @@ public final class RealRoomViewModel: RoomViewModel {
                        "RealRoomViewModel.onEmojiSelected: WS send failed with unexpected error: %{public}@; presenting toast",
                        String(describing: error))
                 await MainActor.run { presenter?.presentToast("网络不佳，对方可能看不到") }
+            }
+        }
+    }
+
+    /// Story 18.4 AC4: V1 §12.3 行 2470-2474 完整规则实装 ——
+    /// (a) self-broadcast 去重 / (b) roster 内别人 + (c) roster miss 仍入队 (center anchor 渲染降级) / (d) catalog miss 不在此层校验.
+    /// 入队后 Task fire-and-forget 1.5s 后按 id 自动移除 (epics.md 行 2715-2716 钦定动画时长).
+    public override func applyEmojiReceived(_ payload: EmojiReceivedPayload) {
+        // (a) self-broadcast 去重: payload.userId == self.currentUserId → 跳过 (V1 §12.3 行 2471).
+        // 本地动效已在 Story 18.3 onEmojiSelected 入队播过, server self-echo 不重复触发.
+        // currentUserId == nil 或 empty 时不走去重 (fail-safe; 未登录 / appState 未 hydrate 路径; 理论不该收到 emoji.received).
+        if let myId = self.currentUserId, !myId.isEmpty, myId == payload.userId {
+            os_log(.debug,
+                   "RealRoomViewModel.applyEmojiReceived: self-broadcast received (userId=%{public}@, code=%{public}@); skip (local animation played in 18.3)",
+                   payload.userId, payload.emojiCode)
+            return
+        }
+
+        // (c) roster miss check: V1 §12.3 行 2473 钦定合法 race (sender leave + member.left 先到), 不丢弃 + log info.
+        // EmojiAnimationLayer 渲染层用 memberAnchors[userId] ?? centerAnchor 实现 center 降级.
+        if !members.contains(where: { $0.id == payload.userId }) {
+            os_log(.info,
+                   "RealRoomViewModel.applyEmojiReceived: userId %{public}@ not in roster (member.left race); fall back to center anchor at render layer",
+                   payload.userId)
+        }
+
+        // (d) catalog miss 不在 vm 层校验: V1 §12.3 行 2474 钦定渲染层 fallback.
+        // FloatingEmojiCellView .task 内 await loadEmojisUseCase.execute() 查 catalog; miss 时 assetUrl=nil → 问号 SF Symbol fallback.
+
+        // 入队 (与 18.3 onEmojiSelected Step A 同模式; UUID 让连续多 emoji 各自独立).
+        let emoji = RoomActiveEmoji(
+            id: UUID(),
+            userId: payload.userId,
+            emojiCode: payload.emojiCode,
+            createdAt: Date()
+        )
+        self.activeEmojis.append(emoji)
+        os_log(.debug,
+               "RealRoomViewModel.applyEmojiReceived: enqueued (userId=%{public}@, code=%{public}@, activeEmojis.count=%{public}d)",
+               payload.userId, payload.emojiCode, self.activeEmojis.count)
+
+        // 1.5s 后按 id 自动移除 (epics.md 行 2715-2716; 与 FloatingEmojiCellView .onAppear withAnimation duration 对齐).
+        // Task fire-and-forget (与 FloatingEmojiView .onAppear 同 lesson; 不持 Task 句柄; deinit 时 1.5s 后自然 exit, 不影响内存).
+        // 移除时 weak self 防 race; activeEmojis 可能已在 room transition 时被清空 (lesson 2026-05-14-room-transient-state-must-reset-on-room-transition;
+        // 18.3 r1 fix 已落) → removeAll 是 no-op.
+        let capturedId = emoji.id
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await MainActor.run {
+                self?.activeEmojis.removeAll { $0.id == capturedId }
             }
         }
     }

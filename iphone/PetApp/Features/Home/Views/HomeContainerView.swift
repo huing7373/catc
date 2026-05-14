@@ -52,11 +52,15 @@ public struct HomeContainerView: View {
 private struct HomeContainerRoomViewBridge: View {
     @EnvironmentObject var roomViewModel: RoomViewModel
     @Environment(\.emojiPanelViewModelFactory) var emojiPanelViewModelFactory
+    /// Story 18.4 AC8: LoadEmojisUseCase 从 RootView 注入 (\.loadEmojisUseCase environment value),
+    /// 透传给 RoomScaffoldView init → EmojiAnimationLayer → FloatingEmojiCellView .task 查 catalog 拿 assetUrl.
+    @Environment(\.loadEmojisUseCase) var loadEmojisUseCase
 
     var body: some View {
         RoomScaffoldView(
             state: roomViewModel,
-            emojiPanelViewModelFactory: emojiPanelViewModelFactory
+            emojiPanelViewModelFactory: emojiPanelViewModelFactory,
+            loadEmojisUseCase: loadEmojisUseCase
         )
     }
 }
@@ -168,5 +172,24 @@ private struct NeverReturnsLoadEmojisUseCase: LoadEmojisUseCaseProtocol {
     func execute() async throws -> [EmojiConfig] {
         try await Task.sleep(nanoseconds: UInt64.max)
         return []
+    }
+}
+
+/// Story 18.4 AC8: `LoadEmojisUseCaseProtocol?` 注入入口（RootView 写入；HomeContainerRoomViewBridge 读取）.
+///
+/// 为何走 EnvironmentValues 而非 init 参数：与 emojiPanelViewModelFactory 同模式 —— HomeContainerView
+/// 是 MainTabView 内嵌子视图，bridge 直接拿 environment 即可，不需层层透传 AppContainer.
+///
+/// 默认 nil → RoomScaffoldView 收到 nil → EmojiAnimationLayer 把 nil 透传给 FloatingEmojiCellView
+/// → .task 内 `if let loader = loadEmojisUseCase` 短路 → assetUrl 保持 nil → 问号 SF Symbol fallback.
+/// (V1 §12.3 行 2474 (d) catalog miss 渲染层 fallback；nil 路径与 catalog miss 路径表现一致).
+private struct LoadEmojisUseCaseKey: EnvironmentKey {
+    static let defaultValue: LoadEmojisUseCaseProtocol? = nil
+}
+
+extension EnvironmentValues {
+    var loadEmojisUseCase: LoadEmojisUseCaseProtocol? {
+        get { self[LoadEmojisUseCaseKey.self] }
+        set { self[LoadEmojisUseCaseKey.self] = newValue }
     }
 }

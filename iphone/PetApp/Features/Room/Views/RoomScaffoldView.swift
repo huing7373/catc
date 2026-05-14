@@ -38,69 +38,102 @@ public struct RoomScaffoldView: View {
     /// 走 .sheet 闭包 → 闭包内 new vm → SwiftUI .sheet 内 @StateObject 持有 vm 直到 sheet dismiss).
     private let emojiPanelViewModelFactory: () -> EmojiPanelViewModel
 
+    /// Story 18.4 AC7: LoadEmojisUseCase 注入 (catalog 查询); FloatingEmojiCellView .task 内 await loader.execute()
+    /// 拿 assetUrl. Preview / UITest 路径可传 nil 走 catalog-miss fallback (问号 SF Symbol).
+    private let loadEmojisUseCase: LoadEmojisUseCaseProtocol?
+
+    /// Story 18.4 AC7: SwiftUI 收集每个成员 PetSpriteView 中心点 (in roomCoord coordinate space);
+    /// 由 memberRow 内 GeometryReader + PreferenceKey 填充, .onPreferenceChange 收集.
+    /// EmojiAnimationLayer 用 memberAnchors[userId] 找该成员 anchor; nil → 走 centerAnchor 降级.
+    @State private var memberAnchors: [String: CGPoint] = [:]
+
+    /// Story 18.4 AC7: V1 §12.3 行 2473 (c) center 降级位置 —— 屏幕中央 (in roomCoord coordinate space).
+    /// 由 ZStack 最外层 GeometryReader 计算 (size.width/2, size.height/2); roster miss userId 时 EmojiAnimationLayer 用该点.
+    @State private var roomCenter: CGPoint = .zero
+
     public init(
         state: RoomViewModel,
-        emojiPanelViewModelFactory: @escaping () -> EmojiPanelViewModel
+        emojiPanelViewModelFactory: @escaping () -> EmojiPanelViewModel,
+        loadEmojisUseCase: LoadEmojisUseCaseProtocol? = nil
     ) {
         self.state = state
         self.emojiPanelViewModelFactory = emojiPanelViewModelFactory
+        self.loadEmojisUseCase = loadEmojisUseCase
     }
 
     public var body: some View {
-        ZStack {
-            // 背景渐变（room.jsx:14 钦定 linear-gradient(180deg, accent-soft 0%, page-bg 45%)）.
-            LinearGradient(
-                colors: [theme.colors.accentSoft, theme.colors.pageBg],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
+        // Story 18.4 AC7: GeometryReader 外层 + .coordinateSpace("roomCoord") 让 memberRow 内
+        // GeometryReader.frame(in: .named("roomCoord")) 算出 PetSpriteView 中心点 (相对房间页坐标空间).
+        // roomCenter 派生 = (size.width/2, size.height/2) 在 .onAppear 写入 @State 供 EmojiAnimationLayer 用.
+        GeometryReader { geo in
+            ZStack {
+                // 背景渐变（room.jsx:14 钦定 linear-gradient(180deg, accent-soft 0%, page-bg 45%)）.
+                LinearGradient(
+                    colors: [theme.colors.accentSoft, theme.colors.pageBg],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
 
-            ScrollView {
-                VStack(spacing: theme.spacing.s14) {
-                    topBar               // 区块 1: 返回按钮 + 标题
-                    wsStateLabel         // Story 12.1 AC5: WS 连接态占位文字（"已连接 / 正在重连… / 已断开"）
-                    roomCodeCard         // 区块 2: 房间号 + 复制按钮
-                    sharedStage          // 区块 3: 共享舞台（粉橙渐变 + 装饰 + MiniCat 弹跳）
-                    membersList          // 区块 4: 4 格成员列表
-                    leaveButton          // 区块 5: 底部"离开房间" PrimaryButton
+                ScrollView {
+                    VStack(spacing: theme.spacing.s14) {
+                        topBar               // 区块 1: 返回按钮 + 标题
+                        wsStateLabel         // Story 12.1 AC5: WS 连接态占位文字（"已连接 / 正在重连… / 已断开"）
+                        roomCodeCard         // 区块 2: 房间号 + 复制按钮
+                        sharedStage          // 区块 3: 共享舞台（粉橙渐变 + 装饰 + MiniCat 弹跳）
+                        membersList          // 区块 4: 4 格成员列表
+                        leaveButton          // 区块 5: 底部"离开房间" PrimaryButton
+                    }
+                    .padding(.horizontal, theme.spacing.s20)
+                    .padding(.top, 8)          // safe area top 已自动 respect；只补呼吸空间. 详见 HomeView.swift:90 注释.
+                    .padding(.bottom, 100)     // 浮动 TabBar 让出空间
                 }
-                .padding(.horizontal, theme.spacing.s20)
-                .padding(.top, 8)          // safe area top 已自动 respect；只补呼吸空间. 详见 HomeView.swift:90 注释.
-                .padding(.bottom, 100)     // 浮动 TabBar 让出空间
-            }
 
-            // Story 18.3 AC7 占位渲染: 让 activeEmojis 队列在屏幕上可见 (单元测试已覆盖 / MCP 验证可见).
-            // Story 18.4 落地后整体替换为 EmojiAnimationLayer (含 anchor / 1.5s 移除 / 飞出动画).
-            // 占位 ForEach 渲染 Text(emojiCode): 不做 anchor 计算; 每个 emoji 单独 a11y identifier
-            // `activeEmoji_<uuid>` 让 UITest 定位 (动态 UUID 通过 NSPredicate matching 命中);
-            // 文本内容用 emojiCode 让 UITest 用 staticTexts["wave"] 断言 (与 EmojiPanelView fixture 同 code).
-            //
-            // `.allowsHitTesting(false)`: 占位 ZStack 层级在 ScrollView 之上, 默认会拦截 tap; 必须显式
-            // 关闭让下方 ScrollView 内 PetSpriteView Button / 复制按钮等 hit events 正常分发到底层
-            // (与 18.4 完整动画路径同精神 —— 动效层永远不抢交互).
-            //
-            // 占位 View 在 activeEmojis 为空时返回 EmptyView (避免占用 ZStack frame 干扰 layout / a11y).
-            EmojiAnimationLayerPlaceholder(activeEmojis: state.activeEmojis)
+                // Story 18.4 AC7: 替换 18.3 EmojiAnimationLayerPlaceholder 为完整 EmojiAnimationLayer.
+                // 输入: activeEmojis (vm @Published) + memberAnchors (PreferenceKey 收集) + roomCenter (GeometryReader 算)
+                //   + loadEmojisUseCase (catalog 查 assetUrl).
+                // .allowsHitTesting(false): 动效层永远不抢交互 (与 18.3 placeholder 同精神).
+                EmojiAnimationLayer(
+                    activeEmojis: state.activeEmojis,
+                    memberAnchors: memberAnchors,
+                    centerAnchor: roomCenter,
+                    loadEmojisUseCase: loadEmojisUseCase
+                )
                 .allowsHitTesting(false)
-        }
-        // Story 18.2 AC4: EmojiPanelView sheet 挂载（ZStack 外层，与 LinearGradient 同级）.
-        // 双向绑定 $state.showEmojiPanel：自己 PetSpriteView Button 点击置 true → sheet 弹出;
-        // swipe-down dismiss 自动置 false; onSelect 闭包选中表情后显式置 false (与 ADR-0010 §3.2 钦定一致).
-        // ADR-0009 §3.3 sheet 白名单语义扩展（JoinRoomModal 是参考样板；EmojiPanel 同属 "Tab 内部次级 sheet"）.
-        .sheet(isPresented: $state.showEmojiPanel) {
-            EmojiPanelView(
-                viewModel: emojiPanelViewModelFactory(),
-                onSelect: { code in
-                    // Story 18.3 AC7: 先触发本地动效 + WS fire-and-forget (Step A 同步入队, Step B/C Task 异步), 再关 sheet.
-                    // 顺序关键: 先 onEmojiSelected 让 activeEmojis 在 sheet 关闭动画期间已入队 → UX 视觉自然.
-                    // 反向顺序 (先关 sheet 再 onEmojiSelected) 会让 SwiftUI publisher 合并主线程 emit 让动效晚一拍出现.
-                    state.onEmojiSelected(code: code)
-                    state.showEmojiPanel = false
-                }
-            )
-            .presentationDetents([.medium])
-            .presentationCornerRadius(28)
+            }
+            .coordinateSpace(name: "roomCoord")
+            .onAppear {
+                roomCenter = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+            }
+            .onPreferenceChange(MemberAnchorPreferenceKey.self) { dict in
+                // Story 18.4 fix-review r1 [P2] —— 替换式赋值, 不 merge.
+                // 旧实装 `memberAnchors.merge(dict) { _, new in new }` 在 member.left 后保留旧 anchor:
+                // 离开成员的 row 不再 emit preference → dict 不含该 userId → merge 保留旧值 →
+                // EmojiAnimationLayer.anchor(for:) 取到 stale anchor → 破坏 V1 §12.3 (c) "roster miss → centerAnchor" 契约.
+                // 修复: 每帧 SwiftUI 重渲染 RoomScaffoldView 时 dict = 当前所有 memberRow emit 的并集 (PreferenceKey.reduce
+                // 已合并); 直接整 dict 覆盖 @State → 离开成员的 userId 自动从 memberAnchors 消失 → anchor lookup miss →
+                // EmojiAnimationLayer 走 centerAnchor 降级 (符合 V1 §12.3 行 2473 (c) 契约).
+                // lesson: docs/lessons/2026-05-14-swiftui-preferencekey-merge-vs-replace-on-roster-change.md
+                memberAnchors = dict
+            }
+            // Story 18.2 AC4: EmojiPanelView sheet 挂载（ZStack 外层，与 LinearGradient 同级）.
+            // 双向绑定 $state.showEmojiPanel：自己 PetSpriteView Button 点击置 true → sheet 弹出;
+            // swipe-down dismiss 自动置 false; onSelect 闭包选中表情后显式置 false (与 ADR-0010 §3.2 钦定一致).
+            // ADR-0009 §3.3 sheet 白名单语义扩展（JoinRoomModal 是参考样板；EmojiPanel 同属 "Tab 内部次级 sheet"）.
+            .sheet(isPresented: $state.showEmojiPanel) {
+                EmojiPanelView(
+                    viewModel: emojiPanelViewModelFactory(),
+                    onSelect: { code in
+                        // Story 18.3 AC7: 先触发本地动效 + WS fire-and-forget (Step A 同步入队, Step B/C Task 异步), 再关 sheet.
+                        // 顺序关键: 先 onEmojiSelected 让 activeEmojis 在 sheet 关闭动画期间已入队 → UX 视觉自然.
+                        // 反向顺序 (先关 sheet 再 onEmojiSelected) 会让 SwiftUI publisher 合并主线程 emit 让动效晚一拍出现.
+                        state.onEmojiSelected(code: code)
+                        state.showEmojiPanel = false
+                    }
+                )
+                .presentationDetents([.medium])
+                .presentationCornerRadius(28)
+            }
         }
     }
 
@@ -395,6 +428,18 @@ public struct RoomScaffoldView: View {
                         size: 40
                     )
                     .frame(width: 40, height: 40)
+                    // Story 18.4 AC7 Task 7.5: PetSpriteView .background(GeometryReader) 报告 anchor
+                    //   到 MemberAnchorPreferenceKey, RoomScaffoldView 顶部 .onPreferenceChange 收集 → @State.
+                    // 自己路径同样报告 anchor (让 EmojiAnimationLayer 渲染自己的 emoji —— 18.3 onEmojiSelected
+                    //   入队走同一 anchor 流), 与他人路径行为对齐. ADR-0010 §3.2: 几何渲染数据不进 vm.
+                    .background(
+                        GeometryReader { petGeo in
+                            Color.clear.preference(
+                                key: MemberAnchorPreferenceKey.self,
+                                value: [member.id: petGeo.frame(in: .named("roomCoord")).midPoint]
+                            )
+                        }
+                    )
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier(AccessibilityID.Room.ownPetSpriteButton(at: index))
@@ -404,6 +449,15 @@ public struct RoomScaffoldView: View {
                     size: 40
                 )
                 .frame(width: 40, height: 40)
+                // Story 18.4 AC7 Task 7.5: 他人路径 PetSpriteView 同样包 .background(GeometryReader) 报告 anchor.
+                .background(
+                    GeometryReader { petGeo in
+                        Color.clear.preference(
+                            key: MemberAnchorPreferenceKey.self,
+                            value: [member.id: petGeo.frame(in: .named("roomCoord")).midPoint]
+                        )
+                    }
+                )
             }
         }
         .padding(10)
@@ -458,42 +512,25 @@ public struct RoomScaffoldView: View {
     }
 }
 
-// MARK: - Story 18.3 AC7: EmojiAnimationLayerPlaceholder 占位渲染
+// MARK: - Story 18.4 AC7 Task 7.7: MemberAnchorPreferenceKey + CGRect.midPoint helper
 
-/// Story 18.3 占位渲染: activeEmojis 队列可视化 (简单"VStack(ForEach) 居中显示 emojiCode 文本");
-/// Story 18.4 替换为完整 EmojiAnimationLayer (含 anchor 计算 / 1.5s 自动移除 / 缩放 + 透明 + 上移 / 同时多 emoji 独立动画).
-///
-/// **关键约束**：
-///   - 必须让 `activeEmojis` 入队的 emoji 在屏幕上**可见** (UITest 用 `app.staticTexts["wave"]` 或
-///     `NSPredicate(format: "identifier BEGINSWITH 'activeEmoji_'")` 验证).
-///   - a11y identifier `activeEmoji_<uuid>` 是 UITest 断言锚点 (动态 UUID 通过 NSPredicate 匹配;
-///     连点 N 次 → N 个不同 UUID 节点都可被 UITest 看到).
-///   - 18.4 落地后整体替换本占位为完整 EmojiAnimationLayer; `activeEmojis` 字段 + Identifiable struct
-///     + 入队语义 + onEmojiSelected 调用链**不需要改**.
-///
-/// **关键 layout 选择**: `activeEmojis.isEmpty` 时返回 `EmptyView()` —— 让占位**完全脱离 layout 流**,
-///   不在 RoomScaffoldView ZStack 中占据任何 frame. 否则 VStack 即使内容为空, ZStack 默认 alignment
-///   也会让它扩展到 ZStack 全屏 size; 即使加 `.allowsHitTesting(false)`, XCUITest 的
-///   `Computed hit point {-1, -1}` 仍会误判 sub-view (如 `roomMember_0_petSprite` Button) 被遮挡.
-///   `EmptyView()` 在 SwiftUI 中是 0-size + 不进 view hierarchy 的特殊 View, 让 ZStack 完全跳过本层.
-///   一旦 `activeEmojis` 非空, VStack 正常居中渲染 emoji 文本.
-struct EmojiAnimationLayerPlaceholder: View {
-    let activeEmojis: [RoomActiveEmoji]
-
-    @ViewBuilder
-    var body: some View {
-        if activeEmojis.isEmpty {
-            EmptyView()
-        } else {
-            VStack {
-                ForEach(activeEmojis) { emoji in
-                    Text(emoji.emojiCode)
-                        .font(.title2)
-                        .accessibilityIdentifier("activeEmoji_\(emoji.id.uuidString)")
-                }
-            }
-        }
+/// SwiftUI PreferenceKey 收集每个 RoomMember PetSpriteView 中心点 (in "roomCoord" coordinate space).
+/// 用法: memberRow 内 PetSpriteView .background(GeometryReader { geo in
+///   Color.clear.preference(key: MemberAnchorPreferenceKey.self,
+///                          value: [member.id: geo.frame(in: .named("roomCoord")).midPoint]) });
+///   RoomScaffoldView 顶部 .onPreferenceChange(MemberAnchorPreferenceKey.self) { ... } 收集 → @State memberAnchors.
+/// reduce: 多 PetSpriteView 报告 → merge dict (后报告覆盖前; 实际 race 不发生因为 SwiftUI 每帧顺序 emit).
+/// Story 18.4 AC7 Task 7.7 钦定 fileprivate (不暴露给其他 view).
+fileprivate struct MemberAnchorPreferenceKey: PreferenceKey {
+    static var defaultValue: [String: CGPoint] = [:]
+    static func reduce(value: inout [String: CGPoint], nextValue: () -> [String: CGPoint]) {
+        value.merge(nextValue()) { _, new in new }
     }
+}
+
+/// Story 18.4 AC7 Task 7.7: 简化 anchor 几何计算 helper.
+fileprivate extension CGRect {
+    var midPoint: CGPoint { CGPoint(x: midX, y: midY) }
 }
 
 // MARK: - MiniCatView 子视图（错峰弹跳动画用 @State 驱动 scaleEffect）

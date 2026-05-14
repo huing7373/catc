@@ -10,6 +10,7 @@
 //   - payload 解码失败 → return .unknown(rawType: type) + log warn（同样不破坏 stream；防 server malformed payload 把房间页搞崩）
 //
 // 节点 4 阶段 incoming 已知 type 集合：room.snapshot / pong / error（Epic 10 钦定）
+// 节点 6 阶段 incoming 扩展：emoji.received（V1 §12.3 行 2435-2481，Story 17.1 锚定 + 18.4 client 落地）
 // 节点 4 阶段 outgoing 已知 type 集合：ping（V1 §12.2）；节点 6 阶段扩展：emoji.send（V1 §12.2 行 1985-2089，Story 17.1 锚定 + 18.3 落地）
 
 import Foundation
@@ -118,6 +119,32 @@ public enum WSMessageCodec {
             } catch {
                 os_log(.error, log: logger, "pet.state.changed payload decode failed: %{public}@", String(describing: error))
                 return .unknown(rawType: "pet.state.changed")
+            }
+        case "emoji.received":
+            // Story 18.4: emoji.received 路由 (V1 §12.3 行 2435-2481 字段表).
+            // 同 member.joined / member.left / pet.state.changed 精神:
+            //   Decodable 只能挡 absent / type-mismatch; server 若推送语义无效 payload (如 userId == "" / emojiCode == "")
+            //   仍会成功解码 —— V1 §12.3 行 2469 钦定两字段必填且非空 (缺字段视为契约违反; client 解析层走"安全忽略 + log warn"),
+            //   codec 必须把这类语义无效 payload fallback 为 .unknown(rawType: "emoji.received") 走 Story 10.1 钦定
+            //   "安全忽略未识别 type" + log error 路径, 避免 ViewModel.applyEmojiReceived 用空字段污染 activeEmojis.
+            //
+            // payload.emojiCode 字符集校验 ([a-z0-9_-] + length 1-64, V1 §11.1 行 1771) codec **不**做 —— 由 server 在
+            // §12.2 服务端逻辑步骤 4 校验过 (single source of truth); client 信任 server 输出.
+            // catalog miss (emojiCode 不在 §11.1 client 缓存) 不由 codec 层处理 —— V1 §12.3 行 2474 (d) 钦定渲染层 fallback.
+            do {
+                let dto = try makeDecoder().decode(EmojiReceivedEnvelope.self, from: data).payload
+                guard !dto.userId.isEmpty else {
+                    os_log(.error, log: logger, "emoji.received rejected: empty userId")
+                    return .unknown(rawType: "emoji.received")
+                }
+                guard !dto.emojiCode.isEmpty else {
+                    os_log(.error, log: logger, "emoji.received rejected: empty emojiCode")
+                    return .unknown(rawType: "emoji.received")
+                }
+                return .emojiReceived(dto.toDomain())
+            } catch {
+                os_log(.error, log: logger, "emoji.received payload decode failed: %{public}@", String(describing: error))
+                return .unknown(rawType: "emoji.received")
             }
         default:
             os_log(.info, log: logger, "unknown server type: %{public}@", envelope.type)
@@ -284,6 +311,24 @@ public enum WSMessageCodec {
 
             func toDomain() -> PetStateChangedPayload {
                 PetStateChangedPayload(userId: userId, petId: petId, currentState: currentState)
+            }
+        }
+    }
+
+    // MARK: - Story 18.4 emoji.received envelope DTO
+
+    /// emoji.received 整体信封 —— 与 V1 §12.3 行 2446-2450 字段表 1:1 对齐.
+    /// 两字段 (userId / emojiCode) 全部 required —— Decodable 缺字段会 throw,
+    /// 走外层 do-catch 的 .unknown(rawType: "emoji.received") fallback.
+    private struct EmojiReceivedEnvelope: Decodable {
+        let payload: EmojiReceivedPayloadDTO
+
+        struct EmojiReceivedPayloadDTO: Decodable {
+            let userId: String
+            let emojiCode: String
+
+            func toDomain() -> EmojiReceivedPayload {
+                EmojiReceivedPayload(userId: userId, emojiCode: emojiCode)
             }
         }
     }

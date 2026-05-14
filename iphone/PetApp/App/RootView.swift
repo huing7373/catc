@@ -162,6 +162,20 @@ struct RootView: View {
                 userIsHost: true,
                 currentUserId: "u1"   // 自己 = u1 (members[0])
             )
+            // Story 18.4 AC8 / AC10: UITEST_EMIT_EMOJI_RECEIVED=1 路径 —— launch 后 1s 自动调
+            // mock.applyEmojiReceived 模拟"别人发表情"广播; UITest 验证接收端动效渲染.
+            // Fixture: u2 + u3 各发一个 wave + love, 触发 EmojiAnimationLayer 多 emoji 独立渲染.
+            // self-broadcast 去重路径在 RealRoomViewModel 单测覆盖; UITest 用 Mock path 验证视觉.
+            if ProcessInfo.processInfo.environment["UITEST_EMIT_EMOJI_RECEIVED"] == "1" {
+                // weak capture mock 防 leak; Task 不持 mock strong ref.
+                // 用 0.6s + 0.3s 让 RoomScaffoldView 已挂载第一帧 + emit 都在 1.5s 动画窗口内.
+                Task { @MainActor [weak mock] in
+                    try? await Task.sleep(nanoseconds: 600_000_000)  // 0.6s 让 RoomScaffoldView 第一帧渲染完
+                    mock?.applyEmojiReceived(EmojiReceivedPayload(userId: "u2", emojiCode: "wave"))
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    mock?.applyEmojiReceived(EmojiReceivedPayload(userId: "u3", emojiCode: "love"))
+                }
+            }
             self._roomViewModel = StateObject(wrappedValue: mock)
             return
         }
@@ -224,6 +238,10 @@ struct RootView: View {
                     // 每次 sheet 弹出 RoomScaffoldView 调一次 factory → new EmojiPanelViewModel (useCase
                     // 是 container.loadEmojisUseCase 单例 → cache 跨 sheet 共享, 18.1 缓存契约一致).
                     emojiPanelViewModelFactory: { [container] in container.makeEmojiPanelViewModel() },
+                    // Story 18.4 AC8: 同时把 container.loadEmojisUseCase stable singleton 透传给 LaunchedContentView →
+                    // .environment(\.loadEmojisUseCase, ...) → RoomScaffoldView → EmojiAnimationLayer → FloatingEmojiCellView
+                    // .task 查 catalog 拿 assetUrl. UITEST 路径下 loadEmojisUseCase 单例不变 (mock fixture 已注入).
+                    loadEmojisUseCase: container.loadEmojisUseCase,
                     onReadyAppear: {
                         #if DEBUG
                         // lazy 注入：第一次 .onAppear 时从已稳定的 container 拿 keychainStore，
@@ -668,6 +686,10 @@ private struct LaunchedContentView: View {
     /// Story 18.2 AC5: EmojiPanelViewModel 工厂闭包；通过 `\.emojiPanelViewModelFactory` environment
     /// value 注入 .ready 子树, HomeContainerRoomViewBridge 读取后传给 RoomScaffoldView init.
     let emojiPanelViewModelFactory: () -> EmojiPanelViewModel
+    /// Story 18.4 AC8: LoadEmojisUseCase stable singleton；通过 `\.loadEmojisUseCase` environment value
+    /// 注入 .ready 子树, HomeContainerRoomViewBridge 读取后传给 RoomScaffoldView init →
+    /// EmojiAnimationLayer 内 FloatingEmojiCellView .task 查 catalog 拿 assetUrl.
+    let loadEmojisUseCase: LoadEmojisUseCaseProtocol?
     let onReadyAppear: () -> Void
     let onReadyTask: () async -> Void
     /// Story 8.5 review round 2 [P2] fix: launch state 离开 `.ready` 时回调（同步路径）.
@@ -689,6 +711,7 @@ private struct LaunchedContentView: View {
         sessionStore: SessionStore?,
         resetIdentityViewModel: ResetIdentityViewModel?,
         emojiPanelViewModelFactory: @escaping () -> EmojiPanelViewModel,
+        loadEmojisUseCase: LoadEmojisUseCaseProtocol?,
         onReadyAppear: @escaping () -> Void,
         onReadyTask: @escaping () async -> Void = { },
         onLeaveReady: @escaping () -> Void = { }
@@ -705,6 +728,7 @@ private struct LaunchedContentView: View {
         self.sessionStore = sessionStore
         self.resetIdentityViewModel = resetIdentityViewModel
         self.emojiPanelViewModelFactory = emojiPanelViewModelFactory
+        self.loadEmojisUseCase = loadEmojisUseCase
         self.onReadyAppear = onReadyAppear
         self.onReadyTask = onReadyTask
         self.onLeaveReady = onLeaveReady
@@ -731,6 +755,12 @@ private struct LaunchedContentView: View {
                     // Story 18.2 AC5: factory 闭包注入 .ready 子树 environment,
                     // HomeContainerRoomViewBridge 通过 `\.emojiPanelViewModelFactory` 读取并传给 RoomScaffoldView init.
                     .environment(\.emojiPanelViewModelFactory, emojiPanelViewModelFactory)
+                    // Story 18.4 AC8: LoadEmojisUseCase stable singleton 注入 .ready 子树 environment,
+                    // HomeContainerRoomViewBridge 通过 `\.loadEmojisUseCase` 读取并传给 RoomScaffoldView init →
+                    // EmojiAnimationLayer 内 FloatingEmojiCellView .task 查 catalog 拿 assetUrl. UITEST 路径下
+                    // (UITEST_MOCK_EMOJI=1) container.loadEmojisUseCase 已是 UITestMockEmojiRepository fixture,
+                    // 注入路径不变.
+                    .environment(\.loadEmojisUseCase, loadEmojisUseCase)
                     .onAppear { onReadyAppear() }
                     .task {
                         await onReadyTask()

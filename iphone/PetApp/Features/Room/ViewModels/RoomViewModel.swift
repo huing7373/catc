@@ -6,17 +6,20 @@
 //   （onOwnPetTap）支持"点击自己猫触发表情面板"路径.
 // Story 18.3 AC4: 扩 1 个 @Published 字段（activeEmojis）+ 1 abstract method（onEmojiSelected）
 //   支持"选中表情 → 本地立即动效 + WS fire-and-forget"路径.
+// Story 18.4 AC3: 扩 1 abstract method（applyEmojiReceived）支持"接收 server emoji.received 广播"路径;
+//   activeEmojis 在 18.3 已落地, 本 story 在接收端也写入（18.4 落地 1.5s 自动 expire 移除）.
 //
 // 设计：与 HomeViewModel 同精神（class 而非 final + abstract method 用 fatalError 强制 override）.
-// 字段范围（Story 18.3 后）：9 字段
+// 字段范围（Story 18.4 后）：9 字段
 //   - roomCodeForCopy / hostCatName / members / userIsHost（Story 37.8 落地）
 //   - wsState / memberPetStates（Story 12.1 落地；RealRoomViewModel WS 路径写入）
 //   - showEmojiPanel / currentUserId（Story 18.2 落地；表情面板 sheet 双向绑定 + self/other 判定 SoT）
-//   - activeEmojis（Story 18.3 落地；本地动效 + 18.4 接收动效共用 transient 队列）.
-// abstract method 范围（Story 18.3 后）：4 abstract method
+//   - activeEmojis（Story 18.3 落地；18.4 接收端写入；18.4 落地 1.5s 自动 expire 移除）.
+// abstract method 范围（Story 18.4 后）：5 abstract method
 //   - onLeaveTap / onCopyTap（Story 37.8 落地）
 //   - onOwnPetTap（Story 18.2 落地）
-//   - onEmojiSelected（Story 18.3 落地；选中表情入口）.
+//   - onEmojiSelected（Story 18.3 落地；选中表情入口）
+//   - applyEmojiReceived（Story 18.4 落地；接收 emoji.received 广播入口）.
 //
 // import 备注（继承 Story 2.2 lesson 2026-04-25-swift-explicit-import-combine.md）：
 // `ObservableObject` / `@Published` 来自 Combine，不能依赖 SwiftUI transitive import.
@@ -107,5 +110,14 @@ public class RoomViewModel: ObservableObject {
     ///     fire-and-forget (Task 包裹, 不阻塞主线程; 失败弹 toast 不回滚动效)
     public func onEmojiSelected(code: String) {
         fatalError("RoomViewModel.onEmojiSelected must be overridden by subclass")
+    }
+
+    /// Story 18.4 AC3: 应用 server emoji.received 广播 —— 接收端 dispatch path.
+    /// 触发: RealRoomViewModel.handle(message:streamRoomId:streamGeneration:) switch case .emojiReceived.
+    /// 实装:
+    ///   - MockRoomViewModel: 入队 activeEmojis + invocations 记录 (无 1.5s 自动移除)
+    ///   - RealRoomViewModel: V1 §12.3 行 2470-2474 完整规则 —— self 去重 / roster miss 仍入队 / catalog miss 不丢弃 + 1.5s 自动移除
+    public func applyEmojiReceived(_ payload: EmojiReceivedPayload) {
+        fatalError("RoomViewModel.applyEmojiReceived must be overridden by subclass")
     }
 }

@@ -129,7 +129,7 @@ extension WebSocketClient {
 /// **Story 12.1 仅覆盖 Epic 10 阶段 server-active 三种 case** + `unknown` fallback；
 /// `member.joined` / `member.left` 由 **Story 12.4** 扩展（已落地）；
 /// `pet.state.changed` 由 Story 15.2 扩展（已落地）；
-/// `emoji.received` 由 Epic 17 / Story 17.x 扩展.
+/// `emoji.received` 由 Story 17.1 锚定契约 + Story 17.5 server 端落地 + Story 18.4 client 端落地（接收 + 动效）.
 public enum WSMessage: Equatable, Sendable {
     /// `room.snapshot` —— 握手成功后必发的第一条 authoritative 消息（§12.1.3 钦定）.
     /// payload schema 见 §12.3 `room.snapshot` 小节字段表 / "client merge contract" 段.
@@ -162,6 +162,15 @@ public enum WSMessage: Equatable, Sendable {
     /// (c) `payload.userId == self` 自己的 self-broadcast 走同一路径（§5.2 self-broadcast 对称兜底前置条件，由 Story 15.4 落地自身侧 UI 驱动）
     /// Story 15.2 落地；trigger 唯一来源 = HTTP `POST /api/v1/pets/current/state-sync` 成功 UPDATE 之后 service 层广播.
     case petStateChanged(PetStateChangedPayload)
+
+    /// `emoji.received` —— 房间内任一成员（含发起者自己）通过 `emoji.send` (Story 18.3) 触发广播 (V1 §12.3 行 2435-2481).
+    /// payload 两字段 (userId + emojiCode)；client 收到后按 V1 §12.3 行 2470-2474 规则处理：
+    /// (a) `payload.userId == 当前 user.id` (self-broadcast) → 跳过 (本地动效已在 18.3 播过)
+    /// (b) `payload.userId ∈ 当前 roster` 且 ≠ 自己 → 在该成员 PetSpriteView 上方触发动效
+    /// (c) `payload.userId` 不在 roster (合法 race; sender 已 leave + member.left 先到达) → 降级到屏幕中央
+    /// (d) `payload.emojiCode` 不在缓存 (理论不该) → 显示问号 fallback
+    /// Story 17.5 server 端落地 BuildEmojiReceivedEnvelope; Story 18.4 client 端落地接收 + 动效渲染.
+    case emojiReceived(EmojiReceivedPayload)
 
     /// Story 12.5 新增：client-internal 连接状态变更通知（**不**是 server-side 协议消息）.
     /// 由 `WebSocketClientImpl` 内部 reconnect 状态机 emit；vm 收到后写 `wsState`（三态映射）.
@@ -314,5 +323,26 @@ public struct PetStateChangedPayload: Equatable, Sendable {
         self.userId = userId
         self.petId = petId
         self.currentState = currentState
+    }
+}
+
+// MARK: - Story 18.4 emoji.received payload value type
+
+/// `emoji.received` payload (V1 §12.3 行 2446-2449 字段表).
+/// 两字段全部必填 (V1 §12.3 行 2469 钦定 payload.userId / payload.emojiCode 都必填; 缺字段视为契约违反,
+/// codec 层走 .unknown(rawType: "emoji.received") + log warn 兜底).
+///
+/// - `userId`: 发送表情的 user 主键 (BIGINT 字符串化, §2.5); 来自 WS 握手 token 解码后的 user.id (server 端).
+/// - `emojiCode`: 表情业务标识符; 与 §11.1 `data.items[].code` 同语义; client 用作查 18.1 缓存的 key 拿 assetUrl.
+///
+/// **本 struct 独立于 EmojiConfig** —— EmojiConfig 是 §11.1 catalog 持久 4 字段 (code/name/assetUrl/sortOrder);
+/// EmojiReceivedPayload 是 §12.3 transient broadcast 2 字段; 两者语义不同; **禁止** typealias / 互转.
+public struct EmojiReceivedPayload: Equatable, Sendable {
+    public let userId: String
+    public let emojiCode: String
+
+    public init(userId: String, emojiCode: String) {
+        self.userId = userId
+        self.emojiCode = emojiCode
     }
 }
