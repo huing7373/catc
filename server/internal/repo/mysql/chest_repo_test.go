@@ -223,22 +223,44 @@ func TestChestRepo_UpdateUnlockAtByID_HappyPath_RowsAffectedOne(t *testing.T) {
 	}
 }
 
-// TestChestRepo_UpdateUnlockAtByID_RowsAffectedZero_ReturnsNil: Story 20.7 review r2 [P2] 改造。
-// rows_affected=0（MySQL 在值未变 / 行不存在时都可能返 0）→ 返 nil（不再翻译为 ErrChestNotFound）。
-// 存在性校验由 service 层用 FindByID 前置完成；本方法不再做存在性判断。
+// TestChestRepo_UpdateUnlockAtByID_RowsAffectedZero_ReturnsErrChestNotFound: Story 20.7 review r3 [P2] 改造。
 //
-// **r1 → r2 反向 case**：r1 在此返 ErrChestNotFound，r2 返 nil。
-// 修复 MySQL "RowsAffected=0 在值未变时也成立" 导致的"同一毫秒重复 unlock 同 chest 误返 1003"bug。
-func TestChestRepo_UpdateUnlockAtByID_RowsAffectedZero_ReturnsNil(t *testing.T) {
+// **r2 → r3 反向 case**：r2 在 rows_affected=0 返 nil（修了 r1 的"同一毫秒重复 unlock 同 chest 误返 1003"bug
+// 顾虑，但引入二阶 race —— service.FindByID 后 chest 被并发 OpenChest 删除 → UPDATE 0 行但 service 返 success
+// → false success UX bug）；r3 重新加回 RowsAffected==0 → ErrChestNotFound 翻译。
+//
+// 在 force-unlock 场景下，调用方传 newUnlockAt = time.Now().UTC()，毫秒级唯一 → 行存在时必返 rows_affected=1；
+// rows_affected=0 唯一来源 = 行已被并发删除（参见 chest_repo.go UpdateUnlockAtByID interface doc r3 改造说明）。
+func TestChestRepo_UpdateUnlockAtByID_RowsAffectedZero_ReturnsErrChestNotFound(t *testing.T) {
 	gormDB, mock := newGormWithMock(t)
 	repo := NewChestRepo(gormDB)
 
 	mock.ExpectExec("UPDATE `user_chests` SET").
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), uint64(99999)).
-		WillReturnResult(sqlmock.NewResult(0, 0)) // rows_affected=0
+		WillReturnResult(sqlmock.NewResult(0, 0)) // rows_affected=0 → r3 翻译为 ErrChestNotFound
 
 	err := repo.UpdateUnlockAtByID(context.Background(), 99999, time.Now().UTC())
-	if err != nil {
-		t.Errorf("err = %v, want nil (r2 [P2] 不再返 ErrChestNotFound; 存在性由 service.FindByID 前置)", err)
+	if !stderrors.Is(err, ErrChestNotFound) {
+		t.Errorf("err = %v, want ErrChestNotFound (r3 [P2]: RowsAffected==0 在 force-unlock 场景下等同于 NotFound)", err)
+	}
+}
+
+// TestChestRepo_UpdateUnlockAtByID_ConcurrentDelete_RaceToErrChestNotFound: Story 20.7 review r3 [P2] 引入。
+//
+// 模拟 r3 [P2] 修复的二阶 race scenario：service.ForceUnlockChest 在 FindByID 校验通过后到 UPDATE 之间，
+// 另一并发 /chest/open 把 chest 删除 → UPDATE WHERE id 命中 0 行。本 case 校验 repo 层正确翻译为
+// ErrChestNotFound（哨兵），让 service 层 errors.Is 后翻译为 1003。
+func TestChestRepo_UpdateUnlockAtByID_ConcurrentDelete_RaceToErrChestNotFound(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewChestRepo(gormDB)
+
+	// 模拟: chest 已被并发 OpenChest 删除 → UPDATE WHERE id 命中 0 行
+	mock.ExpectExec("UPDATE `user_chests` SET").
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), uint64(5001)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	err := repo.UpdateUnlockAtByID(context.Background(), 5001, time.Now().UTC())
+	if !stderrors.Is(err, ErrChestNotFound) {
+		t.Errorf("err = %v, want ErrChestNotFound (concurrent delete race → repo 必须翻译为哨兵让 service 返 1003)", err)
 	}
 }

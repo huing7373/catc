@@ -20,12 +20,17 @@ import (
 //
 // **Story 20.7 review r2 [P2] 改造**：service 现在 2 步直接调用（不开事务）：
 //  1. FindByID(ctx, chestID) → 拿 chest，校验存在 + chest.UserID == claimedUserID
-//  2. UpdateUnlockAtByID(ctx, chestID, time.Now().UTC()) → UPDATE WHERE id（不看 RowsAffected）
+//  2. UpdateUnlockAtByID(ctx, chestID, time.Now().UTC()) → UPDATE WHERE id
 //
 // r1 → r2 的核心变化：
 //   - 不再注入 txMgr（NewDevChestService 单参数）
 //   - 不再调 FindByUserIDForUpdate（client 通过 chestID 入参把"哪个 chest"信息传进来）
 //   - 增加"越权 unlock 他人 chest → 1003"case（service 防御性 user_id 比对）
+//
+// **Story 20.7 review r3 [P2] 改造**：r2 的"移除 RowsAffected 检查"是 over-correction，引入二阶 race
+// （FindByID 后 chest 被并发 OpenChest 删除 → UPDATE 0 行但 service 返 false success）。r3 重新加回
+// repo 层 RowsAffected==0 → ErrChestNotFound 翻译；service 在 UpdateUnlockAtByID 返 ErrChestNotFound
+// 时同样翻译为 1003。case 6 ConcurrentDeleteRace_Returns1003 是 r3 修复的核心见证。
 //
 // 复用模式与 chest_service_test.go (20.5) 同：每 case 用独立 stubChestRepo instance（避免计数器串扰）。
 
@@ -244,6 +249,49 @@ func TestDevChestService_ForceUnlockChest_UpdateDBError_Returns1009(t *testing.T
 	}
 	if !stderrors.Is(err, dbErr) {
 		t.Errorf("err 链不含 dbErr; err = %v", err)
+	}
+	if findByIDCalls != 1 {
+		t.Errorf("FindByID calls = %d, want 1", findByIDCalls)
+	}
+	if updateCalls != 1 {
+		t.Errorf("UpdateUnlockAtByID calls = %d, want 1", updateCalls)
+	}
+}
+
+// 6. ConcurrentDeleteRace_Returns1003: r3 [P2] 新增 case。
+//
+//    模拟二阶 race scenario：FindByID 成功拿到 chest + 校验 user 归属通过 →
+//    紧接着另一并发 /chest/open 把 chest 删除 → UpdateUnlockAtByID 命中 0 行 →
+//    repo 翻译为 mysql.ErrChestNotFound → service 透传翻译为 1003（与步骤 (1) FindByID NotFound 同码）。
+//
+//    **r2 → r3 关键回归 case**：r2 实装会返 nil（false success），r3 实装必须返 1003。
+//    这是 r2 over-correction（"移除 RowsAffected 检查"）引入的二阶 bug 的修复见证。
+func TestDevChestService_ForceUnlockChest_ConcurrentDeleteRace_Returns1003(t *testing.T) {
+	findByIDCalls := 0
+	updateCalls := 0
+	repo := &stubChestRepo{
+		findByIDFn: func(ctx context.Context, chestID uint64) (*mysql.UserChest, error) {
+			findByIDCalls++
+			// FindByID 成功（模拟"校验通过的瞬间 chest 还存在"）
+			return &mysql.UserChest{ID: 5001, UserID: 1001}, nil
+		},
+		updateUnlockAtByIDFn: func(ctx context.Context, chestID uint64, newUnlockAt time.Time) error {
+			updateCalls++
+			// 模拟: 校验后 chest 被并发 OpenChest 删除 → UPDATE 0 行 → repo 翻译为 ErrChestNotFound
+			return mysql.ErrChestNotFound
+		},
+	}
+
+	svc := buildDevChestService(repo)
+	err := svc.ForceUnlockChest(context.Background(), 1001, 5001)
+	if err == nil {
+		t.Fatal("ForceUnlockChest should fail when UPDATE hits ErrChestNotFound (concurrent delete race; r2 would falsely return nil)")
+	}
+	if got := apperror.Code(err); got != apperror.ErrResourceNotFound {
+		t.Errorf("apperror.Code = %d, want %d (1003; r3 [P2] 修复 r2 false-success bug)", got, apperror.ErrResourceNotFound)
+	}
+	if !stderrors.Is(err, mysql.ErrChestNotFound) {
+		t.Errorf("err 链不含 ErrChestNotFound 哨兵; err = %v", err)
 	}
 	if findByIDCalls != 1 {
 		t.Errorf("FindByID calls = %d, want 1", findByIDCalls)

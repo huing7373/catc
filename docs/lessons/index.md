@@ -312,3 +312,4 @@
 | 2026-05-14 | [跨接口字段语义对齐 + 错误码表收口（无可达路径就删除而非保留）（20-1 r15）](2026-05-14-cross-endpoint-field-alignment-and-error-table-pruning.md) | 2 | docs | `566071f` |
 | 2026-05-15 | [FOR UPDATE 后 UPDATE 必须 WHERE id 而非 WHERE user_id（避免与并发 Delete+Create 链路跑偏到 next row）（20-7 r1）](2026-05-15-for-update-then-update-where-id-not-where-user-id-20-7-r1.md) | 1 | architecture | `<pending>` |
 | 2026-05-15 | ["current chest" race 的彻底解：client 传 chest.id（server 不再猜 current）+ MySQL RowsAffected=0 不等同 NOT FOUND（20-7 r2）](2026-05-15-client-passes-id-server-doesnt-guess-current-and-rowsaffected-not-notfound-20-7-r2.md) | 2 | architecture, error-handling | `<pending>` |
+| 2026-05-15 | [domain-aware RowsAffected 语义（force-unlock 场景下 0=NotFound） & fix-review 迭代陷阱（over-correction chain）（20-7 r3）](2026-05-15-domain-aware-rowsaffected-and-over-correction-chain-20-7-r3.md) | 2 | error-handling, process | `<pending>` |

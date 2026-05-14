@@ -69,10 +69,10 @@ type ChestRepo interface {
 	// 交给 client（GET /chest/current 时刻 client 知道是哪个 id），server 只负责"按这个 id
 	// unlock"，不再做"current = 调用时刻看到的 chest"的盲打猜测。
 	//
-	// **race 不再成立**：chest 一旦绑定 user_id，user_id 字段不会改；UPDATE WHERE id 走 PK，
-	// chest 在 SELECT 后被 OpenChest 删除时 UPDATE 影响 0 行也不算错（service 不看 RowsAffected）。
-	// 极端场景：client 拿到 chest.id=X 后，X 被另一并发 OpenChest 删除并 INSERT Y → dev 端点
-	// UPDATE WHERE id=X 命中 0 行 → 视为成功（陈旧的 X 已不复存在，dev 端点已无须维护"current"语义）。
+	// **race 不再成立**：chest 一旦绑定 user_id，user_id 字段不会改；UPDATE WHERE id 走 PK。
+	// r3 [P2] 改造后，若 FindByID 后 chest 被另一并发 OpenChest 删除 → UpdateUnlockAtByID 影响 0 行
+	// → 翻译为 ErrChestNotFound → service 返 1003（让 client 重新 GET /chest/current 拿新 id 后重试）；
+	// 而非 r2 的"视为成功"——避免"dev 端点声称 unlock 成功但 GET /chest/current 仍 counting"的二阶 race。
 	//
 	// NotFound（PK 不存在）→ ErrChestNotFound 哨兵；service 层 errors.Is 翻译为 1003。
 	FindByID(ctx context.Context, chestID uint64) (*UserChest, error)
@@ -105,7 +105,8 @@ type ChestRepo interface {
 	Delete(ctx context.Context, id uint64) error
 
 	// UpdateUnlockAtByID 把指定 chestID 的 user_chests 行的 unlock_at 列更新为 newUnlockAt。Story 20.7 引入；
-	// 历经 r1 [P2]（→ UpdateUnlockAtByID(chestID)）和 r2 [P2]（彻底放弃 RowsAffected 语义）两次改造。
+	// 历经 r1 [P2]（→ UpdateUnlockAtByID(chestID)）、r2 [P2]（移除 RowsAffected 检查）、
+	// r3 [P2]（在 force-unlock 场景下重新加回 RowsAffected==0 → ErrChestNotFound）三次改造。
 	//
 	// # 历史改造路径
 	//
@@ -116,21 +117,32 @@ type ChestRepo interface {
 	// **r1 → r2 改造**：r1 的"FOR UPDATE SELECT 拿 id"在 OpenChest commit 后看到的 id **也是新 Y**
 	// （FOR UPDATE 锁释放后 SELECT 返回 commit 后的快照），race 没真正修好。r2 的彻底解：把"哪个 chest"
 	// 决策权交给 client —— client 先 GET /chest/current 拿到当前 chest.id，再 POST 这个 id；
-	// server 不再猜"current"语义，service 用 FindByID 校验存在性 + 归属，UPDATE 不看 RowsAffected。
+	// server 不再猜"current"语义，service 用 FindByID 校验存在性 + 归属。r2 同时**移除** RowsAffected
+	// 检查（顾虑"同毫秒重复 unlock 同 chest"值未变误判）。
 	//
-	// # rows_affected 语义（r2 改造后）
+	// **r2 → r3 改造（当前）**：r2 的"完全不看 RowsAffected"是 over-correction，引入二阶 race：
+	// service.ForceUnlockChest 步骤 (1) FindByID 拿 chest + 校验归属 → 步骤 (2) UPDATE 之间，
+	// 另一并发 /chest/open 把 chest 删除 → UPDATE 影响 0 行但 service 返 success → 用户体验
+	// 是"dev 端点声称 unlock 成功但 GET /chest/current 仍 counting"。r3 重新加回 RowsAffected==0
+	// → ErrChestNotFound 检查。
 	//
-	// **不再依赖 RowsAffected 区分 NotFound** —— r2 之前的实装依赖 "rows_affected=0 → ErrChestNotFound"
-	// 翻译为 1003，但有两个陷阱：
-	//   1. MySQL UPDATE 在值未变时也返 rows_affected=0（默认连接行为 changedRows 而非 matchedRows）。
-	//      同一毫秒两次 dev force-unlock 同一 chest → 第二次 unlock_at 与现值相同 → rows_affected=0
-	//      → **误判**为 ChestNotFound → 误返 1003。
-	//   2. r2 把"chest 是否存在"语义前置到 service.FindByID —— 此处 UPDATE 影响 0 行已合法（极端场景：
-	//      client 拿到 id=X 后，X 被并发 OpenChest 删除，UPDATE WHERE id=X 命中 0 行，dev 语义视为成功）。
+	// # rows_affected 语义（r3 改造后）
 	//
-	// **r2 实装**：
+	// **在 force-unlock 场景下，RowsAffected==0 等同于 NotFound**：
+	//   - newUnlockAt = time.Now().UTC()，系统时钟单调推进，毫秒级唯一 → unlock_at 列值必然变化
+	//     → 行存在时 MySQL 必返 RowsAffected=1
+	//   - RowsAffected==0 **唯一**来源 = 行已不存在（被并发 OpenChest 删除）
+	//   - r2 顾虑的"同毫秒重复 unlock 同行 → 值未变 → rows_affected=0"是理论 case：
+	//     time.Now() 毫秒级冲突极罕见 + 重试可恢复 + dev 端点对此容忍度高
+	//
+	// **r3 实装**：
 	//   - DB error（连接断 / SQL 错 / 死锁等）→ raw error 透传（service 层包成 1009）
-	//   - 否则 → 返 nil（不再区分 rows_affected 0/1）
+	//   - RowsAffected==0 → ErrChestNotFound 哨兵（service 层翻译为 1003）
+	//   - RowsAffected==1 → 返 nil
+	//
+	// **未来调用方注意**：若其他场景调用本方法且 newUnlockAt 可能与现有值"按位相同"
+	// （如固定时间常量、或传入 chest.UnlockAt 自身），需重新评估 RowsAffected==0 语义；
+	// 当前唯一调用方是 service.ForceUnlockChest，其 newUnlockAt 是 time.Now().UTC()。
 	//
 	// # 不改的字段
 	//
@@ -150,7 +162,8 @@ type ChestRepo interface {
 	//
 	// **不强制事务**（r2 改造后）：service 用 FindByID（非 FOR UPDATE）做存在性 + 归属校验后直接 UPDATE，
 	// chest 一旦绑定 user 不会改 user_id；UPDATE 走 PK 索引。r2 之前的 r1 实装强制事务（FOR UPDATE + UPDATE
-	// 同事务），但事务对 race 修复**无作用**（详见上面历史路径），徒增复杂度，r2 移除。
+	// 同事务），但事务对 race 修复**无作用**（详见上面历史路径），徒增复杂度，r2 移除。r3 通过 RowsAffected==0
+	// → NotFound 让 race（"FindByID 后 chest 被并发删除"）从"false success"变成"显式 1003"，无需事务。
 	UpdateUnlockAtByID(ctx context.Context, chestID uint64, newUnlockAt time.Time) error
 }
 
@@ -242,10 +255,10 @@ func (r *chestRepo) Delete(ctx context.Context, id uint64) error {
 //
 // 走 PRIMARY KEY id 索引。
 //
-// **r2 [P2] 改造**：不再检查 RowsAffected → 不再返 ErrChestNotFound 哨兵。
-// MySQL UPDATE 在值未变时 rows_affected=0（默认连接 changedRows 而非 matchedRows），
-// 会让"同一毫秒重复 unlock 同 chest"被误判为 ChestNotFound → 误返 1003。
-// 存在性 + 归属校验在 service 层用 FindByID 前置完成；本方法只做"UPDATE 这个 PK"。
+// **r3 [P2] 改造**：重新加回 RowsAffected==0 → ErrChestNotFound 检查（修复 r2 移除后引入的二阶
+// race —— service.FindByID 与 UPDATE 之间 chest 被并发 OpenChest 删除 → UPDATE 0 行但 service
+// 返 false success）。在 force-unlock 场景下，newUnlockAt = time.Now().UTC() 毫秒级唯一，行存在
+// 时 UPDATE 必返 RowsAffected=1；RowsAffected==0 唯一来源 = 行已不存在。
 //
 // **GORM 实装**：用 `gorm.DB.Model(&UserChest{}).Where("id = ?", chestID).Update("unlock_at", newUnlockAt)`
 // 而非 `.Save(&chest)` —— Save 会写入全部字段（含 version / status / open_cost_steps）+
@@ -254,5 +267,12 @@ func (r *chestRepo) Delete(ctx context.Context, id uint64) error {
 func (r *chestRepo) UpdateUnlockAtByID(ctx context.Context, chestID uint64, newUnlockAt time.Time) error {
 	db := tx.FromContext(ctx, r.db)
 	result := db.WithContext(ctx).Model(&UserChest{}).Where("id = ?", chestID).Update("unlock_at", newUnlockAt)
-	return result.Error
+	if result.Error != nil {
+		return result.Error
+	}
+	// r3 [P2]: 在 force-unlock 场景下 RowsAffected==0 等同于 NotFound（详见 interface doc）。
+	if result.RowsAffected == 0 {
+		return ErrChestNotFound
+	}
+	return nil
 }

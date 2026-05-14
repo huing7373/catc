@@ -12,8 +12,16 @@
 // **Story 20.7 review r2 [P2] 改造**：
 //   - service 不再注入 txMgr（r1 的"事务 + FOR UPDATE"对 race 修复无作用）
 //   - service.ForceUnlockChest 接 chestID 参数（client 通过 GET /chest/current 拿到）
-//   - 加 case 3 同一毫秒重复 unlock 同 chest（验 RowsAffected=0 不再误判 ChestNotFound）
-//   - 加 case 4 越权 unlock 他人 chest → 1003
+//
+// **Story 20.7 review r3 [P2] 改造**：
+//   - 重新加回 repo 层 RowsAffected==0 → ErrChestNotFound 翻译，修 r2 引入的二阶 race（FindByID 后
+//     chest 被并发 OpenChest 删除 → UPDATE 0 行但 service 返 false success → 用户体验 dev 端点
+//     "声称成功但 GET /chest/current 仍 counting"）
+//   - case 3 从"同一毫秒重复 unlock 同 chest 应成功"改为"FindByID 后并发删除 chest → 1003"
+//     —— 模拟二阶 race scenario：先 INSERT chest → 调 ForceUnlockChest 前先手工 DELETE → service 拿
+//     不到 chest（步骤 1 FindByID 返 NotFound）；后续也可加纯 UPDATE 路径的删除（绕过 FindByID）但
+//     stub 单测已覆盖 case 6 ConcurrentDeleteRace
+//   - case 4 越权 unlock 他人 chest → 1003
 
 package service_test
 
@@ -140,16 +148,19 @@ func TestDevChestServiceIntegration_ForceUnlockChest_ChestNotFound_Returns1003(t
 }
 
 // ============================================================
-// AC9 case 3: 同一毫秒重复 unlock 同 chest（r2 [P2] 新增）
+// AC9 case 3: 已删除的 chest（已为 PK 不存在）→ 1003（r3 [P2] 改造）
 // ============================================================
 //
-// 验证 r2 [P2] 修复：MySQL UPDATE 在值未变时返 RowsAffected=0，repo 层 r2 改造后
-// **不**再把 RowsAffected=0 翻译为 ErrChestNotFound，所以连续 2 次 unlock 同一 chest
-// 第 2 次应**成功**而非 1003。
+// **r2 → r3 改造**：r2 的 case 3 验证"同一毫秒重复 unlock 同 chest 应成功"（基于"RowsAffected=0
+// 不再误判"）；r3 把 RowsAffected==0 重新翻译为 ErrChestNotFound，恢复"chest 不存在 → 1003"语义。
+// 本 case 改为验证"chest 在 ForceUnlockChest 调用前已被删除 → 返 1003"——FindByID 直接返
+// NotFound 是步骤 1 短路路径，case 2 已覆盖；这里特意 INSERT 后立即 DELETE 来模拟"chest 曾存在
+// 但 dev 调用瞬间不存在"的边界。
 //
-// 模拟场景：client 拿到 chest.id，毫秒内连点 2 次 /dev/force-unlock-chest（自动化脚本
-// 重试 / 网络重发场景）。r1 实装会在第 2 次返 1003（误判），r2 修复后第 2 次返 nil。
-func TestDevChestServiceIntegration_ForceUnlockChest_DuplicateCallSameMillis_Succeeds(t *testing.T) {
+// 二阶 race（FindByID 拿到 chest 后 UPDATE 前被并发删除 → UPDATE 0 行 → repo 翻译为 ErrChestNotFound
+// → service 翻译为 1003）的单元覆盖由 dev_chest_service_test.go case 6 ConcurrentDeleteRace_Returns1003
+// 通过 stub 模拟（集成测试无法稳定复现"两个 query 之间另一个 transaction 完成 DELETE"的时序）。
+func TestDevChestServiceIntegration_ForceUnlockChest_ChestAlreadyDeleted_Returns1003(t *testing.T) {
 	svc, sqlDB, cleanup := buildDevChestServiceIntegration(t)
 	defer cleanup()
 
@@ -159,20 +170,18 @@ func TestDevChestServiceIntegration_ForceUnlockChest_DuplicateCallSameMillis_Suc
 	unlockAtFuture := time.Now().UTC().Add(10 * time.Minute)
 	insertChest(t, sqlDB, chestID, userID, 1, unlockAtFuture, 1000)
 
-	ctx := context.Background()
+	// 立即手工删除（模拟"chest 已被并发 OpenChest 删除"的时序终点状态）
+	if _, err := sqlDB.Exec(`DELETE FROM user_chests WHERE id = ?`, chestID); err != nil {
+		t.Fatalf("manual DELETE: %v", err)
+	}
 
-	// 第 1 次 unlock
-	if err := svc.ForceUnlockChest(ctx, userID, chestID); err != nil {
-		t.Fatalf("ForceUnlockChest #1: %v", err)
+	// dev force-unlock → FindByID 返 ErrChestNotFound → service 翻译为 1003
+	err := svc.ForceUnlockChest(context.Background(), userID, chestID)
+	if err == nil {
+		t.Fatal("ForceUnlockChest should fail when chest already deleted (r3 [P2])")
 	}
-	// 第 2 次紧接着 unlock（同一毫秒概率高）→ unlock_at 与现值相同 → MySQL rows_affected=0
-	// r1 实装会返 ErrChestNotFound → 1003；r2 实装应返 nil
-	if err := svc.ForceUnlockChest(ctx, userID, chestID); err != nil {
-		t.Fatalf("ForceUnlockChest #2 (same-millis duplicate; r2 [P2] should succeed, r1 would falsely return 1003): %v", err)
-	}
-	// 第 3 次（同样紧接，进一步加压 race 检出概率）
-	if err := svc.ForceUnlockChest(ctx, userID, chestID); err != nil {
-		t.Fatalf("ForceUnlockChest #3: %v", err)
+	if got := apperror.Code(err); got != apperror.ErrResourceNotFound {
+		t.Errorf("apperror.Code = %d, want %d (1003)", got, apperror.ErrResourceNotFound)
 	}
 }
 

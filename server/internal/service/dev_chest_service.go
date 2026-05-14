@@ -28,11 +28,15 @@ import (
 //   (b) chest.user_id == claimedUserID（防越权 unlock 他人 chest），UPDATE WHERE id 直接动 unlock_at。
 //   race 不再成立 —— 因为 server 不再猜"current"语义。
 //
-// # 为何不用事务（r2 改造后）
+// # 为何不用事务（r2 改造后）+ race 处理（r3 改造）
 //
-// chest 一旦绑定 user_id，user_id 字段永不变；UPDATE 走 PK 索引。极端 race：client 拿到 id=X 后，
-// X 被并发 OpenChest 删除 + INSERT Y → dev 端点 UPDATE WHERE id=X 影响 0 行 → 视为成功（陈旧的 X
-// 已不存在；dev 端点已无须维护"current"语义）。
+// chest 一旦绑定 user_id，user_id 字段永不变；UPDATE 走 PK 索引。
+//
+// **r3 [P2] 改造**：FindByID 拿到 chest + 校验归属后到 UpdateUnlockAtByID 之间存在二阶 race：
+// 若另一并发 /chest/open 删除 chest，UPDATE 会命中 0 行。r2 把"0 行视为成功"是 over-correction，
+// 导致 dev 端点 false success（声称 unlock 成功但 GET /chest/current 仍 counting）。r3 在 repo 层
+// 把 RowsAffected==0 翻译为 ErrChestNotFound 哨兵 → service 透传翻译为 1003 → client 重新 GET
+// /chest/current 拿新 chest.id 后重试。仍无须事务（user_id 不会改 + 重试可恢复）。
 //
 // # 错误约定（ADR-0006 三层映射）
 //
@@ -115,10 +119,15 @@ func (s *devChestServiceImpl) ForceUnlockChest(ctx context.Context, userID uint6
 		return apperror.New(apperror.ErrResourceNotFound, apperror.DefaultMessages[apperror.ErrResourceNotFound])
 	}
 
-	// (2) UPDATE WHERE id=chestID —— 不看 RowsAffected（极端 race 下 chest 可能已被 OpenChest 删除，
-	// 影响 0 行视为成功；详见 chest_repo.UpdateUnlockAtByID doc r2 [P2] 改造说明）
+	// (2) UPDATE WHERE id=chestID。r3 [P2] 改造：repo 在 RowsAffected==0 时返 ErrChestNotFound 哨兵
+	// （二阶 race —— FindByID 后 chest 被并发 OpenChest 删除），service 透传翻译为 1003。
 	now := time.Now().UTC()
 	if err := s.chestRepo.UpdateUnlockAtByID(ctx, chestID, now); err != nil {
+		if stderrors.Is(err, mysql.ErrChestNotFound) {
+			// r3 [P2]: 二阶 race（FindByID 后 chest 被并发删除）→ UPDATE 0 行 → 1003。
+			// 与步骤 (1) FindByID NotFound 同码（client 重试时 GET /chest/current 拿新 id）。
+			return apperror.Wrap(err, apperror.ErrResourceNotFound, apperror.DefaultMessages[apperror.ErrResourceNotFound])
+		}
 		return apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
 	}
 
