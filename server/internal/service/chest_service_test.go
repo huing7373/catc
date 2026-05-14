@@ -22,6 +22,16 @@ import (
 	"github.com/huing/cat/server/internal/service"
 )
 
+// newChestServiceForGetCurrent: Story 20.6 起 service.NewChestService 签名扩为 7 参数；
+// 20.5 GetCurrent 测试只关心 chestRepo，其他依赖传 nil（GetCurrent 不消费）。本 helper
+// 集中签名扩展处，避免每个 case 都重复构造 7 参数。
+//
+// 注意：传 nil 的 stepAccountRepo / idempotencyRepo / picker 等不会被 GetCurrent 路径访问；
+// OpenChest 路径在本文件 test 不被调（chest_open_service_test.go 已独立覆盖）。
+func newChestServiceForGetCurrent(repo mysql.ChestRepo) service.ChestService {
+	return service.NewChestService(repo, nil, nil, nil, nil, nil, nil)
+}
+
 // 1. HappyPath_Counting: unlock_at 在未来 5 分钟 → status=1 (counting), remainingSeconds ≈ 300
 func TestChestService_GetCurrent_HappyPath_Counting_Returns300s(t *testing.T) {
 	unlockAt := time.Now().UTC().Add(5 * time.Minute)
@@ -40,7 +50,7 @@ func TestChestService_GetCurrent_HappyPath_Counting_Returns300s(t *testing.T) {
 			}, nil
 		},
 	}
-	svc := service.NewChestService(repo)
+	svc := newChestServiceForGetCurrent(repo)
 
 	brief, err := svc.GetCurrent(context.Background(), 1001)
 	if err != nil {
@@ -82,7 +92,7 @@ func TestChestService_GetCurrent_HappyPath_Unlockable_DBStatus1_UnlockAtPassed_R
 			}, nil
 		},
 	}
-	svc := service.NewChestService(repo)
+	svc := newChestServiceForGetCurrent(repo)
 
 	brief, err := svc.GetCurrent(context.Background(), 1001)
 	if err != nil {
@@ -109,7 +119,7 @@ func TestChestService_GetCurrent_HappyPath_DBStatus2_Returns2_0s(t *testing.T) {
 			}, nil
 		},
 	}
-	svc := service.NewChestService(repo)
+	svc := newChestServiceForGetCurrent(repo)
 
 	brief, err := svc.GetCurrent(context.Background(), 1001)
 	if err != nil {
@@ -132,7 +142,7 @@ func TestChestService_GetCurrent_ChestNotFound_Returns4001(t *testing.T) {
 			return nil, mysql.ErrChestNotFound
 		},
 	}
-	svc := service.NewChestService(repo)
+	svc := newChestServiceForGetCurrent(repo)
 
 	brief, err := svc.GetCurrent(context.Background(), 1001)
 	if brief != nil {
@@ -166,7 +176,7 @@ func TestChestService_GetCurrent_ClockBoundary_RemainingSecondsNotNegative(t *te
 			}, nil
 		},
 	}
-	svc := service.NewChestService(repo)
+	svc := newChestServiceForGetCurrent(repo)
 
 	brief, err := svc.GetCurrent(context.Background(), 1001)
 	if err != nil {
@@ -193,7 +203,7 @@ func TestChestService_GetCurrent_RepoOtherDBError_Returns1009(t *testing.T) {
 			return nil, dbErr
 		},
 	}
-	svc := service.NewChestService(repo)
+	svc := newChestServiceForGetCurrent(repo)
 
 	brief, err := svc.GetCurrent(context.Background(), 1001)
 	if brief != nil {

@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	stderrors "errors"
 	"fmt"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"github.com/huing/cat/server/internal/infra/metrics"
 	redisinfra "github.com/huing/cat/server/internal/infra/redis"
 	"github.com/huing/cat/server/internal/pkg/auth"
+	"github.com/huing/cat/server/internal/pkg/random"
 	repomysql "github.com/huing/cat/server/internal/repo/mysql"
 	"github.com/huing/cat/server/internal/repo/tx"
 	"github.com/huing/cat/server/internal/service"
@@ -450,10 +452,26 @@ func NewRouter(deps Deps) *gin.Engine {
 		petSvc := service.NewPetService(petRepo, userRepo, deps.SessionMgr, petBroadcastFn)
 		petsHandler := handler.NewPetsHandler(petSvc)
 
-		// Story 20.5 加：chest service + handler（GET /chest/current，单查不开事务 + 动态判定）。
-		// 复用 4.8 已 wire 的 chestRepo 实例（避免重复构造同 db handle 的多个 repo）。
-		chestSvc := service.NewChestService(chestRepo)
-		chestHandler := handler.NewChestHandler(chestSvc)
+		// Story 20.6 加：4 个新 repo 实例 + 1 个 weightedPicker（注入到 chestSvc）。
+		// idempotencyRepo / cosmeticItemRepo / chestOpenLogRepo 由本 story 首次落地；
+		// weightedPicker 注入 crypto/rand.Reader（替代 math/rand 全局源 —— 防作弊钦定）。
+		cosmeticItemRepo := repomysql.NewCosmeticItemRepo(deps.GormDB)
+		chestOpenLogRepo := repomysql.NewChestOpenLogRepo(deps.GormDB)
+		idempotencyRepo := repomysql.NewIdempotencyRepo(deps.GormDB)
+		weightedPicker := random.NewCryptoWeightedPicker(cryptorand.Reader)
+
+		// Story 20.5 加：chest service + handler；Story 20.6 扩签名为 7 参数。
+		// 复用既有 chestRepo / stepAccountRepo / txMgr；注入本 story 4 新实例。
+		chestSvc := service.NewChestService(
+			chestRepo,
+			deps.TxMgr,
+			idempotencyRepo,
+			stepAccountRepo,
+			cosmeticItemRepo,
+			chestOpenLogRepo,
+			weightedPicker,
+		)
+		chestHandler := handler.NewChestHandler(chestSvc, idempotencyRepo, deps.RateLimitCfg)
 
 		api := r.Group("/api/v1")
 
@@ -474,6 +492,11 @@ func NewRouter(deps Deps) *gin.Engine {
 		authedGroup.POST("/steps/sync", stepsHandler.PostSync)     // Story 7.3 加
 		authedGroup.GET("/steps/account", stepsHandler.GetAccount) // Story 7.4 加
 		authedGroup.GET("/chest/current", chestHandler.GetCurrent) // Story 20.5 加
+		// Story 20.6 新增独立路由组 chestOpenGroup（**不**挂 RateLimit middleware；V1 §7.2.5.4 r10 钦定）：
+		// POST /chest/open 接口在 handler 内层做 rate_limit 检查（committed success replay 路径免配额）。
+		// 该路径与 authedGroup 路由的关键差异是仅挂 Auth 中间件，**没有** RateLimit middleware。
+		chestOpenGroup := api.Group("", middleware.Auth(deps.Signer))
+		chestOpenGroup.POST("/chest/open", chestHandler.Open)
 		authedGroup.POST("/rooms", roomHandler.CreateRoom)         // Story 11.3 加
 		// Story 11.4 加：POST /api/v1/rooms/:roomId/join 加入房间
 		authedGroup.POST("/rooms/:roomId/join", roomHandler.JoinRoom)

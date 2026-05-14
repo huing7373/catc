@@ -47,6 +47,15 @@ func (s *stubStepStepAccountRepo) UpdateBalance(ctx context.Context, userID uint
 	return s.updateBalanceFn(ctx, userID, delta, expectedVersion)
 }
 
+// FindByUserIDForUpdate / Spend: Story 20.6 引入；step_service 不调，stub 默认 panic。
+func (s *stubStepStepAccountRepo) FindByUserIDForUpdate(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+	panic("stubStepStepAccountRepo.FindByUserIDForUpdate not configured (step_service should not call it)")
+}
+
+func (s *stubStepStepAccountRepo) Spend(ctx context.Context, userID uint64, amount uint64, expectedVersion uint64) error {
+	panic("stubStepStepAccountRepo.Spend not configured (step_service should not call it)")
+}
+
 type stubStepSyncLogRepo struct {
 	findLatestFn  func(ctx context.Context, userID uint64, syncDate string) (*mysql.StepSyncLog, error)
 	sumAcceptedFn func(ctx context.Context, userID uint64, syncDate string) (int64, error)

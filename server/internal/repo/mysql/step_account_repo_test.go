@@ -123,3 +123,75 @@ func TestStepAccountRepo_UpdateBalance_HappyPath(t *testing.T) {
 		}
 	})
 }
+
+// Story 20.6 — FindByUserIDForUpdate + Spend 单测
+
+// TestStepAccountRepo_FindByUserIDForUpdate_HappyPath:
+// SELECT ... FOR UPDATE 走 clause.Locking{Strength: "UPDATE"}。
+func TestStepAccountRepo_FindByUserIDForUpdate_HappyPath(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewStepAccountRepo(gormDB)
+
+	rows := sqlmock.NewRows([]string{
+		"user_id", "total_steps", "available_steps", "consumed_steps", "version",
+		"created_at", "updated_at",
+	}).AddRow(1001, 1500, 1500, 0, 3, nil, nil)
+	mock.ExpectQuery(`SELECT \* FROM .user_step_accounts. WHERE user_id = \? ORDER BY .user_step_accounts.\..user_id. LIMIT \? FOR UPDATE`).
+		WithArgs(uint64(1001), 1).
+		WillReturnRows(rows)
+
+	got, err := repo.FindByUserIDForUpdate(context.Background(), 1001)
+	if err != nil {
+		t.Fatalf("FindByUserIDForUpdate: %v", err)
+	}
+	if got == nil || got.UserID != 1001 || got.AvailableSteps != 1500 || got.Version != 3 {
+		t.Errorf("got = %+v, want user=1001 available=1500 version=3", got)
+	}
+}
+
+// TestStepAccountRepo_FindByUserIDForUpdate_NotFound: 事务内查不到 → ErrStepAccountNotFound。
+func TestStepAccountRepo_FindByUserIDForUpdate_NotFound_ReturnsErrStepAccountNotFound(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewStepAccountRepo(gormDB)
+
+	rows := sqlmock.NewRows([]string{"user_id"})
+	mock.ExpectQuery(`SELECT \* FROM .user_step_accounts. WHERE user_id = \? ORDER BY .user_step_accounts.\..user_id. LIMIT \? FOR UPDATE`).
+		WithArgs(uint64(9999), 1).
+		WillReturnRows(rows)
+
+	got, err := repo.FindByUserIDForUpdate(context.Background(), 9999)
+	if got != nil {
+		t.Errorf("got = %+v, want nil", got)
+	}
+	if !stderrors.Is(err, ErrStepAccountNotFound) {
+		t.Errorf("err = %v, want ErrStepAccountNotFound", err)
+	}
+}
+
+// TestStepAccountRepo_Spend_HappyPath: rows_affected=1 → nil。
+// 验证 UPDATE ... SET available_steps - amount, consumed_steps + amount, version + 1。
+func TestStepAccountRepo_Spend_HappyPath(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewStepAccountRepo(gormDB)
+
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE `user_step_accounts`")).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := repo.Spend(context.Background(), 1001, 1000, 3); err != nil {
+		t.Fatalf("Spend: %v", err)
+	}
+}
+
+// TestStepAccountRepo_Spend_OptimisticLockConflict: rows_affected=0 → ErrStepAccountVersionMismatch。
+func TestStepAccountRepo_Spend_OptimisticLockConflict_ReturnsErrStepAccountVersionMismatch(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewStepAccountRepo(gormDB)
+
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE `user_step_accounts`")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	err := repo.Spend(context.Background(), 1001, 1000, 999)
+	if !stderrors.Is(err, ErrStepAccountVersionMismatch) {
+		t.Errorf("err = %v, want ErrStepAccountVersionMismatch", err)
+	}
+}

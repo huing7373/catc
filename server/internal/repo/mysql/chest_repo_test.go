@@ -100,3 +100,63 @@ func TestChestRepo_FindByUserID_NotFound_ReturnsErrChestNotFound(t *testing.T) {
 		t.Errorf("err = %v, want ErrChestNotFound", err)
 	}
 }
+
+// TestChestRepo_FindByUserIDForUpdate_HappyPath: Story 20.6 引入。
+// SELECT ... FOR UPDATE 走 clause.Locking{Strength: "UPDATE"}。
+func TestChestRepo_FindByUserIDForUpdate_HappyPath(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewChestRepo(gormDB)
+
+	utcUnlock := time.Now().UTC().Add(-1 * time.Minute) // unlockable 场景
+	rows := sqlmock.NewRows([]string{
+		"id", "user_id", "status", "unlock_at", "open_cost_steps", "version",
+		"created_at", "updated_at",
+	}).AddRow(5001, 1001, 1, utcUnlock, 1000, 3, nil, nil)
+	// SQL 含 "FOR UPDATE" 关键字（clause.Locking{Strength: "UPDATE"} 路径）
+	mock.ExpectQuery(`SELECT \* FROM .user_chests. WHERE user_id = \? ORDER BY .user_chests.\..id. LIMIT \? FOR UPDATE`).
+		WithArgs(uint64(1001), 1).
+		WillReturnRows(rows)
+
+	got, err := repo.FindByUserIDForUpdate(context.Background(), 1001)
+	if err != nil {
+		t.Fatalf("FindByUserIDForUpdate: %v", err)
+	}
+	if got == nil || got.ID != 5001 || got.UserID != 1001 || got.Version != 3 {
+		t.Errorf("got = %+v, want id=5001 user=1001 version=3", got)
+	}
+}
+
+// TestChestRepo_FindByUserIDForUpdate_NotFound_ReturnsErrChestNotFound:
+// 事务内查不到 → ErrChestNotFound（service 层翻译为 4001）
+func TestChestRepo_FindByUserIDForUpdate_NotFound_ReturnsErrChestNotFound(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewChestRepo(gormDB)
+
+	rows := sqlmock.NewRows([]string{"id"}) // 0 行
+	mock.ExpectQuery(`SELECT \* FROM .user_chests. WHERE user_id = \? ORDER BY .user_chests.\..id. LIMIT \? FOR UPDATE`).
+		WithArgs(uint64(9999), 1).
+		WillReturnRows(rows)
+
+	got, err := repo.FindByUserIDForUpdate(context.Background(), 9999)
+	if got != nil {
+		t.Errorf("got = %+v, want nil on NotFound", got)
+	}
+	if !stderrors.Is(err, ErrChestNotFound) {
+		t.Errorf("err = %v, want ErrChestNotFound", err)
+	}
+}
+
+// TestChestRepo_Delete_HappyPath: Story 20.6 引入。
+// DELETE FROM user_chests WHERE id = ?。
+func TestChestRepo_Delete_HappyPath(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewChestRepo(gormDB)
+
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM `user_chests`")).
+		WithArgs(uint64(5001)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := repo.Delete(context.Background(), 5001); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+}

@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -129,6 +130,167 @@ func RateLimitByUserID(c *gin.Context) string {
 func RateLimit(cfg config.RateLimitConfig, extractor KeyExtractor) gin.HandlerFunc {
 	h, _ := newRateLimit(cfg, extractor)
 	return h
+}
+
+// userIDRateChecker 是 Story 20.6 引入的 handler 内层 rate_limit 专用限频器
+// （V1 §7.2.5.4 r10 钦定：POST /chest/open 路由层 opt-out RateLimit middleware，
+// rate_limit 检查由 handler 在 idempotency 命中预检之后显式调用，cached success
+// replay 免配额）。
+//
+// **设计权衡**：
+//   - 现有 `RateLimit` 工厂每次返回独立闭包（带独立 buckets map）；handler 内层
+//     直接调 `RateLimit(...)` 会让每次请求都构造新闭包 → 完全失效
+//   - 解决路径：复用 newRateLimit 核心限频逻辑（per-key Limiter + buckets sync.Map
+//     + count atomic + overflow 兜底）；新增 Check 方法接受 user-ID key 直接执行
+//   - 与 `RateLimit` 工厂共享内部行为（user-ID extractor 同模式 + 同 cfg 解析）；
+//     仅替换 caller-facing 路径（gin.HandlerFunc → 返 error）
+type userIDRateChecker struct {
+	buckets      *sync.Map
+	count        *atomic.Int64
+	overflow     *rate.Limiter
+	perSec       rate.Limit
+	burst        int
+	bucketsLimit int64
+}
+
+// newUserIDRateChecker 按 cfg 构造一个新的限频实例；cfg 解析逻辑与 newRateLimit 一致
+// （任一 cfg 字段 nil / 非法 → panic；与 RateLimit 工厂的启动期 fail-fast 约束一致）。
+func newUserIDRateChecker(cfg config.RateLimitConfig) *userIDRateChecker {
+	if cfg.PerKeyPerMin == nil {
+		panic("middleware.CheckRateLimitByUserID: PerKeyPerMin must not be nil")
+	}
+	if cfg.BurstSize == nil {
+		panic("middleware.CheckRateLimitByUserID: BurstSize must not be nil")
+	}
+	if cfg.BucketsLimit == nil {
+		panic("middleware.CheckRateLimitByUserID: BucketsLimit must not be nil")
+	}
+	perKeyPerMin := *cfg.PerKeyPerMin
+	if perKeyPerMin <= 0 {
+		panic(fmt.Sprintf("middleware.CheckRateLimitByUserID: PerKeyPerMin must be > 0, got %d", perKeyPerMin))
+	}
+	burstSize := *cfg.BurstSize
+	if burstSize <= 0 {
+		burstSize = perKeyPerMin
+	}
+	bucketsLimit := *cfg.BucketsLimit
+	if bucketsLimit <= 0 {
+		bucketsLimit = 10000
+	}
+	perSec := rate.Limit(float64(perKeyPerMin) / 60.0)
+	burst := int(burstSize)
+	return &userIDRateChecker{
+		buckets:      &sync.Map{},
+		count:        &atomic.Int64{},
+		overflow:     rate.NewLimiter(perSec, burst),
+		perSec:       perSec,
+		burst:        burst,
+		bucketsLimit: bucketsLimit,
+	}
+}
+
+// Check 按 userID 走限频判定（与 newRateLimit handler 内 buckets / overflow / CAS
+// 逻辑等价）。
+//
+// 返回值：
+//   - nil: 通过
+//   - *apperror.AppError(ErrTooManyRequests=1005, ...): 超限
+//
+// **userID == 0 兜底**：按 "key 为空 → 放行" 路径（与 newRateLimit handler 内
+// `if key == ""` 分支一致）。实际场景 auth 中间件已注入合法 userID，应是不可达分支；
+// 保守放行避免阻塞合法请求。
+func (rc *userIDRateChecker) Check(userID uint64) error {
+	if userID == 0 {
+		// key 为空场景 → 放行（与 newRateLimit `if key == ""` 一致）
+		return nil
+	}
+	key := fmt.Sprintf("user:%d", userID)
+	var lim *rate.Limiter
+	if v, ok := rc.buckets.Load(key); ok {
+		lim = v.(*rate.Limiter)
+	} else {
+		// CAS 预占一个 bucket 槽位再 LoadOrStore（与 newRateLimit 同模式）
+		reserved := false
+		for {
+			cur := rc.count.Load()
+			if cur >= rc.bucketsLimit {
+				break
+			}
+			if rc.count.CompareAndSwap(cur, cur+1) {
+				reserved = true
+				break
+			}
+		}
+		if !reserved {
+			lim = rc.overflow
+		} else {
+			newLim := rate.NewLimiter(rc.perSec, rc.burst)
+			actual, loaded := rc.buckets.LoadOrStore(key, newLim)
+			lim = actual.(*rate.Limiter)
+			if loaded {
+				rc.count.Add(-1)
+			}
+		}
+	}
+	if !lim.Allow() {
+		return apperror.New(apperror.ErrTooManyRequests, apperror.DefaultMessages[apperror.ErrTooManyRequests])
+	}
+	return nil
+}
+
+// chestOpenUserIDLimiter 是 process 级别的 handler 内层 rate_limit 单例
+// （sync.Once 守护 lazy init；首次 CheckRateLimitByUserID 调用时按 cfg 构造）。
+//
+// **限制**：cfg 一次性冻结；首次构造后即使再传入不同 cfg 也只用首次的 cfg
+// （与 RateLimit 工厂 "YAML 改了要重启" 约束一致）。
+var (
+	chestOpenUserIDLimiterOnce sync.Once
+	chestOpenUserIDLimiter     *userIDRateChecker
+)
+
+// CheckRateLimitByUserID 是 Story 20.6 引入的 handler 内层 rate_limit 入口
+// （V1 §7.2.5.4 r10 钦定）。
+//
+// **使用场景**：POST /chest/open 路由层 opt-out RateLimit middleware；handler 在
+// idempotency autocommit 预检后，仅对**未命中** committed success replay 的请求
+// 显式调本函数做限频兜底。命中 success replay 的请求**跳过**本函数（免配额）。
+//
+// 返回值：
+//   - nil：通过（请求未超频；调用方继续走业务事务）
+//   - *apperror.AppError(ErrTooManyRequests=1005, ...)：超限；调用方应
+//     `c.Error(err) + return`（中间件链会把 1005 envelope 写回）
+//
+// **cfg 一次性冻结**：首次调用本函数时按 cfg 构造 limiter 实例；后续调用即使
+// 传入不同 cfg，也只用首次的 cfg。process 重启才能切到新 cfg。这与 RateLimit
+// 工厂 "YAML 改了要重启" 约束一致（详见 RateLimit 顶部 # 配置 reload 段）。
+//
+// **ctx 当前未消费**：保留 ctx 参数为 future log / trace ID 关联预留；当前实装内部
+// 限频逻辑不消费 ctx（rate.Limiter.Allow() 不接 ctx）。
+func CheckRateLimitByUserID(ctx context.Context, cfg config.RateLimitConfig, userID uint64) error {
+	_ = ctx // 未消费；future log / trace 关联预留
+	chestOpenUserIDLimiterOnce.Do(func() {
+		chestOpenUserIDLimiter = newUserIDRateChecker(cfg)
+	})
+	return chestOpenUserIDLimiter.Check(userID)
+}
+
+// resetChestOpenUserIDLimiterForTest 是测试专用 hook（同 package 单测访问）。
+//
+// **不**导出（仅同包测试访问）；跨包测试用 ResetChestOpenUserIDLimiterForTest 导出版本。
+func resetChestOpenUserIDLimiterForTest() {
+	chestOpenUserIDLimiterOnce = sync.Once{}
+	chestOpenUserIDLimiter = nil
+}
+
+// ResetChestOpenUserIDLimiterForTest 是测试专用导出 hook。
+//
+// **关键警告**：本函数**仅供测试用**！生产代码绝对不应调用 —— 会重置 sync.Once
+// + 丢失现有 limiter 实例，让所有进行中的限频窗口归零（可被滥用为绕过限频）。
+//
+// 用于跨包测试（如 handler 包测试 chest_open）需要重置 process 级 limiter 状态，
+// 避免不同 case 之间状态串扰。
+func ResetChestOpenUserIDLimiterForTest() {
+	resetChestOpenUserIDLimiterForTest()
 }
 
 // newRateLimit 是 RateLimit 的内部实现，额外返回一个 *atomic.Int64（buckets

@@ -1,7 +1,12 @@
 package mysql
 
 import (
+	"context"
 	"time"
+
+	"gorm.io/gorm"
+
+	"github.com/huing/cat/server/internal/repo/tx"
 )
 
 // CosmeticItem 是 cosmetic_items 表的完整 GORM domain struct（Story 20.2 引入；
@@ -51,3 +56,50 @@ type CosmeticItem struct {
 
 // TableName 显式声明 "cosmetic_items"。
 func (CosmeticItem) TableName() string { return "cosmetic_items" }
+
+// CosmeticItemRepo 是 cosmetic_items 表的访问接口（Story 20.6 引入；
+// 本 story 阶段唯一方法 ListEnabledForWeightedPick —— 开箱事务步骤 5g 加权抽取）。
+//
+// **范围红线**：本 interface 仅含本 story 业务路径所需方法；**不**提前实装
+// Create / Update / Delete / FindByID 等方法（YAGNI；那些路径未来 catalog / inventory
+// epic owner —— Epic 23 落地 GET /cosmetics/catalog / inventory 接口时再补）。
+type CosmeticItemRepo interface {
+	// ListEnabledForWeightedPick 返回所有 is_enabled=1 的 cosmetic_items 行
+	// （含 id / rarity / drop_weight / name / slot / asset_url / icon_url；
+	// V1 §7.2.5g 钦定的字段集）。
+	//
+	// 调用方语义：开箱事务步骤 5g 加权抽取一次性拉全表 enabled 集合
+	// （节点 7 阶段 enabled 集合约 15-20 行，单次扫表 + service 内加权采样足够；
+	// N+1 单查每件反而劣化）。事务内 / 事务外都可调，由 ctx 决定走 tx 还是 db。
+	//
+	// 返回空切片 → service 层翻译为 1009 "seed 未执行"数据完整性异常（V1 §7.2.5g 钦定）。
+	//
+	// query 失败 → 返 raw error 透传（service 包成 1009）。
+	ListEnabledForWeightedPick(ctx context.Context) ([]CosmeticItem, error)
+}
+
+// cosmeticItemRepo 是 CosmeticItemRepo 的默认实装。
+type cosmeticItemRepo struct {
+	db *gorm.DB
+}
+
+// NewCosmeticItemRepo 构造 CosmeticItemRepo。Story 20.6 引入。
+func NewCosmeticItemRepo(db *gorm.DB) CosmeticItemRepo {
+	return &cosmeticItemRepo{db: db}
+}
+
+// ListEnabledForWeightedPick 实装：SELECT 所有 is_enabled=1 行。
+//
+// GORM Find 自动把空结果集映射为空切片（非 nil）；service 层用 len(items)==0 判断
+// 而非 nil 判断。
+func (r *cosmeticItemRepo) ListEnabledForWeightedPick(ctx context.Context) ([]CosmeticItem, error) {
+	db := tx.FromContext(ctx, r.db)
+	var items []CosmeticItem
+	err := db.WithContext(ctx).
+		Where("is_enabled = ?", 1).
+		Find(&items).Error
+	if err != nil {
+		return nil, err
+	}
+	return items, nil
+}

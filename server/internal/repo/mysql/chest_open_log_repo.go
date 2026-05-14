@@ -1,7 +1,12 @@
 package mysql
 
 import (
+	"context"
 	"time"
+
+	"gorm.io/gorm"
+
+	"github.com/huing/cat/server/internal/repo/tx"
 )
 
 // ChestOpenLog 是 chest_open_logs 表的完整 GORM domain struct（Story 20.4 引入；
@@ -50,3 +55,35 @@ type ChestOpenLog struct {
 
 // TableName 显式声明 "chest_open_logs"。
 func (ChestOpenLog) TableName() string { return "chest_open_logs" }
+
+// ChestOpenLogRepo 是 chest_open_logs 表的访问接口（Story 20.6 引入；
+// 本 story 阶段唯一方法 Create —— 开箱事务步骤 5h 写一行）。
+//
+// **范围红线**：本 interface 仅含本 story 业务路径所需方法；**不**提前实装
+// FindByUserID / 历史查询等方法（YAGNI；那些路径未来运营 epic owner）。
+type ChestOpenLogRepo interface {
+	// Create 在事务内插入一行 chest_open_logs（V1 §7.2.5h 钦定的"开箱日志写入"）。
+	// GORM 在成功后回填 log.ID（AUTO_INCREMENT）。
+	//
+	// **必须在事务内调用**（与同事务前面的 UPDATE step_account / DELETE chest /
+	// INSERT new chest 一起原子提交）。
+	//
+	// query 失败 → 返 raw error 透传（service 包成 1009）。
+	Create(ctx context.Context, log *ChestOpenLog) error
+}
+
+// chestOpenLogRepo 是 ChestOpenLogRepo 的默认实装。
+type chestOpenLogRepo struct {
+	db *gorm.DB
+}
+
+// NewChestOpenLogRepo 构造 ChestOpenLogRepo。Story 20.6 引入。
+func NewChestOpenLogRepo(db *gorm.DB) ChestOpenLogRepo {
+	return &chestOpenLogRepo{db: db}
+}
+
+// Create 实装：INSERT 一行 chest_open_logs；GORM 自动回填 log.ID。
+func (r *chestOpenLogRepo) Create(ctx context.Context, log *ChestOpenLog) error {
+	db := tx.FromContext(ctx, r.db)
+	return db.WithContext(ctx).Create(log).Error
+}

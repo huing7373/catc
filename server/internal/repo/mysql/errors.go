@@ -88,4 +88,11 @@ var (
 	// 是业务码 6001；同名不同包是故意的，让阅读对照容易。
 	// 由 Story 11.4 (POST /rooms/{roomId}/join) 引入；Story 11.5 (leave) 也会消费同哨兵。
 	ErrRoomNotFound = errors.New("mysql: room not found")
+
+	// ErrIdempotencyRecordNotFound: IdempotencyRepo.FindByUserIDAndKey 查不到行
+	// （合法 case —— 首次到达；service 层用 errors.Is 区分语义后走主流程）；
+	// 同样由 IdempotencyRepo.MarkSuccess rows_affected=0 返回（理论不应发生 ——
+	// 同事务前面 ClaimPending 必已 INSERT；实际触发说明上游调用顺序错乱，
+	// 按 1009 透传）。由 Story 20.6 引入。
+	ErrIdempotencyRecordNotFound = errors.New("mysql: idempotency record not found")
 )

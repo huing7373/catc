@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/huing/cat/server/internal/repo/tx"
 )
@@ -52,6 +53,33 @@ type ChestRepo interface {
 	// 节点 2 阶段消费方：home_service.LoadHome（Story 4.8）；节点 7 chest_service.GetCurrent
 	// （Story 20.5）也会消费 —— 与 home_service 共享同一查询，避免双查。
 	FindByUserID(ctx context.Context, userID uint64) (*UserChest, error)
+
+	// FindByUserIDForUpdate 取 user_chests 行并对该行加排他锁（FOR UPDATE）。Story 20.6 引入。
+	//
+	// **必须在事务内调用**（caller 传入的 ctx 必须是 txMgr.WithTx 注入的 txCtx）；
+	// 事务外调用时 FOR UPDATE 锁会被 driver 立即释放（autocommit 模式下任何 SELECT
+	// 完成即 commit），等同于普通 SELECT，违反 V1 §7.2.5c "FOR UPDATE 行锁串行化" 钦定。
+	// ADR-0007 §2.4 钦定 fn 内全部 repo 调用用 txCtx。
+	//
+	// GORM clause.Locking{Strength: "UPDATE"} 路径生成 SELECT ... FOR UPDATE SQL；
+	// 与 room_repo.FindByIDForUpdate 同模式。
+	//
+	// 找不到 → 返 ErrChestNotFound 哨兵（与 FindByUserID 共用同一哨兵；
+	// service 层 errors.Is 后翻译为 4001 ErrChestNotFound）。
+	FindByUserIDForUpdate(ctx context.Context, userID uint64) (*UserChest, error)
+
+	// Delete 按 id 删除 user_chests 行。Story 20.6 引入；用于 V1 §7.2.5i 刷新下一轮 chest
+	// （先 DELETE 旧 chest 再 INSERT 新 chest，避免与 uk_user_id UNIQUE 索引冲突）。
+	//
+	// **必须在事务内调用**（与同事务 INSERT 新 chest 一起原子提交）；事务外调用 = race
+	// 风险（删完到 INSERT 之间用户可能读到 "chest 不存在" 中间态）。
+	//
+	// rows_affected 不做返回值约束（理论必删 1 行 —— 同事务前面 FindByUserIDForUpdate 已
+	// 拿到这一行；rows_affected=0 = 上游调用顺序错乱，service 不感知该信号，由后续 INSERT
+	// 或 commit 期失败兜底）。
+	//
+	// query 失败 → 返 raw error 透传（service 包成 1009）。
+	Delete(ctx context.Context, id uint64) error
 }
 
 // chestRepo 是 ChestRepo 的默认实装。
@@ -93,4 +121,29 @@ func (r *chestRepo) FindByUserID(ctx context.Context, userID uint64) (*UserChest
 		return nil, err
 	}
 	return &c, nil
+}
+
+// FindByUserIDForUpdate 实装：SELECT ... FOR UPDATE 走 clause.Locking{Strength: "UPDATE"}。
+//
+// 走 uk_user_id 唯一索引（与 FindByUserID 同）；事务内锁该行，让并发 OpenChest 串行化。
+func (r *chestRepo) FindByUserIDForUpdate(ctx context.Context, userID uint64) (*UserChest, error) {
+	db := tx.FromContext(ctx, r.db)
+	var c UserChest
+	err := db.WithContext(ctx).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("user_id = ?", userID).
+		First(&c).Error
+	if err != nil {
+		if stderrors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrChestNotFound
+		}
+		return nil, err
+	}
+	return &c, nil
+}
+
+// Delete 实装：DELETE FROM user_chests WHERE id = ?。
+func (r *chestRepo) Delete(ctx context.Context, id uint64) error {
+	db := tx.FromContext(ctx, r.db)
+	return db.WithContext(ctx).Delete(&UserChest{}, id).Error
 }

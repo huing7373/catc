@@ -62,6 +62,16 @@ func (s *stubHomeStepAccountRepo) UpdateBalance(ctx context.Context, userID uint
 	panic("stubHomeStepAccountRepo.UpdateBalance not configured (home_service should not call it)")
 }
 
+// FindByUserIDForUpdate Story 20.6 加：home_service 不调；保留以满足 interface。
+func (s *stubHomeStepAccountRepo) FindByUserIDForUpdate(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+	panic("stubHomeStepAccountRepo.FindByUserIDForUpdate not configured (home_service should not call it)")
+}
+
+// Spend Story 20.6 加：home_service 不调；保留以满足 interface。
+func (s *stubHomeStepAccountRepo) Spend(ctx context.Context, userID uint64, amount uint64, expectedVersion uint64) error {
+	panic("stubHomeStepAccountRepo.Spend not configured (home_service should not call it)")
+}
+
 type stubHomeChestRepo struct {
 	findByUserIDFn func(ctx context.Context, userID uint64) (*mysql.UserChest, error)
 }
@@ -69,6 +79,16 @@ type stubHomeChestRepo struct {
 func (s *stubHomeChestRepo) Create(ctx context.Context, c *mysql.UserChest) error { return nil }
 func (s *stubHomeChestRepo) FindByUserID(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
 	return s.findByUserIDFn(ctx, userID)
+}
+
+// FindByUserIDForUpdate Story 20.6 加：home_service 不调；保留以满足 interface。
+func (s *stubHomeChestRepo) FindByUserIDForUpdate(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
+	panic("stubHomeChestRepo.FindByUserIDForUpdate not configured (home_service should not call it)")
+}
+
+// Delete Story 20.6 加：home_service 不调；保留以满足 interface。
+func (s *stubHomeChestRepo) Delete(ctx context.Context, id uint64) error {
+	panic("stubHomeChestRepo.Delete not configured (home_service should not call it)")
 }
 
 // buildHomeService 用 4 个 stub repo 构造 HomeService。每个 case 独立设置 fn。

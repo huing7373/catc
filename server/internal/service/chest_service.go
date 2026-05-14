@@ -6,15 +6,16 @@ import (
 	"time"
 
 	apperror "github.com/huing/cat/server/internal/pkg/errors"
+	"github.com/huing/cat/server/internal/pkg/random"
 	"github.com/huing/cat/server/internal/repo/mysql"
+	"github.com/huing/cat/server/internal/repo/tx"
 )
 
 // ChestService 是 chest handler 的依赖 interface（便于 handler 单测 mock）。
 //
 // **接口而非具体类型**：handler 单测注入 stub struct，与 7.4 / 17.4 / 11.6 同模式。
 //
-// 节点 7 阶段仅 GetCurrent；future Story 20.6 落地 POST /chest/open 时**另起独立 interface**
-// （或在本 interface 末尾追加 OpenChest 方法 + 复用 chestServiceImpl）—— 本 story 不预实装。
+// Story 20.5 落地 GetCurrent；Story 20.6 追加 OpenChest（POST /chest/open）。
 type ChestService interface {
 	// GetCurrent 处理 GET /api/v1/chest/current 业务（Story 20.5）。
 	//
@@ -34,24 +35,66 @@ type ChestService interface {
 	// **不**接事务（纯读，与 home_service.LoadHome / step_service.GetAccount 同模式）。
 	// **不**更新 DB（动态判定，节省写；真状态变更在开箱事务 Story 20.6）。
 	GetCurrent(ctx context.Context, userID uint64) (*ChestBrief, error)
+
+	// OpenChest 处理 POST /api/v1/chest/open 业务（Story 20.6）。
+	//
+	// 流程（V1 §7.2.5 8 步事务 + handler 内层 rate_limit 不在本 service 做）：
+	//   1. 入参校验（idempotencyKey length 兜底；非业务必走，handler 已校验）
+	//   2. 步骤 3: 幂等命中预检（autocommit SELECT idempotency 行）→ 命中 success → 直接返 cached
+	//   3. 步骤 5: 业务事务（txMgr.WithTx fn）：5a 预声明 → 5b 短路 / 5c-l 全流程
+	//
+	// 步骤 4 (rate_limit) 由 handler 层做；本 service 不感知。
+	//
+	// 详见 chest_open_service.go 顶部注释 + V1 §7.2 r1~r15 决策段。
+	OpenChest(ctx context.Context, in OpenChestInput) (*OpenChestOutput, error)
 }
 
 // chestServiceImpl 是 ChestService 的默认实装。
 //
 // 依赖（DI 注入；bootstrap.NewRouter 内 wire）：
 //   - chestRepo: mysql.ChestRepo（4.6 已实装）
-//
-// **不**依赖：
-//   - txMgr（GET /chest/current 全只读，无事务）
-//   - userRepo / petRepo / stepAccountRepo（chest 单表查询不聚合其他实体）
-//   - signer（auth 中间件已校验 token，handler 已注入 userID）
+//   - Story 20.6 起追加：txMgr / idempotencyRepo / stepAccountRepo / cosmeticItemRepo /
+//     chestOpenLogRepo / weightedPicker / nowFn（OpenChest 业务事务依赖）
 type chestServiceImpl struct {
 	chestRepo mysql.ChestRepo
+
+	// Story 20.6 引入字段（OpenChest 业务事务依赖）；Story 20.5 GetCurrent 不消费。
+	txMgr            tx.Manager
+	idempotencyRepo  mysql.IdempotencyRepo
+	stepAccountRepo  mysql.StepAccountRepo
+	cosmeticItemRepo mysql.CosmeticItemRepo
+	chestOpenLogRepo mysql.ChestOpenLogRepo
+	weightedPicker   random.WeightedPicker
+	nowFn            func() time.Time
 }
 
-// NewChestService 构造 ChestService。
-func NewChestService(chestRepo mysql.ChestRepo) ChestService {
-	return &chestServiceImpl{chestRepo: chestRepo}
+// NewChestService 构造 ChestService。Story 20.6 扩展签名为 7 参数 + nowFn 默认 UTC。
+//
+// **签名变更（向后不兼容）**：Story 20.5 仅 1 参数（chestRepo）；Story 20.6 起需要
+// 注入业务事务全部依赖（txMgr / idempotencyRepo / stepAccountRepo /
+// cosmeticItemRepo / chestOpenLogRepo / weightedPicker）。router.go wire 一并扩展。
+//
+// nowFn 内部默认 `func() time.Time { return time.Now().UTC() }`；单测可注入 mock
+// 时钟覆盖 chestServiceImpl.nowFn 字段。
+func NewChestService(
+	chestRepo mysql.ChestRepo,
+	txMgr tx.Manager,
+	idempotencyRepo mysql.IdempotencyRepo,
+	stepAccountRepo mysql.StepAccountRepo,
+	cosmeticItemRepo mysql.CosmeticItemRepo,
+	chestOpenLogRepo mysql.ChestOpenLogRepo,
+	weightedPicker random.WeightedPicker,
+) ChestService {
+	return &chestServiceImpl{
+		chestRepo:        chestRepo,
+		txMgr:            txMgr,
+		idempotencyRepo:  idempotencyRepo,
+		stepAccountRepo:  stepAccountRepo,
+		cosmeticItemRepo: cosmeticItemRepo,
+		chestOpenLogRepo: chestOpenLogRepo,
+		weightedPicker:   weightedPicker,
+		nowFn:            func() time.Time { return time.Now().UTC() },
+	}
 }
 
 // GetCurrent 实装：单表查询 user_chests → 动态判定 → ChestBrief。

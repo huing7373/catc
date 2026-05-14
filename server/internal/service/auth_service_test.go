@@ -98,6 +98,18 @@ func (s *stubStepAccountRepo) UpdateBalance(ctx context.Context, userID uint64, 
 	panic("stubStepAccountRepo.UpdateBalance not configured (auth_service should not call it)")
 }
 
+// FindByUserIDForUpdate 是 Story 20.6 新加到 StepAccountRepo interface 的方法；
+// auth_service / chest_service (20.5) 都不调，仅 chest_open_service (20.6) 用。
+// 本 stub 默认 panic，让"误调"立刻可见；20.6 service test 用独立 stub。
+func (s *stubStepAccountRepo) FindByUserIDForUpdate(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+	panic("stubStepAccountRepo.FindByUserIDForUpdate not configured (auth_service / 20.5 should not call it)")
+}
+
+// Spend 同上：Story 20.6 引入；本 stub 默认 panic。
+func (s *stubStepAccountRepo) Spend(ctx context.Context, userID uint64, amount uint64, expectedVersion uint64) error {
+	panic("stubStepAccountRepo.Spend not configured (auth_service / 20.5 should not call it)")
+}
+
 type stubChestRepo struct {
 	createFn       func(ctx context.Context, c *mysql.UserChest) error
 	findByUserIDFn func(ctx context.Context, userID uint64) (*mysql.UserChest, error)
@@ -113,6 +125,17 @@ func (s *stubChestRepo) FindByUserID(ctx context.Context, userID uint64) (*mysql
 		return s.findByUserIDFn(ctx, userID)
 	}
 	panic("stubChestRepo.FindByUserID not configured")
+}
+
+// FindByUserIDForUpdate 是 Story 20.6 新加到 ChestRepo interface 的方法。
+// auth_service / chest_service (20.5) 都不调；本 stub 默认 panic。
+func (s *stubChestRepo) FindByUserIDForUpdate(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
+	panic("stubChestRepo.FindByUserIDForUpdate not configured (auth_service / 20.5 should not call it)")
+}
+
+// Delete 同上：Story 20.6 引入。
+func (s *stubChestRepo) Delete(ctx context.Context, id uint64) error {
+	panic("stubChestRepo.Delete not configured (auth_service / 20.5 should not call it)")
 }
 
 // stubTxMgr.WithTx 直接调 fn —— mock 不真开事务（业务正确性靠 fn 内 repo 调用顺序断言；

@@ -27,18 +27,29 @@ import (
 
 	"github.com/huing/cat/server/internal/app/http/handler"
 	"github.com/huing/cat/server/internal/app/http/middleware"
+	"github.com/huing/cat/server/internal/infra/config"
 	apperror "github.com/huing/cat/server/internal/pkg/errors"
 	"github.com/huing/cat/server/internal/pkg/response"
 	"github.com/huing/cat/server/internal/service"
 )
 
 // stubChestService 是 service.ChestService 的 stub 实装，仅服务于 chest_handler_test.go。
+// Story 20.6 加 openChestFn 字段以满足 interface 新加方法 OpenChest。
 type stubChestService struct {
 	getCurrentFn func(ctx context.Context, userID uint64) (*service.ChestBrief, error)
+	openChestFn  func(ctx context.Context, in service.OpenChestInput) (*service.OpenChestOutput, error)
 }
 
 func (s *stubChestService) GetCurrent(ctx context.Context, userID uint64) (*service.ChestBrief, error) {
 	return s.getCurrentFn(ctx, userID)
+}
+
+// OpenChest Story 20.6 加：interface 新方法；20.5 测试不消费 → panic 兜底。
+func (s *stubChestService) OpenChest(ctx context.Context, in service.OpenChestInput) (*service.OpenChestOutput, error) {
+	if s.openChestFn != nil {
+		return s.openChestFn(ctx, in)
+	}
+	panic("stubChestService.OpenChest not configured")
 }
 
 // newChestHandlerRouter 构造测试 router：挂 ErrorMappingMiddleware + 注入 mockUserID + 注册 GET /chest/current。
@@ -56,7 +67,9 @@ func newChestHandlerRouter(svc service.ChestService, mockUserID *uint64) *gin.En
 			c.Next()
 		})
 	}
-	h := handler.NewChestHandler(svc)
+	// Story 20.6 改：NewChestHandler 签名 3 参数；20.5 GetCurrent 测试不消费 idempotencyChecker / rateLimitCfg，
+	// 传入 nil + zero-value 即可（GetCurrent 路径不访问该字段）。
+	h := handler.NewChestHandler(svc, nil, config.RateLimitConfig{})
 	r.GET("/api/v1/chest/current", h.GetCurrent)
 	return r
 }
