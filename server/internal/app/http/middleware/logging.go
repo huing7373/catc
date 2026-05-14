@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -9,6 +10,21 @@ import (
 	"github.com/huing/cat/server/internal/infra/logger"
 	"github.com/huing/cat/server/internal/infra/metrics"
 )
+
+// devURLPrefix 标记 dev / stub / preview 端点的 **raw URL** 前缀。
+//
+// 与 metrics.isDevPath 的 Gin pattern path 检查互为**双层防御**：
+//
+//   - metrics 层（callee 侧）：基于 Gin c.FullPath() 返回的已解析 pattern
+//     （如 "/dev/grant-cosmetic-batch"）做 prefix 匹配 —— 只能识别**已注册**的 dev 路由
+//   - logging 层（caller 侧，本常量）：基于 c.Request.URL.Path 原始 URL 做 prefix 匹配
+//     —— 能识别**未注册**的 dev 路径（prod build / devtools=false 时 dev handler 不挂载，
+//     Gin 走 NoRoute，c.FullPath() 返空串）
+//
+// 单靠 callee 侧检查会让 prod build 上的 /dev/* probe / e2e 流量穿透到
+// api_path="UNKNOWN" 这桶，污染 5xx-alert 告警规则。caller 侧才是真正的根因 fix
+// （Story 20.8 r4 lesson）。
+const devURLPrefix = "/dev/"
 
 // Logging 中间件：每个请求末尾输出一行结构化日志 + 更新 2 个 HTTP metric。
 //
@@ -94,6 +110,17 @@ func Logging() gin.HandlerFunc {
 		}
 		reqLogger.LogAttrs(ctx, slog.LevelInfo, "http_request", attrs...)
 
-		metrics.ObserveHTTP(c.FullPath(), c.Request.Method, status, latency)
+		// metrics 记录：dev 路径（/dev/*）完全 skip，**用 raw URL.Path 而非 FullPath() 检查**。
+		//
+		// 关键差异（Story 20.8 r4 lesson）：
+		//   - c.FullPath() = Gin 已注册 route pattern，路由未挂载时（prod build / devtools=false）
+		//     返**空串** → 单靠 metrics 层 isDevPath("") 会漏掉，落到 api_path="UNKNOWN" 桶
+		//   - c.Request.URL.Path = 客户端实际请求 URL，能识别"实际是 /dev/* 但路由未注册"的请求
+		//
+		// 此处 caller-side 检查是根因 fix；metrics 层 isDevPath 保留作双层防御
+		// （已注册路由走 callee 侧，未注册走 caller 侧）。
+		if !strings.HasPrefix(c.Request.URL.Path, devURLPrefix) {
+			metrics.ObserveHTTP(c.FullPath(), c.Request.Method, status, latency)
+		}
 	}
 }

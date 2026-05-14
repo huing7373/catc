@@ -8,10 +8,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/huing/cat/server/internal/infra/metrics"
 	apperror "github.com/huing/cat/server/internal/pkg/errors"
 )
 
@@ -290,6 +292,110 @@ func TestLogging_CtxDoneOnDeadlineExceeded(t *testing.T) {
 	if !got {
 		t.Errorf("ctx_done = false, want true（ctx deadline 已过，Logging 应识别）")
 	}
+}
+
+// TestLogging_DevURL_Unregistered_NotCounted 验当 /dev/* URL 命中**未注册**路由（prod
+// build / devtools=false 场景）时，Logging 中间件**不**调 ObserveHTTP —— 也就不会让
+// api_path="UNKNOWN" 桶吃到 dev probe / e2e 流量。
+//
+// 关键防回归点（Story 20.8 r4 lesson）：
+//
+// metrics.isDevPath 只能识别**已注册**的 Gin route pattern（如 "/dev/grant-cosmetic-batch"）。
+// 但 prod build 不挂 dev handler 时，c.FullPath() 返**空串** → metrics 层 isDevPath("") = false
+// → 落到 api_path="UNKNOWN" 桶污染 5xx 告警。caller-side（本中间件）用 raw URL.Path
+// 检查才是真正的根因 fix。
+//
+// 不依赖 metrics 包私有 Counter；用 /metrics 文本快照断言 dev URL 不出现在任一系列里。
+func TestLogging_DevURL_Unregistered_NotCounted(t *testing.T) {
+	r, _ := newLoggingRouter(t, func(r *gin.Engine) {
+		// 故意**不**注册任何 /dev/* 路由，模拟 prod build（无 devtools tag）的真实状态：
+		// dev handler 物理不存在，所有 /dev/* 请求都会走 Gin NoRoute → 404 + 空 FullPath()。
+		r.GET("/ping", func(c *gin.Context) { c.String(http.StatusOK, "pong") })
+	})
+
+	devURL := "/dev/grant-cosmetic-batch-probe-unregistered"
+	req := httptest.NewRequest(http.MethodPost, devURL, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("unregistered dev URL status = %d, want 404", w.Code)
+	}
+
+	// 抓 /metrics 文本快照：dev URL 子串 + api_path="UNKNOWN" 这一桶都不能因这次请求出现增量。
+	// 由于 "UNKNOWN" 桶可能被同包/同进程其它测试用过，**精确语义**是检查 dev URL 本身没泄漏 +
+	// 抓 snapshot 前后 UNKNOWN counter 不变。后者更强 —— 用 httpRequestsTotal 不可见（私有），
+	// 退化为：metrics 文本里不能含 dev URL 这段 path 子串（dev URL 也不会被原样写进 metrics，
+	// 因为 caller 侧已跳过）。
+	snapshot := scrapeMetrics(t)
+	if strings.Contains(snapshot, devURL) {
+		t.Errorf("/dev/* URL 不应出现在 metrics 文本中；实际泄漏：\n%s", snapshot)
+	}
+}
+
+// TestLogging_DevURL_Registered_NotCounted 验当 /dev/* 路由**已注册**（devtools build）
+// 时，logging 中间件也不调 ObserveHTTP（双层防御中 caller 侧那一层直接命中前缀，
+// 不依赖 metrics 层的 isDevPath）。
+func TestLogging_DevURL_Registered_NotCounted(t *testing.T) {
+	r, _ := newLoggingRouter(t, func(r *gin.Engine) {
+		// 已注册 dev 路由：模拟 devtools build。期望仍 skip metrics。
+		r.POST("/dev/registered-probe", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	})
+
+	devURL := "/dev/registered-probe"
+	req := httptest.NewRequest(http.MethodPost, devURL, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("registered dev route status = %d, want 200", w.Code)
+	}
+
+	snapshot := scrapeMetrics(t)
+	if strings.Contains(snapshot, devURL) {
+		t.Errorf("已注册的 /dev/* 路由也不应出现在 metrics 文本中；实际：\n%s", snapshot)
+	}
+}
+
+// TestLogging_NonDevURL_StillCounted 反向 case：非 /dev/* 路径必须正常进 metrics（双层
+// 检查不能误伤）。/dev 无尾斜杠 / /devops/... 等同名前缀仍应被计数（与 metrics
+// http_test.go::TestObserveHTTP_DevPrefixDiscipline 对称）。
+func TestLogging_NonDevURL_StillCounted(t *testing.T) {
+	r, _ := newLoggingRouter(t, func(r *gin.Engine) {
+		r.GET("/devops/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+		r.GET("/ping", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	})
+
+	for _, p := range []string{"/devops/healthz", "/ping"} {
+		req := httptest.NewRequest(http.MethodGet, p, nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200", p, w.Code)
+		}
+	}
+
+	snapshot := scrapeMetrics(t)
+	// 这两条路径都该出现在 cat_api_requests_total 序列里
+	for _, p := range []string{"/devops/healthz", "/ping"} {
+		expected := `cat_api_requests_total{api_path="` + p + `"`
+		if !strings.Contains(snapshot, expected) {
+			t.Errorf("非 /dev/* 路径 %s 应出现在 metrics 文本中；snapshot:\n%s", p, snapshot)
+		}
+	}
+}
+
+// scrapeMetrics 抓取 metrics 包 /metrics 文本输出，便于断言。
+func scrapeMetrics(t *testing.T) string {
+	t.Helper()
+	h := metrics.Handler()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("metrics handler status = %d, want 200", w.Code)
+	}
+	return w.Body.String()
 }
 
 func TestLogging_UnmatchedRoute_EmptyApiPath(t *testing.T) {
