@@ -30,6 +30,11 @@
 //    20.5 GET /chest/current / 20.6 POST /chest/open 加权抽取各路径依赖）；
 //   StatusAfterUp 版本号断言从 v=10 改 v=11。
 //
+// Story 20.3 扩展：在表 schema 不变（仍 10 张）基础上新增 0012_seed_cosmetic_items；
+//   主要 case 跑 15 行 seed 的内容正确性 + AR18 各品质数量约束 + common 至少覆盖
+//   4 个不同 slot + ON DUPLICATE KEY UPDATE 强制覆盖语义（不影响表数量断言）；
+//   StatusAfterUp 版本号断言从 v=11 改 v=12。
+//
 // Story 17.3 r1 review [P2] 重写 SeedIdempotent：原版走 Up→Down→Up 路径但 Down
 //   把整张表 DROP 掉 → 第二次 Up 跑空表 → 没真正触发 duplicate-code 路径。新版改
 //   "预填 admin-flavored 行 → UPDATE schema_migrations 回滚版本号 → 再 Up" 让
@@ -564,6 +569,7 @@ func TestMigrateIntegration_TablesPresent_AfterUp(t *testing.T) {
 // Story 17.3 扩展：从 9 改 10（多了 0010_seed_emoji_configs；Epic 17 节点 6 表情 seed）
 // Story 20.2 扩展：从 10 改 11（多了 0011_init_cosmetic_items；Epic 20 节点 7
 // 宝箱业务链路 schema 根基）
+// Story 20.3 扩展：从 11 改 12（多了 0012_seed_cosmetic_items；Epic 20 节点 7 cosmetic seed）
 func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	dsn, cleanup := startMySQL(t)
 	defer cleanup()
@@ -594,8 +600,8 @@ func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status after Up: %v", err)
 	}
-	if v != 11 {
-		t.Errorf("Status version = %d, want 11", v)
+	if v != 12 {
+		t.Errorf("Status version = %d, want 12", v)
 	}
 	if dirty {
 		t.Errorf("Status dirty = true, want false")
@@ -1534,6 +1540,13 @@ func TestMigrateIntegration_CosmeticItems_Schema(t *testing.T) {
 // 表无 seed（20.3 owner），但提前用测试专用 code 防 20.3 seed 落地后本 case 第一次
 // INSERT 因 seed 已存在而失败（与 Story 17.3 解耦 wave seed 同模式）。
 func TestMigrateIntegration_CosmeticItems_UniqueCode_Rejected(t *testing.T) {
+	// Story 20.3 注释：本 case 用测试专用 code (test_unique_cosmetic_a) 与 0012 seed
+	// 的 15 个 owned codes 字面量隔离（hat_yellow / hat_red / gloves_white /
+	// gloves_brown / glasses_round / neck_blue / back_bag / tail_ribbon /
+	// hat_chef / glasses_star / neck_scarf_star / body_tshirt / hat_crown /
+	// back_wings / body_armor），避免 0012 seed 先写入后该 case 第一次 INSERT 就
+	// 触发 UNIQUE 冲突（与 17.3 解耦 0010 emoji seed 同模式 —— 20.2 已经吸取教训
+	// 用了测试专用 code，所以 20.3 不需要再改实际 SQL 字面量，仅在此追加注释说明）。
 	dsn, cleanup := startMySQL(t)
 	defer cleanup()
 
@@ -1570,5 +1583,444 @@ func TestMigrateIntegration_CosmeticItems_UniqueCode_Rejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Duplicate entry") {
 		t.Errorf("UNIQUE(code) rejection error message = %q, want substring \"Duplicate entry\"", err.Error())
+	}
+}
+
+// TestMigrateIntegration_CosmeticItems_SeedContent 验证
+// migrations/0012_seed_cosmetic_items.up.sql 钦定的 15 个装扮 seed 在 migrate up
+// 后真实写入 cosmetic_items 表，且每行字段值符合 epics.md §Story 20.3 + AR18 +
+// V1 §7.2 reward 字段约束：
+//
+//   - 至少 15 行存在（实际 0012 钦定 15 行；用 >= 15 而非 == 15 兼容未来 0013+
+//     新 migration 加 cosmetic）
+//   - 各 rarity 数量符合 AR18：
+//       rarity=1(common)    ≥ 8
+//       rarity=2(rare)      ≥ 4
+//       rarity=3(epic)      ≥ 2
+//       rarity=4(legendary) ≥ 1
+//   - common 至少覆盖 4 个不同 slot（AR18 钦定 + epics.md §Story 20.3 行 2839）
+//   - 每行 asset_url 非空（V1 §7.2 reward.assetUrl 钦定 length ≥ 1 + 禁止 ""）
+//   - 每行 icon_url 非空（V1 §7.2 reward.iconUrl 钦定 length ≥ 1 + 禁止 ""）
+//   - 每行 is_enabled = 1（enabled 才会被 GET /cosmetics/catalog 返回 + 加权抽取命中）
+//   - 每行 name 非空（VARCHAR(64) NOT NULL）
+//   - 每行 slot ∈ {1,2,3,4,5,6,7,99}（§6.8 枚举值；本 case 用 set 校验）
+//   - 每行 rarity ∈ {1,2,3,4}（§6.9 枚举值；本 case 用 set 校验）
+//   - 各 rarity 的 drop_weight 按品质递减分布（common > rare > epic > legendary；
+//     0012 钦定 common=100 / rare=20 / epic=4 / legendary=1）
+//
+// **背景（Story 20.3 引入）**：epics.md §Story 20.3 钦定的"集成测试覆盖（dockertest）：
+// migrate up → SELECT count(*) GROUP BY rarity → 验证各品质数量 ≥ AR18 约束"
+// 路径在本 case 落地；用于 Story 20.4 ~ 20.9 / iOS Epic 21 / Epic 19.1 节点 7
+// demo E2E / Epic 23 / Epic 29 Story 29.3 / Epic 32 / 33 实装时验证 seed 数据
+// 真实在位 + AR18 数量约束 100% 强保证的根基。
+//
+// 用 database/sql 直跑 SELECT（**不**走 GORM）让测试结果**不**依赖 ORM 行为差异
+// （与 17.3 / 11.2 / 17.2 落地的 dockertest case 同模式）。
+func TestMigrateIntegration_CosmeticItems_SeedContent(t *testing.T) {
+	dsn, cleanup := startMySQL(t)
+	defer cleanup()
+
+	mig, err := migrate.New(dsn, migrationsPath(t))
+	if err != nil {
+		t.Fatalf("migrate.New: %v", err)
+	}
+	defer mig.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := mig.Up(ctx); err != nil {
+		t.Fatalf("migrate Up: %v", err)
+	}
+
+	sqlDB, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	// 钦定的 15 个 code（与 0012_seed_cosmetic_items.up.sql 1:1 对齐）
+	wantCodes := []string{
+		"hat_yellow", "hat_red", "gloves_white", "gloves_brown",
+		"glasses_round", "neck_blue", "back_bag", "tail_ribbon",
+		"hat_chef", "glasses_star", "neck_scarf_star", "body_tshirt",
+		"hat_crown", "back_wings", "body_armor",
+	}
+
+	// 1. SELECT 全表（按 rarity / slot / code 升序），>= 15 行
+	rows, err := sqlDB.QueryContext(ctx, `
+		SELECT code, name, slot, rarity, asset_url, icon_url, drop_weight, is_enabled
+		FROM cosmetic_items
+		ORDER BY rarity ASC, slot ASC, code ASC`)
+	if err != nil {
+		t.Fatalf("SELECT cosmetic_items: %v", err)
+	}
+	defer rows.Close()
+
+	type rowData struct {
+		code       string
+		name       string
+		slot       int
+		rarity     int
+		assetURL   string
+		iconURL    string
+		dropWeight int
+		isEnabled  int
+	}
+	var allRows []rowData
+	seenCodes := make(map[string]rowData)
+	for rows.Next() {
+		var r rowData
+		if err := rows.Scan(&r.code, &r.name, &r.slot, &r.rarity, &r.assetURL, &r.iconURL, &r.dropWeight, &r.isEnabled); err != nil {
+			t.Errorf("scan row: %v", err)
+			continue
+		}
+		allRows = append(allRows, r)
+		seenCodes[r.code] = r
+	}
+	if err := rows.Err(); err != nil {
+		t.Errorf("rows.Err: %v", err)
+	}
+
+	if len(allRows) < 15 {
+		t.Errorf("cosmetic_items row count = %d, want >= 15 (Story 20.3 seed 钦定 15 个装扮)", len(allRows))
+	}
+
+	// 2. 各 rarity 数量符合 AR18 最小约束（GROUP BY rarity）
+	rarityCount := map[int]int{}
+	for _, r := range allRows {
+		rarityCount[r.rarity]++
+	}
+	if rarityCount[1] < 8 {
+		t.Errorf("rarity=1 (common) count = %d, want >= 8 (AR18)", rarityCount[1])
+	}
+	if rarityCount[2] < 4 {
+		t.Errorf("rarity=2 (rare) count = %d, want >= 4 (AR18)", rarityCount[2])
+	}
+	if rarityCount[3] < 2 {
+		t.Errorf("rarity=3 (epic) count = %d, want >= 2 (AR18)", rarityCount[3])
+	}
+	if rarityCount[4] < 1 {
+		t.Errorf("rarity=4 (legendary) count = %d, want >= 1 (AR18)", rarityCount[4])
+	}
+
+	// 3. common（rarity=1）的 slot 至少覆盖 4 个不同值（AR18 行 184 钦定 +
+	//    epics.md §Story 20.3 行 2839 钦定）
+	commonSlotSet := map[int]struct{}{}
+	for _, r := range allRows {
+		if r.rarity == 1 {
+			commonSlotSet[r.slot] = struct{}{}
+		}
+	}
+	if len(commonSlotSet) < 4 {
+		t.Errorf("common (rarity=1) distinct slot count = %d, want >= 4 (AR18 + epics.md §Story 20.3 行 2839)", len(commonSlotSet))
+	}
+
+	// 4. 钦定 15 个 code 必须全部存在 + 每行字段值符合约束
+	validSlots := map[int]bool{1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true, 99: true}
+	validRarities := map[int]bool{1: true, 2: true, 3: true, 4: true}
+	for _, code := range wantCodes {
+		r, ok := seenCodes[code]
+		if !ok {
+			t.Errorf("seed missing code = %q (Story 20.3 钦定 15 个 code 都必须存在)", code)
+			continue
+		}
+		// a. name 非空
+		if len(r.name) == 0 {
+			t.Errorf("seed code=%q name 为空 (VARCHAR(64) NOT NULL + seed 钦定非空)", code)
+		}
+		// b. asset_url 非空（V1 §7.2 reward.assetUrl + AR18 钦定）
+		if len(r.assetURL) == 0 {
+			t.Errorf("seed code=%q asset_url 为空 (V1 §7.2 reward.assetUrl + AR18 钦定 enabled cosmetic asset_url 必须非空)", code)
+		}
+		// c. icon_url 非空（V1 §7.2 reward.iconUrl + AR18 钦定）
+		if len(r.iconURL) == 0 {
+			t.Errorf("seed code=%q icon_url 为空 (V1 §7.2 reward.iconUrl + AR18 钦定 enabled cosmetic icon_url 必须非空)", code)
+		}
+		// d. is_enabled == 1
+		if r.isEnabled != 1 {
+			t.Errorf("seed code=%q is_enabled = %d, want 1 (enabled 才能被 GET /cosmetics/catalog 返回 + 加权抽取命中)", code, r.isEnabled)
+		}
+		// e. slot ∈ {1,2,3,4,5,6,7,99}（§6.8）
+		if !validSlots[r.slot] {
+			t.Errorf("seed code=%q slot = %d, want ∈ {1,2,3,4,5,6,7,99} (§6.8 枚举值)", code, r.slot)
+		}
+		// f. rarity ∈ {1,2,3,4}（§6.9）
+		if !validRarities[r.rarity] {
+			t.Errorf("seed code=%q rarity = %d, want ∈ {1,2,3,4} (§6.9 枚举值)", code, r.rarity)
+		}
+	}
+
+	// 5. 各 rarity 的 drop_weight 按品质递减分布（epics.md §Story 20.3 行 2844
+	//    钦定 common=100 > rare=20 > epic=4 > legendary=1）：
+	//    用 GROUP BY rarity + MIN(drop_weight) / MAX(drop_weight) 断言：
+	//      a. common 的 MIN(drop_weight) > rare 的 MAX(drop_weight)（100 > 20）
+	//      b. rare 的 MIN(drop_weight) > epic 的 MAX(drop_weight)（20 > 4）
+	//      c. epic 的 MIN(drop_weight) > legendary 的 MAX(drop_weight)（4 > 1）
+	weightRows, err := sqlDB.QueryContext(ctx, `
+		SELECT rarity, MIN(drop_weight) AS min_w, MAX(drop_weight) AS max_w
+		FROM cosmetic_items
+		WHERE code IN ('hat_yellow', 'hat_red', 'gloves_white', 'gloves_brown',
+		               'glasses_round', 'neck_blue', 'back_bag', 'tail_ribbon',
+		               'hat_chef', 'glasses_star', 'neck_scarf_star', 'body_tshirt',
+		               'hat_crown', 'back_wings', 'body_armor')
+		GROUP BY rarity`)
+	if err != nil {
+		t.Fatalf("SELECT GROUP BY rarity drop_weight: %v", err)
+	}
+	defer weightRows.Close()
+
+	minByRarity := map[int]int{}
+	maxByRarity := map[int]int{}
+	for weightRows.Next() {
+		var rarity, minW, maxW int
+		if err := weightRows.Scan(&rarity, &minW, &maxW); err != nil {
+			t.Errorf("scan rarity weight row: %v", err)
+			continue
+		}
+		minByRarity[rarity] = minW
+		maxByRarity[rarity] = maxW
+	}
+	if err := weightRows.Err(); err != nil {
+		t.Errorf("weightRows.Err: %v", err)
+	}
+
+	if minByRarity[1] <= maxByRarity[2] {
+		t.Errorf("common MIN(drop_weight) = %d not > rare MAX(drop_weight) = %d (epics.md §Story 20.3 行 2844 钦定 common=100 > rare=20)", minByRarity[1], maxByRarity[2])
+	}
+	if minByRarity[2] <= maxByRarity[3] {
+		t.Errorf("rare MIN(drop_weight) = %d not > epic MAX(drop_weight) = %d (epics.md §Story 20.3 行 2844 钦定 rare=20 > epic=4)", minByRarity[2], maxByRarity[3])
+	}
+	if minByRarity[3] <= maxByRarity[4] {
+		t.Errorf("epic MIN(drop_weight) = %d not > legendary MAX(drop_weight) = %d (epics.md §Story 20.3 行 2844 钦定 epic=4 > legendary=1)", minByRarity[3], maxByRarity[4])
+	}
+}
+
+// TestMigrateIntegration_CosmeticItems_SeedForceOverwrite 验证
+// migrations/0012_seed_cosmetic_items.up.sql 钦定的 ON DUPLICATE KEY UPDATE 语义在
+// duplicate-code 路径下的 server 端表现：
+// **当 UNIQUE KEY uk_code 命中时，ON DUPLICATE KEY UPDATE 不报错 + 不翻倍 +
+// 强制把 name / slot / rarity / asset_url / icon_url / drop_weight / is_enabled
+// 7 字段覆盖回 0012 钦定值**。
+//
+// **背景（Story 20.3 引入；r0 直接复用 17-3 r3 决断）**：
+// epics.md §Story 20.3 钦定的"重复 migrate up → 不重复插入"+ 17-3 r3 lesson
+// "0010 owns 4 codes / up 强制覆盖" 路径在本 case 落地，与
+// TestMigrateIntegration_EmojiConfigs_SeedIdempotent 同模式（行 1130 ~ 1303）。
+//
+// **覆盖路径**：
+//  1. migrate Up 全程 (v=12) → cosmetic_items 15 行（0012 seed 写入）
+//  2. DELETE seed 15 行 + 手动 INSERT 15 行 admin-flavored 数据（name / slot /
+//     rarity / asset_url / icon_url / drop_weight / is_enabled 7 字段都和 seed
+//     不同，模拟 admin 在 0012 owned codes 上做了"违规 customization"，包括
+//     is_enabled=0 把某 cosmetic 临时下架 / asset_url='' 让奖励弹窗破图 /
+//     drop_weight=0 让某 cosmetic 永远抽不到）
+//  3. UPDATE schema_migrations SET version = 11 → 让 golang-migrate 认为 0012 还没跑过
+//  4. migrate Up 重跑 → 触发 0012.up ON DUPLICATE KEY UPDATE 命中 uk_code 15 次
+//  5. 断言：
+//     a. 行数仍 15（不翻倍到 30）
+//     b. 7 字段被**强制覆盖回** 0012 seed 钦定值（hat_yellow 的 name 恢复为
+//        "小黄帽" / slot 恢复为 1 / rarity 恢复为 1 / asset_url 恢复为
+//        "https://placehold.co/128x128?text=Hat-Yellow" / icon_url 恢复为
+//        "https://placehold.co/64x64?text=Hat-Yellow" / drop_weight 恢复为 100 /
+//        is_enabled 恢复为 1；其他 14 行同理逐字段抽样验证）
+//     这是 r0 决策"0012 owns these 15 codes"的 100% 强保证。
+//
+// **三种"伪幂等"实现仍被本测试抓到**：
+//   - INSERT INTO（无 IGNORE / ON DUPLICATE KEY UPDATE）→ 步骤 4 撞 uk_code 1062 直接报错
+//   - INSERT IGNORE → 行数对但 admin 7 字段**保留不被覆盖** → 步骤 5b 断言炸
+//     （断言期望"覆盖回 seed 值"，IGNORE 路径下还是 admin 值）
+//   - REPLACE INTO → 行数对、字段覆盖正确，但 REPLACE 触发 id 重排会让
+//     chest_open_logs.reward_cosmetic_item_id 历史日志断开 reference 语义；
+//     虽然字段断言可能能过，但语义不对（这里靠 SQL review 兜底，本 case 不强测）
+//
+// **为什么不走 force(11)**：本 migrate 包没暴露 Force API（migrate.go 仅 Up / Down
+// / Status / Close）。直接 UPDATE schema_migrations 是 dockertest 集成测试可控
+// 范围内的最小操作；也忠实模拟了 ops 在生产里手工修复 dirty 后的回退场景；
+// 与 17.3 落地的 TestMigrateIntegration_EmojiConfigs_SeedIdempotent 同模式。
+//
+// 用 database/sql 直跑 SQL（**不**走 GORM）。
+func TestMigrateIntegration_CosmeticItems_SeedForceOverwrite(t *testing.T) {
+	dsn, cleanup := startMySQL(t)
+	defer cleanup()
+
+	mig, err := migrate.New(dsn, migrationsPath(t))
+	if err != nil {
+		t.Fatalf("migrate.New: %v", err)
+	}
+	defer mig.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// 步骤 1：第一次 migrate up → cosmetic_items 15 行（0012 seed 写入）
+	if err := mig.Up(ctx); err != nil {
+		t.Fatalf("first migrate Up: %v", err)
+	}
+
+	sqlDB, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	const seedCodesINClause = `'hat_yellow', 'hat_red', 'gloves_white', 'gloves_brown',
+		'glasses_round', 'neck_blue', 'back_bag', 'tail_ribbon',
+		'hat_chef', 'glasses_star', 'neck_scarf_star', 'body_tshirt',
+		'hat_crown', 'back_wings', 'body_armor'`
+
+	var countAfterFirstUp int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM cosmetic_items WHERE code IN (`+seedCodesINClause+`)`).Scan(&countAfterFirstUp); err != nil {
+		t.Fatalf("SELECT COUNT after first Up: %v", err)
+	}
+	if countAfterFirstUp != 15 {
+		t.Fatalf("after first Up, cosmetic_items seed rows = %d, want 15 (Story 20.3 钦定 15 个装扮)", countAfterFirstUp)
+	}
+
+	// 步骤 2：DELETE seed 15 行 + 手动 INSERT 15 行 admin-flavored 数据（模拟 admin
+	// 在上线后调整过 hat_yellow 等的 name / slot / rarity / asset_url / icon_url /
+	// drop_weight / is_enabled 7 字段）
+	if _, err := sqlDB.ExecContext(ctx,
+		`DELETE FROM cosmetic_items WHERE code IN (`+seedCodesINClause+`)`); err != nil {
+		t.Fatalf("DELETE seed rows: %v", err)
+	}
+
+	type adminRow struct {
+		code       string
+		name       string
+		slot       int
+		rarity     int
+		assetURL   string
+		iconURL    string
+		dropWeight int
+		isEnabled  int
+	}
+	// **故意**与 0012.up.sql seed 值的全部 7 字段都不同（name 加 -admin 后缀 /
+	// slot 全用 99=other / rarity 都改成不同值 / asset_url / icon_url 用 admin-cdn /
+	// drop_weight 全部为 0（让该 cosmetic 永远抽不到，模拟 admin "禁用"）/
+	// is_enabled=0（模拟 admin 下架）。这是 r0 决策的核心测试场景 —— 模拟 admin 在 0012
+	// owned codes 上做了"违规 customization"，验证 0012.up ON DUPLICATE KEY UPDATE
+	// 路径会把这 7 字段**强制覆盖回** seed 钦定值。
+	adminRows := []adminRow{
+		{code: "hat_yellow", name: "小黄帽-admin", slot: 99, rarity: 4, assetURL: "https://admin-cdn.example.com/hat_yellow.png", iconURL: "https://admin-cdn.example.com/hat_yellow_icon.png", dropWeight: 0, isEnabled: 0},
+		{code: "hat_red", name: "小红帽-admin", slot: 99, rarity: 4, assetURL: "https://admin-cdn.example.com/hat_red.png", iconURL: "https://admin-cdn.example.com/hat_red_icon.png", dropWeight: 0, isEnabled: 0},
+		{code: "gloves_white", name: "白手套-admin", slot: 99, rarity: 4, assetURL: "https://admin-cdn.example.com/gloves_white.png", iconURL: "https://admin-cdn.example.com/gloves_white_icon.png", dropWeight: 0, isEnabled: 0},
+		{code: "gloves_brown", name: "棕手套-admin", slot: 99, rarity: 4, assetURL: "https://admin-cdn.example.com/gloves_brown.png", iconURL: "https://admin-cdn.example.com/gloves_brown_icon.png", dropWeight: 0, isEnabled: 0},
+		{code: "glasses_round", name: "圆框眼镜-admin", slot: 99, rarity: 4, assetURL: "https://admin-cdn.example.com/glasses_round.png", iconURL: "https://admin-cdn.example.com/glasses_round_icon.png", dropWeight: 0, isEnabled: 0},
+		{code: "neck_blue", name: "蓝围脖-admin", slot: 99, rarity: 4, assetURL: "https://admin-cdn.example.com/neck_blue.png", iconURL: "https://admin-cdn.example.com/neck_blue_icon.png", dropWeight: 0, isEnabled: 0},
+		{code: "back_bag", name: "小书包-admin", slot: 99, rarity: 4, assetURL: "https://admin-cdn.example.com/back_bag.png", iconURL: "https://admin-cdn.example.com/back_bag_icon.png", dropWeight: 0, isEnabled: 0},
+		{code: "tail_ribbon", name: "蝴蝶结尾巾-admin", slot: 99, rarity: 4, assetURL: "https://admin-cdn.example.com/tail_ribbon.png", iconURL: "https://admin-cdn.example.com/tail_ribbon_icon.png", dropWeight: 0, isEnabled: 0},
+		{code: "hat_chef", name: "厨师帽-admin", slot: 99, rarity: 4, assetURL: "https://admin-cdn.example.com/hat_chef.png", iconURL: "https://admin-cdn.example.com/hat_chef_icon.png", dropWeight: 0, isEnabled: 0},
+		{code: "glasses_star", name: "星星眼镜-admin", slot: 99, rarity: 4, assetURL: "https://admin-cdn.example.com/glasses_star.png", iconURL: "https://admin-cdn.example.com/glasses_star_icon.png", dropWeight: 0, isEnabled: 0},
+		{code: "neck_scarf_star", name: "星星围巾-admin", slot: 99, rarity: 4, assetURL: "https://admin-cdn.example.com/neck_scarf_star.png", iconURL: "https://admin-cdn.example.com/neck_scarf_star_icon.png", dropWeight: 0, isEnabled: 0},
+		{code: "body_tshirt", name: "白T恤-admin", slot: 99, rarity: 4, assetURL: "https://admin-cdn.example.com/body_tshirt.png", iconURL: "https://admin-cdn.example.com/body_tshirt_icon.png", dropWeight: 0, isEnabled: 0},
+		{code: "hat_crown", name: "金王冠-admin", slot: 99, rarity: 1, assetURL: "https://admin-cdn.example.com/hat_crown.png", iconURL: "https://admin-cdn.example.com/hat_crown_icon.png", dropWeight: 0, isEnabled: 0},
+		{code: "back_wings", name: "天使翅膀-admin", slot: 99, rarity: 1, assetURL: "https://admin-cdn.example.com/back_wings.png", iconURL: "https://admin-cdn.example.com/back_wings_icon.png", dropWeight: 0, isEnabled: 0},
+		{code: "body_armor", name: "黄金圣衣-admin", slot: 99, rarity: 1, assetURL: "https://admin-cdn.example.com/body_armor.png", iconURL: "https://admin-cdn.example.com/body_armor_icon.png", dropWeight: 0, isEnabled: 0},
+	}
+	for _, r := range adminRows {
+		if _, err := sqlDB.ExecContext(ctx,
+			`INSERT INTO cosmetic_items (code, name, slot, rarity, asset_url, icon_url, drop_weight, is_enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			r.code, r.name, r.slot, r.rarity, r.assetURL, r.iconURL, r.dropWeight, r.isEnabled); err != nil {
+			t.Fatalf("INSERT admin row %q: %v", r.code, err)
+		}
+	}
+
+	// 步骤 3：回滚 schema_migrations 版本号到 11，让 golang-migrate 认为 0012 还没跑过；
+	// 这是触发 "duplicate-code 路径下重跑 0012.up" 的关键。
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE schema_migrations SET version = 11, dirty = 0 WHERE 1=1`); err != nil {
+		t.Fatalf("UPDATE schema_migrations to v=11: %v", err)
+	}
+
+	// 重开一个 Migrator 实例（golang-migrate 内部 cache 版本号）
+	if err := mig.Close(); err != nil {
+		t.Fatalf("close first migrator: %v", err)
+	}
+	mig2, err := migrate.New(dsn, migrationsPath(t))
+	if err != nil {
+		t.Fatalf("migrate.New (after rollback to v=11): %v", err)
+	}
+	defer mig2.Close()
+
+	// 步骤 4：再跑一次 migrate Up → 0012.up 会被重跑 → ON DUPLICATE KEY UPDATE 命中 uk_code
+	if err := mig2.Up(ctx); err != nil {
+		t.Fatalf("second migrate Up (after schema_migrations rollback): %v", err)
+	}
+
+	// 步骤 5a：行数仍恰好 15（不翻倍到 30 —— ON DUPLICATE KEY UPDATE 兜底不重复插入）
+	var countAfterSecondUp int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM cosmetic_items WHERE code IN (`+seedCodesINClause+`)`).Scan(&countAfterSecondUp); err != nil {
+		t.Fatalf("SELECT COUNT after second Up: %v", err)
+	}
+	if countAfterSecondUp != 15 {
+		t.Errorf("after second Up, cosmetic_items seed rows = %d, want 15 (ON DUPLICATE KEY UPDATE 兜底不重复插入；不应翻倍到 30)", countAfterSecondUp)
+	}
+
+	// 步骤 5b：每行 name / slot / rarity / asset_url / icon_url / drop_weight /
+	// is_enabled 7 字段**被强制覆盖回 0012 seed 钦定值**，**不是** admin 写入的值。
+	// —— 真正验证 ON DUPLICATE KEY UPDATE 的"强制覆盖"语义；这是 r0 决策
+	//   "0012 owns these 15 codes"的 100% 强保证（与 17-3 r3 同模式）。
+	// 0012.up.sql 钦定值（与 SQL 文件 1:1 对齐）：
+	type seedRow struct {
+		code       string
+		name       string
+		slot       int
+		rarity     int
+		assetURL   string
+		iconURL    string
+		dropWeight int
+		isEnabled  int
+	}
+	seedRows := []seedRow{
+		{code: "hat_yellow", name: "小黄帽", slot: 1, rarity: 1, assetURL: "https://placehold.co/128x128?text=Hat-Yellow", iconURL: "https://placehold.co/64x64?text=Hat-Yellow", dropWeight: 100, isEnabled: 1},
+		{code: "hat_red", name: "小红帽", slot: 1, rarity: 1, assetURL: "https://placehold.co/128x128?text=Hat-Red", iconURL: "https://placehold.co/64x64?text=Hat-Red", dropWeight: 100, isEnabled: 1},
+		{code: "gloves_white", name: "白手套", slot: 2, rarity: 1, assetURL: "https://placehold.co/128x128?text=Gloves-White", iconURL: "https://placehold.co/64x64?text=Gloves-White", dropWeight: 100, isEnabled: 1},
+		{code: "gloves_brown", name: "棕手套", slot: 2, rarity: 1, assetURL: "https://placehold.co/128x128?text=Gloves-Brown", iconURL: "https://placehold.co/64x64?text=Gloves-Brown", dropWeight: 100, isEnabled: 1},
+		{code: "glasses_round", name: "圆框眼镜", slot: 3, rarity: 1, assetURL: "https://placehold.co/128x128?text=Glasses-Round", iconURL: "https://placehold.co/64x64?text=Glasses-Round", dropWeight: 100, isEnabled: 1},
+		{code: "neck_blue", name: "蓝围脖", slot: 4, rarity: 1, assetURL: "https://placehold.co/128x128?text=Neck-Blue", iconURL: "https://placehold.co/64x64?text=Neck-Blue", dropWeight: 100, isEnabled: 1},
+		{code: "back_bag", name: "小书包", slot: 5, rarity: 1, assetURL: "https://placehold.co/128x128?text=Back-Bag", iconURL: "https://placehold.co/64x64?text=Back-Bag", dropWeight: 100, isEnabled: 1},
+		{code: "tail_ribbon", name: "蝴蝶结尾巾", slot: 7, rarity: 1, assetURL: "https://placehold.co/128x128?text=Tail-Ribbon", iconURL: "https://placehold.co/64x64?text=Tail-Ribbon", dropWeight: 100, isEnabled: 1},
+		{code: "hat_chef", name: "厨师帽", slot: 1, rarity: 2, assetURL: "https://placehold.co/128x128?text=Hat-Chef", iconURL: "https://placehold.co/64x64?text=Hat-Chef", dropWeight: 20, isEnabled: 1},
+		{code: "glasses_star", name: "星星眼镜", slot: 3, rarity: 2, assetURL: "https://placehold.co/128x128?text=Glasses-Star", iconURL: "https://placehold.co/64x64?text=Glasses-Star", dropWeight: 20, isEnabled: 1},
+		{code: "neck_scarf_star", name: "星星围巾", slot: 4, rarity: 2, assetURL: "https://placehold.co/128x128?text=Neck-Scarf-Star", iconURL: "https://placehold.co/64x64?text=Neck-Scarf-Star", dropWeight: 20, isEnabled: 1},
+		{code: "body_tshirt", name: "白T恤", slot: 6, rarity: 2, assetURL: "https://placehold.co/128x128?text=Body-Tshirt", iconURL: "https://placehold.co/64x64?text=Body-Tshirt", dropWeight: 20, isEnabled: 1},
+		{code: "hat_crown", name: "金王冠", slot: 1, rarity: 3, assetURL: "https://placehold.co/128x128?text=Hat-Crown", iconURL: "https://placehold.co/64x64?text=Hat-Crown", dropWeight: 4, isEnabled: 1},
+		{code: "back_wings", name: "天使翅膀", slot: 5, rarity: 3, assetURL: "https://placehold.co/128x128?text=Back-Wings", iconURL: "https://placehold.co/64x64?text=Back-Wings", dropWeight: 4, isEnabled: 1},
+		{code: "body_armor", name: "黄金圣衣", slot: 6, rarity: 4, assetURL: "https://placehold.co/128x128?text=Body-Armor", iconURL: "https://placehold.co/64x64?text=Body-Armor", dropWeight: 1, isEnabled: 1},
+	}
+	for _, want := range seedRows {
+		var gotName, gotAssetURL, gotIconURL string
+		var gotSlot, gotRarity, gotDropWeight, gotIsEnabled int
+		err := sqlDB.QueryRowContext(ctx,
+			`SELECT name, slot, rarity, asset_url, icon_url, drop_weight, is_enabled FROM cosmetic_items WHERE code = ?`, want.code).
+			Scan(&gotName, &gotSlot, &gotRarity, &gotAssetURL, &gotIconURL, &gotDropWeight, &gotIsEnabled)
+		if err != nil {
+			t.Errorf("SELECT row %q after second Up: %v", want.code, err)
+			continue
+		}
+		if gotName != want.name {
+			t.Errorf("cosmetic %q name = %q, want %q (ON DUPLICATE KEY UPDATE 应强制覆盖回 0012 seed 钦定值)", want.code, gotName, want.name)
+		}
+		if gotSlot != want.slot {
+			t.Errorf("cosmetic %q slot = %d, want %d (ON DUPLICATE KEY UPDATE 应强制覆盖回 0012 seed 钦定值)", want.code, gotSlot, want.slot)
+		}
+		if gotRarity != want.rarity {
+			t.Errorf("cosmetic %q rarity = %d, want %d (ON DUPLICATE KEY UPDATE 应强制覆盖回 0012 seed 钦定值)", want.code, gotRarity, want.rarity)
+		}
+		if gotAssetURL != want.assetURL {
+			t.Errorf("cosmetic %q asset_url = %q, want %q (ON DUPLICATE KEY UPDATE 应强制覆盖回 0012 seed 钦定值)", want.code, gotAssetURL, want.assetURL)
+		}
+		if gotIconURL != want.iconURL {
+			t.Errorf("cosmetic %q icon_url = %q, want %q (ON DUPLICATE KEY UPDATE 应强制覆盖回 0012 seed 钦定值)", want.code, gotIconURL, want.iconURL)
+		}
+		if gotDropWeight != want.dropWeight {
+			t.Errorf("cosmetic %q drop_weight = %d, want %d (ON DUPLICATE KEY UPDATE 应强制覆盖回 0012 seed 钦定值)", want.code, gotDropWeight, want.dropWeight)
+		}
+		if gotIsEnabled != want.isEnabled {
+			t.Errorf("cosmetic %q is_enabled = %d, want %d (ON DUPLICATE KEY UPDATE 应强制覆盖回 0012 seed 钦定值)", want.code, gotIsEnabled, want.isEnabled)
+		}
 	}
 }
