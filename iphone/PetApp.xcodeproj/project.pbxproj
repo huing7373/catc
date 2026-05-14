@@ -29,8 +29,11 @@
 		19E70B9E9CCA11AAF3EF4933 /* TerminalErrorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202D06A1D0A71F260B651929 /* TerminalErrorView.swift */; };
 		1BC43A46F56D9F43F13E0B37 /* DeviceInfoProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6A56BD4CDD8A553CC16BDF6 /* DeviceInfoProvider.swift */; };
 		1D3F55B63140E9DBDCB65973 /* FriendsViewScaffoldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C38AA4FCA62B305067C947 /* FriendsViewScaffoldTests.swift */; };
+		1D9F1A676E6783E694BA8536 /* EmojiRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2017BE6294021FF0F092B9B2 /* EmojiRepositoryTests.swift */; };
 		21AA1CFEC43BA966B28F2CC5 /* JoinRoomInputNormalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E74C1C217ADEC1F96D50C8C /* JoinRoomInputNormalizer.swift */; };
+		26C31380DF2EAC255C8985D0 /* EmojiPanelHostView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B17D873230658680FC8DB980 /* EmojiPanelHostView.swift */; };
 		26E3D14FA1120264A6D01E26 /* CreateRoomUseCase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26EC016C160A46E97EE3C72B /* CreateRoomUseCase.swift */; };
+		2842F027A712082A743CD4FD /* LoadEmojisUseCase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EE86A0AE67A0F79EEEB3FDF /* LoadEmojisUseCase.swift */; };
 		28878259543D99E04AD019FB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FDA371AE4C3DBF3E721CDEBB /* Assets.xcassets */; };
 		293098F699F6FD8D8840EAB8 /* PingStubURLProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 998C34BD14F4C0B81C495080 /* PingStubURLProtocol.swift */; };
 		2CCACE2F631BD551DB5CE8F1 /* MotionProviderMockTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C50A9302109780F85AA9AFDA /* MotionProviderMockTests.swift */; };
@@ -58,6 +61,7 @@
 		406186F0D2F99A6D0216AABB /* RoomRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A128886E1929DF49A8AD3C3 /* RoomRepository.swift */; };
 		4158EEBFA7D1499EC398928A /* HomeViewModelLoadHomeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E13185203AFBFE4069761426 /* HomeViewModelLoadHomeTests.swift */; };
 		4304F9B83AF96AF62042C7C8 /* FriendsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DFE6BFD422F3533CB8F1F7C /* FriendsViewModel.swift */; };
+		43815EFD3F93EB54EE86EBEE /* EmojiListResponse.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4926FD7F8D35343E1C033904 /* EmojiListResponse.swift */; };
 		4449E09577B83A912CB4B872 /* MockAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DA46BB6516A8163D6A248A3 /* MockAPIClient.swift */; };
 		45073A0997BBCAD3123CCD55 /* WSMessageCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7EB4C4399B419EFC216FFF1 /* WSMessageCodec.swift */; };
 		45150EC475C8A7BF8C9052A3 /* PingEndpoints.swift in Sources */ = {isa = PBXBuildFile; fileRef = 517BF7C81F0AD987AB070D28 /* PingEndpoints.swift */; };
@@ -91,6 +95,7 @@
 		58EAFDF2A5E4320047CF61EA /* FriendsScaffoldView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F05CB847053EF404BADB71EF /* FriendsScaffoldView.swift */; };
 		5A3067A38CB01D5308374CC7 /* AnimationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA9576EF29E7DDEFE5364260 /* AnimationState.swift */; };
 		5D07216FD1E42F2C14420EE3 /* PingResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = 480BA05AC64B4E5774C10FA1 /* PingResult.swift */; };
+		5D0D1239E6D848A7A9DDC4FB /* EmojisEndpoints.swift in Sources */ = {isa = PBXBuildFile; fileRef = 048F7B657E1260FE3B7E0106 /* EmojisEndpoints.swift */; };
 		5D58E5EE8BD16A5B76BE531C /* HomeRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A994F1189BB18B4147B358EC /* HomeRepositoryTests.swift */; };
 		5E7842385D4F7435264006F0 /* ProfileMenuItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBA38032AD114E2A1F129DBE /* ProfileMenuItem.swift */; };
 		607D338E5D68CDDBFA7F02CC /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9EFA8790E4F25D6B495C1B8 /* HomeView.swift */; };
@@ -113,6 +118,7 @@
 		716DF5D21CC8D9456C134905 /* MockWardrobeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFAD6ECB980BF3A211FAB104 /* MockWardrobeViewModel.swift */; };
 		71F5B431F83F534BBECFA720 /* FriendsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF2AA0CACC1A9544F0AC407B /* FriendsTab.swift */; };
 		72B84D0BC5F8371D3BD92ADC /* WSState.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3501FDB5AF02E7A294FCD3B /* WSState.swift */; };
+		7516CB500D88EBAE63284557 /* EmojiPanelViewUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E99359CF0E3B4FF209BFE2A8 /* EmojiPanelViewUITests.swift */; };
 		75A6BAE2843F4F66E054B95C /* AlertOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FA805DF68697507C41F9593 /* AlertOverlayView.swift */; };
 		7671F46DB32D18B530DFAC2D /* GuestLoginRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = A67BA2AE8B846A8622DA39DF /* GuestLoginRequest.swift */; };
 		77035657C96A166F4E609A18 /* AppCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 483BC7F72A7FCD49E2BE1D30 /* AppCoordinatorTests.swift */; };
@@ -123,6 +129,7 @@
 		7ADBDC56A2CEB23A3498AF5A /* WardrobeScaffoldView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46A8E61D61BABA4EC4DE1350 /* WardrobeScaffoldView.swift */; };
 		7DDAECA090A44C9778FB7ABC /* KeychainKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = B433BA798A041C7AA978179C /* KeychainKey.swift */; };
 		811503877EA41C28F16506E9 /* APIError.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC52FAD1898892946E1ADE82 /* APIError.swift */; };
+		81BE9423960C50AA76EA90DD /* EmojiPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB5C503373F22815CC684B8E /* EmojiPanelView.swift */; };
 		82A201AA42B16E5DA2DFE002 /* MockProfileViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E29C985B53B9A4C5F53AADEC /* MockProfileViewModel.swift */; };
 		862FD51DFC8CD996340EB9E7 /* ThemeRadius.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF6F6BF990741F1FFFD46A2F /* ThemeRadius.swift */; };
 		8679EA86DF3E207A39AFCBDA /* AppLaunchState.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF1A8971F2840EEC5BE3311A /* AppLaunchState.swift */; };
@@ -142,6 +149,7 @@
 		913A9059C98CD554992F8FE0 /* RealProfileViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A073A54C24C7F9427042535E /* RealProfileViewModel.swift */; };
 		9284C5618CDC2E6CFD5CBD60 /* HomeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41B91CE72C06EB19940C55CE /* HomeViewModel.swift */; };
 		92F54F64E168B9282A1B7FFE /* ToastView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48D911BB711574FB1AB88573 /* ToastView.swift */; };
+		93359AC4CF029D392DAC4868 /* EmojiPanelViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4516A54B77597ECCD60EB9A3 /* EmojiPanelViewModelTests.swift */; };
 		9358925EDD48383D910B4246 /* InMemoryKeychainStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A97641FABBB15B8262102DB5 /* InMemoryKeychainStoreTests.swift */; };
 		93B6CD7DB27E7A0BC34E7E32 /* KeychainError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 482CB8AD5EE456178B49420C /* KeychainError.swift */; };
 		93CBF4FD7F63F1908E6B6801 /* HealthProviderIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 209005BD922487C8EEA8A567 /* HealthProviderIntegrationTests.swift */; };
@@ -165,6 +173,7 @@
 		A0F2DF91DB67F8EABCAD684D /* RoomEndpointDTO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 957C9EDB0A4633D7C206BF28 /* RoomEndpointDTO.swift */; };
 		A61A551AF2D857A4ADF15914 /* StepsSyncResponse.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5A7149609AC252D26069330 /* StepsSyncResponse.swift */; };
 		A67C4D0E57AD1062D5A2900E /* HomeResponseDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CDA57E0A8283405D1ABCF5B /* HomeResponseDecodingTests.swift */; };
+		A7E35380FEAFA63C5F5D28AE /* LoadEmojisUseCaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C85CBDB5056F2E2B29C6297 /* LoadEmojisUseCaseTests.swift */; };
 		A956B1C741D91F637971B37B /* Icons.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0565A1742A225D9D006BA655 /* Icons.swift */; };
 		AA79148B086C57FB35A6C193 /* APIClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE2862C89977057686E47F3B /* APIClientTests.swift */; };
 		AE70A36D7E26C75093A07A48 /* ErrorPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 704A84374E7FD033D996D545 /* ErrorPresenter.swift */; };
@@ -178,10 +187,12 @@
 		B86D5E92FB7547BCAEAA42A6 /* HomeRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EE3D4E64DE3B434D72C569E /* HomeRepository.swift */; };
 		B89824A7AD22972F4CBAA833 /* HomeContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E82EB03BF2525811F78B66B /* HomeContainerView.swift */; };
 		B961FA6BD6B5402D0E8DDB38 /* Card.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5661F40FD3539A757DB2F76F /* Card.swift */; };
+		BA9DFC3515EEF1DC30464C22 /* EmojiConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0C4E4B4B3AF88BD7FD0285E /* EmojiConfig.swift */; };
 		BB19C945A1F99591F88B055C /* AppErrorMapperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6383C925F6E7A62AF9ABC30A /* AppErrorMapperTests.swift */; };
 		BC8A0DF2A1296C7244D19C30 /* ProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E94000B196080C665C08550 /* ProfileView.swift */; };
 		BEE5281223033A1ABAB6D6C6 /* RealRoomViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB5AC0D62302D34517A9283D /* RealRoomViewModel.swift */; };
 		C019FDCE35A8B4202ECF5458 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CAB882C2B95DC68F801BCE7 /* AppState.swift */; };
+		C05152B6DB5FB50538894962 /* EmojiRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 749BE0A0A72F3A290224842E /* EmojiRepository.swift */; };
 		C0D3AA07AFB73565A6F6F0F3 /* WebSocketClientMock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A61248D918E858BF304C7C6A /* WebSocketClientMock.swift */; };
 		C19D7B878ACC85494F180A29 /* GuestLoginUseCase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64271363872AC8EF58CEB60D /* GuestLoginUseCase.swift */; };
 		C2FBC386BCF01712B5835415 /* SampleViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A12FDBB2E4C09B1DEAFF51B /* SampleViewModelTests.swift */; };
@@ -208,6 +219,7 @@
 		D937EBE723E43D3431F93A64 /* KeychainPersistenceUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A2D1D094D742D4DCC3301C3 /* KeychainPersistenceUITests.swift */; };
 		D95CF956D40CD9DC16B70D43 /* RoomEndpointsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A8E6EBCB9712C0BD5EE9968 /* RoomEndpointsTests.swift */; };
 		DABCAF4CF39EED13C8B9FD10 /* SessionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = B75295C260CB8C58C10561AA /* SessionState.swift */; };
+		DB2D11626165BBD10600CCD5 /* EmojiPanelViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A629DAF26ABF434480451A53 /* EmojiPanelViewModel.swift */; };
 		DD1CA3F4A262B95ADB43ADAA /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1395FB63EFED053C4C4C497C /* Theme.swift */; };
 		DECAA7C709C77D94B9719A89 /* RoomScaffoldDefaults.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A3E5D9E3AD694F3AEBD82C2 /* RoomScaffoldDefaults.swift */; };
 		E0BD232D2FAD0FCD6608BF57 /* StepsSyncRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40515348CAB685F2F278EF54 /* StepsSyncRequest.swift */; };
@@ -266,6 +278,7 @@
 		0356656CC2DBA0B7ED4D2B9A /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		037A03497312B6CC6305D89B /* ErrorPresentationHostModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorPresentationHostModifier.swift; sourceTree = "<group>"; };
 		047B6AA8183B489ECCA148EC /* SessionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStoreTests.swift; sourceTree = "<group>"; };
+		048F7B657E1260FE3B7E0106 /* EmojisEndpoints.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojisEndpoints.swift; sourceTree = "<group>"; };
 		0565A1742A225D9D006BA655 /* Icons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Icons.swift; sourceTree = "<group>"; };
 		08CA4F6139E7A05AAF87C850 /* AppLaunchStateMachine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLaunchStateMachine.swift; sourceTree = "<group>"; };
 		0AEF0690D72478E6E87D3B86 /* HealthProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthProvider.swift; sourceTree = "<group>"; };
@@ -286,10 +299,12 @@
 		1A9498ED4B7189FF05A4DFAC /* HomeEndpoints.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeEndpoints.swift; sourceTree = "<group>"; };
 		1AFFBC70D51EF0C753AF1588 /* RoomEndpoints.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomEndpoints.swift; sourceTree = "<group>"; };
 		1B084E76E0B4DD936A100277 /* MockHomeRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockHomeRepository.swift; sourceTree = "<group>"; };
+		1C85CBDB5056F2E2B29C6297 /* LoadEmojisUseCaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadEmojisUseCaseTests.swift; sourceTree = "<group>"; };
 		1CF7B96620ACC7C9E4EE8858 /* PetStateSyncRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetStateSyncRequest.swift; sourceTree = "<group>"; };
 		1D4B763460336F628BDDB9BF /* RoomViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomViewModel.swift; sourceTree = "<group>"; };
 		1DA210F434F9C5277B8FC5E1 /* StepRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StepRepository.swift; sourceTree = "<group>"; };
 		1E82EB03BF2525811F78B66B /* HomeContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeContainerView.swift; sourceTree = "<group>"; };
+		2017BE6294021FF0F092B9B2 /* EmojiRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiRepositoryTests.swift; sourceTree = "<group>"; };
 		202D06A1D0A71F260B651929 /* TerminalErrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalErrorView.swift; sourceTree = "<group>"; };
 		209005BD922487C8EEA8A567 /* HealthProviderIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthProviderIntegrationTests.swift; sourceTree = "<group>"; };
 		20C2CB6558B6E0046F2CD832 /* CosmeticItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CosmeticItem.swift; sourceTree = "<group>"; };
@@ -305,6 +320,7 @@
 		297F6DACB1E5B9C73562F93D /* CreateRoomUseCaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateRoomUseCaseTests.swift; sourceTree = "<group>"; };
 		2D836DE136F5616109D4BA59 /* WardrobeViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WardrobeViewModel.swift; sourceTree = "<group>"; };
 		2E94000B196080C665C08550 /* ProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileView.swift; sourceTree = "<group>"; };
+		2EE86A0AE67A0F79EEEB3FDF /* LoadEmojisUseCase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadEmojisUseCase.swift; sourceTree = "<group>"; };
 		2F0DF7EA15655C4386547F94 /* PetStateEndpointsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetStateEndpointsTests.swift; sourceTree = "<group>"; };
 		2F216935E6C1A579B98306F9 /* GuestLoginUseCaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuestLoginUseCaseTests.swift; sourceTree = "<group>"; };
 		30D9A6A4BA2E1BE3F7997EEE /* JoinRoomModalPlaceholder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoinRoomModalPlaceholder.swift; sourceTree = "<group>"; };
@@ -321,6 +337,7 @@
 		422C789F2854D6FE69DC2F4A /* PetSpriteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetSpriteView.swift; sourceTree = "<group>"; };
 		426B47E14859D36E2054952B /* AuthEndpoints.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthEndpoints.swift; sourceTree = "<group>"; };
 		429BCD069210F263A08F6BA9 /* DeviceInfoProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceInfoProviderTests.swift; sourceTree = "<group>"; };
+		4516A54B77597ECCD60EB9A3 /* EmojiPanelViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiPanelViewModelTests.swift; sourceTree = "<group>"; };
 		45B537A9A913D964BB4F8494 /* PetAppApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetAppApp.swift; sourceTree = "<group>"; };
 		45C0B9D47B59E5A9EEA717F3 /* HomeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeUITests.swift; sourceTree = "<group>"; };
 		46A8E61D61BABA4EC4DE1350 /* WardrobeScaffoldView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WardrobeScaffoldView.swift; sourceTree = "<group>"; };
@@ -330,6 +347,7 @@
 		483E90AE12F6E9CD76C4A806 /* RootViewWireTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootViewWireTests.swift; sourceTree = "<group>"; };
 		48677E3230DDDADF3490B024 /* ErrorPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorPresentation.swift; sourceTree = "<group>"; };
 		48D911BB711574FB1AB88573 /* ToastView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastView.swift; sourceTree = "<group>"; };
+		4926FD7F8D35343E1C033904 /* EmojiListResponse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiListResponse.swift; sourceTree = "<group>"; };
 		4B99F81C6A99E03E5B645882 /* HomeViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeViewTests.swift; sourceTree = "<group>"; };
 		4DFE6BFD422F3533CB8F1F7C /* FriendsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FriendsViewModel.swift; sourceTree = "<group>"; };
 		4EA8CC02E98250460FA152FB /* RoomMember.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomMember.swift; sourceTree = "<group>"; };
@@ -374,6 +392,7 @@
 		7050D81BA9C76A339D071AB5 /* HealthKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = HealthKit.framework; path = System/Library/Frameworks/HealthKit.framework; sourceTree = SDKROOT; };
 		7313A2F9EB8855EA34065028 /* MotionProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionProvider.swift; sourceTree = "<group>"; };
 		73C55F32B57A7D49B7C4B736 /* PrimitivesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrimitivesTests.swift; sourceTree = "<group>"; };
+		749BE0A0A72F3A290224842E /* EmojiRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiRepository.swift; sourceTree = "<group>"; };
 		77D74E92F06F929BC8876E94 /* RealFriendsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealFriendsViewModel.swift; sourceTree = "<group>"; };
 		791083D6FAB62120612A3C6F /* PetApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PetApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7925FCB304E09F51D4EB31C1 /* ProfileScaffoldDefaults.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileScaffoldDefaults.swift; sourceTree = "<group>"; };
@@ -416,6 +435,7 @@
 		A3215A48C676F394BF96B254 /* SyncPetStateUseCaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncPetStateUseCaseTests.swift; sourceTree = "<group>"; };
 		A3987EA4E158D2F9250986C9 /* PingUseCase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PingUseCase.swift; sourceTree = "<group>"; };
 		A61248D918E858BF304C7C6A /* WebSocketClientMock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketClientMock.swift; sourceTree = "<group>"; };
+		A629DAF26ABF434480451A53 /* EmojiPanelViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiPanelViewModel.swift; sourceTree = "<group>"; };
 		A67BA2AE8B846A8622DA39DF /* GuestLoginRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuestLoginRequest.swift; sourceTree = "<group>"; };
 		A6B0E0D7FA4E35E61E70DE13 /* RarityTag.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RarityTag.swift; sourceTree = "<group>"; };
 		A773C979015CB0BC2641E422 /* HomeContainerViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeContainerViewTests.swift; sourceTree = "<group>"; };
@@ -432,6 +452,7 @@
 		AE68A27ED67BFBA619C018E1 /* StepsEndpoints.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StepsEndpoints.swift; sourceTree = "<group>"; };
 		AEC51C8FA46026E39A419461 /* MotionProviderMock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionProviderMock.swift; sourceTree = "<group>"; };
 		AF03C830C761BDD95A1AC14D /* LaunchingViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchingViewTests.swift; sourceTree = "<group>"; };
+		B17D873230658680FC8DB980 /* EmojiPanelHostView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiPanelHostView.swift; sourceTree = "<group>"; };
 		B2C5ED72E2191EE2624B1770 /* KeychainServicesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainServicesStore.swift; sourceTree = "<group>"; };
 		B39E94DF59D63BB7B44DACA0 /* ResetIdentityButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResetIdentityButton.swift; sourceTree = "<group>"; };
 		B433BA798A041C7AA978179C /* KeychainKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainKey.swift; sourceTree = "<group>"; };
@@ -455,6 +476,7 @@
 		CA0A53B2DE325D783AA52526 /* HealthProviderImpl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthProviderImpl.swift; sourceTree = "<group>"; };
 		CAA6988B9A64BBA62374B494 /* MockLoadHomeUseCase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockLoadHomeUseCase.swift; sourceTree = "<group>"; };
 		CAB6968619ECEAFB7605E183 /* CosmeticCategory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CosmeticCategory.swift; sourceTree = "<group>"; };
+		CB5C503373F22815CC684B8E /* EmojiPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiPanelView.swift; sourceTree = "<group>"; };
 		CBA38032AD114E2A1F129DBE /* ProfileMenuItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileMenuItem.swift; sourceTree = "<group>"; };
 		CBB152DBC935D025C9235235 /* MockRoomRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockRoomRepository.swift; sourceTree = "<group>"; };
 		CCB3D2DC7A6B14D3E65C41F1 /* ThemeColors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeColors.swift; sourceTree = "<group>"; };
@@ -475,6 +497,7 @@
 		E29C985B53B9A4C5F53AADEC /* MockProfileViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockProfileViewModel.swift; sourceTree = "<group>"; };
 		E2F11B62344500F9517F8111 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
 		E3501FDB5AF02E7A294FCD3B /* WSState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WSState.swift; sourceTree = "<group>"; };
+		E99359CF0E3B4FF209BFE2A8 /* EmojiPanelViewUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiPanelViewUITests.swift; sourceTree = "<group>"; };
 		EB0FA1241723FAAED3D62FBD /* RealHomeViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealHomeViewModelTests.swift; sourceTree = "<group>"; };
 		EC52FAD1898892946E1ADE82 /* APIError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIError.swift; sourceTree = "<group>"; };
 		EC6DF1BC39D846CADDD73E6D /* AccessibilityIDTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityIDTests.swift; sourceTree = "<group>"; };
@@ -482,6 +505,7 @@
 		EDA2E8B7A5F4EC9870C190A7 /* HealthProviderProbeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthProviderProbeView.swift; sourceTree = "<group>"; };
 		EDE055F3BD3FC2B2FB628B13 /* PetSpriteViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetSpriteViewTests.swift; sourceTree = "<group>"; };
 		F05CB847053EF404BADB71EF /* FriendsScaffoldView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FriendsScaffoldView.swift; sourceTree = "<group>"; };
+		F0C4E4B4B3AF88BD7FD0285E /* EmojiConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiConfig.swift; sourceTree = "<group>"; };
 		F271EF28052AB189832E77D0 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F34F82C20EA4745D4A744162 /* WebSocketClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketClient.swift; sourceTree = "<group>"; };
 		F387CC35A8F5381124AE9A2B /* HealthProviderMockTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthProviderMockTests.swift; sourceTree = "<group>"; };
@@ -581,6 +605,15 @@
 			path = Wardrobe;
 			sourceTree = "<group>";
 		};
+		08509F829E037F3B9B78C5CF /* UseCases */ = {
+			isa = PBXGroup;
+			children = (
+				048F7B657E1260FE3B7E0106 /* EmojisEndpoints.swift */,
+				2EE86A0AE67A0F79EEEB3FDF /* LoadEmojisUseCase.swift */,
+			);
+			path = UseCases;
+			sourceTree = "<group>";
+		};
 		089F960D4FFF2842770D7BE2 /* Primitives */ = {
 			isa = PBXGroup;
 			children = (
@@ -660,6 +693,14 @@
 			path = Views;
 			sourceTree = "<group>";
 		};
+		1B1D76FDB2C486542A68C166 /* ViewModels */ = {
+			isa = PBXGroup;
+			children = (
+				A629DAF26ABF434480451A53 /* EmojiPanelViewModel.swift */,
+			);
+			path = ViewModels;
+			sourceTree = "<group>";
+		};
 		1BF5D517A6AFD429C5F590C2 /* Networking */ = {
 			isa = PBXGroup;
 			children = (
@@ -683,6 +724,14 @@
 				DD6FB413B31C15D9B7B237E5 /* FriendStatus.swift */,
 			);
 			path = Models;
+			sourceTree = "<group>";
+		};
+		295BBF8DBBB0DC650B06B2A8 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				CB5C503373F22815CC684B8E /* EmojiPanelView.swift */,
+			);
+			path = Views;
 			sourceTree = "<group>";
 		};
 		2B99AD145258F3C1FF66ED43 /* Core */ = {
@@ -806,6 +855,7 @@
 			children = (
 				80E6B96ECDEA169CE516B6B6 /* Auth */,
 				7D5E80E650ED53841BD33917 /* DevTools */,
+				CF3F0E04BB48570360919AFB /* Emoji */,
 				F86BB0F05066873D74AADFB7 /* Friends */,
 				4730E64865712BF4AC3BC9D7 /* Home */,
 				6144E0CA8B48B8A8CB66CA1F /* Launching */,
@@ -859,6 +909,7 @@
 			children = (
 				9FA8CC60025EF762805D22AE /* Auth */,
 				EABA3D9C3612B8EB923A73C1 /* DevTools */,
+				D86278F7B452576C58EC9B89 /* Emoji */,
 				0CE3AE5F001EEF540BD260B0 /* Friends */,
 				33A79AA43DBF0E2C07582909 /* Home */,
 				EA662BD9030009C272BA2F46 /* Launching */,
@@ -867,6 +918,22 @@
 				048024349B06D073CC14F6FD /* Wardrobe */,
 			);
 			path = Features;
+			sourceTree = "<group>";
+		};
+		51D54C592294DE59BDEA58D2 /* ViewModels */ = {
+			isa = PBXGroup;
+			children = (
+				4516A54B77597ECCD60EB9A3 /* EmojiPanelViewModelTests.swift */,
+			);
+			path = ViewModels;
+			sourceTree = "<group>";
+		};
+		538AD87B9EF5892983BA5E05 /* Emoji */ = {
+			isa = PBXGroup;
+			children = (
+				E99359CF0E3B4FF209BFE2A8 /* EmojiPanelViewUITests.swift */,
+			);
+			path = Emoji;
 			sourceTree = "<group>";
 		};
 		564B28355FCBAD2F1362A2DE /* Models */ = {
@@ -905,6 +972,14 @@
 				27D05E3B609A20DC41CE4A81 /* ErrorPresenterTests.swift */,
 			);
 			path = ErrorHandling;
+			sourceTree = "<group>";
+		};
+		67FB393ABA64F2EDEBAABDE9 /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				538AD87B9EF5892983BA5E05 /* Emoji */,
+			);
+			path = Features;
 			sourceTree = "<group>";
 		};
 		68440AE0441C6199EA12A2D7 /* ViewModels */ = {
@@ -1001,6 +1076,15 @@
 				5CD9AB7425E0E1E1198F1BF4 /* ResetKeychainUseCaseTests.swift */,
 			);
 			path = DevTools;
+			sourceTree = "<group>";
+		};
+		7E9C8701F35D95C00E0EB92D /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				F0C4E4B4B3AF88BD7FD0285E /* EmojiConfig.swift */,
+				4926FD7F8D35343E1C033904 /* EmojiListResponse.swift */,
+			);
+			path = Models;
 			sourceTree = "<group>";
 		};
 		80C225C1999892901DE516F7 /* UseCases */ = {
@@ -1191,6 +1275,7 @@
 				69D3C2A9B9AFEB089423A8B8 /* NavigationUITests.swift */,
 				5E81BAD870B6698393539A53 /* RoomUITests.swift */,
 				0D83DEC0D12C9D61EA1A4441 /* StepSyncIntegrationTests.swift */,
+				67FB393ABA64F2EDEBAABDE9 /* Features */,
 			);
 			path = PetAppUITests;
 			sourceTree = "<group>";
@@ -1258,12 +1343,27 @@
 			path = Repositories;
 			sourceTree = "<group>";
 		};
+		B66BE73FBCA4B6CEDA3B935F /* Models */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
 		BDBAA4901779769C95F35028 /* Session */ = {
 			isa = PBXGroup;
 			children = (
 				CD7B7BDE4B6BE2B7378352EC /* SessionStore.swift */,
 			);
 			path = Session;
+			sourceTree = "<group>";
+		};
+		BE6C3B72C46AF8F394AC899F /* Repositories */ = {
+			isa = PBXGroup;
+			children = (
+				749BE0A0A72F3A290224842E /* EmojiRepository.swift */,
+			);
+			path = Repositories;
 			sourceTree = "<group>";
 		};
 		C5AB777F0561D255B6CE431C /* Resources */ = {
@@ -1311,6 +1411,17 @@
 			path = ViewModels;
 			sourceTree = "<group>";
 		};
+		CF3F0E04BB48570360919AFB /* Emoji */ = {
+			isa = PBXGroup;
+			children = (
+				B66BE73FBCA4B6CEDA3B935F /* Models */,
+				EA45D0C3233BBAAE8B89A7AD /* Repositories */,
+				E70EC0FCE8CF38F4A78C6D78 /* UseCases */,
+				51D54C592294DE59BDEA58D2 /* ViewModels */,
+			);
+			path = Emoji;
+			sourceTree = "<group>";
+		};
 		D652E4738214C75CDF62ED85 /* App */ = {
 			isa = PBXGroup;
 			children = (
@@ -1333,6 +1444,18 @@
 				30D9A6A4BA2E1BE3F7997EEE /* JoinRoomModalPlaceholder.swift */,
 			);
 			path = JoinRoomModal;
+			sourceTree = "<group>";
+		};
+		D86278F7B452576C58EC9B89 /* Emoji */ = {
+			isa = PBXGroup;
+			children = (
+				7E9C8701F35D95C00E0EB92D /* Models */,
+				BE6C3B72C46AF8F394AC899F /* Repositories */,
+				08509F829E037F3B9B78C5CF /* UseCases */,
+				1B1D76FDB2C486542A68C166 /* ViewModels */,
+				295BBF8DBBB0DC650B06B2A8 /* Views */,
+			);
+			path = Emoji;
 			sourceTree = "<group>";
 		};
 		D9C635C628C4BD6A15AB0C58 /* Session */ = {
@@ -1378,6 +1501,22 @@
 			path = Helpers;
 			sourceTree = "<group>";
 		};
+		E70EC0FCE8CF38F4A78C6D78 /* UseCases */ = {
+			isa = PBXGroup;
+			children = (
+				1C85CBDB5056F2E2B29C6297 /* LoadEmojisUseCaseTests.swift */,
+			);
+			path = UseCases;
+			sourceTree = "<group>";
+		};
+		EA45D0C3233BBAAE8B89A7AD /* Repositories */ = {
+			isa = PBXGroup;
+			children = (
+				2017BE6294021FF0F092B9B2 /* EmojiRepositoryTests.swift */,
+			);
+			path = Repositories;
+			sourceTree = "<group>";
+		};
 		EA662BD9030009C272BA2F46 /* Launching */ = {
 			isa = PBXGroup;
 			children = (
@@ -1417,6 +1556,7 @@
 		EC9A36487F19B2CECF5A3CBC /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				B17D873230658680FC8DB980 /* EmojiPanelHostView.swift */,
 				EDA2E8B7A5F4EC9870C190A7 /* HealthProviderProbeView.swift */,
 				622050729DBCB9C9DB9991ED /* MotionProviderProbeView.swift */,
 				B39E94DF59D63BB7B44DACA0 /* ResetIdentityButton.swift */,
@@ -1620,6 +1760,8 @@
 				010264E3482D2CFA71FE84C8 /* AuthBoundaryAPIClientTests.swift in Sources */,
 				4E906FA8437453586F466483 /* CreateRoomUseCaseTests.swift in Sources */,
 				E1CE2A0DFACE91BB66D23870 /* DeviceInfoProviderTests.swift in Sources */,
+				93359AC4CF029D392DAC4868 /* EmojiPanelViewModelTests.swift in Sources */,
+				1D9F1A676E6783E694BA8536 /* EmojiRepositoryTests.swift in Sources */,
 				38802607E5107149270AF777 /* ErrorComponentSnapshotTests.swift in Sources */,
 				0B34804F9B12140FE2F73D40 /* ErrorPresenterTests.swift in Sources */,
 				1D3F55B63140E9DBDCB65973 /* FriendsViewScaffoldTests.swift in Sources */,
@@ -1643,6 +1785,7 @@
 				C4A74F2241EDE99CAD987FAD /* KeychainServicesStoreTests.swift in Sources */,
 				FC6A77C277F0B24130DD19BA /* LaunchingViewTests.swift in Sources */,
 				7707DB99A369C065164EFE29 /* LeaveRoomUseCaseTests.swift in Sources */,
+				A7E35380FEAFA63C5F5D28AE /* LoadEmojisUseCaseTests.swift in Sources */,
 				6A15A03AC51444995B3AFBC7 /* LoadHomeUseCaseTests.swift in Sources */,
 				4449E09577B83A912CB4B872 /* MockAPIClient.swift in Sources */,
 				F78603C7E795CCC20CE4444F /* MockAuthRepository.swift in Sources */,
@@ -1691,6 +1834,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				98254ACE6BE190BB8E11DE19 /* AccessibilityID.swift in Sources */,
+				7516CB500D88EBAE63284557 /* EmojiPanelViewUITests.swift in Sources */,
 				93CBF4FD7F63F1908E6B6801 /* HealthProviderIntegrationTests.swift in Sources */,
 				0BE98B44B6EC1B5C8DAA5D1D /* HomeUITests.swift in Sources */,
 				D937EBE723E43D3431F93A64 /* KeychainPersistenceUITests.swift in Sources */,
@@ -1727,6 +1871,13 @@
 				26E3D14FA1120264A6D01E26 /* CreateRoomUseCase.swift in Sources */,
 				2EB258FCA3C36C35DB861782 /* DateProvider.swift in Sources */,
 				1BC43A46F56D9F43F13E0B37 /* DeviceInfoProvider.swift in Sources */,
+				BA9DFC3515EEF1DC30464C22 /* EmojiConfig.swift in Sources */,
+				43815EFD3F93EB54EE86EBEE /* EmojiListResponse.swift in Sources */,
+				26C31380DF2EAC255C8985D0 /* EmojiPanelHostView.swift in Sources */,
+				81BE9423960C50AA76EA90DD /* EmojiPanelView.swift in Sources */,
+				DB2D11626165BBD10600CCD5 /* EmojiPanelViewModel.swift in Sources */,
+				C05152B6DB5FB50538894962 /* EmojiRepository.swift in Sources */,
+				5D0D1239E6D848A7A9DDC4FB /* EmojisEndpoints.swift in Sources */,
 				0D1C73ED1924CFC5FC9B22B3 /* Endpoint.swift in Sources */,
 				90E3F4F1FE7519C0462F2F74 /* Environment+Theme.swift in Sources */,
 				57BE472024B9DD6FA201A363 /* ErrorPresentation.swift in Sources */,
@@ -1767,6 +1918,7 @@
 				B801320C2AED18031E866158 /* KeychainUITestHookView.swift in Sources */,
 				31708AB58835B1AF66619F42 /* LaunchingView.swift in Sources */,
 				9D72E92A806CDEE8E18DFD17 /* LeaveRoomUseCase.swift in Sources */,
+				2842F027A712082A743CD4FD /* LoadEmojisUseCase.swift in Sources */,
 				F04B34644FFF56D66C2CD75E /* LoadHomeUseCase.swift in Sources */,
 				D13E1F1947A3DCE06AEE60C3 /* MainTabView.swift in Sources */,
 				E3287590F391AE7D188C8D2B /* MockFriendsViewModel.swift in Sources */,

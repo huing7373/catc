@@ -93,6 +93,14 @@ public final class AppContainer: ObservableObject {
     /// 测试 init 重载允许注入 mock client.
     public let webSocketClient: WebSocketClient
 
+    /// Story 18.1 AC5: 全 App 共享的 LoadEmojisUseCase 单例.
+    /// emojis 缓存语义钦定 "App 生命周期内一次加载" (V1 §11.1 行 1817 client 缓存契约) ——
+    /// actor 内部 cache 字段必须跨 ViewModel 共享, 故走 stable singleton 模式
+    /// (与 errorPresenter / sessionStore 同精神), **禁止** 走 `makeXxx()` factory 模式
+    /// (每次 new 实例会让 cache 失效, 每个 EmojiPanelView 实例首次显示都触发 GET /emojis →
+    ///  违反 V1 §11.1 client 缓存契约).
+    public let loadEmojisUseCase: LoadEmojisUseCaseProtocol
+
     #if DEBUG
     /// Story 8.5 AC11: UITest 路径下注入的 mock StepRepository（替代默认 DefaultStepRepository）.
     /// 仅 DEBUG 编译；通过 `UITEST_MOCK_STEP_SYNC=1` launch arg 启用.
@@ -165,13 +173,28 @@ public final class AppContainer: ObservableObject {
             uitestMockHealth = nil
         }
 
+        // Story 18.1 AC8: UITest 路径走 launch env 注入 mock EmojiRepository.
+        //   - UITEST_MOCK_EMOJI=1 启用 mock; UITEST_MOCK_EMOJI_JSON (可选) 注入 JSON fixture
+        //     (`[{code,name,assetUrl,sortOrder}, ...]` array 形态; 缺省走 4 项内置 fixture).
+        //   - 触发条件 + 路径: Story 18.1 钦定 EmojiPanelHostView UITest 通过
+        //     `--uitest-emoji-panel-host` launch arg 渲染 stub host view; mock repo 让
+        //     LoadEmojisUseCase 不走真实 GET /emojis (UITest 无 server).
+        let uitestMockEmojiRepo: EmojiRepositoryProtocol?
+        if env["UITEST_MOCK_EMOJI"] == "1" {
+            let stubEmojis = AppContainer.parseUITestMockEmojiFixture(json: env["UITEST_MOCK_EMOJI_JSON"])
+            uitestMockEmojiRepo = UITestMockEmojiRepository(stubEmojis: stubEmojis)
+        } else {
+            uitestMockEmojiRepo = nil
+        }
+
         self.init(
             apiClient: wrappedAPIClient,
             keychainStore: keychainStore,
             unauthorizedHandlerSink: sink,
             webSocketClient: wsClient,
             healthProvider: uitestMockHealth,
-            uiTestMockStepRepository: uitestMockStepRepo
+            uiTestMockStepRepository: uitestMockStepRepo,
+            emojiRepository: uitestMockEmojiRepo
         )
         #else
         self.init(
@@ -197,7 +220,8 @@ public final class AppContainer: ObservableObject {
         webSocketClient: WebSocketClient? = nil,
         dateProvider: DateProvider = DefaultDateProvider(),
         healthProvider: HealthProvider? = nil,
-        uiTestMockStepRepository: StepRepositoryProtocol? = nil
+        uiTestMockStepRepository: StepRepositoryProtocol? = nil,
+        emojiRepository: EmojiRepositoryProtocol? = nil
     ) {
         self.apiClient = apiClient
         self.errorPresenter = ErrorPresenter()
@@ -218,6 +242,10 @@ public final class AppContainer: ObservableObject {
         self.motionProvider = MotionProviderImpl()
         self.dateProvider = dateProvider
         self.uiTestMockStepRepository = uiTestMockStepRepository
+        // Story 18.1 AC5: 用 stable singleton 模式 wire LoadEmojisUseCase, 让 cache 跨 ViewModel 共享.
+        // UITest 路径下 emojiRepository 注入 mock (UITestMockEmojiRepository); 默认 nil 时走 DefaultEmojiRepository.
+        let resolvedEmojiRepo: EmojiRepositoryProtocol = emojiRepository ?? DefaultEmojiRepository(apiClient: apiClient)
+        self.loadEmojisUseCase = DefaultLoadEmojisUseCase(repository: resolvedEmojiRepo)
     }
     #else
     public init(
@@ -242,6 +270,9 @@ public final class AppContainer: ObservableObject {
         self.healthProvider = HealthProviderImpl()
         self.motionProvider = MotionProviderImpl()
         self.dateProvider = dateProvider
+        // Story 18.1 AC5: Release build 同 DEBUG 路径 wire LoadEmojisUseCase 单例;
+        // **禁止**仅 DEBUG 落地导致 Release build 找不到 useCase 引发 nil crash.
+        self.loadEmojisUseCase = DefaultLoadEmojisUseCase(repository: DefaultEmojiRepository(apiClient: apiClient))
     }
     #endif
 
@@ -440,6 +471,50 @@ public final class AppContainer: ObservableObject {
         )
     }
 
+    // MARK: - Story 18.1 AC5: Emoji 链路 factory
+
+    /// Story 18.1 AC5: 构造 EmojiRepository (每次调用返回新实例; apiClient 单例由 container 持有).
+    /// 与 makeStepRepository / makeRoomRepository 同模式 (value type struct, 构造廉价).
+    ///
+    /// **注意**: caller 一般**不**需要直接调本方法 —— `loadEmojisUseCase` 单例字段已内部持有一个
+    /// EmojiRepository instance. 本 factory 留作模板示范 + 未来 SendEmoji UseCase 可能需要时复用.
+    public func makeEmojiRepository() -> EmojiRepositoryProtocol {
+        DefaultEmojiRepository(apiClient: apiClient)
+    }
+
+    /// Story 18.1 AC5: 构造 EmojiPanelViewModel (每次调用返回新实例; useCase 是 stable singleton 共享 cache).
+    /// caller=任意挂载 EmojiPanelView 的 view (Story 18.2 RoomView; Story 18.1 UI 测试 stub host view).
+    ///
+    /// ViewModel 是 @MainActor + @Published 状态机, 每个 EmojiPanelView 实例需要独立 ViewModel;
+    /// 但 useCase 是同一 stable singleton 实例 = cache 跨 ViewModel 共享 (Dev Note #4 钦定).
+    @MainActor
+    public func makeEmojiPanelViewModel() -> EmojiPanelViewModel {
+        EmojiPanelViewModel(useCase: loadEmojisUseCase)
+    }
+
+    #if DEBUG
+    /// Story 18.1 AC8: UITest 路径下从 launch env JSON 字符串解析 emoji fixture.
+    /// 缺省 / 解析失败时走 4 项内置 fixture (wave / love / laugh / cry); 与 V1 §11.1 字段名 1:1.
+    /// 不在 production 调用 (仅 convenience init() DEBUG 块走此路径).
+    static func parseUITestMockEmojiFixture(json: String?) -> [EmojiConfig] {
+        let defaultFixture: [EmojiConfig] = [
+            EmojiConfig(code: "wave", name: "挥手", assetUrl: "https://placehold.co/64x64?text=Wave", sortOrder: 1),
+            EmojiConfig(code: "love", name: "爱心", assetUrl: "https://placehold.co/64x64?text=Love", sortOrder: 2),
+            EmojiConfig(code: "laugh", name: "大笑", assetUrl: "https://placehold.co/64x64?text=Laugh", sortOrder: 3),
+            EmojiConfig(code: "cry", name: "哭泣", assetUrl: "https://placehold.co/64x64?text=Cry", sortOrder: 4)
+        ]
+        guard let json = json, let data = json.data(using: .utf8) else {
+            return defaultFixture
+        }
+        do {
+            return try JSONDecoder().decode([EmojiConfig].self, from: data)
+        } catch {
+            // UITest 路径出错时回退默认 fixture (不 crash, 让 UITest 仍能跑).
+            return defaultFixture
+        }
+    }
+    #endif
+
     #if DEBUG
     /// Story 2.8 新增（仅 Debug build）：构造 ResetIdentityViewModel。
     /// Release build 该方法不存在；调用方（RootView）也必须 #if DEBUG 包裹调用 — fail-closed。
@@ -477,6 +552,21 @@ private final class UITestMockStepRepository: StepRepositoryProtocol, @unchecked
 
     func syncSteps(_ request: StepsSyncRequest) async throws -> StepsSyncResponse {
         return stubResponse
+    }
+}
+
+/// Story 18.1 AC8: UITest 路径下注入的 mock EmojiRepository；与 UITEST_MOCK_EMOJI=1 配合启用.
+/// stubEmojis 来源 = UITEST_MOCK_EMOJI_JSON env (JSON array) 或 4 项默认 fixture.
+/// 仅 DEBUG 编译；不污染 Production binary.
+private final class UITestMockEmojiRepository: EmojiRepositoryProtocol, @unchecked Sendable {
+    private let stubEmojis: [EmojiConfig]
+
+    init(stubEmojis: [EmojiConfig]) {
+        self.stubEmojis = stubEmojis
+    }
+
+    func listEmojis() async throws -> [EmojiConfig] {
+        return stubEmojis
     }
 }
 

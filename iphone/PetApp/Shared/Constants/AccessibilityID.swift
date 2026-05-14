@@ -204,4 +204,21 @@ public enum AccessibilityID {
     public enum Compose {
         public static let placeholder = "compose_placeholder"
     }
+
+    /// Story 18.1 AC6 落地的 EmojiPanelView a11y identifier.
+    /// 命名风格：`emojiPanel` / `emojiPanel_<state>` / `emojiCell_<code>` —— 与 Room.member(at:)
+    /// 同模式 (dynamic helper) + Home.petSpriteRest 同模式 (静态 const).
+    public enum Emoji {
+        /// EmojiPanelView 根容器 (loaded 态时挂在 LazyVGrid 上, 用于 UITest 定位整个面板).
+        public static let panel = "emojiPanel"
+        /// loading 态 ProgressView 标识 (UITest 验证 loading 占位是否出现).
+        public static let panelLoading = "emojiPanel_loading"
+        /// failed 态 RetryView 标识 (UITest 验证错误态降级是否出现).
+        public static let panelError = "emojiPanel_error"
+        /// 单个表情 cell 模式: `emojiCell_<code>` (e.g. "emojiCell_wave"); caller 走 helper.
+        /// 与 Room.member(at:) 同模式 —— UITest 用 `app.buttons["emojiCell_wave"].tap()` 选中具体表情.
+        public static func cell(_ code: String) -> String { "emojiCell_\(code)" }
+        /// Story 18.1 AC8 UITest stub host 用：让 UITest 通过隐藏 Text 断言 onSelect 回调 emojiCode.
+        public static let uitestSelectedCode = "emojiPanel_uitestSelectedCode"
+    }
 }

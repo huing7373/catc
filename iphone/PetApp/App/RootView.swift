@@ -171,6 +171,19 @@ struct RootView: View {
     }
 
     var body: some View {
+        #if DEBUG
+        // Story 18.1 AC8: UITest stub host view 路径 —— `--uitest-emoji-panel-host` launch arg
+        // 触发时, 全屏渲染 EmojiPanelHostView 而非正常 ZStack/MainTabView. 仅 DEBUG 编译.
+        // 不依赖 launchStateMachine (UITest 路径下 bootstrap 已被 UITEST_SKIP_GUEST_LOGIN 替代).
+        if ProcessInfo.processInfo.arguments.contains("--uitest-emoji-panel-host") {
+            return AnyView(EmojiPanelHostView(container: container))
+        }
+        #endif
+        return AnyView(mainBody)
+    }
+
+    @ViewBuilder
+    private var mainBody: some View {
         ZStack {
             if let stateMachine = launchStateMachine {
                 LaunchedContentView(
