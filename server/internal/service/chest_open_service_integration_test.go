@@ -952,22 +952,41 @@ func TestChestOpenServiceIntegration_Steps1001_SucceedsAvailable1(t *testing.T) 
 // ============================================================
 // AC13: 边界 4 — chest unlock_at 比 now 早 1ms → unlockable（V1 §7.2.5d 公式边界）
 // ============================================================
+//
+// **20.9 r2 修正（fixed clock）**：本 case 必须用 fixed clock 才能精确验证
+// service 内 `chest.UnlockAt.After(now) == false` 的边界 —— 即 "now - 1ms <= now"
+// 必须为真。
+//
+// **r1 缺陷**：r1 实装走 wall clock，`unlockAt = time.Now().UTC().Add(-1ms)` 后
+// service 内再调 `s.nowFn() = time.Now().UTC()`，在 busy CI runner 上两次
+// time.Now() 间隔可能 >> 1ms（DB INSERT / GORM 反射 / RTT 等耗时），实际 delta
+// 远大于 1ms；即使 service 错把 `!After(now)` 改成 `Before(now)` 或 `< 5ms` 等
+// regression，本测试仍可能误判通过 —— 没精确锁住边界语义。
+//
+// **r2 修正**：通过 service.SetChestServiceNowFn 注入 fixed nowFn → T；构造
+// unlockAt = T - 1ms；精确验证"差 1ms 仍 unlockable"。lesson 见
+// docs/lessons/2026-05-15-fixed-clock-for-boundary-tests.md。
 func TestChestOpenServiceIntegration_UnlockAtMinus1ms_IsUnlockable(t *testing.T) {
 	svc, sqlDB, cleanup := buildChestOpenServiceIntegration(t)
 	defer cleanup()
 
+	// fixed clock: 固定时刻 T；service 内 s.nowFn() 必返 T，
+	// 与 wall clock 解耦 → unlockAt = T - 1ms 精确对应边界。
+	fixedNow := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
+	service.SetChestServiceNowFn(svc, func() time.Time { return fixedNow })
+
 	const userID = uint64(1)
 	insertUser(t, sqlDB, userID, "uid-unlock-1ms", "边界1ms", "")
 	insertStepAccount(t, sqlDB, userID, 1500, 1500, 0)
-	// unlock_at = now - 1ms（status=1 counting，但时间已过）
-	unlockAt := time.Now().UTC().Add(-1 * time.Millisecond)
+	// unlock_at = fixedNow - 1ms（status=1 counting，时间精确早 1ms）
+	unlockAt := fixedNow.Add(-1 * time.Millisecond)
 	insertChest(t, sqlDB, 9001, userID, 1, unlockAt, 1000)
 
 	out, err := svc.OpenChest(context.Background(), service.OpenChestInput{
 		UserID: userID, IdempotencyKey: "test_unlock_1ms",
 	})
 	if err != nil {
-		t.Fatalf("expected unlockable (status=1 + unlock_at past 1ms), got %v", err)
+		t.Fatalf("expected unlockable (status=1 + unlock_at == fixedNow-1ms), got %v", err)
 	}
 	if out == nil {
 		t.Fatal("out = nil")
@@ -978,12 +997,36 @@ func TestChestOpenServiceIntegration_UnlockAtMinus1ms_IsUnlockable(t *testing.T)
 // AC14: 抽奖分布 — 1000 次开箱 → 各品质比例符合 drop_weight 设计
 // ============================================================
 //
-// drop_weight 总和: common(8 件 × 100) + rare(4 × 20) + epic(2 × 4) + legendary(1 × 1) = 800 + 80 + 8 + 1 = 889
-// 期望 1000 次开箱: common ≈ 900, rare ≈ 90, epic ≈ 9, legendary ≈ 1.1
-// 宽松区间（容差 ±10% common/rare, 0-3x epic, 0-8 legendary）
+// **20.9 r2 修正（deterministic picker）**：本 case **不**走真实 crypto-weighted
+// picker —— 真随机 + 1000 样本必然偶发命中 tail outcome（如 legendary 期望 1.1
+// 件，P(count=0) ≈ 33%；rare 期望 90 件，σ ≈ 9.6 → ±3σ 区间内仍有 ~5% 漏掉），
+// 把集成测试 `--integration` 退化为 flaky CI gate（lesson：
+// docs/lessons/2026-05-15-no-real-rng-in-integration-tests.md）。
+//
+// **r2 设计**：注入 deterministic stub picker，按理论比例（common 900 / rare 90 /
+// epic 9 / legendary 1）钦定调用序列。本 case 验证的是 **service 把 picker 返回
+// 的 index 正确映射到 reward_rarity 字段 + 1000 次循环正确顺序执行 1000 个事务**
+// —— 是集成 layer 的关注点；picker 自身权重算法的分布正确性留给
+// `weighted_test.go` 的 stand-alone unit test（可用大样本 + chi-square 或
+// 确定性 seed 验证）。
+//
+// **picker 策略**：stub 按 desired weight 找匹配 item index 返回 —— common 件
+// drop_weight=100 / rare=20 / epic=4 / legendary=1 唯一可区分 → 不依赖
+// cosmetic_items 表 ORDER BY（GORM Find 默认 MySQL 顺序未必稳定）。
 func TestChestOpenServiceIntegration_WeightedPickDistribution_1000Opens(t *testing.T) {
-	svc, sqlDB, cleanup := buildChestOpenServiceIntegration(t)
+	sqlDB, chestRepo, stepAccountRepo, idempotencyRepo, cosmeticItemRepo, chestOpenLogRepo, txMgr, _, cleanup := buildChestServiceWithRepos(t)
 	defer cleanup()
+
+	// deterministic stub picker：900 common (weight=100) → 90 rare (weight=20) →
+	// 9 epic (weight=4) → 1 legendary (weight=1)；总 1000 次。
+	stub := newRaritySequencePicker(t,
+		raritySequenceSpec{desiredWeight: 100, count: 900}, // common
+		raritySequenceSpec{desiredWeight: 20, count: 90},   // rare
+		raritySequenceSpec{desiredWeight: 4, count: 9},     // epic
+		raritySequenceSpec{desiredWeight: 1, count: 1},     // legendary
+	)
+
+	svc := service.NewChestService(chestRepo, txMgr, idempotencyRepo, stepAccountRepo, cosmeticItemRepo, chestOpenLogRepo, stub)
 
 	const userID = uint64(1)
 	insertUser(t, sqlDB, userID, "uid-dist", "分布", "")
@@ -1011,6 +1054,11 @@ func TestChestOpenServiceIntegration_WeightedPickDistribution_1000Opens(t *testi
 		}
 	}
 
+	// 验证 stub 被调用 N 次（防 service 旁路抽奖逻辑的 regression）
+	if got := stub.calls(); got != N {
+		t.Errorf("stub picker calls=%d, want %d", got, N)
+	}
+
 	// 统计 chest_open_logs.reward_rarity 分布
 	rows, err := sqlDB.Query(`SELECT reward_rarity, COUNT(*) FROM chest_open_logs WHERE user_id=? GROUP BY reward_rarity`, userID)
 	if err != nil {
@@ -1031,18 +1079,22 @@ func TestChestOpenServiceIntegration_WeightedPickDistribution_1000Opens(t *testi
 		t.Fatalf("rows.Err: %v", err)
 	}
 
-	// 宽松区间断言
-	if counts[1] < 820 || counts[1] > 980 {
-		t.Errorf("common count=%d, want [820, 980]", counts[1])
+	// **精确断言**（deterministic stub → 0 flakiness）：
+	//   rarity=1 (common):    900
+	//   rarity=2 (rare):       90
+	//   rarity=3 (epic):        9
+	//   rarity=4 (legendary):   1
+	if counts[1] != 900 {
+		t.Errorf("common count=%d, want exactly 900 (deterministic stub)", counts[1])
 	}
-	if counts[2] < 50 || counts[2] > 130 {
-		t.Errorf("rare count=%d, want [50, 130]", counts[2])
+	if counts[2] != 90 {
+		t.Errorf("rare count=%d, want exactly 90 (deterministic stub)", counts[2])
 	}
-	if counts[3] < 0 || counts[3] > 25 {
-		t.Errorf("epic count=%d, want [0, 25]", counts[3])
+	if counts[3] != 9 {
+		t.Errorf("epic count=%d, want exactly 9 (deterministic stub)", counts[3])
 	}
-	if counts[4] < 0 || counts[4] > 8 {
-		t.Errorf("legendary count=%d, want [0, 8]", counts[4])
+	if counts[4] != 1 {
+		t.Errorf("legendary count=%d, want exactly 1 (deterministic stub)", counts[4])
 	}
 	// 总和必须 == 1000
 	total := counts[1] + counts[2] + counts[3] + counts[4]
@@ -1112,4 +1164,76 @@ type faultChestOpenLogRepoOnCreate struct {
 
 func (f *faultChestOpenLogRepoOnCreate) Create(ctx context.Context, log *mysql.ChestOpenLog) error {
 	return f.injectErr
+}
+
+// ============================================================
+// raritySequencePicker — deterministic WeightedPicker stub
+// （Story 20.9 r2 引入，仅本 file 用于 AC14 分布 case）
+// ============================================================
+//
+// 用途：替代 random.NewCryptoWeightedPicker，按预定 sequence 返回 item index。
+// 让"1000 次开箱分布断言"完全 deterministic → 0 flakiness。
+//
+// 设计：
+//
+//   - 构造时接收一组 raritySequenceSpec（desiredWeight + count）；按顺序铺平成
+//     1×count[0] + 1×count[1] + ... 的 weight sequence
+//   - 每次 Pick(items) 调用 → 取出当前 sequence 首位 desiredWeight → 在 items
+//     里线性扫描找到第一个 Weight == desiredWeight 的 index 返回
+//   - cosmetic_items 表中 4 个 drop_weight 值（100 / 20 / 4 / 1）唯一可区分 →
+//     找匹配 weight 的 index 等价于"选某一 rarity 桶里第一件 item"
+//   - 调用次数耗尽 sequence 后再 Pick → panic（防 caller 多调）
+//
+// **为何不用 mathrand.New(seed)**：mathrand 仍是 RNG，分布是统计意义的；只在
+// 大样本意义上接近期望，单次 1000 抽样仍可能落 tail。本 stub 完全 deterministic。
+type raritySequenceSpec struct {
+	desiredWeight uint64 // items[i].Weight 必须 == 该值才被选中
+	count         int    // 该 weight 连续返回次数
+}
+
+type raritySequencePicker struct {
+	t        *testing.T
+	sequence []uint64 // 铺平后的 desiredWeight 序列
+	cursor   int
+	mu       sync.Mutex
+}
+
+func newRaritySequencePicker(t *testing.T, specs ...raritySequenceSpec) *raritySequencePicker {
+	t.Helper()
+	total := 0
+	for _, s := range specs {
+		total += s.count
+	}
+	seq := make([]uint64, 0, total)
+	for _, s := range specs {
+		for i := 0; i < s.count; i++ {
+			seq = append(seq, s.desiredWeight)
+		}
+	}
+	return &raritySequencePicker{t: t, sequence: seq}
+}
+
+// Pick 实现 random.WeightedPicker：返回 items 中第一个 Weight 等于
+// sequence[cursor] 的 index；cursor 越界 panic。
+func (p *raritySequencePicker) Pick(items []random.WeightedItem) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cursor >= len(p.sequence) {
+		p.t.Fatalf("raritySequencePicker: cursor=%d >= sequence len=%d (caller over-called)", p.cursor, len(p.sequence))
+	}
+	desired := p.sequence[p.cursor]
+	p.cursor++
+	for i, it := range items {
+		if it.Weight == desired {
+			return i, nil
+		}
+	}
+	p.t.Fatalf("raritySequencePicker: no item with Weight=%d in %d items (cursor was %d)", desired, len(items), p.cursor-1)
+	return 0, nil // unreachable; t.Fatalf 已终止
+}
+
+func (p *raritySequencePicker) calls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cursor
 }

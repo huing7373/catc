@@ -320,3 +320,4 @@
 | 2026-05-15 | [dev 端点的 metrics 边界：从一开始就该排除，5xx 不污染 alert（20-8 r3）](2026-05-15-dev-endpoint-metrics-exempt-20-8-r3.md) | 1 | architecture | `3b56be3` |
 | 2026-05-15 | [dev 路径检查必须在 caller 侧（基于 raw URL）而非 callee 侧（基于已解析 route pattern）（20-8 r4）](2026-05-15-dev-path-check-caller-side-not-callee-side-20-8-r4.md) | 1 | architecture | `5c61f57` |
 | 2026-05-15 | [集成测试错误码断言必须忠实于事务步骤顺序（OpenChest 5d-5f unlock_at 检查在 step 检查之前 → race 失败码是 4002 而非 3002）（20-9 r1）](2026-05-15-integration-test-error-code-must-match-tx-step-order-20-9-r1.md) | 1 | testing | `<pending>` |
+| 2026-05-15 | [集成测试不准用真随机/真时钟做边界断言（deterministic picker stub + fixed clock 注入）（20-9 r2）](2026-05-15-integration-tests-deterministic-picker-and-fixed-clock-20-9-r2.md) | 2 | testing | `<pending>` |
