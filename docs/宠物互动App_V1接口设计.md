@@ -961,8 +961,8 @@ JSON 示例：
       - 没有 chest 行 → rollback → 4001
    b. **判定 unlockable**：动态判定逻辑与 §7.1 服务端逻辑步骤 3 一致 —— `(status = 1 AND unlock_at <= now) OR status = 2` 视为可开启；否则 → rollback → 4002
    c. **FOR UPDATE 锁 user_step_accounts**：`SELECT total_steps, available_steps, consumed_steps, version FROM user_step_accounts WHERE user_id = ? FOR UPDATE`
-      - 没有行（理论不该，Story 4.6 已初始化）→ rollback → 3002（按"步数不足"映射）
-      - `available_steps < 1000` → rollback → 3002
+      - **没有行**（理论不该，Story 4.6 已初始化）→ rollback → **1009 服务繁忙**（数据完整性异常，**非**步数不足；本 case 与"available_steps < 1000"语义不同：前者表征 server 端数据缺失，client 不应提示用户"走路赚步数"，应作为 server 错误重试 / 联系客服；详见"可能的错误码"表 1009 行）
+      - `available_steps < 1000` → rollback → 3002（**仅**此路径映射 3002）
    d. **扣步数 + 加 consumed**：`UPDATE user_step_accounts SET available_steps = available_steps - 1000, consumed_steps = consumed_steps + 1000, version = version + 1 WHERE user_id = ? AND version = ?`（乐观锁；`user_step_accounts` 主键是 `user_id` 不是 `id` —— 见数据库设计 §5.4）
       - `affected_rows = 0`（version 不匹配，并发写入）→ rollback → 1009（按"数据冲突重试"映射；rollback 时步骤 5 走 DEL sentinel 分支清理 → client 用同 key 重试会重新 claim sentinel + 走全流程；推荐 client 用新 idempotencyKey 重试以语义清晰，与"网络层重试"区分）
    e. **加权抽取 cosmetic_item**：`SELECT id, code, name, slot, rarity, drop_weight, asset_url, icon_url FROM cosmetic_items WHERE is_enabled = 1` → 按 `drop_weight` 加权抽取 1 条 → 拿到 `cosmetic_item_id`（`drop_weight` 必须在 SELECT 子句中，否则后续加权抽取无权重输入；与数据库设计 §5.8 `cosmetic_items.drop_weight` 同义）
@@ -986,8 +986,9 @@ JSON 示例：
 - 加权抽奖（步骤 4e）使用 mocked `random.Reader` 接口（Story 20.6 实装时 inject），便于单测断言权重分布；本接口契约层**不**钦定具体算法（alias method / 线性扫描皆可）
 - **事务失败时 sentinel 清理**：步骤 4 任何子步骤（a~h）rollback → 步骤 5 改为 `DEL idem:{userId}:chest_open:{idempotencyKey}` 删除 sentinel；这是契约对"业务错误后用新 key 重试"承诺的兑现（若不删 sentinel，同 key 重试会持续返回 1008 直到 TTL 过期）
 - **Redis 回填失败处理**（步骤 5 SET 或 DEL 任一）：
-  - 成功路径 SET 失败：事务已提交，**不**回滚；log warn；client 收到 200 OK + 正确 reward；同 key 重试将看到 sentinel `"__pending__"` → 收到 1008；client 应改用**新** idempotencyKey 重试（首次结果已落盘 + 已下发，资产无重复出箱风险——此处可接受"sentinel 残留 TTL 24h"的极端 case，符合 MVP 实际部署 Redis 可用性目标）
-  - 失败路径 DEL 失败：sentinel 残留至 TTL（24h）；期间同 key 请求收到 1008；client 应改用新 idempotencyKey；同样符合 best-effort 幂等性退化语义
+  - **成功路径 SET 失败**（事务已提交但缓存未回填）：事务已提交，**不**回滚；log **error**（非 warn —— 此 case 表征幂等承诺已局部退化，需告警值班）；client 收到 200 OK + 正确 reward。**关键约束**：此后同 key 重试将看到 sentinel `"__pending__"` 直到 sentinel TTL 过期（24h）→ 持续返回 1008；client **禁止**改用新 idempotencyKey 重试（否则资产已落盘 + 新 key 会再开事务造成重复扣 1000 步 + 重复发放装扮，违反"网络重试同 key 安全"承诺）；client **应**按 §7.2「client 重试策略」§1008 重试条款处理（同 key + 指数退避 N 次后仍 1008 → 放弃并提示用户「奖励已发放，请刷新查看；如未到账请联系客服」，**不**自动换 key 重试）。由于本 case 会让首次 reward 无法被同 key 再次读出（client 已收到首次 200，所以"读不出"在功能上不影响用户拿到奖励，只影响"重放幂等读"承诺），运营层面**应**保障 Redis 可用性 SLA ≥ 99.9% 把此 case 收敛到罕见事故级
+  - **失败路径 DEL 失败**（事务已回滚但 sentinel 未清理）：sentinel 残留至 TTL（24h）；期间同 key 请求收到 1008；client **同样禁止**改用新 idempotencyKey 自动重试（前次首次请求实际未成功，但 client 无法区分"事务确实失败"vs"事务成功但 SET 也失败"两种 case；若自动换 key 会在前者无效、在后者造成重复出箱）；client **应**按 §7.2「client 重试策略」§1008 重试条款，同 key + 指数退避 N 次后仍 1008 → 放弃并提示用户联系客服。该条款同样要求 Redis 可用性 SLA ≥ 99.9% 把 DEL 失败收敛到罕见事故级
+  - **server 端不变量**（实装锁定）：步骤 5 的 SET / DEL 均为 best-effort；server 端**不**为这两种失败提供自动修复机制（不补偿写、不延迟重试）；故 Story 20.6 实装需在 SET / DEL 失败时**强制 log.Error** + 触发 metrics counter `chest_open_idem_cache_writeback_failed_total`，便于运营层接 Alert 介入
 
 #### 响应体
 
@@ -1021,7 +1022,7 @@ JSON 示例：
 | `data.nextChest.status` | number (int) | 必填 | 节点 7 阶段固定 `1` (counting) | 下一轮状态；新 chest 必为 counting 状态 |
 | `data.nextChest.unlockAt` | string (ISO 8601 UTC) | 必填 | length = 20 | 下一轮解锁时间；server 端固定为开箱时刻 + 10 分钟 |
 | `data.nextChest.openCostSteps` | number (int) | 必填 | 节点 7 阶段固定 `1000` | 下一轮开启所需步数 |
-| `data.nextChest.remainingSeconds` | number (int) | 必填 | 节点 7 阶段固定 `600`（10 min = 600 sec） | 距 unlockAt 剩余秒数；server 端固定下发 600 |
+| `data.nextChest.remainingSeconds` | number (int) | 必填 | `0 ≤ value ≤ 600`（新 chest `unlock_at = now + 10 min`，故 ceil 上界 = 600） | 距 unlockAt 剩余秒数；**server 端按 §7.1 服务端逻辑同一规则计算** —— `max(0, ceil((unlock_at - now) / 1s))`；新 chest 刚 INSERT 后通常 = 600，但若响应序列化耗时 > 1s 可能下降为 599 / 598（与紧随其后调 §7.1 GET /chest/current 返回值保持一致）；**禁止**实装时写死 600 字面量（会与 §7.1 GET 语义漂移） |
 
 JSON 示例：
 
@@ -1066,8 +1067,8 @@ JSON 示例：
 | 1002 | 参数错误 | `idempotencyKey` 缺失 / length < 1 或 > 128 / 字符集含 `[A-Za-z0-9_:-]` 之外的字符 |
 | 1005 | 操作过于频繁 | rate_limit 中间件拦截（**已认证路由**按 `user_id` 限频，每用户每分钟 > 60 次） |
 | 1008 | 幂等冲突 | Redis sentinel `"__pending__"` 命中——同 idempotencyKey 的另一个请求正在执行（事务尚未提交、首次结果尚未回填）；server 端短路返回 1008，**不**进事务；client 应稍后用**同**一 idempotencyKey 重试（首次请求完成后会回填真实结果，重试将命中缓存返回 200 + reward）。**注**：当 idempotencyKey 命中已完整的 response JSON（首次开箱已成功）时 server 直接返回 200 + 首次结果，**不**返回 1008——1008 仅表征"并发执行中"，不表征"已完成"|
-| 1009 | 服务繁忙 | DB 异常（事务失败 / SELECT 返回 err / INSERT 返回 err 等）/ Redis 异常（如 EVAL 失败但事务已开始，详见服务端逻辑步骤 5 注解）/ 步数 UPDATE 乐观锁 version 不匹配导致 affected_rows = 0（并发冲突，client 可重试）/ 加权抽奖时 enabled cosmetic_items 为空（seed 未执行 —— 数据完整性异常） |
-| 3002 | 可用步数不足 | `user_step_accounts.available_steps < 1000`（开箱所需）；client 收到 3002 时应展示"步数不足，请先走路赚步数"+ 引导用户走步 / 主动同步步数（Story 21.5 锚定的"开箱前主动同步步数"流程可减少此 case） |
+| 1009 | 服务繁忙 | DB 异常（事务失败 / SELECT 返回 err / INSERT 返回 err 等）/ Redis 异常（如 EVAL 失败但事务已开始，详见服务端逻辑步骤 5 注解）/ 步数 UPDATE 乐观锁 version 不匹配导致 affected_rows = 0（并发冲突，client 可重试）/ 加权抽奖时 enabled cosmetic_items 为空（seed 未执行 —— 数据完整性异常）/ **`user_step_accounts` 行缺失**（理论上 Story 4.6 登录初始化必创建，缺失视为数据完整性异常，与"步数不足"语义区分） |
+| 3002 | 可用步数不足 | `user_step_accounts.available_steps < 1000`（开箱所需，行存在但余额不足）；client 收到 3002 时应展示"步数不足，请先走路赚步数"+ 引导用户走步 / 主动同步步数（Story 21.5 锚定的"开箱前主动同步步数"流程可减少此 case）。**注**：`user_step_accounts` 行**不存在**的 case **不**映射 3002，走 1009（详见上行 1009 触发条件） |
 | 4001 | 当前宝箱不存在 | 用户在 user_chests 表中无任何行（理论上 Story 4.6 登录初始化必然创建首个 chest）—— 表征数据完整性异常 |
 | 4002 | 宝箱尚未解锁 | 当前 chest 状态判定为 counting（数据库 status = 1 AND `unlock_at > now`）；client 不应让 4002 触发（Story 21 应在 button 可点状态校验上规避：仅 `status = 2` 时按钮可点），如果触发说明 client 端 button 状态校验有 bug 或 server / client 时钟漂移严重；client 收到 4002 时应主动重新调一次 GET /chest/current 校正本地状态 |
 
@@ -1089,7 +1090,7 @@ JSON 示例：
   - **1008 重试**（sentinel 命中并发执行中）→ client 应用**同** idempotencyKey + 退避重试（**不要**换 key，否则首次请求成功后回填的缓存命中不到，第二个 key 会再次进事务造成重复开箱）；建议 client 重试 3 次后仍 1008 则放弃并向用户报错（极端 case，首次请求长时间卡住或 sentinel 因 Redis 异常残留）
   - **重复点击防抖**：client UI 层应在用户点击"开箱"按钮后**立即禁用**按钮（loading 状态），直到收到 server 响应再启用；服务端层面 idempotencyKey + Redis 原子声明提供二次防护
 
-- **事务边界**：MySQL 事务在步骤 4 内（FOR UPDATE 锁 chest + step_account + UPDATE + INSERT 日志 + DELETE + INSERT chest），Redis 原子声明 sentinel 在事务**之前**（步骤 3），Redis 回填真实结果（成功路径 SET）或清理 sentinel（失败路径 DEL）在事务**之后**（步骤 5）；这种顺序保证：(a) 同 key 并发请求只有一个能 claim sentinel 进入事务，另一个走 1008 短路——**不**靠 MySQL 行锁兜底（FOR UPDATE 在 4a 才生效，已晚于事务开启）；(b) MySQL 事务失败 + DEL sentinel 失败 → sentinel 残留 TTL → 同 key 重试持续 1008（best-effort 退化，可接受）；(c) MySQL 事务成功 + Redis SET 失败 → client 收到 200 OK + 正确 reward → 同 key 重试看到 sentinel 返回 1008，需 client 换新 key（资产已落盘，新 key 重试会再开事务造成重复出箱——故 MVP 阶段**禁止**业务流程允许重复开箱；本 case 极端罕见，符合 Epic 20 acceptance 不要求 Redis 99.999% 可用的目标）
+- **事务边界**：MySQL 事务在步骤 4 内（FOR UPDATE 锁 chest + step_account + UPDATE + INSERT 日志 + DELETE + INSERT chest），Redis 原子声明 sentinel 在事务**之前**（步骤 3），Redis 回填真实结果（成功路径 SET）或清理 sentinel（失败路径 DEL）在事务**之后**（步骤 5）；这种顺序保证：(a) 同 key 并发请求只有一个能 claim sentinel 进入事务，另一个走 1008 短路——**不**靠 MySQL 行锁兜底（FOR UPDATE 在 4a 才生效，已晚于事务开启）；(b) MySQL 事务失败 + DEL sentinel 失败 → sentinel 残留 TTL → 同 key 重试持续 1008（best-effort 退化，可接受）；(c) MySQL 事务成功 + Redis SET 失败 → client 收到 200 OK + 正确 reward → 同 key 重试看到 sentinel 返回 1008；**client 禁止自动换新 key 重试**（首次资产已落盘，换 key 重试会再开事务造成重复扣步数 + 重复出箱），应按 §7.2「client 重试策略」§1008 条款同 key 退避 N 次后**放弃 + 提示用户联系客服**；由此 case 极端罕见，运营层面要求 Redis 可用性 SLA ≥ 99.9% 收敛到事故级（**不**降级为"业务流程允许重复开箱"）
 
 - **加权抽奖语义**：`drop_weight` 是抽奖权重（值越大越容易抽到），server 端按 `cumulative_weight / total_weight` 比例抽取；同 `drop_weight` 值的 cosmetic 抽到概率相等；`drop_weight = 0` 的 cosmetic（不应在 enabled 集合中）等价于不可抽到；加权抽取**仅**对 `is_enabled = 1` 行有效（disabled 行不参与抽奖）
 

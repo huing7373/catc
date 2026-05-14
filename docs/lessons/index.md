@@ -297,3 +297,4 @@
 | 2026-05-14 | [Xcode SDK 与 simulator runtime 版本错位会让所有 scheme-based xcodebuild 失败，必须装匹配 runtime（非 sub-agent 绕过）（epic-18 retro A1）](2026-05-14-xcode-sdk-runtime-version-mismatch-blocks-scheme-build.md) | 1 | config | `3cd2ef4` |
 | 2026-05-14 | [POST /chest/open 幂等原子声明 & rate_limit 中间件不可绕开（20-1 r1）](2026-05-14-idempotency-atomic-claim-and-rate-limit-honesty.md) | 2 | architecture, docs | `<pending>` |
 | 2026-05-14 | [契约 finalize story 必须做跨文档一致性 & SQL PK / 列名 / 字段类型字面级校验（20-1 r2）](2026-05-14-contract-finalization-cross-doc-consistency-and-sql-pk.md) | 4 | docs | `<pending>` |
+| 2026-05-14 | [幂等缓存写回失败的 client 重试指引 / 数据完整性 vs 业务错误的错误码归类 / 跨节同名字段语义对齐（20-1 r3）](2026-05-14-idempotency-set-fail-retry-and-data-integrity-error-mapping-20-1-r3.md) | 3 | architecture, error-handling, docs | `<pending>` |
