@@ -1,6 +1,6 @@
 # Story 20.9: Layer 2 集成测试 — 开箱事务全流程（dockertest 真实 MySQL 跨 service / handler 两层穷举 epics.md §20.9 钦定 14 类场景：完整流程 / 4 回滚 / 2 幂等 / 2 并发 / 4 边界 / 1 抽奖分布；**不**实装新业务功能，仅扩展 integration test 覆盖矩阵）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
