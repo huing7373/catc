@@ -1207,3 +1207,4 @@ epics.md §Story 20.8 行 2970 钦定"集成测试覆盖（节点 8 完成后跑
 |---|---|---|
 | 2026-05-15 | Story 20.8 created (backlog → ready-for-dev) | backlog → ready-for-dev |
 | 2026-05-15 | dev-story 实装：service / handler / devtools / bootstrap 4 处骨架 + 4 处单测（service 3 + handler 11 + devtools 2 + bootstrap 1 = 17 case 全过）；`bash scripts/build.sh --test` / `--devtools --test` 全绿；遵守 spec 严格无侵入区（不动 migrations / user_cosmetic_item_repo / cosmetic_item_repo / Deps struct） | in-progress → review |
+| 2026-05-15 | fix-review r3：dev 端点 metrics 豁免（更根因解）—— 在 `server/internal/infra/metrics/http.go` 加 `isDevPath` 私有 helper + `ObserveHTTP` 入口短路返回，让 `/dev/*` 路径**完全不计入** `cat_api_requests_total` / `cat_api_request_duration_seconds`；连带把 20.7 force-unlock-chest / 7.5 grant-steps / 未来新增 dev 端点一起豁免。新增 3 个测试（DevEndpoint_NotCounted 含 stub 501 核心 case / DevPrefixDiscipline 防 over-match / IsDevPath helper 单测）；归档 lesson `docs/lessons/2026-05-15-dev-endpoint-metrics-exempt-20-8-r3.md` | review (no transition) |
