@@ -149,6 +149,7 @@
 - `user_step_sync_logs`
 - `user_chests`
 - `chest_open_logs`
+- `chest_open_idempotency_records`（r5 review 锁定，详见 §5.16）
 
 ### 4.4 合成
 
@@ -723,6 +724,57 @@ CREATE TABLE emoji_configs (
 
 ---
 
+## 5.16 chest_open_idempotency_records
+
+开箱接口幂等记录表（**r5 review 锁定**，详见 V1接口设计 §7.2 服务端逻辑步骤 3 / 4i / 5 + §13.3）。
+
+```sql
+CREATE TABLE chest_open_idempotency_records (
+    id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+    user_id BIGINT UNSIGNED NOT NULL,
+    idempotency_key VARCHAR(128) NOT NULL,
+    status ENUM('pending', 'success', 'failed') NOT NULL DEFAULT 'pending',
+    response_json JSON NULL,
+    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+
+    UNIQUE KEY uk_user_id_key (user_id, idempotency_key),
+    KEY idx_status_created_at (status, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+### 字段说明
+
+- `user_id`：发起开箱请求的用户 id（与 `users.id` 对齐；不建外键，与本设计其他表保持一致）
+- `idempotency_key`：client 传入的幂等键；约束与 V1接口设计 §7.2 一致（`[A-Za-z0-9_:-]` + length 1-128）
+- `status`：三态机 —— `pending`（声明已写入，业务事务执行中）/ `success`（业务事务已 commit，`response_json` 已落盘）/ `failed`（业务事务已回滚，client 应换新 key 重试）
+- `response_json`：`status = 'success'` 时缓存的完整 V1 响应（`{code, message, data: {reward, stepAccount, nextChest}, requestId}`），同 key 重试时直接反序列化返回；`status = 'pending'` / `'failed'` 时为 NULL
+- `created_at` / `updated_at`：标准时间戳，`updated_at` 在 `status` 推进时自动更新
+
+### 索引说明
+
+- `uk_user_id_key`：UNIQUE 约束兼任原子声明依据 —— V1接口设计 §7.2 步骤 3 用 `INSERT ... ON DUPLICATE KEY UPDATE id = id` 借此 UNIQUE 做 single-statement 原子 claim；同 `(user_id, idempotency_key)` 的并发请求只有一个能拿到 `affected_rows = 1`，另一个走短路返回
+- `idx_status_created_at`：辅助索引，支持运维清理任务按 `status` + `created_at` 范围扫描（如清理 N 天前的 `success` 记录控制表大小）；MVP 阶段无需主动清理（DB 容量足够）
+
+### 设计说明（**契约决策来源**）
+
+本表的引入是 Story 20-1 r5 review 锁定的契约层决定：
+
+- **背景**：r3 / r4 review 把开箱幂等设计在 Redis（`idem:{userId}:chest_open:{idempotencyKey}` key + sentinel + final-response 双 TTL）；r5 review 指出 Redis 是非事务存储，与 MySQL 不能形成原子写 —— "MySQL 事务 commit 成功 + Redis SET 失败" case 下 client 无法区分"首次已生效"vs"首次未生效"，可能引发重复扣步数 + 重复出箱
+- **决策**：把幂等记录从 Redis 上移到 MySQL，与业务事务**同事务原子写**；DB 成为"首次是否成功"的单一可信源
+- **lesson 文档**：`docs/lessons/2026-05-14-db-same-tx-idempotency-replaces-redis-writeback-fragility-20-1-r5.md`
+
+### 阶段适用
+
+- **节点 7（Epic 20 / Story 20.6 实装）**：本表**仅**服务 `POST /api/v1/chest/open` 接口
+- **节点 11 / Epic 32（合成事务）**：若 `POST /api/v1/compose/upgrade` 复用同一持久化模式，**应**起新表 `compose_upgrade_idempotency_records`（schema 同结构，UNIQUE 与索引同款）；**或**抽出通用表 `idempotency_records` 加 `api_name` 字段统一兜管 —— 由 Story 32.4 在节点 11 落地前锚定。本 story 20-1 仅钦定节点 7 的 `chest_open_idempotency_records` 表
+
+### migration 归属
+
+本表 schema 由 Story 20-1（契约 finalize）锚定，**migration SQL 由 Story 20.6（开箱事务实装）或独立 follow-up story（如 Story 20.10）落地**；本 story 20-1 不直接产生 migration 文件。详见 V1接口设计 §7.2 / docs/sprint-status.yaml 20-1 follow-up 说明。
+
+---
+
 ## 6. 状态枚举汇总
 
 ### 6.1 users.status
@@ -860,6 +912,12 @@ CREATE TABLE emoji_configs (
 
 保证配置 code 稳定唯一。
 
+### chest_open_idempotency_records
+
+- `UNIQUE(user_id, idempotency_key)`
+
+兼任原子声明依据：V1接口设计 §7.2 步骤 3 用 `INSERT ... ON DUPLICATE KEY UPDATE id = id` 借此 UNIQUE 做 single-statement 原子 claim；同 `(user_id, idempotency_key)` 的并发请求只有一个能拿到 `affected_rows = 1` 进入业务事务（r5 review 锁定）。
+
 ## 7.2 高优先级普通索引
 
 建议保留：
@@ -867,6 +925,7 @@ CREATE TABLE emoji_configs (
 - `user_step_sync_logs(user_id, sync_date)`
 - `user_step_sync_logs(user_id, created_at)`
 - `chest_open_logs(user_id, created_at)`
+- `chest_open_idempotency_records(status, created_at)`（运维清理辅助）
 - `compose_logs(user_id, created_at)`
 - `room_members(room_id)`
 - `user_cosmetic_items(user_id, status)`
@@ -920,14 +979,18 @@ CREATE TABLE emoji_configs (
 - 插入一条 `user_cosmetic_items`
 - 写 `chest_open_logs`
 - 重建或刷新下一轮 `user_chests`
+- **更新 `chest_open_idempotency_records.status = 'success'` + `response_json`**（r5 review 锁定）
 
 > **节点 7 vs 节点 8 阶段差异（与 V1接口设计 §7.2 / §14.1 一致）**：本节描述的是**最终契约**（节点 8 / Epic 23 完成后稳态）。**节点 7 阶段（Story 20.6 / Epic 21 验收期）**「插入一条 `user_cosmetic_items`」步骤暂不执行 —— `chest_open_logs.reward_user_cosmetic_item_id` 写占位 `0`；详见 V1接口设计 §7.2.4f。Story 23.5 落地后回归本节最终契约语义。
+
+> **幂等记录同事务原子写（r5 review 锁定）**：`chest_open_idempotency_records` 行的 `status` 推进（从 `pending` 改为 `success`）与业务表写入**同一事务**原子提交（V1接口设计 §7.2 步骤 4i + §7.2 关键约束「事务边界」）；这构成"幂等状态 + 业务数据"单一可信源，client 同 key 重试始终安全。**移除** r4 钦定的"Redis sentinel + 双 TTL + 异步 SET 重试"路径（详见 §5.16 设计说明 + V1接口设计 §13.3）。
 
 否则容易出现：
 
 - 扣了步数没发奖
 - 发了奖没扣步数
 - 开奖成功但宝箱没刷新
+- **幂等状态与业务数据不一致**（如业务 commit 成功但幂等记录未更新 → client 同 key 重试可能误判"首次未发生" → 重复扣步数 + 重复出箱）
 
 ---
 
@@ -1034,10 +1097,9 @@ CREATE TABLE emoji_configs (
 
 ### 幂等与防重键
 
-例如：
+**注（r5 review 锁定）**：`POST /api/v1/chest/open` 的幂等记录**不**在 Redis，已上移到 MySQL `chest_open_idempotency_records` 表（与业务事务同事务原子写）；详见 §5.16 + V1接口设计 §13.3。`POST /api/v1/compose/upgrade` 预期复用同一 DB 持久化模式，由 Story 32.4 在节点 11 落地前锚定（起新表或共用通用表）。
 
-- `idem:{userId}:chest_open:{idempotencyKey}`
-- `idem:{userId}:compose_upgrade:{idempotencyKey}`
+**Redis 在幂等路径上的角色**已**移除**（r4 的"sentinel TTL 60s + final-response TTL 24h"双 TTL 方案在 r5 全面废弃）。如未来引入其他不需要"同事务原子性"的轻量幂等场景（如 GET 防重、客户端去抖），可重新评估 Redis 方案，但**资产类**操作（开箱 / 合成 / 穿戴等会改 MySQL 业务数据的接口）**禁止**使用 Redis 做幂等存储 —— Redis 非事务存储的特性与"幂等记录 + 业务数据原子"诉求根本冲突。
 
 ### 限频控制
 
