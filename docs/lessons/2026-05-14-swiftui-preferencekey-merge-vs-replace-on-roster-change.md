@@ -2,7 +2,7 @@
 date: 2026-05-14
 source_review: /tmp/epic-loop-review-18-4-r1.md (codex review, round 1)
 story: 18-4-接收-emoji-received-在对应成员猫上方播放飞出动效
-commit: <pending>
+commit: 682e6de
 lesson_count: 2
 ---
 
