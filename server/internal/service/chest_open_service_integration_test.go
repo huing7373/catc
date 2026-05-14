@@ -22,7 +22,17 @@
 //  12. Steps1000_SucceedsAvailable0               — 边界 2：1000 步 → 成功 + 余 0
 //  13. Steps1001_SucceedsAvailable1               — 边界 3：1001 步 → 成功 + 余 1
 //  14. UnlockAtMinus1ms_IsUnlockable              — 边界 4：unlock_at 比 now 早 1ms → unlockable
-//  15. WeightedPickDistribution_1000Opens         — 抽奖分布：1000 次开箱 → drop_weight 设计区间
+//  15a. WeightedPickDistribution_DeterministicWiring_1000Opens
+//                                                  — 抽奖 wiring：1000 次 deterministic stub →
+//                                                    精确 900/90/9/1 reward 映射断言（20.9 r2 引入；
+//                                                    r3 改名以表明验证 wiring 而非分布）
+//  15b. WeightedPickDistribution_RealCryptoPicker_SmokeTest
+//                                                  — 抽奖真 picker smoke：100 次 production
+//                                                    `random.NewCryptoWeightedPicker` → 验证
+//                                                    production picker wiring + common 下界 ≥ 50
+//                                                    (Binomial(100, 0.9) P(失败) ≈ 6e-29 → 0 flakiness)
+//                                                    （20.9 r3 引入，配合 weighted_test.go 算法层
+//                                                    覆盖形成"算法/wiring/production 兜底"三层责任分离）
 //
 // build tag `integration` 隔离 → 默认 `bash scripts/build.sh --test` 不跑这些；
 // 只在 `bash scripts/build.sh --integration` 触发。
@@ -994,26 +1004,42 @@ func TestChestOpenServiceIntegration_UnlockAtMinus1ms_IsUnlockable(t *testing.T)
 }
 
 // ============================================================
-// AC14: 抽奖分布 — 1000 次开箱 → 各品质比例符合 drop_weight 设计
+// AC14a: 抽奖 wiring — 1000 次 deterministic stub → reward mapping 正确性
 // ============================================================
 //
 // **20.9 r2 修正（deterministic picker）**：本 case **不**走真实 crypto-weighted
 // picker —— 真随机 + 1000 样本必然偶发命中 tail outcome（如 legendary 期望 1.1
 // 件，P(count=0) ≈ 33%；rare 期望 90 件，σ ≈ 9.6 → ±3σ 区间内仍有 ~5% 漏掉），
 // 把集成测试 `--integration` 退化为 flaky CI gate（lesson：
-// docs/lessons/2026-05-15-no-real-rng-in-integration-tests.md）。
+// docs/lessons/2026-05-15-integration-tests-deterministic-picker-and-fixed-clock-20-9-r2.md）。
 //
-// **r2 设计**：注入 deterministic stub picker，按理论比例（common 900 / rare 90 /
-// epic 9 / legendary 1）钦定调用序列。本 case 验证的是 **service 把 picker 返回
-// 的 index 正确映射到 reward_rarity 字段 + 1000 次循环正确顺序执行 1000 个事务**
-// —— 是集成 layer 的关注点；picker 自身权重算法的分布正确性留给
-// `weighted_test.go` 的 stand-alone unit test（可用大样本 + chi-square 或
-// 确定性 seed 验证）。
+// **20.9 r3 修正（dual-track，本 case 改名 DeterministicWiring）**：r2 stub 把真
+// crypto picker 从集成测试完全移除，导致 production `random.NewCryptoWeightedPicker`
+// 的 wiring（service 是否真的调到 production picker、index→rarity 映射是否正确）
+// 没有 production-path regression 兜底（codex r3 P2 指出）。
+//
+// **r3 设计（双轨）**：
+//   - 本 case（DeterministicWiring）保留 r2 stub → 验证 service 调 picker 的调度次数
+//     正确 + picker 返回 index 正确映射到 reward_rarity 字段 + 1000 次循环正确顺序
+//     执行 1000 个事务（精确断言 900/90/9/1，0 flakiness）
+//   - 新 case `RealCryptoPicker_SmokeTest` 用真 `random.NewCryptoWeightedPicker` + 100
+//     次小样本 + 极宽松下界断言（common ≥ 50，Binomial(100, 0.9) 下 P(X<50) ≈ 6e-29
+//     → 实际 0 flakiness）→ smoke test 验证 production picker 真被调用 + 不 crash +
+//     返回 valid rarity；分布算法正确性由 weighted_test.go 已有的 10000 样本
+//     determinstic-seed unit test 兜底
+//
+// 责任分层（r3 后）：
+//   - weighted_test.go: 算法层 — real picker + deterministic seed + 10000 样本 +
+//     ±5% 容差验证 distribution 算法正确（"miscompute totals / wrong bucket" 必挂）
+//   - 本 case DeterministicWiring: 集成层 wiring 验证 — service 调度 + index→rarity
+//     映射 + 1000 次事务串行执行
+//   - 新 case RealCryptoPicker_SmokeTest: 集成层 picker 注入兜底 — production picker
+//     真被 wire 进 service（防 service-side regression 把 picker 旁路成 nil 或其他实装）
 //
 // **picker 策略**：stub 按 desired weight 找匹配 item index 返回 —— common 件
 // drop_weight=100 / rare=20 / epic=4 / legendary=1 唯一可区分 → 不依赖
 // cosmetic_items 表 ORDER BY（GORM Find 默认 MySQL 顺序未必稳定）。
-func TestChestOpenServiceIntegration_WeightedPickDistribution_1000Opens(t *testing.T) {
+func TestChestOpenServiceIntegration_WeightedPickDistribution_DeterministicWiring_1000Opens(t *testing.T) {
 	sqlDB, chestRepo, stepAccountRepo, idempotencyRepo, cosmeticItemRepo, chestOpenLogRepo, txMgr, _, cleanup := buildChestServiceWithRepos(t)
 	defer cleanup()
 
@@ -1100,6 +1126,126 @@ func TestChestOpenServiceIntegration_WeightedPickDistribution_1000Opens(t *testi
 	total := counts[1] + counts[2] + counts[3] + counts[4]
 	if total != N {
 		t.Errorf("total=%d, want %d", total, N)
+	}
+}
+
+// ============================================================
+// AC14b: 抽奖真 picker smoke — 100 次 real crypto picker → production wiring 兜底
+// ============================================================
+//
+// **20.9 r3 引入（dual-track 第二轨）**：codex r3 P2 指出，r2 stub 把真
+// `random.NewCryptoWeightedPicker` 从集成测试完全移除 —— 若 service 装配阶段
+// 把 picker 误 wire 成 nil / 错实装、或 picker 算法发生 production regression
+// （miscompute totals / wrong bucket），DeterministicWiring case 不会挂（因
+// 注入了 stub），weighted_test.go 的 unit test 也不验证 service 装配。
+//
+// **本 case 设计目标**：
+//   - 用 production `random.NewCryptoWeightedPicker(rand.Reader)` 跑小样本
+//   - 验证 service 真把 production picker 调进 fn —— picker 不 crash、不
+//     panic、返回 valid index → service 映射到 valid rarity
+//   - 用极宽松下界断言（common ≥ 50/100，P(失败) ≈ 6e-29）→ 完全 0 flakiness
+//
+// **为何小样本（100 而非 1000）**：
+//   - smoke test 不验证分布精度，验证"picker 真被调用且不 broken"；100 次足
+//     以让 production picker 路径执行
+//   - 节省 CI 时间（每次 OpenChest ~50ms，1000 次 ~50s，100 次 ~5s）
+//   - 分布算法精确性由 weighted_test.go 10000 样本 unit test 兜底
+//
+// **断言宽容度计算**（确保 0 flakiness）：
+//   - drop_weight 总和 = 8·100 + 4·20 + 2·4 + 1·1 = 889
+//   - p_common = 800/889 ≈ 0.9000
+//   - X ~ Binomial(100, 0.9)：E[X] = 90, σ ≈ 3
+//   - 断言 X ≥ 50（即 5 个 σ 之外的 tail）：P(X < 50) ≈ 6e-29 — 实际不可能
+//   - 断言 valid rarity ∈ {1,2,3,4}：production picker 保证
+//   - 断言 total == 100：production picker 调度次数验证
+//
+// **不断言其他 rarity 下界**：
+//   - rare 期望 9，σ ≈ 2.9 — 小样本下 P(rare=0) ≈ 6e-5 仍非 0，避免该 tail
+//   - 只断言 common 下界足够 detect"picker 总是返 epic/legendary 索引"这类
+//     bucket 计算错误（production picker 若 weight 算法错乱，common bucket
+//     不会还稳定占 80%+）
+func TestChestOpenServiceIntegration_WeightedPickDistribution_RealCryptoPicker_SmokeTest(t *testing.T) {
+	sqlDB, chestRepo, stepAccountRepo, idempotencyRepo, cosmeticItemRepo, chestOpenLogRepo, txMgr, _, cleanup := buildChestServiceWithRepos(t)
+	defer cleanup()
+
+	// **关键**：用 production crypto picker（不是 stub），保留与
+	// buildChestOpenServiceIntegration 一致的装配，验证 production wiring。
+	realPicker := random.NewCryptoWeightedPicker(rand.Reader)
+	svc := service.NewChestService(chestRepo, txMgr, idempotencyRepo, stepAccountRepo, cosmeticItemRepo, chestOpenLogRepo, realPicker)
+
+	const userID = uint64(1)
+	insertUser(t, sqlDB, userID, "uid-smoke", "smoke", "")
+	insertStepAccount(t, sqlDB, userID, 1500, 1500, 0)
+	insertChest(t, sqlDB, 9001, userID, 1, time.Now().UTC().Add(-1*time.Minute), 1000)
+
+	const N = 100
+	for i := 0; i < N; i++ {
+		_, err := svc.OpenChest(context.Background(), service.OpenChestInput{
+			UserID:         userID,
+			IdempotencyKey: fmt.Sprintf("smoke_%04d", i),
+		})
+		if err != nil {
+			t.Fatalf("real-picker call %d: %v", i, err)
+		}
+		// 重置步数 + 下一轮 chest force-unlock（每次循环准备开下一次）
+		if i < N-1 {
+			if _, err := sqlDB.Exec(`UPDATE user_step_accounts SET available_steps=1500, consumed_steps=0, version=version+1 WHERE user_id=?`, userID); err != nil {
+				t.Fatalf("reset steps: %v", err)
+			}
+			if _, err := sqlDB.Exec(`UPDATE user_chests SET unlock_at=?, status=1 WHERE user_id=?`,
+				time.Now().UTC().Add(-1*time.Minute), userID); err != nil {
+				t.Fatalf("force-unlock: %v", err)
+			}
+		}
+	}
+
+	// 统计 chest_open_logs.reward_rarity 分布
+	rows, err := sqlDB.Query(`SELECT reward_rarity, COUNT(*) FROM chest_open_logs WHERE user_id=? GROUP BY reward_rarity`, userID)
+	if err != nil {
+		t.Fatalf("query distribution: %v", err)
+	}
+	defer rows.Close()
+
+	counts := map[int8]int{}
+	for rows.Next() {
+		var rarity int8
+		var n int
+		if err := rows.Scan(&rarity, &n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		counts[rarity] = n
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows.Err: %v", err)
+	}
+
+	// 输出实际分布（debug + future tuning 参考）
+	t.Logf("real-picker N=%d distribution: common=%d rare=%d epic=%d legendary=%d (sum=%d)",
+		N, counts[1], counts[2], counts[3], counts[4], counts[1]+counts[2]+counts[3]+counts[4])
+
+	// **总和断言**（picker 调度次数正确性 — 若 picker 返回无效 index，service
+	// rarity 映射会写 0 或别的值 → 总和不等 N）
+	total := 0
+	for _, c := range counts {
+		total += c
+	}
+	if total != N {
+		t.Errorf("total reward rows=%d, want %d (production picker 调度或映射异常)", total, N)
+	}
+
+	// **rarity 范围断言**（production picker 返回有效 index → service 必映射到 {1,2,3,4}）
+	for rarity := range counts {
+		if rarity < 1 || rarity > 4 {
+			t.Errorf("invalid rarity=%d in chest_open_logs (production picker 返回了无效 index)", rarity)
+		}
+	}
+
+	// **common 下界宽容断言**（5σ 之外，P(失败) ≈ 6e-29，实际 0 flakiness）：
+	// p_common = 800/889 ≈ 0.9 → 100 次中至少 50 次 common
+	// 若 production picker weight 算法把 common bucket 漏算成小桶，common 占比会
+	// 跌到 < 50%，本断言必挂
+	if counts[1] < 50 {
+		t.Errorf("common count=%d < 50 (production weighted picker may have miscomputed bucket; expected ~90 for Binomial(100, 0.9))", counts[1])
 	}
 }
 
