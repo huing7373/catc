@@ -2,7 +2,7 @@
 date: 2026-05-15
 source_review: codex review round 4（epic-loop /tmp/epic-loop-review-20-8-r4.md）
 story: 20-8-dev-端点-post-dev-grant-cosmetic-batch
-commit: <pending>
+commit: 5c61f57
 lesson_count: 1
 ---
 

@@ -315,7 +315,7 @@
 | 2026-05-15 | [domain-aware RowsAffected 语义（force-unlock 场景下 0=NotFound） & fix-review 迭代陷阱（over-correction chain）（20-7 r3）](2026-05-15-domain-aware-rowsaffected-and-over-correction-chain-20-7-r3.md) | 2 | error-handling, process | `dd1237c` |
 | 2026-05-15 | [用事务把 RowsAffected 语义模糊性从源头消除 & over-correction chain 的终结模式（20-7 r4）](2026-05-15-transaction-eliminates-rowsaffected-ambiguity-20-7-r4.md) | 2 | architecture, process | `dbc31d3` |
 | 2026-05-15 | [dev 端点正确性 > contract 美感（承认契约变更而非回退根因修复）（20-7 r5）](2026-05-15-dev-endpoint-correctness-over-contract-aesthetics-20-7-r5.md) | 1 | architecture, docs, process | `7ad289c` |
-| 2026-05-15 | [Stub endpoint 必须 explicit-failure 而非 silent false-positive（20-8 r1）](2026-05-15-stub-endpoint-explicit-failure-20-8-r1.md) | 1 | architecture, error-handling | `<pending>` |
-| 2026-05-15 | [Stub endpoint 错误码不能复用通用 ErrServiceBusy —— HTTP status + log level 双层语义（20-8 r2）](2026-05-15-stub-endpoint-not-implemented-error-code-20-8-r2.md) | 2 | architecture, error-handling | `<pending>` |
-| 2026-05-15 | [dev 端点的 metrics 边界：从一开始就该排除，5xx 不污染 alert（20-8 r3）](2026-05-15-dev-endpoint-metrics-exempt-20-8-r3.md) | 1 | architecture | `<pending>` |
-| 2026-05-15 | [dev 路径检查必须在 caller 侧（基于 raw URL）而非 callee 侧（基于已解析 route pattern）（20-8 r4）](2026-05-15-dev-path-check-caller-side-not-callee-side-20-8-r4.md) | 1 | architecture | `<pending>` |
+| 2026-05-15 | [Stub endpoint 必须 explicit-failure 而非 silent false-positive（20-8 r1）](2026-05-15-stub-endpoint-explicit-failure-20-8-r1.md) | 1 | architecture, error-handling | `d4af2f6` |
+| 2026-05-15 | [Stub endpoint 错误码不能复用通用 ErrServiceBusy —— HTTP status + log level 双层语义（20-8 r2）](2026-05-15-stub-endpoint-not-implemented-error-code-20-8-r2.md) | 2 | architecture, error-handling | `2ad1a21` |
+| 2026-05-15 | [dev 端点的 metrics 边界：从一开始就该排除，5xx 不污染 alert（20-8 r3）](2026-05-15-dev-endpoint-metrics-exempt-20-8-r3.md) | 1 | architecture | `3b56be3` |
+| 2026-05-15 | [dev 路径检查必须在 caller 侧（基于 raw URL）而非 callee 侧（基于已解析 route pattern）（20-8 r4）](2026-05-15-dev-path-check-caller-side-not-callee-side-20-8-r4.md) | 1 | architecture | `5c61f57` |
