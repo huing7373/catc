@@ -1203,43 +1203,124 @@ func TestChestOpenServiceIntegration_WeightedPickDistribution_DeterministicWirin
 }
 
 // ============================================================
-// r6 终结决策：删除原 AC14b (RealCryptoPicker_SmokeTest)
+// AC14b: production picker wiring-only — N=100 real crypto picker, 最弱断言
 // ============================================================
 //
-// **删除依据**：codex r6 P2 指出该 case `counts[2] >= 1` (至少 1 rare) 断言在 N=100
-// 真随机样本下 P(rare == 0) ≈ 7e-5 → 集成测试如 CI 跑 100 次/月 → 期望 ~0.7% 月度
-// 红灯率（无 production bug）→ 不可接受。两次概率断言叠加 ≈ 1e-4 false-failure。
+// **r7 修正（弱化断言 vs r6 整 case 删除）**：codex r7 P2 指出 r6 选项 A（删除整个
+// real picker case）是过度修复 —— `buildChestOpenServiceIntegration` / `NewChestService`
+// 把 production `random.NewCryptoWeightedPicker` 错 wire 成固定 picker / nil 时，
+// 其他 case 都用同一个 helper 装配 → wiring regression **无任何 case 兜底**。
 //
-// **责任分离（test reliability over completeness）**：
-//   - **算法正确性**（weight 计算 / index→rarity 映射的概率分布）→ 由
-//     `server/internal/pkg/random/weighted_test.go` 覆盖：N=10000 + deterministic
-//     `mathrand.Source` seed + ±5% 容差 → P(failure) ≈ 0；4 case 覆盖 single /
-//     multi-distribution / empty / zero-weight 全分支。
-//   - **service wiring 正确性**（service 是否真调 picker + index→rarity 字段映射 +
-//     调度次数 = N）→ 由本文件 `DeterministicWiring_1000Opens` case 覆盖：
-//     stub picker 严格 900/90/9/1 → 任一环节 broken 必挂。
-//   - **production picker injection 正确性**（`buildChestOpenServiceIntegration` 装配
-//     真 `random.NewCryptoWeightedPicker` + service 入口接受 `WeightedPicker`
-//     interface）→ 由本文件其他全部 case 间接覆盖（happy path / 边界 / 并发 / 幂等
-//     case 都用 `buildChestOpenServiceIntegration`，真 picker 被调用 N+ 次；任一
-//     case fail 即说明 wiring broken）。
-//   - **真随机 picker 自身正确性**（crypto/rand 输出无偏 + 算法 mod bias 处理）→
-//     超出本测试范围；由 Go stdlib `crypto/rand` 维护团队兜底 + weighted_test.go
-//     算法层断言反向验证。
+// **r7 改造（选项 B：保留 case + 退到最弱断言）**：
+//   - 用 `buildChestOpenServiceIntegration` 真 picker 装配（exercise production
+//     picker 路径，与其他 case 用同一 helper → wiring regression 必被本 case 触发）
+//   - N=100 次开箱
+//   - **极简断言**：
+//     1. `total == 100`（picker 真被调度 N 次 + 所有 call success）
+//     2. 每次返回的 `rarity ∈ {1, 2, 3, 4}`（picker 返回合法枚举值）
+//   - **不**断言 distribution（不验证 common >= X / rare >= Y 等 probabilistic）
+//   - **不**断言"至少 2 distinct rarity"（避免 r5/r6 真随机 flaky 重演）
 //
-// **chain 终结**（r2-r6 over-correction）：
-//   - r2 加 deterministic stub picker 消除 r1 之前真随机 flaky → r3 指出失去真
-//     picker coverage
-//   - r3 加双轨（stub + real picker smoke） → r4 指出并发缺 start barrier（不同
-//     finding）
+// **该最弱断言的退化兼容性**：picker 在最坏退化场景（"总返第一个 enabled item"，
+// seed 前几个都是 common）下仍能过本 case —— 这是 acceptable trade-off：
+//   - 该退化场景**已被** DeterministicWiring case 100% 检测到（stub picker 必然
+//     命中各 rarity，service 调度 + index→rarity 映射任一 broken 即挂）
+//   - 本 case 只负责"production picker 真被 wire 起来 + 返合法 rarity"
+//   - distribution 验证由 `internal/pkg/random/weighted_test.go` 单测覆盖（N=10000
+//     deterministic seed + ±5% 容差）
+//
+// **责任三角（r7 终极锁定 — wiring + algorithm + flakiness 三选二，集成测试选前两个无后者）**：
+//   - **算法分布**（weight 计算 / index→rarity 映射的概率正确性）→ 单测层
+//     `weighted_test.go`：deterministic seed + N=10000 + ±5% 容差 → 0 flakiness
+//   - **service wiring**（NewChestService 接受 WeightedPicker interface + 调度次数 +
+//     index→rarity 字段映射）→ 集成层 `DeterministicWiring_1000Opens`：stub picker
+//     900/90/9/1 → 0 flakiness
+//   - **production picker injection**（`buildChestOpenServiceIntegration` 真装配
+//     `random.NewCryptoWeightedPicker(rand.Reader)`）→ **本 case**（弱断言 → 0 flakiness）
+//
+// **chain 全程（r2-r7）**：
+//   - r2 加 deterministic stub 消 r1 真随机 flaky → r3 指出失去真 picker coverage
+//   - r3 加双轨（stub + real picker smoke 带概率断言） → r4 并发 start barrier
+//     （独立 finding）
 //   - r4 加 start barrier → r5 指出 race vs serial 不可区分
-//   - r5 加 timing assertion + bypass-resistant 概率断言 → r6 指出两者均 flaky
-//   - **r6 终结**：承认集成测试层无法同时实现"完美 race detection + 完美 bypass
-//     detection + 0 flakiness"三角，改用责任分离 —— 集成测试只验证 wiring + 业务
-//     正确性；race detection 留给 `-race` + production telemetry；算法 detection
-//     留给单元测试。
+//   - r5 加 timing + bypass-resistant 真随机断言 → r6 指出两者 flaky
+//   - r6 删 timing 断言 + **整个删除 real picker case**（选项 A） → r7 指出整 case
+//     删除是过度修复 → wiring regression 失兜底
+//   - **r7 终结**：选项 B（保留 case + 弱化断言）—— 比 r6 的整 case 删除更精确，
+//     保留 wiring 兜底 + 0 flakiness 同时达成
 //
-// 详细 chain 回顾 + 规则见 `docs/lessons/2026-05-15-test-reliability-over-completeness-20-9-r6.md`。
+// 详细 chain 回顾 + 责任分离规则见
+// `docs/lessons/2026-05-15-real-picker-wiring-weakest-assertion-20-9-r7.md`
+// + `docs/lessons/2026-05-15-test-reliability-over-completeness-20-9-r6.md`。
+func TestChestOpenServiceIntegration_WeightedPickDistribution_RealCryptoPicker_WiringOnly(t *testing.T) {
+	svc, sqlDB, cleanup := buildChestOpenServiceIntegration(t)
+	defer cleanup()
+
+	const userID = uint64(1)
+	insertUser(t, sqlDB, userID, "uid-wire", "wiring-only", "")
+	insertStepAccount(t, sqlDB, userID, 1500, 1500, 0)
+	insertChest(t, sqlDB, 9101, userID, 1, time.Now().UTC().Add(-1*time.Minute), 1000)
+
+	const N = 100
+	for i := 0; i < N; i++ {
+		out, err := svc.OpenChest(context.Background(), service.OpenChestInput{
+			UserID:         userID,
+			IdempotencyKey: fmt.Sprintf("wire_%04d", i),
+		})
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		if out == nil {
+			t.Fatalf("call %d: out = nil", i)
+		}
+		// 弱断言 1: 返回的 rarity 必须 ∈ {1, 2, 3, 4} 合法枚举值
+		// （production picker 返回 invalid index / rarity 字段映射错误 → 必挂）
+		if r := out.Reward.Rarity; r < 1 || r > 4 {
+			t.Fatalf("call %d: rarity=%d, want ∈ {1,2,3,4}", i, r)
+		}
+		// 重置步数 + 下一轮 chest force-unlock
+		if i < N-1 {
+			if _, err := sqlDB.Exec(`UPDATE user_step_accounts SET available_steps=1500, consumed_steps=0, version=version+1 WHERE user_id=?`, userID); err != nil {
+				t.Fatalf("reset steps: %v", err)
+			}
+			if _, err := sqlDB.Exec(`UPDATE user_chests SET unlock_at=?, status=1 WHERE user_id=?`,
+				time.Now().UTC().Add(-1*time.Minute), userID); err != nil {
+				t.Fatalf("force-unlock: %v", err)
+			}
+		}
+	}
+
+	// 弱断言 2: chest_open_logs 总行数 == N（picker 真被 wire 起来 + 每次 call success）
+	// 任一调度 broken / wiring 错误（picker 改成 nil panic / 错 wire / 漏 inject）
+	// → call N 必然挂 → 本 case 失败
+	var total int
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM chest_open_logs WHERE user_id=?`, userID).Scan(&total); err != nil {
+		t.Fatalf("query total count: %v", err)
+	}
+	if total != N {
+		t.Errorf("total chest_open_logs = %d, want %d (production picker 真被调度 N 次)", total, N)
+	}
+
+	// 弱断言 3: 落库 rarity 同样必须全部 ∈ {1, 2, 3, 4}（防 service.OpenChest 返合法值
+	// 但落库错值的 wiring 漏洞）
+	rows, err := sqlDB.Query(`SELECT reward_rarity FROM chest_open_logs WHERE user_id=?`, userID)
+	if err != nil {
+		t.Fatalf("query rarities: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r int8
+		if err := rows.Scan(&r); err != nil {
+			t.Fatalf("scan rarity: %v", err)
+		}
+		if r < 1 || r > 4 {
+			t.Errorf("DB chest_open_logs.reward_rarity = %d, want ∈ {1,2,3,4}", r)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows.Err: %v", err)
+	}
+}
 
 // ============================================================
 // Fault injection wrapper struct（Story 20.9 范围；仅本文件可见同 package service_test 内）

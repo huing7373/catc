@@ -989,6 +989,21 @@ func TestChestOpenServiceIntegration_WeightedPickDistribution_1000Opens(t *testi
 - ❌ **不**收紧区间（容差 ≤5% 在 N=1000 下会偶发 flaky）
 - ❌ **不**断言 cosmetic_items.id 全部出现（legendary 仅 1 件，1000 次抽奖期望 1.1 次，可能 0 次完全不出现）
 
+**r2-r7 chain 终稿（AC14 实装最终形态）**：
+
+实际落地的 AC14 经过 r2-r7 七轮 review 收敛为**三 case 责任分离**矩阵（不是初版的"单 case 真随机 + 宽松区间"）：
+
+| Case 名 | helper | picker | N | 断言 | flakiness | 验证职责 |
+|---|---|---|---|---|---|---|
+| `DeterministicWiring_1000Opens` | `buildChestServiceWithRepos` | stub `raritySequencePicker` | 1000 | 精确 900/90/9/1 | 0 | service 调度 picker + index→rarity 字段映射 + 1000 事务串行 |
+| `RealCryptoPicker_WiringOnly` | `buildChestOpenServiceIntegration` | 真 `random.NewCryptoWeightedPicker` | 100 | 仅 `total == N` + 每次 rarity ∈ {1,2,3,4} | 0 | production picker 真被 wire（`buildChestOpenServiceIntegration` 装配链 + `NewChestService` 入参顺序）|
+| `weighted_test.go::Test*Distribution*` （单测层）| - | 真 picker + `mathrand.Source` deterministic seed | 10000 | ±5% 容差精确分布 | 0 | 算法分布正确性（weight 计算 / index→rarity 概率） |
+
+**r6 → r7 反弹学习**：
+- r6 选项 A（删除整个 real picker case）= 过度修复 → wiring regression 在集成层失兜底
+- r7 选项 B（保留 case + 退到最弱断言）= 正解 → 弱化断言比"删 case"精确
+- **规则**：发现 review 找 case 概率断言 flaky 时，先尝试**弱化断言到 0-flakiness 形态**（如本例 `rarity ∈ {1..4}` + `total == N`），再考虑删除整个 case；删除是"核弹级修复"，应是最后手段
+
 **AC15 — bootstrap / handler 单测兼容性 + 全量验证**
 
 本 story 不修改 bootstrap router / 20.6 已有的 service / handler / repo 实装；但因为新增多个 fault\*Repo wrapper struct 在 `package service_test`，可能与 4.7 已落地的 fault\*Repo 重名 → 本 story 范围处理：
