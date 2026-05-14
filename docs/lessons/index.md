@@ -301,3 +301,4 @@
 | 2026-05-14 | [幂等 sentinel 短 TTL 设计消除 Redis 写回失败的 24h 卡死 / 不要把"防重复"的最大代价加在"幂等承诺"身上（20-1 r4）](2026-05-14-idempotency-sentinel-short-ttl-eliminates-redis-writeback-lockout-20-1-r4.md) | 2 | architecture, docs | `<pending>` |
 | 2026-05-14 | [为什么 Redis 不能做"资产事务幂等"的可信源 & DB 同事务幂等才是 finalize 解（20-1 r5）](2026-05-14-db-same-tx-idempotency-replaces-redis-writeback-fragility-20-1-r5.md) | 1 | architecture | `<pending>` |
 | 2026-05-14 | [同事务幂等的"预声明也必须事务内" & 时间派生字段不可缓存进 response_json（20-1 r6）](2026-05-14-idempotency-pre-claim-must-be-inside-business-tx-20-1-r6.md) | 2 | architecture | `<pending>` |
+| 2026-05-14 | [DB 同事务幂等：禁止 post-rollback failed 异步补偿 + response_json 缓存禁止包含 requestId（20-1 r7）](2026-05-14-idempotency-no-async-failed-compensation-and-no-cached-requestId-20-1-r7.md) | 2 | architecture, docs | `<pending>` |
