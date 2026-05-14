@@ -217,3 +217,32 @@ func TestRouter_DevForceUnlockChest_NilHandlerSkipsRoute(t *testing.T) {
 		t.Errorf("/dev/force-unlock-chest with nil handler should be 404 (Gin NoRoute); got %d body=%s", wForce.Code, wForce.Body.String())
 	}
 }
+
+// TestRouter_DevGrantCosmeticBatch_NilHandlerSkipsRoute 验证 Story 20.8 dev grant-cosmetic-batch
+// 端点的 wire 链路（nil-tolerant 路径）：
+//   - BUILD_DEV=true + Deps{} 零值 → bootstrap 不构造 devCosmeticHandler → 保持 nil →
+//     devtools.Register 跳过 /dev/grant-cosmetic-batch 路由 → POST 返 Gin NoRoute 404
+//   - 同时 /dev/ping-dev 仍正常注册（框架自带，不依赖 devCosmeticHandler）
+//
+// 与 TestRouter_DevGrantSteps_NilHandlerSkipsRoute (7.5) / TestRouter_DevForceUnlockChest_NilHandlerSkipsRoute
+// (20.7) 同模式：真实 wire 链路（dev handler 真被调）由 dev_cosmetic_handler_test 单测覆盖；
+// 本测试仅验证"nil-tolerant"路径。
+func TestRouter_DevGrantCosmeticBatch_NilHandlerSkipsRoute(t *testing.T) {
+	t.Setenv("BUILD_DEV", "true")
+	gin.SetMode(gin.TestMode)
+	r := NewRouter(Deps{}) // 零值 deps → devCosmeticHandler 保持 nil
+
+	// /dev/ping-dev 应该正常注册（Register 内 ping-dev 不依赖任何业务 handler）
+	wPing := httptest.NewRecorder()
+	r.ServeHTTP(wPing, httptest.NewRequest(http.MethodGet, "/dev/ping-dev", nil))
+	if wPing.Code != http.StatusOK {
+		t.Errorf("/dev/ping-dev should be 200 when BUILD_DEV=true; got %d body=%s", wPing.Code, wPing.Body.String())
+	}
+
+	// /dev/grant-cosmetic-batch 应该跳过注册（devCosmeticHandler nil）→ Gin NoRoute 404
+	wGrant := httptest.NewRecorder()
+	r.ServeHTTP(wGrant, httptest.NewRequest(http.MethodPost, "/dev/grant-cosmetic-batch", bytes.NewReader([]byte(`{"userId":1,"rarity":1,"count":10}`))))
+	if wGrant.Code != http.StatusNotFound {
+		t.Errorf("/dev/grant-cosmetic-batch with nil handler should be 404 (Gin NoRoute); got %d body=%s", wGrant.Code, wGrant.Body.String())
+	}
+}

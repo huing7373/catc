@@ -295,6 +295,8 @@ func NewRouter(deps Deps) *gin.Engine {
 	var devStepsHandler *handler.DevStepsHandler
 	// Story 20.7 加：dev chest handler；与 7.5 devStepsHandler 同模式。
 	var devChestHandler *handler.DevChestHandler
+	// Story 20.8 加：dev cosmetic handler（节点 7 阶段 stub；节点 8 激活后保持声明位置不变）。
+	var devCosmeticHandler *handler.DevCosmeticHandler
 
 	// Story 4.6 wire：仅当 deps 完整时挂业务路由。
 	//
@@ -372,6 +374,18 @@ func NewRouter(deps Deps) *gin.Engine {
 		// success（同毫秒重复 unlock 同 chest），跳出 r2-r3-r4 over-correction chain。
 		devChestSvc := service.NewDevChestService(deps.TxMgr, chestRepo)
 		devChestHandler = handler.NewDevChestHandler(devChestSvc)
+
+		// Story 20.8 加：dev cosmetic service + handler（节点 7 阶段 stub —— 无 repo 依赖）。
+		//
+		// **节点 7 阶段**：stub service 不写库，NewDevCosmeticService() 无参数。
+		// **节点 8 / Story 23.5 激活后**：23.5 owner 改 constructor 签名加 repo 依赖，如：
+		//
+		//	devCosmeticSvc := service.NewDevCosmeticService(cosmeticItemRepo, userCosmeticItemRepo)
+		//
+		// router.go wire 顺序不变；只改 constructor 签名 + 加 repo 依赖（chestRepo 已在 if 块顶部 wire，
+		// cosmeticItemRepo 待 23.5 owner 新建实例 + 加 Deps 字段）。
+		devCosmeticSvc := service.NewDevCosmeticService()
+		devCosmeticHandler = handler.NewDevCosmeticHandler(devCosmeticSvc)
 
 		// Story 11.3 加：room service + handler（4 步事务：FindByID 预检 → INSERT rooms →
 		// INSERT room_members → UPDATE users.current_room_id）。复用上面构造的 roomRepo /
@@ -615,7 +629,11 @@ func NewRouter(deps Deps) *gin.Engine {
 	if devChestHandler != nil {
 		chestArg = devChestHandler
 	}
-	devtools.Register(r, stepsArg, chestArg)
+	var cosmeticArg devtools.DevCosmeticHandler
+	if devCosmeticHandler != nil {
+		cosmeticArg = devCosmeticHandler
+	}
+	devtools.Register(r, stepsArg, chestArg, cosmeticArg)
 
 	return r
 }

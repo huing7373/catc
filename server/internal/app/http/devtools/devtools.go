@@ -76,7 +76,7 @@ type DevStepsHandler interface {
 // DevChestHandler 是 dev 宝箱端点的 handler 抽象（Story 20.7）。
 //
 // 用 interface 解耦避免 devtools 包反向 import handler 包：实际的 handler 实装在
-// internal/app/http/handler/dev_chest_handler.go；本 interface 仅为 Register 签名抽象，
+// internal/app/http/handler/dev_chest_handler.go；本 interface 仅为 Register 签名抽象,
 // 让 devtools 包保持"框架"角色，不依赖具体 handler 实装。
 //
 // **签名简化原则**：本 interface 只列 Register 签名所需的方法（PostForceUnlockChest）；
@@ -84,6 +84,19 @@ type DevStepsHandler interface {
 // **不**追加到本 interface（"按业务模块独立 interface"原则，与 DevStepsHandler / DevChestHandler 平级）。
 type DevChestHandler interface {
 	PostForceUnlockChest(c *gin.Context)
+}
+
+// DevCosmeticHandler 是 dev 装扮端点的 handler 抽象（Story 20.8 节点 7 阶段 stub）。
+//
+// 用 interface 解耦避免 devtools 包反向 import handler 包：实际的 handler 实装在
+// internal/app/http/handler/dev_cosmetic_handler.go；本 interface 仅为 Register 签名抽象，
+// 让 devtools 包保持"框架"角色，不依赖具体 handler 实装。
+//
+// **签名简化原则**：本 interface 只列 Register 签名所需的方法（PostGrantCosmeticBatch）；
+// future 加 /dev/grant-cosmetic-by-id 等同 cosmetic 业务模块的 dev 端点时，可考虑加到本 interface
+// （同业务模块原则）；其他业务模块（如 /dev/grant-room）新建独立 DevRoomHandler interface。
+type DevCosmeticHandler interface {
+	PostGrantCosmeticBatch(c *gin.Context)
 }
 
 // Register 把 /dev/* 路由组挂到传入的 gin.Engine 上（仅在 dev 模式启用时）。
@@ -94,6 +107,7 @@ type DevChestHandler interface {
 //   - GET  /dev/ping-dev              → PingDevHandler（Story 1.6 框架自带）
 //   - POST /dev/grant-steps           → devStepsHandler.PostGrantSteps（Story 7.5；devStepsHandler == nil 时跳过）
 //   - POST /dev/force-unlock-chest    → devChestHandler.PostForceUnlockChest（Story 20.7；devChestHandler == nil 时跳过）
+//   - POST /dev/grant-cosmetic-batch  → devCosmeticHandler.PostGrantCosmeticBatch（Story 20.8 节点 7 stub；devCosmeticHandler == nil 时跳过）
 //
 // **多 handler 可空设计**（nil-tolerant）：
 //   - 单元测试 NewRouter(Deps{}) 零值场景：bootstrap 不构造业务 handler → 都传 nil
@@ -106,7 +120,7 @@ type DevChestHandler interface {
 //
 // Register **不是**幂等的：在同一 engine 上重复调用会让 Gin panic（路由重复注册）。
 // 但调用方只有 bootstrap.NewRouter() 一处，天然只调一次，不再额外防御。
-func Register(r *gin.Engine, devStepsHandler DevStepsHandler, devChestHandler DevChestHandler) {
+func Register(r *gin.Engine, devStepsHandler DevStepsHandler, devChestHandler DevChestHandler, devCosmeticHandler DevCosmeticHandler) {
 	if !IsEnabled() {
 		return
 	}
@@ -124,6 +138,10 @@ func Register(r *gin.Engine, devStepsHandler DevStepsHandler, devChestHandler De
 	if devChestHandler != nil {
 		// Story 20.7 加：业务 dev 端点 /dev/force-unlock-chest；nil-tolerant 跳过避免单测 panic。
 		g.POST("/force-unlock-chest", devChestHandler.PostForceUnlockChest)
+	}
+	if devCosmeticHandler != nil {
+		// Story 20.8 加：业务 dev 端点 /dev/grant-cosmetic-batch；nil-tolerant 跳过避免单测 panic。
+		g.POST("/grant-cosmetic-batch", devCosmeticHandler.PostGrantCosmeticBatch)
 	}
 }
 

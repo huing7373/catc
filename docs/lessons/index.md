@@ -315,3 +315,4 @@
 | 2026-05-15 | [domain-aware RowsAffected 语义（force-unlock 场景下 0=NotFound） & fix-review 迭代陷阱（over-correction chain）（20-7 r3）](2026-05-15-domain-aware-rowsaffected-and-over-correction-chain-20-7-r3.md) | 2 | error-handling, process | `dd1237c` |
 | 2026-05-15 | [用事务把 RowsAffected 语义模糊性从源头消除 & over-correction chain 的终结模式（20-7 r4）](2026-05-15-transaction-eliminates-rowsaffected-ambiguity-20-7-r4.md) | 2 | architecture, process | `dbc31d3` |
 | 2026-05-15 | [dev 端点正确性 > contract 美感（承认契约变更而非回退根因修复）（20-7 r5）](2026-05-15-dev-endpoint-correctness-over-contract-aesthetics-20-7-r5.md) | 1 | architecture, docs, process | `7ad289c` |
+| 2026-05-15 | [Stub endpoint 必须 explicit-failure 而非 silent false-positive（20-8 r1）](2026-05-15-stub-endpoint-explicit-failure-20-8-r1.md) | 1 | architecture, error-handling | `<pending>` |
