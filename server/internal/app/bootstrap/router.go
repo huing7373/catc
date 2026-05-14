@@ -450,6 +450,11 @@ func NewRouter(deps Deps) *gin.Engine {
 		petSvc := service.NewPetService(petRepo, userRepo, deps.SessionMgr, petBroadcastFn)
 		petsHandler := handler.NewPetsHandler(petSvc)
 
+		// Story 20.5 加：chest service + handler（GET /chest/current，单查不开事务 + 动态判定）。
+		// 复用 4.8 已 wire 的 chestRepo 实例（避免重复构造同 db handle 的多个 repo）。
+		chestSvc := service.NewChestService(chestRepo)
+		chestHandler := handler.NewChestHandler(chestSvc)
+
 		api := r.Group("/api/v1")
 
 		// /auth 子组：RateLimitByIP（V1 §4.1 行 218）
@@ -468,6 +473,7 @@ func NewRouter(deps Deps) *gin.Engine {
 		authedGroup.GET("/emojis", emojisHandler.GetEmojis)
 		authedGroup.POST("/steps/sync", stepsHandler.PostSync)     // Story 7.3 加
 		authedGroup.GET("/steps/account", stepsHandler.GetAccount) // Story 7.4 加
+		authedGroup.GET("/chest/current", chestHandler.GetCurrent) // Story 20.5 加
 		authedGroup.POST("/rooms", roomHandler.CreateRoom)         // Story 11.3 加
 		// Story 11.4 加：POST /api/v1/rooms/:roomId/join 加入房间
 		authedGroup.POST("/rooms/:roomId/join", roomHandler.JoinRoom)
