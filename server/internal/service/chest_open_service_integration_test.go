@@ -26,18 +26,27 @@
 //                                                  — 抽奖 wiring：1000 次 deterministic stub →
 //                                                    精确 900/90/9/1 reward 映射断言（20.9 r2 引入；
 //                                                    r3 改名以表明验证 wiring 而非分布）
-//  15b. WeightedPickDistribution_RealCryptoPicker_SmokeTest
-//                                                  — 抽奖真 picker smoke：100 次 production
-//                                                    `random.NewCryptoWeightedPicker` → 验证
-//                                                    production picker wiring + common 下界 ≥ 50
-//                                                    (Binomial(100, 0.9) P(失败) ≈ 6e-29 → 0 flakiness)
-//                                                    （20.9 r3 引入，配合 weighted_test.go 算法层
-//                                                    覆盖形成"算法/wiring/production 兜底"三层责任分离）
+//                                                    （r6 删除原 15b 后，本 case 是抽奖逻辑在集成层
+//                                                    的唯一 case；production picker 正确性由
+//                                                    weighted_test.go 单测 + 其他 case 的间接 wiring
+//                                                    覆盖。详见 r6 chain 终结决策。）
 //
 // build tag `integration` 隔离 → 默认 `bash scripts/build.sh --test` 不跑这些；
 // 只在 `bash scripts/build.sh --integration` 触发。
 //
 // 本机 Windows docker 不可用 → t.Skip（startMySQL 内已 skip）。CI Linux 跑。
+//
+// **20.9 r6 chain 终结 — 测试哲学（reliability over completeness）**：
+// 集成测试只对"业务结果正确"做硬断言，**不**对"并发本身真触发"或"picker 真随机"
+// 做 timing / 概率断言（这两类断言在集成测试层无法同时实现完美检测 + 0 flakiness）。
+//   - 并发本身的 timing 验证 → 由 `go test -race` runtime 兜底 + production
+//     metrics（idempotency 表 pending rollback 计数、FOR UPDATE 等待时长直方图）
+//   - picker 算法的分布正确性 → 由 `server/internal/pkg/random/weighted_test.go`
+//     单测 (N=10000 + deterministic seed + ±5% 容差) 覆盖
+//   - 集成测试**保留** start barrier（功能正确性需要，goroutine 同时起跑是制造
+//     race scenario 的前提，但不带 flaky 风险）+ 业务结果断言（"全部 100 success
+//     + 同 reward + idempotency 1 行"已经反向证明 race 路径业务正确）
+// 详见 `docs/lessons/2026-05-15-test-reliability-over-completeness-20-9-r6.md`。
 //
 // 复用既有 helper：startMySQL / runMigrations / insertUser / insertStepAccount / insertChest /
 // assertCount / buildChestOpenServiceIntegration / 4.7 落地的 faultChestRepo。
@@ -751,17 +760,19 @@ func TestChestOpenServiceIntegration_Concurrent100SameKey_OnlyOneOpens(t *testin
 		}
 	}
 
-	// r5 codex 修正 #1: 区分 race vs serial 的 timing 断言。
-	// **背景**：r4 修正加 start barrier 保证 goroutine 同时起跑，但 100 次顺序 cached
-	// replay 也会得到"100 全 success + 同 reward"——断言无法区分目标 race 路径有没有
-	// 真触发（false-positive coverage）。
-	// **方案**：测量 wall-clock。100 个并发 call 的 totalElapsed 应远小于 sumDuration（每
-	// 个 call 自报 t0..t1）。
-	// **阈值计算**（MaxOpenConns=10）：
-	//   - serial:  totalElapsed ≈ sumDuration → ratio ≈ 1.0
-	//   - race:    最多 10 个 goroutine 同时占连接 → totalElapsed ≈ sumDuration/10 ≈ 0.1
-	//              + ClaimPending 串行化进一步缩短（cached replay 路径不进事务体）
-	//   - 阈值 0.5：留 5x 安全裕量，serial 必 fail，race 必 pass
+	// r6 codex 修正 #1: 删除 r5 引入的 `serialRatio < 0.5` 硬阈值断言。
+	// **回退理由**：r5 timing 断言依赖 scheduler timing + Docker/MySQL latency → 在 loaded
+	// CI runner（共享 host / 资源紧张 / GC 暂停 / 容器冷启动）上，healthy implementation 也
+	// 可能让 ratio >= 0.5 → false-failure。
+	// **替代方案（责任分离）**：
+	//   - 并发本身的 timing 验证 → 由 `go test -race` runtime 兜底（race detector 直接
+	//     检测 data race / lock 误用）+ production observability（metrics counter / DB
+	//     row 状态分析）
+	//   - 本集成测试只保证"在 race scenario 下结果业务正确"（"全部 100 success + 同
+	//     reward + idempotency 行 1 行 + cached"已经验证）
+	// **保留 r4 start barrier**：goroutine 同时起跑是"功能正确性"前提（避免顺序串行
+	// 启动导致 race 完全不触发），不带 flaky 风险。
+	// 仅保留 wall-clock 日志便于本地 / CI 调试观察，不做断言。
 	var sumDuration, maxDuration time.Duration
 	for _, d := range times {
 		sumDuration += d
@@ -769,12 +780,8 @@ func TestChestOpenServiceIntegration_Concurrent100SameKey_OnlyOneOpens(t *testin
 			maxDuration = d
 		}
 	}
-	serialRatio := float64(totalElapsed) / float64(sumDuration)
-	if serialRatio >= 0.5 {
-		t.Errorf("并发未触发 race contention（同 key cached replay 路径）: totalElapsed=%v, sumDuration=%v, maxDuration=%v, ratio=%.3f (>= 0.5 表明 serial 执行 → MaxOpenConns=10 限制下 race ratio 应远小于 0.5)",
-			totalElapsed, sumDuration, maxDuration, serialRatio)
-	}
-	t.Logf("same-key concurrent timing: total=%v sum=%v max=%v ratio=%.3f", totalElapsed, sumDuration, maxDuration, serialRatio)
+	t.Logf("same-key concurrent timing (informational, no assertion): total=%v sum=%v max=%v ratio=%.3f",
+		totalElapsed, sumDuration, maxDuration, float64(totalElapsed)/float64(sumDuration))
 
 	// DB 断言：只开了 1 次
 	var availableSteps uint64
@@ -908,18 +915,16 @@ func TestChestOpenServiceIntegration_Concurrent100DifferentKeys_StepLimitOnlyOne
 	assertCount(t, sqlDB, "chest_open_idempotency_records WHERE user_id=?", []any{userID}, 1, "idem only 1 (99 failed tx ROLLBACK clean)")
 	assertCount(t, sqlDB, "chest_open_idempotency_records WHERE user_id=? AND status='success'", []any{userID}, 1, "idem the 1 row is success")
 
-	// r5 codex 修正 #2: 区分 race vs serial 的 timing 断言。
-	// **背景**：r4 修正加 start barrier 保证 goroutine 同时起跑，但 100 次顺序不同 key
-	// 也会得到"1 success + 99 ErrChestNotUnlocked"——第一次 commit 后 chest 已被
-	// DELETE+INSERT，后 99 次顺序串行也会拿到新 chest 全部 4002（断言无法区分 FOR
-	// UPDATE 行锁真实争抢有没有触发）。
-	// **方案**：测量 wall-clock。100 个并发事务总耗时应远小于 sumDuration。
-	// **阈值计算**（MaxOpenConns=10）：
-	//   - serial:  totalElapsed ≈ sumDuration → ratio ≈ 1.0
-	//   - race:    最多 10 个事务同时占连接 + 99 个事务在 FOR UPDATE 排队（极短，
-	//              因 unlock_at 检查 fast-fail），但 100 个 ClaimPending INSERT 仍可并发
-	//              → totalElapsed << sumDuration → ratio < 0.5
-	//   - 阈值 0.5：留充足安全裕量
+	// r6 codex 修正 #2: 删除 r5 引入的 `serialRatio < 0.5` 硬阈值断言（同上路径理由）。
+	// **替代方案（责任分离）**：
+	//   - FOR UPDATE 行锁是否真触发 → 由 `go test -race` runtime + production
+	//     observability（idempotency 表 status='pending' rollback 残留计数 / 行锁等待
+	//     时长 metrics）兜底
+	//   - 本集成测试只保证"在 race scenario 下结果业务正确"（"1 succeeded + 99 ×
+	//     ErrChestNotUnlocked + idempotency 表只剩 1 行 success"已经验证 = 行锁串行化
+	//     + 失败事务 ROLLBACK 干净）
+	// **保留 r4 start barrier**：goroutine 同时起跑是制造"100 个事务争抢同一行 FOR
+	// UPDATE"的功能前提，不带 flaky 风险。
 	var sumDuration, maxDuration time.Duration
 	for _, d := range times {
 		sumDuration += d
@@ -927,12 +932,8 @@ func TestChestOpenServiceIntegration_Concurrent100DifferentKeys_StepLimitOnlyOne
 			maxDuration = d
 		}
 	}
-	serialRatio := float64(totalElapsed) / float64(sumDuration)
-	if serialRatio >= 0.5 {
-		t.Errorf("并发未触发 race contention（FOR UPDATE 行锁路径）: totalElapsed=%v, sumDuration=%v, maxDuration=%v, ratio=%.3f (>= 0.5 表明 serial 执行 → MaxOpenConns=10 限制下 race ratio 应远小于 0.5)",
-			totalElapsed, sumDuration, maxDuration, serialRatio)
-	}
-	t.Logf("diff-key concurrent timing: total=%v sum=%v max=%v ratio=%.3f", totalElapsed, sumDuration, maxDuration, serialRatio)
+	t.Logf("diff-key concurrent timing (informational, no assertion): total=%v sum=%v max=%v ratio=%.3f",
+		totalElapsed, sumDuration, maxDuration, float64(totalElapsed)/float64(sumDuration))
 }
 
 // ============================================================
@@ -1202,156 +1203,43 @@ func TestChestOpenServiceIntegration_WeightedPickDistribution_DeterministicWirin
 }
 
 // ============================================================
-// AC14b: 抽奖真 picker smoke — 100 次 real crypto picker → production wiring 兜底
+// r6 终结决策：删除原 AC14b (RealCryptoPicker_SmokeTest)
 // ============================================================
 //
-// **20.9 r3 引入（dual-track 第二轨）**：codex r3 P2 指出，r2 stub 把真
-// `random.NewCryptoWeightedPicker` 从集成测试完全移除 —— 若 service 装配阶段
-// 把 picker 误 wire 成 nil / 错实装、或 picker 算法发生 production regression
-// （miscompute totals / wrong bucket），DeterministicWiring case 不会挂（因
-// 注入了 stub），weighted_test.go 的 unit test 也不验证 service 装配。
+// **删除依据**：codex r6 P2 指出该 case `counts[2] >= 1` (至少 1 rare) 断言在 N=100
+// 真随机样本下 P(rare == 0) ≈ 7e-5 → 集成测试如 CI 跑 100 次/月 → 期望 ~0.7% 月度
+// 红灯率（无 production bug）→ 不可接受。两次概率断言叠加 ≈ 1e-4 false-failure。
 //
-// **本 case 设计目标**：
-//   - 用 production `random.NewCryptoWeightedPicker(rand.Reader)` 跑小样本
-//   - 验证 service 真把 production picker 调进 fn —— picker 不 crash、不
-//     panic、返回 valid index → service 映射到 valid rarity
-//   - 用极宽松下界断言（common ≥ 50/100，P(失败) ≈ 6e-29）→ 完全 0 flakiness
+// **责任分离（test reliability over completeness）**：
+//   - **算法正确性**（weight 计算 / index→rarity 映射的概率分布）→ 由
+//     `server/internal/pkg/random/weighted_test.go` 覆盖：N=10000 + deterministic
+//     `mathrand.Source` seed + ±5% 容差 → P(failure) ≈ 0；4 case 覆盖 single /
+//     multi-distribution / empty / zero-weight 全分支。
+//   - **service wiring 正确性**（service 是否真调 picker + index→rarity 字段映射 +
+//     调度次数 = N）→ 由本文件 `DeterministicWiring_1000Opens` case 覆盖：
+//     stub picker 严格 900/90/9/1 → 任一环节 broken 必挂。
+//   - **production picker injection 正确性**（`buildChestOpenServiceIntegration` 装配
+//     真 `random.NewCryptoWeightedPicker` + service 入口接受 `WeightedPicker`
+//     interface）→ 由本文件其他全部 case 间接覆盖（happy path / 边界 / 并发 / 幂等
+//     case 都用 `buildChestOpenServiceIntegration`，真 picker 被调用 N+ 次；任一
+//     case fail 即说明 wiring broken）。
+//   - **真随机 picker 自身正确性**（crypto/rand 输出无偏 + 算法 mod bias 处理）→
+//     超出本测试范围；由 Go stdlib `crypto/rand` 维护团队兜底 + weighted_test.go
+//     算法层断言反向验证。
 //
-// **为何小样本（100 而非 1000）**：
-//   - smoke test 不验证分布精度，验证"picker 真被调用且不 broken"；100 次足
-//     以让 production picker 路径执行
-//   - 节省 CI 时间（每次 OpenChest ~50ms，1000 次 ~50s，100 次 ~5s）
-//   - 分布算法精确性由 weighted_test.go 10000 样本 unit test 兜底
+// **chain 终结**（r2-r6 over-correction）：
+//   - r2 加 deterministic stub picker 消除 r1 之前真随机 flaky → r3 指出失去真
+//     picker coverage
+//   - r3 加双轨（stub + real picker smoke） → r4 指出并发缺 start barrier（不同
+//     finding）
+//   - r4 加 start barrier → r5 指出 race vs serial 不可区分
+//   - r5 加 timing assertion + bypass-resistant 概率断言 → r6 指出两者均 flaky
+//   - **r6 终结**：承认集成测试层无法同时实现"完美 race detection + 完美 bypass
+//     detection + 0 flakiness"三角，改用责任分离 —— 集成测试只验证 wiring + 业务
+//     正确性；race detection 留给 `-race` + production telemetry；算法 detection
+//     留给单元测试。
 //
-// **断言宽容度计算**（确保 0 flakiness）：
-//   - drop_weight 总和 = 8·100 + 4·20 + 2·4 + 1·1 = 889
-//   - p_common = 800/889 ≈ 0.9000
-//   - X ~ Binomial(100, 0.9)：E[X] = 90, σ ≈ 3
-//   - 断言 X ≥ 50（即 5 个 σ 之外的 tail）：P(X < 50) ≈ 6e-29 — 实际不可能
-//   - 断言 valid rarity ∈ {1,2,3,4}：production picker 保证
-//   - 断言 total == 100：production picker 调度次数验证
-//
-// **不断言其他 rarity 下界**：
-//   - rare 期望 9，σ ≈ 2.9 — 小样本下 P(rare=0) ≈ 6e-5 仍非 0，避免该 tail
-//   - 只断言 common 下界足够 detect"picker 总是返 epic/legendary 索引"这类
-//     bucket 计算错误（production picker 若 weight 算法错乱，common bucket
-//     不会还稳定占 80%+）
-func TestChestOpenServiceIntegration_WeightedPickDistribution_RealCryptoPicker_SmokeTest(t *testing.T) {
-	sqlDB, chestRepo, stepAccountRepo, idempotencyRepo, cosmeticItemRepo, chestOpenLogRepo, txMgr, _, cleanup := buildChestServiceWithRepos(t)
-	defer cleanup()
-
-	// **关键**：用 production crypto picker（不是 stub），保留与
-	// buildChestOpenServiceIntegration 一致的装配，验证 production wiring。
-	realPicker := random.NewCryptoWeightedPicker(rand.Reader)
-	svc := service.NewChestService(chestRepo, txMgr, idempotencyRepo, stepAccountRepo, cosmeticItemRepo, chestOpenLogRepo, realPicker)
-
-	const userID = uint64(1)
-	insertUser(t, sqlDB, userID, "uid-smoke", "smoke", "")
-	insertStepAccount(t, sqlDB, userID, 1500, 1500, 0)
-	insertChest(t, sqlDB, 9001, userID, 1, time.Now().UTC().Add(-1*time.Minute), 1000)
-
-	const N = 100
-	for i := 0; i < N; i++ {
-		_, err := svc.OpenChest(context.Background(), service.OpenChestInput{
-			UserID:         userID,
-			IdempotencyKey: fmt.Sprintf("smoke_%04d", i),
-		})
-		if err != nil {
-			t.Fatalf("real-picker call %d: %v", i, err)
-		}
-		// 重置步数 + 下一轮 chest force-unlock（每次循环准备开下一次）
-		if i < N-1 {
-			if _, err := sqlDB.Exec(`UPDATE user_step_accounts SET available_steps=1500, consumed_steps=0, version=version+1 WHERE user_id=?`, userID); err != nil {
-				t.Fatalf("reset steps: %v", err)
-			}
-			if _, err := sqlDB.Exec(`UPDATE user_chests SET unlock_at=?, status=1 WHERE user_id=?`,
-				time.Now().UTC().Add(-1*time.Minute), userID); err != nil {
-				t.Fatalf("force-unlock: %v", err)
-			}
-		}
-	}
-
-	// 统计 chest_open_logs.reward_rarity 分布
-	rows, err := sqlDB.Query(`SELECT reward_rarity, COUNT(*) FROM chest_open_logs WHERE user_id=? GROUP BY reward_rarity`, userID)
-	if err != nil {
-		t.Fatalf("query distribution: %v", err)
-	}
-	defer rows.Close()
-
-	counts := map[int8]int{}
-	for rows.Next() {
-		var rarity int8
-		var n int
-		if err := rows.Scan(&rarity, &n); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		counts[rarity] = n
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("rows.Err: %v", err)
-	}
-
-	// 输出实际分布（debug + future tuning 参考）
-	t.Logf("real-picker N=%d distribution: common=%d rare=%d epic=%d legendary=%d (sum=%d)",
-		N, counts[1], counts[2], counts[3], counts[4], counts[1]+counts[2]+counts[3]+counts[4])
-
-	// **总和断言**（picker 调度次数正确性 — 若 picker 返回无效 index，service
-	// rarity 映射会写 0 或别的值 → 总和不等 N）
-	total := 0
-	for _, c := range counts {
-		total += c
-	}
-	if total != N {
-		t.Errorf("total reward rows=%d, want %d (production picker 调度或映射异常)", total, N)
-	}
-
-	// **rarity 范围断言**（production picker 返回有效 index → service 必映射到 {1,2,3,4}）
-	for rarity := range counts {
-		if rarity < 1 || rarity > 4 {
-			t.Errorf("invalid rarity=%d in chest_open_logs (production picker 返回了无效 index)", rarity)
-		}
-	}
-
-	// **common 下界宽容断言**（5σ 之外，P(失败) ≈ 6e-29，实际 0 flakiness）：
-	// p_common = 800/889 ≈ 0.9 → 100 次中至少 50 次 common
-	// 若 production picker weight 算法把 common bucket 漏算成小桶，common 占比会
-	// 跌到 < 50%，本断言必挂
-	if counts[1] < 50 {
-		t.Errorf("common count=%d < 50 (production weighted picker may have miscomputed bucket; expected ~90 for Binomial(100, 0.9))", counts[1])
-	}
-
-	// r5 codex 修正 #3: bypass-resistant 真随机断言。
-	// **背景**：codex r5 指出原断言 (total==100, rarity ∈ {1..4}, common >= 50) 仍可被
-	// "返第一个 enabled item"的 picker regression 绕过 —— seed 表前 8 个 enabled item
-	// 都是 common rarity，所以一直返第一个 common 也能满足 common >= 50 + rarity ∈ {1..4}。
-	// **方案**：补两条断言，让真"返第一个"退化场景必挂。
-	//
-	// **断言 1: 至少抽到 2 种不同 rarity**
-	//   - 真随机 100 样本下 P(only 1 distinct rarity) ≈ 0（即使 p_common=0.9 → P(全 100
-	//     次都 common) = 0.9^100 ≈ 2.7e-5，再叠加 P(全 rare) + ... 仍 ~3e-5）
-	//   - "返第一个 common item" → seen 只有 {1}，必 fail
-	//
-	// **断言 2: 至少抽到 1 次 rare**
-	//   - p_rare = 80/889 ≈ 0.09 → P(rare == 0 in 100) = (1 - 0.09)^100 ≈ 0.91^100 ≈ 7e-5
-	//   - "返第一个 common item" → seen[2] = 0，必 fail
-	//   - 即使 picker 退化为"返第一个 enabled item of any common rarity"也会被 rare 断言
-	//     挂掉
-	//
-	// **flakiness 估算**：两条独立断言失败率叠加 P(任一 false positive) ≈ 7e-5 + 3e-5
-	// ≈ 1e-4 = 0.01%。如果未来发现 CI 出现 1/10000 偶发挂掉，可扩大 N（如 N=300 让
-	// P(rare == 0) ≈ 5e-13 → 完全 0 flakiness），但 CI 时间会上升 3x。当前 1e-4 已远
-	// 优于"返第一个"退化场景必能 detect 这一防护价值。
-	distinctRarities := len(counts)
-	if distinctRarities < 2 {
-		t.Errorf("real-picker only produced %d distinct rarity bucket(s) in N=%d samples (seen=%v); P(only 1 rarity) ≈ 3e-5 → 强烈提示 picker 退化为 \"返固定 index\" 类 regression（如返第一个 enabled item 总是 common）",
-			distinctRarities, N, counts)
-	}
-	rareCount := counts[2] // rarity=2 = rare
-	if rareCount < 1 {
-		t.Errorf("real-picker produced 0 rare items in N=%d samples; P(rare == 0 | p_rare=80/889) ≈ 7e-5 → 强烈提示 picker bypass（如 \"返第一个 enabled item\" 绕过 weighted draw → seed 表前 8 个都是 common → rare 永远抽不到）",
-			N)
-	}
-}
+// 详细 chain 回顾 + 规则见 `docs/lessons/2026-05-15-test-reliability-over-completeness-20-9-r6.md`。
 
 // ============================================================
 // Fault injection wrapper struct（Story 20.9 范围；仅本文件可见同 package service_test 内）

@@ -324,3 +324,4 @@
 | 2026-05-15 | [集成测试 vs 单元测试责任划分（weighted picker 算法 vs wiring）（20-9 r3）](2026-05-15-integration-vs-unit-test-responsibility-split-weighted-picker-20-9-r3.md) | 1 | testing | `<pending>` |
 | 2026-05-15 | [并发集成测试必须用 start barrier 同步 goroutine 启动，否则 false-positive race coverage（20-9 r4）](2026-05-15-concurrent-test-needs-start-barrier-20-9-r4.md) | 1 | testing | `<pending>` |
 | 2026-05-15 | [并发测试 timing 断言 + bypass-resistant 真随机断言（20-9 r5）](2026-05-15-concurrent-timing-assertion-and-bypass-resistant-random-20-9-r5.md) | 3 | testing | `<pending>` |
+| 2026-05-15 | [集成测试 reliability over completeness：r2-r6 over-correction chain 终结（20-9 r6）](2026-05-15-test-reliability-over-completeness-20-9-r6.md) | 1 | testing | `<pending>` |
