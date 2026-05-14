@@ -921,6 +921,8 @@ CREATE TABLE emoji_configs (
 - 写 `chest_open_logs`
 - 重建或刷新下一轮 `user_chests`
 
+> **节点 7 vs 节点 8 阶段差异（与 V1接口设计 §7.2 / §14.1 一致）**：本节描述的是**最终契约**（节点 8 / Epic 23 完成后稳态）。**节点 7 阶段（Story 20.6 / Epic 21 验收期）**「插入一条 `user_cosmetic_items`」步骤暂不执行 —— `chest_open_logs.reward_user_cosmetic_item_id` 写占位 `0`；详见 V1接口设计 §7.2.4f。Story 23.5 落地后回归本节最终契约语义。
+
 否则容易出现：
 
 - 扣了步数没发奖

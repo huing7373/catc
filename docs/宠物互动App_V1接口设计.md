@@ -963,11 +963,17 @@ JSON 示例：
    c. **FOR UPDATE 锁 user_step_accounts**：`SELECT total_steps, available_steps, consumed_steps, version FROM user_step_accounts WHERE user_id = ? FOR UPDATE`
       - 没有行（理论不该，Story 4.6 已初始化）→ rollback → 3002（按"步数不足"映射）
       - `available_steps < 1000` → rollback → 3002
-   d. **扣步数 + 加 consumed**：`UPDATE user_step_accounts SET available_steps = available_steps - 1000, consumed_steps = consumed_steps + 1000, version = version + 1 WHERE id = ? AND version = ?`（乐观锁）
+   d. **扣步数 + 加 consumed**：`UPDATE user_step_accounts SET available_steps = available_steps - 1000, consumed_steps = consumed_steps + 1000, version = version + 1 WHERE user_id = ? AND version = ?`（乐观锁；`user_step_accounts` 主键是 `user_id` 不是 `id` —— 见数据库设计 §5.4）
       - `affected_rows = 0`（version 不匹配，并发写入）→ rollback → 1009（按"数据冲突重试"映射；rollback 时步骤 5 走 DEL sentinel 分支清理 → client 用同 key 重试会重新 claim sentinel + 走全流程；推荐 client 用新 idempotencyKey 重试以语义清晰，与"网络层重试"区分）
-   e. **加权抽取 cosmetic_item**：`SELECT id, code, name, slot, rarity, asset_url, icon_url FROM cosmetic_items WHERE is_enabled = 1` → 按 `drop_weight` 加权抽取 1 条 → 拿到 `cosmetic_item_id`
+   e. **加权抽取 cosmetic_item**：`SELECT id, code, name, slot, rarity, drop_weight, asset_url, icon_url FROM cosmetic_items WHERE is_enabled = 1` → 按 `drop_weight` 加权抽取 1 条 → 拿到 `cosmetic_item_id`（`drop_weight` 必须在 SELECT 子句中，否则后续加权抽取无权重输入；与数据库设计 §5.8 `cosmetic_items.drop_weight` 同义）
       - 没有任何 enabled cosmetic_items（seed 未执行）→ rollback → 1009
    f. **写 chest_open_logs**：`INSERT INTO chest_open_logs (user_id, chest_id, cost_steps, reward_user_cosmetic_item_id, reward_cosmetic_item_id, reward_rarity, created_at) VALUES (?, ?, 1000, 0, ?, ?, NOW())` —— **节点 7 阶段 `reward_user_cosmetic_item_id` 固定为 `0`**（占位值，因不创建 user_cosmetic_items 实例；节点 8 Story 23.5 修改本步骤为先 INSERT user_cosmetic_items 拿到 id 再填入此处）
+
+> **跨文档分阶段契约说明（重要）**：本步骤 f「节点 7 阶段**不**创建 `user_cosmetic_items` 实例」是**渐进式契约的节点 7 切片**，与"最终契约" §14.1「开箱事务必须发放装扮实例」+ 数据库设计 §8.3「插入一条 `user_cosmetic_items`」**有意分阶段**，并非矛盾：
+> - §14.1 / DB §8.3 描述的是**最终契约**（节点 8 / Epic 23 完成后稳态）—— 开箱事务包含「发放装扮实例」步骤
+> - §7.2.4f（本步骤）描述的是**节点 7 阶段切片**（Epic 20 / Epic 21 / 节点 7 demo 验收阶段）—— 暂不创建实例，`reward.userCosmeticItemId` 返回占位 `"0"`，详见本节末「关键约束」§7.2 节点 7 vs 节点 8 阶段说明
+> - **server / iOS 实装者读到此处的 disambiguation 规则**：节点 7 阶段（Story 20.6 / Epic 21）**必须**遵循本步骤 f 的"不创建实例 + reward_user_cosmetic_item_id = 0"路径；节点 8 阶段（Story 23.5 落地后）由 Story 23.5 acceptance 修改本步骤为"先 INSERT user_cosmetic_items 拿到 id 再填入此处"，同时 §14.1 / DB §8.3 自然回归一致语义
+> - **本契约 finalize（Story 20.1）冻结的是"两段语义都生效，按节点切换"的状态**，**不是**§7.2 推翻 §14.1 / DB §8.3
    g. **刷新下一轮 chest**：`DELETE FROM user_chests WHERE id = ?`（旧 chest）→ `INSERT INTO user_chests (user_id, status, unlock_at, open_cost_steps, version) VALUES (?, 1, NOW() + INTERVAL 10 MINUTE, 1000, 0)`（新 chest）
    h. **事务提交**
 5. **Redis 回填幂等结果缓存**：`SET idem:{userId}:chest_open:{idempotencyKey} = <完整 response JSON>, EX 86400`（TTL 24h）—— **覆盖**步骤 3 写入的 `"__pending__"` sentinel。若事务在步骤 4 中 rollback（任何 a~h 子步骤失败）→ **必须**主动 `DEL idem:{userId}:chest_open:{idempotencyKey}` 删除 sentinel（**否则同 key 重试会持续返回 1008 直到 TTL 过期，违反"业务错误后用新 key 重试"契约对 sentinel 的清理预期**）；DEL 失败仅 log warn（同步骤 5 写失败处理，best-effort）
@@ -1003,9 +1009,9 @@ JSON 示例：
 
 | 字段 | 类型 | 必填 | 范围/约束 | 说明 |
 |---|---|---|---|---|
-| `data.stepAccount.totalSteps` | number (int) | 必填 | `0 ≤ value ≤ 2^31 - 1` | 累计步数；与 §6.2 `totalSteps` 同义 + 数据库 `user_step_accounts.total_steps` 同义；开箱不修改此字段 |
-| `data.stepAccount.availableSteps` | number (int) | 必填 | `0 ≤ value ≤ 2^31 - 1` | 可用步数（扣除 1000 之后的值）；与 §6.2 `availableSteps` 同义 + 数据库 `user_step_accounts.available_steps` 同义；client 用此更新主界面步数余额 UI |
-| `data.stepAccount.consumedSteps` | number (int) | 必填 | `0 ≤ value ≤ 2^31 - 1` | 已消耗步数（加 1000 之后的值）；与 §6.2 `consumedSteps` 同义 + 数据库 `user_step_accounts.consumed_steps` 同义 |
+| `data.stepAccount.totalSteps` | number (int64) | 必填 | `0 ≤ value ≤ 2^63 - 1` | 累计步数；与 §6.2 `totalSteps` 同义 + 数据库 `user_step_accounts.total_steps`（BIGINT UNSIGNED）同义；开箱不修改此字段 |
+| `data.stepAccount.availableSteps` | number (int64) | 必填 | `0 ≤ value ≤ 2^63 - 1` | 可用步数（扣除 1000 之后的值）；与 §6.2 `availableSteps` 同义 + 数据库 `user_step_accounts.available_steps`（BIGINT UNSIGNED）同义；client 用此更新主界面步数余额 UI |
+| `data.stepAccount.consumedSteps` | number (int64) | 必填 | `0 ≤ value ≤ 2^63 - 1` | 已消耗步数（加 1000 之后的值）；与 §6.2 `consumedSteps` 同义 + 数据库 `user_step_accounts.consumed_steps`（BIGINT UNSIGNED）同义 |
 
 **`data.nextChest` 字段表**（开箱后立即创建的下一轮宝箱，字段集与 §7.1 完全一致）：
 
@@ -2823,6 +2829,8 @@ idem:{userId}:{apiName}:{idempotencyKey}
 - 发放装扮实例
 - 写开箱日志
 - 刷新下一轮宝箱
+
+> **节点 7 vs 节点 8 阶段差异（与 §7.2.4 一致）**：本节描述的是**最终契约**（节点 8 / Epic 23 完成后稳态）。**节点 7 阶段（Story 20.6 / Epic 21 验收期）**「发放装扮实例」步骤暂不执行 —— `chest_open_logs.reward_user_cosmetic_item_id` 写占位 `0`，`user_cosmetic_items` 实例**不**创建；详见 §7.2.4f 与 §7.2 节点 7 vs 节点 8「关键约束」。Story 23.5 落地后回归本节最终契约语义。
 
 ## 14.2 穿戴事务
 
