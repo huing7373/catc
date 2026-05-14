@@ -700,6 +700,7 @@ func TestChestOpenServiceIntegration_Concurrent100SameKey_OnlyOneOpens(t *testin
 		err      error
 	}
 	results := make([]result, N)
+	times := make([]time.Duration, N) // r5 codex 修正 #1：测量每个 call wall-clock 区分 race vs serial
 
 	// start barrier: 所有 goroutine 起好后再统一释放，避免 fast runner 上 spawn 循环本身
 	// 比 goroutine 业务调用还慢、导致并发退化为顺序执行（false-positive race coverage）
@@ -711,10 +712,12 @@ func TestChestOpenServiceIntegration_Concurrent100SameKey_OnlyOneOpens(t *testin
 		go func() {
 			defer wg.Done()
 			<-start // 等所有 goroutine ready
+			t0 := time.Now()
 			out, err := svc.OpenChest(context.Background(), service.OpenChestInput{
 				UserID:         userID,
 				IdempotencyKey: idempotencyKey,
 			})
+			times[i] = time.Since(t0)
 			if err != nil {
 				results[i] = result{err: err}
 				return
@@ -722,8 +725,10 @@ func TestChestOpenServiceIntegration_Concurrent100SameKey_OnlyOneOpens(t *testin
 			results[i] = result{rewardID: out.Reward.CosmeticItemID, nextID: out.NextChest.ID}
 		}()
 	}
+	beforeRelease := time.Now()
 	close(start) // 释放所有 goroutine 同时进入业务逻辑
 	wg.Wait()
+	totalElapsed := time.Since(beforeRelease)
 
 	// 断言 1: 全部 100 goroutine 都成功（任一 err → fail）
 	var firstReward, firstNextID uint64
@@ -745,6 +750,31 @@ func TestChestOpenServiceIntegration_Concurrent100SameKey_OnlyOneOpens(t *testin
 			t.Errorf("g%d: nextID=%d, want %d (cached)", i, r.nextID, firstNextID)
 		}
 	}
+
+	// r5 codex 修正 #1: 区分 race vs serial 的 timing 断言。
+	// **背景**：r4 修正加 start barrier 保证 goroutine 同时起跑，但 100 次顺序 cached
+	// replay 也会得到"100 全 success + 同 reward"——断言无法区分目标 race 路径有没有
+	// 真触发（false-positive coverage）。
+	// **方案**：测量 wall-clock。100 个并发 call 的 totalElapsed 应远小于 sumDuration（每
+	// 个 call 自报 t0..t1）。
+	// **阈值计算**（MaxOpenConns=10）：
+	//   - serial:  totalElapsed ≈ sumDuration → ratio ≈ 1.0
+	//   - race:    最多 10 个 goroutine 同时占连接 → totalElapsed ≈ sumDuration/10 ≈ 0.1
+	//              + ClaimPending 串行化进一步缩短（cached replay 路径不进事务体）
+	//   - 阈值 0.5：留 5x 安全裕量，serial 必 fail，race 必 pass
+	var sumDuration, maxDuration time.Duration
+	for _, d := range times {
+		sumDuration += d
+		if d > maxDuration {
+			maxDuration = d
+		}
+	}
+	serialRatio := float64(totalElapsed) / float64(sumDuration)
+	if serialRatio >= 0.5 {
+		t.Errorf("并发未触发 race contention（同 key cached replay 路径）: totalElapsed=%v, sumDuration=%v, maxDuration=%v, ratio=%.3f (>= 0.5 表明 serial 执行 → MaxOpenConns=10 限制下 race ratio 应远小于 0.5)",
+			totalElapsed, sumDuration, maxDuration, serialRatio)
+	}
+	t.Logf("same-key concurrent timing: total=%v sum=%v max=%v ratio=%.3f", totalElapsed, sumDuration, maxDuration, serialRatio)
 
 	// DB 断言：只开了 1 次
 	var availableSteps uint64
@@ -800,6 +830,7 @@ func TestChestOpenServiceIntegration_Concurrent100DifferentKeys_StepLimitOnlyOne
 		errCode   int
 	}
 	results := make([]result, N)
+	times := make([]time.Duration, N) // r5 codex 修正 #2：测量每个 call wall-clock 区分 race vs serial
 
 	// start barrier: 同上，确保 100 个事务几乎同时进入 FindByUserIDForUpdate(userID)
 	// 真正制造 FOR UPDATE 行锁排队 → 否则 fast runner 上可能 goroutine 串行启动 +
@@ -813,9 +844,11 @@ func TestChestOpenServiceIntegration_Concurrent100DifferentKeys_StepLimitOnlyOne
 		go func() {
 			defer wg.Done()
 			<-start // 等所有 goroutine ready
+			t0 := time.Now()
 			_, err := svc.OpenChest(context.Background(), service.OpenChestInput{
 				UserID: userID, IdempotencyKey: key,
 			})
+			times[i] = time.Since(t0)
 			if err == nil {
 				results[i] = result{succeeded: true}
 				return
@@ -828,8 +861,10 @@ func TestChestOpenServiceIntegration_Concurrent100DifferentKeys_StepLimitOnlyOne
 			}
 		}()
 	}
+	beforeRelease := time.Now()
 	close(start) // 释放所有 goroutine 同时进入业务逻辑
 	wg.Wait()
+	totalElapsed := time.Since(beforeRelease)
 
 	// race 期望（详见函数头注释）：
 	//   - 1 个 succeeded（第一个事务）
@@ -872,6 +907,32 @@ func TestChestOpenServiceIntegration_Concurrent100DifferentKeys_StepLimitOnlyOne
 	assertCount(t, sqlDB, "chest_open_logs WHERE user_id=?", []any{userID}, 1, "log only 1")
 	assertCount(t, sqlDB, "chest_open_idempotency_records WHERE user_id=?", []any{userID}, 1, "idem only 1 (99 failed tx ROLLBACK clean)")
 	assertCount(t, sqlDB, "chest_open_idempotency_records WHERE user_id=? AND status='success'", []any{userID}, 1, "idem the 1 row is success")
+
+	// r5 codex 修正 #2: 区分 race vs serial 的 timing 断言。
+	// **背景**：r4 修正加 start barrier 保证 goroutine 同时起跑，但 100 次顺序不同 key
+	// 也会得到"1 success + 99 ErrChestNotUnlocked"——第一次 commit 后 chest 已被
+	// DELETE+INSERT，后 99 次顺序串行也会拿到新 chest 全部 4002（断言无法区分 FOR
+	// UPDATE 行锁真实争抢有没有触发）。
+	// **方案**：测量 wall-clock。100 个并发事务总耗时应远小于 sumDuration。
+	// **阈值计算**（MaxOpenConns=10）：
+	//   - serial:  totalElapsed ≈ sumDuration → ratio ≈ 1.0
+	//   - race:    最多 10 个事务同时占连接 + 99 个事务在 FOR UPDATE 排队（极短，
+	//              因 unlock_at 检查 fast-fail），但 100 个 ClaimPending INSERT 仍可并发
+	//              → totalElapsed << sumDuration → ratio < 0.5
+	//   - 阈值 0.5：留充足安全裕量
+	var sumDuration, maxDuration time.Duration
+	for _, d := range times {
+		sumDuration += d
+		if d > maxDuration {
+			maxDuration = d
+		}
+	}
+	serialRatio := float64(totalElapsed) / float64(sumDuration)
+	if serialRatio >= 0.5 {
+		t.Errorf("并发未触发 race contention（FOR UPDATE 行锁路径）: totalElapsed=%v, sumDuration=%v, maxDuration=%v, ratio=%.3f (>= 0.5 表明 serial 执行 → MaxOpenConns=10 限制下 race ratio 应远小于 0.5)",
+			totalElapsed, sumDuration, maxDuration, serialRatio)
+	}
+	t.Logf("diff-key concurrent timing: total=%v sum=%v max=%v ratio=%.3f", totalElapsed, sumDuration, maxDuration, serialRatio)
 }
 
 // ============================================================
@@ -1257,6 +1318,38 @@ func TestChestOpenServiceIntegration_WeightedPickDistribution_RealCryptoPicker_S
 	// 跌到 < 50%，本断言必挂
 	if counts[1] < 50 {
 		t.Errorf("common count=%d < 50 (production weighted picker may have miscomputed bucket; expected ~90 for Binomial(100, 0.9))", counts[1])
+	}
+
+	// r5 codex 修正 #3: bypass-resistant 真随机断言。
+	// **背景**：codex r5 指出原断言 (total==100, rarity ∈ {1..4}, common >= 50) 仍可被
+	// "返第一个 enabled item"的 picker regression 绕过 —— seed 表前 8 个 enabled item
+	// 都是 common rarity，所以一直返第一个 common 也能满足 common >= 50 + rarity ∈ {1..4}。
+	// **方案**：补两条断言，让真"返第一个"退化场景必挂。
+	//
+	// **断言 1: 至少抽到 2 种不同 rarity**
+	//   - 真随机 100 样本下 P(only 1 distinct rarity) ≈ 0（即使 p_common=0.9 → P(全 100
+	//     次都 common) = 0.9^100 ≈ 2.7e-5，再叠加 P(全 rare) + ... 仍 ~3e-5）
+	//   - "返第一个 common item" → seen 只有 {1}，必 fail
+	//
+	// **断言 2: 至少抽到 1 次 rare**
+	//   - p_rare = 80/889 ≈ 0.09 → P(rare == 0 in 100) = (1 - 0.09)^100 ≈ 0.91^100 ≈ 7e-5
+	//   - "返第一个 common item" → seen[2] = 0，必 fail
+	//   - 即使 picker 退化为"返第一个 enabled item of any common rarity"也会被 rare 断言
+	//     挂掉
+	//
+	// **flakiness 估算**：两条独立断言失败率叠加 P(任一 false positive) ≈ 7e-5 + 3e-5
+	// ≈ 1e-4 = 0.01%。如果未来发现 CI 出现 1/10000 偶发挂掉，可扩大 N（如 N=300 让
+	// P(rare == 0) ≈ 5e-13 → 完全 0 flakiness），但 CI 时间会上升 3x。当前 1e-4 已远
+	// 优于"返第一个"退化场景必能 detect 这一防护价值。
+	distinctRarities := len(counts)
+	if distinctRarities < 2 {
+		t.Errorf("real-picker only produced %d distinct rarity bucket(s) in N=%d samples (seen=%v); P(only 1 rarity) ≈ 3e-5 → 强烈提示 picker 退化为 \"返固定 index\" 类 regression（如返第一个 enabled item 总是 common）",
+			distinctRarities, N, counts)
+	}
+	rareCount := counts[2] // rarity=2 = rare
+	if rareCount < 1 {
+		t.Errorf("real-picker produced 0 rare items in N=%d samples; P(rare == 0 | p_rare=80/889) ≈ 7e-5 → 强烈提示 picker bypass（如 \"返第一个 enabled item\" 绕过 weighted draw → seed 表前 8 个都是 common → rare 永远抽不到）",
+			N)
 	}
 }
 
