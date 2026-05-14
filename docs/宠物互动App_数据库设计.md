@@ -726,7 +726,7 @@ CREATE TABLE emoji_configs (
 
 ## 5.16 chest_open_idempotency_records
 
-开箱接口幂等记录表（**r5 review 锁定**，详见 V1接口设计 §7.2 服务端逻辑步骤 3 / 4i / 5 + §13.3）。
+开箱接口幂等记录表（**r5 review 锁定 DB 持久化方案，r6 review 把预声明纳入业务事务消除 pending 卡死悖论**，详见 V1接口设计 §7.2 服务端逻辑步骤 3a / 3b / 3k / 5 + §13.3）。
 
 ```sql
 CREATE TABLE chest_open_idempotency_records (
@@ -747,22 +747,25 @@ CREATE TABLE chest_open_idempotency_records (
 
 - `user_id`：发起开箱请求的用户 id（与 `users.id` 对齐；不建外键，与本设计其他表保持一致）
 - `idempotency_key`：client 传入的幂等键；约束与 V1接口设计 §7.2 一致（`[A-Za-z0-9_:-]` + length 1-128）
-- `status`：三态机 —— `pending`（声明已写入，业务事务执行中）/ `success`（业务事务已 commit，`response_json` 已落盘）/ `failed`（业务事务已回滚，client 应换新 key 重试）
-- `response_json`：`status = 'success'` 时缓存的完整 V1 响应（`{code, message, data: {reward, stepAccount, nextChest}, requestId}`），同 key 重试时直接反序列化返回；`status = 'pending'` / `'failed'` 时为 NULL
+- `status`：三态机 —— `pending`（声明已写入，业务事务**持锁执行中**；对其他事务不可见，它们在 InnoDB unique-key X-lock 上阻塞）/ `success`（业务事务已 commit，`response_json` 已落盘）/ `failed`（业务事务已回滚后由 server 端可选 best-effort 补偿写入的占位状态；rollback 同时已把 `pending` 行清除）
+- `response_json`：`status = 'success'` 时缓存的完整 V1 响应（`{code, message, data: {reward, stepAccount, nextChest.{id, status, unlockAt, openCostSteps}}, requestId}`）；**不**包含时间派生字段如 `nextChest.remainingSeconds`（r6 review 锁定：该字段由 server 在响应序列化时按 `max(0, ceil((unlock_at - now) / 1s))` 实时计算填入，避免同 key 重试回放 stale 倒计时）；`status = 'pending'` / `'failed'` 时为 NULL
 - `created_at` / `updated_at`：标准时间戳，`updated_at` 在 `status` 推进时自动更新
 
 ### 索引说明
 
-- `uk_user_id_key`：UNIQUE 约束兼任原子声明依据 —— V1接口设计 §7.2 步骤 3 用 `INSERT ... ON DUPLICATE KEY UPDATE id = id` 借此 UNIQUE 做 single-statement 原子 claim；同 `(user_id, idempotency_key)` 的并发请求只有一个能拿到 `affected_rows = 1`，另一个走短路返回
+- `uk_user_id_key`：UNIQUE 约束兼任原子声明依据 + 并发阻塞排队依据 —— V1接口设计 §7.2 步骤 3a 在业务事务内首条语句用 `INSERT ... ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)` 借此 UNIQUE 做 single-statement 原子 claim；同 `(user_id, idempotency_key)` 的并发请求被 InnoDB unique-key X-lock 阻塞排队，首个事务结束（commit / rollback）后其他事务再继续 —— commit → 行已存在 → `affected_rows = 0` 短路；rollback → 行已消失 → `affected_rows = 1` 走全流程
 - `idx_status_created_at`：辅助索引，支持运维清理任务按 `status` + `created_at` 范围扫描（如清理 N 天前的 `success` 记录控制表大小）；MVP 阶段无需主动清理（DB 容量足够）
 
 ### 设计说明（**契约决策来源**）
 
-本表的引入是 Story 20-1 r5 review 锁定的契约层决定：
+本表的引入是 Story 20-1 r5 / r6 review 锁定的契约层决定：
 
 - **背景**：r3 / r4 review 把开箱幂等设计在 Redis（`idem:{userId}:chest_open:{idempotencyKey}` key + sentinel + final-response 双 TTL）；r5 review 指出 Redis 是非事务存储，与 MySQL 不能形成原子写 —— "MySQL 事务 commit 成功 + Redis SET 失败" case 下 client 无法区分"首次已生效"vs"首次未生效"，可能引发重复扣步数 + 重复出箱
-- **决策**：把幂等记录从 Redis 上移到 MySQL，与业务事务**同事务原子写**；DB 成为"首次是否成功"的单一可信源
-- **lesson 文档**：`docs/lessons/2026-05-14-db-same-tx-idempotency-replaces-redis-writeback-fragility-20-1-r5.md`
+- **r5 决策**：把幂等记录从 Redis 上移到 MySQL；最终化 UPDATE 与业务事务**同事务原子写**；DB 成为"首次是否成功"的单一可信源
+- **r6 修订**：r5 把预声明 INSERT 写在业务事务**之前**作独立 INSERT —— 业务事务 rollback 时 pending 行**不**跟着回滚，同 key 重试永久卡 1008（事务 rollback 后状态语义错位悖论）。r6 把预声明 INSERT 也纳入业务事务，作为事务内**首条语句**，借 InnoDB unique-key X-lock 实现并发阻塞排队；rollback 同步清除 pending 行 → 同 key 重试等价于首次到达走全流程，**无 pending 残留卡死**
+- **lesson 文档**：
+  - `docs/lessons/2026-05-14-db-same-tx-idempotency-replaces-redis-writeback-fragility-20-1-r5.md`（r5）
+  - `docs/lessons/2026-05-14-idempotency-pre-claim-must-be-inside-business-tx-20-1-r6.md`（r6，pending 回滚悖论 + response_json 缓存不含时间派生字段）
 
 ### 阶段适用
 
@@ -969,8 +972,9 @@ CREATE TABLE chest_open_idempotency_records (
 
 ## 8.3 开箱事务
 
-必须放入一个事务：
+必须放入一个事务（**预声明 + 业务写入 + 最终化全部同事务**，r6 review 锁定）：
 
+- **预声明 `chest_open_idempotency_records` 行**（事务内**首条语句**：`INSERT ... ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`，借 `UNIQUE(user_id, idempotency_key)` 阻塞同 key 并发；详见 V1接口设计 §7.2 步骤 3a）
 - 校验宝箱状态与版本
 - 校验 `available_steps >= 1000`
 - 扣减 `available_steps`
@@ -979,11 +983,11 @@ CREATE TABLE chest_open_idempotency_records (
 - 插入一条 `user_cosmetic_items`
 - 写 `chest_open_logs`
 - 重建或刷新下一轮 `user_chests`
-- **更新 `chest_open_idempotency_records.status = 'success'` + `response_json`**（r5 review 锁定）
+- **最终化 `chest_open_idempotency_records.status = 'success'` + `response_json`**（r5 review 锁定，r6 review 维持；详见 V1接口设计 §7.2 步骤 3k）
 
-> **节点 7 vs 节点 8 阶段差异（与 V1接口设计 §7.2 / §14.1 一致）**：本节描述的是**最终契约**（节点 8 / Epic 23 完成后稳态）。**节点 7 阶段（Story 20.6 / Epic 21 验收期）**「插入一条 `user_cosmetic_items`」步骤暂不执行 —— `chest_open_logs.reward_user_cosmetic_item_id` 写占位 `0`；详见 V1接口设计 §7.2.4f。Story 23.5 落地后回归本节最终契约语义。
+> **节点 7 vs 节点 8 阶段差异（与 V1接口设计 §7.2 / §14.1 一致）**：本节描述的是**最终契约**（节点 8 / Epic 23 完成后稳态）。**节点 7 阶段（Story 20.6 / Epic 21 验收期）**「插入一条 `user_cosmetic_items`」步骤暂不执行 —— `chest_open_logs.reward_user_cosmetic_item_id` 写占位 `0`；详见 V1接口设计 §7.2.4h。Story 23.5 落地后回归本节最终契约语义。
 
-> **幂等记录同事务原子写（r5 review 锁定）**：`chest_open_idempotency_records` 行的 `status` 推进（从 `pending` 改为 `success`）与业务表写入**同一事务**原子提交（V1接口设计 §7.2 步骤 4i + §7.2 关键约束「事务边界」）；这构成"幂等状态 + 业务数据"单一可信源，client 同 key 重试始终安全。**移除** r4 钦定的"Redis sentinel + 双 TTL + 异步 SET 重试"路径（详见 §5.16 设计说明 + V1接口设计 §13.3）。
+> **幂等记录同事务原子写（r5 review 锁定 / r6 review 修订）**：`chest_open_idempotency_records` 行的预声明 INSERT（pending）+ 最终化 UPDATE（pending → success）+ `response_json` 写入与业务表写入**全部在同一事务**原子提交（V1接口设计 §7.2 步骤 3a / 3k + §7.2 关键约束「事务边界」）；这构成"幂等状态 + 业务数据"单一可信源，client 同 key 重试始终安全。r5 钦定 UPDATE 同事务，r6 进一步把 INSERT 也纳入同一事务（消除 r5 "业务事务 rollback 时 pending 行不跟随回滚 → 同 key 永久 1008 卡死"悖论）。**移除** r4 钦定的"Redis sentinel + 双 TTL + 异步 SET 重试"路径（详见 §5.16 设计说明 + V1接口设计 §13.3）。
 
 否则容易出现：
 
@@ -991,6 +995,7 @@ CREATE TABLE chest_open_idempotency_records (
 - 发了奖没扣步数
 - 开奖成功但宝箱没刷新
 - **幂等状态与业务数据不一致**（如业务 commit 成功但幂等记录未更新 → client 同 key 重试可能误判"首次未发生" → 重复扣步数 + 重复出箱）
+- **pending 残留卡死**（如预声明写在业务事务之外作独立 INSERT → 业务事务 rollback 时 pending 行残留 → client 同 key 重试永久命中 pending 返回 1008）
 
 ---
 
