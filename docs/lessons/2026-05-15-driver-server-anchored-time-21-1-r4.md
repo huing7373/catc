@@ -2,7 +2,7 @@
 date: 2026-05-15
 source_review: codex review on Story 21-1 r3 → r4
 story: 21-1-首页宝箱组件-swiftui
-commit: <pending>
+commit: 1d7c39c
 lesson_count: 1
 ---
 

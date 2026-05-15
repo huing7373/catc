@@ -2,7 +2,7 @@
 date: 2026-05-15
 source_review: codex review file /tmp/epic-loop-review-21-1-r2.md (epic-loop r2)
 story: 21-1-首页宝箱组件-swiftui
-commit: <pending>
+commit: 9a603d6
 lesson_count: 1
 supersedes_partial: docs/lessons/2026-05-15-default-value-vs-meaningful-zero-21-1-r1.md
 ---

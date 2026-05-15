@@ -2,7 +2,7 @@
 date: 2026-05-15
 source_review: codex review file /tmp/epic-loop-review-21-1-r1.md (epic-loop r1)
 story: 21-1-首页宝箱组件-swiftui
-commit: <pending>
+commit: c2526d6
 lesson_count: 1
 ---
 
