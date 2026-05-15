@@ -328,3 +328,4 @@
 | 2026-05-15 | [real picker wiring 弱断言：r6 整 case 删除 → r7 弱化断言反弹（20-9 r7）](2026-05-15-real-picker-wiring-weakest-assertion-20-9-r7.md) | 1 | testing | `92c8938` |
 | 2026-05-15 | [默认值 0 vs 业务意义上的 0：状态派生不能让 view-state 默认值伪装成业务状态（21-1 r1）](2026-05-15-default-value-vs-meaningful-zero-21-1-r1.md) | 1 | architecture | `<pending>` |
 | 2026-05-15 | [Combine sink 异步 hop 破坏 happens-before：subsequent hydration 闪一帧（21-1 r3）](2026-05-15-driver-sync-sink-on-subsequent-change-21-1-r3.md) | 1 | architecture | `1da2869` |
+| 2026-05-15 | [Server-anchored time：device clock skew 时 unlockAt 派生破坏 source of truth（21-1 r4）](2026-05-15-driver-server-anchored-time-21-1-r4.md) | 1 | architecture | `<pending>` |

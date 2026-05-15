@@ -6,8 +6,10 @@
 //   - 弱引用 AppState（防循环；ADR-0010 §3.1 ViewModel 注入 AppState 是 strong，driver 是 weak）.
 //   - 订阅 appState.$currentChest（Combine sink）→ 每次变化 cancel 老 Task + 启动新 Task.
 //   - 倒计时 Task 内 @MainActor `while !Task.isCancelled` 循环每秒 sleep 1s + 计算 remainingSeconds 写回.
-//   - 倒计时来源：`max(0, Int(currentChest.unlockAt.timeIntervalSince(Date())))`（绝对时间 → 相对秒数）；
-//     这样既不依赖 server 给的 remainingSeconds 初始值（避免双源不一致），也保 timer drift 自校准.
+//   - **倒计时来源（review r4 P2 修订）**: server-anchored —— hydrate 时捕获 `(hydratedAt, anchorRemaining)`,
+//     之后 displayed = max(0, anchorRemaining - elapsed since hydratedAt). **不**用 `unlockAt - Date()`,
+//     避免 device clock skew（如设备时钟快 5 分钟）让 server-counting 宝箱误显示 unlockable.
+//     详 `docs/lessons/2026-05-15-driver-server-anchored-time-21-1-r4.md`.
 //   - 倒计时到 0 时不停 Task（等待 currentChest 再次变化）—— Story 21.2 落地后 LoadChestUseCase 60s 定时拉取
 //     会把 currentChest.status 切到 unlockable + 新 unlockAt，driver 自然 react；本 story 阶段倒计时到 0 后
 //     视图通过 status / remainingSeconds 派生切到 unlockable 视觉态.
@@ -27,9 +29,30 @@ public final class ChestTimerDriver {
     private var subscription: AnyCancellable?
     private var tickTask: Task<Void, Never>?
 
-    public init(appState: AppState, viewModel: HomeViewModel) {
+    /// 注入式 clock provider —— prod 用默认 `{ Date() }`，测试注入 mock clock 函数.
+    /// 设计意图（review r4 P2）：让 server-anchored countdown 的"自 hydrate 起经过多少秒"可被
+    /// fake clock 推进，无需真等系统时间流逝.
+    private let clock: () -> Date
+
+    /// **anchor 状态**（review r4 P2）：捕获 hydrate 时刻的 `(hydratedAt, anchorRemaining)`,
+    /// 之后所有 tick 都从这两个值派生 displayed —— 而非用 `unlockAt - Date()`.
+    /// - `hydratedAt`: 当前 `chest` 进入 driver 时的本地时钟快照（**device 时钟**，不是 server 时钟）.
+    /// - `anchorRemaining`: 当前 `chest.remainingSeconds`（server 算好的真值）.
+    /// - `anchoredChestId`: 配套的 chest id，chest 切换 → 重新 anchor.
+    /// 计算：`displayed = max(0, anchorRemaining - Int(now - hydratedAt))` —— 两端都是同 device 同 clock，
+    /// 差值不受 wall-clock skew 影响.
+    private var hydratedAt: Date?
+    private var anchorRemaining: Int?
+    private var anchoredChestId: String?
+
+    public init(
+        appState: AppState,
+        viewModel: HomeViewModel,
+        clock: @escaping () -> Date = { Date() }
+    ) {
         self.appState = appState
         self.viewModel = viewModel
+        self.clock = clock
     }
 
     /// 启动 driver：订阅 appState.$currentChest，首次启动立即用当前值跑一次 recompute.
@@ -78,13 +101,23 @@ public final class ChestTimerDriver {
         tickTask?.cancel()
 
         guard let chest else {
-            // currentChest 为 nil（未 hydrate 或被清空）→ remainingSeconds = 0 + 不启 Task.
+            // currentChest 为 nil（未 hydrate 或被清空）→ remainingSeconds = 0 + 清 anchor + 不启 Task.
+            hydratedAt = nil
+            anchorRemaining = nil
+            anchoredChestId = nil
             viewModel?.chestRemainingSeconds = 0
             return
         }
 
+        // **server-anchored hydrate**（review r4 P2）: chest id 变 → 重新捕获 anchor.
+        // 同 id 的 chest 重新进 sink（罕见 —— Story 21.2 60s 拉取若返同 id 会触发）→ 仍重新 anchor,
+        // 因为 server 重发说明 remainingSeconds 是新算的、应当采信.
+        hydratedAt = clock()
+        anchorRemaining = chest.remainingSeconds
+        anchoredChestId = chest.id
+
         // 首次/重启：立即算一次 + 启 Task 每秒 tick.
-        recomputeAndWrite(unlockAt: chest.unlockAt)
+        recomputeAndWrite()
         let chestId = chest.id
         tickTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
@@ -93,13 +126,28 @@ public final class ChestTimerDriver {
                 guard let self else { return }
                 // 防 ABA：tickTask 启动后 currentChest 被换掉，sink 已 cancel 老 task；这里再 guard 一次 chest 仍是同一个.
                 guard self.appState?.currentChest?.id == chestId else { return }
-                self.recomputeAndWrite(unlockAt: chest.unlockAt)
+                self.recomputeAndWrite()
             }
         }
     }
 
-    private func recomputeAndWrite(unlockAt: Date) {
-        let remaining = max(0, Int(unlockAt.timeIntervalSince(Date())))
+    /// 从 anchor 派生 displayed remainingSeconds（review r4 P2 server-anchored 计算）.
+    ///
+    /// 公式：`displayed = max(0, anchorRemaining - Int(now - hydratedAt))`
+    ///
+    /// 关键性质：
+    /// - **抗 wall-clock skew**：`now` 和 `hydratedAt` 都是同 device 同 clock 的快照，
+    ///   两者差值是真实的"自 hydrate 起经过的秒数"，与 server 时钟、device 时钟的绝对偏差无关.
+    /// - **抗 background/foreground**：app 进后台 X 秒后回前台调 tick → `now - hydratedAt` 自动跳进 X 秒,
+    ///   displayed 追上正确 remaining，无需额外恢复逻辑.
+    /// - **资源 nil 兜底**：anchor 未设置（罕见 race）→ 写 0 防止 stale 显示.
+    private func recomputeAndWrite() {
+        guard let hydratedAt, let anchorRemaining else {
+            viewModel?.chestRemainingSeconds = 0
+            return
+        }
+        let elapsed = Int(clock().timeIntervalSince(hydratedAt))
+        let remaining = max(0, anchorRemaining - elapsed)
         viewModel?.chestRemainingSeconds = remaining
     }
 }

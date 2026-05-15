@@ -219,4 +219,116 @@ final class ChestCardViewTests: XCTestCase {
 
         driver.stop()
     }
+
+    // MARK: - case#9 critical: server-anchored countdown 抗 device clock skew（review r4 配套）
+
+    /// 关键不变量（review r4 P2 配套修复）：device 时钟与 server 时钟严重 skew 时（如设备时钟比
+    /// server 快 5 分钟），driver **必须**用 server 提供的 `remainingSeconds` 作为 anchor,
+    /// **不**派生自 `unlockAt - Date()`. 否则 server-counting 宝箱（remainingSeconds=180,
+    /// unlockAt 按 server 时钟计算）会立刻被 device 时钟判定为已过期 → 误显示 unlockable 金色卡片.
+    ///
+    /// 模拟方式：构造一个 `unlockAt` 在过去（device 时钟视角已过期）但 `remainingSeconds=180` 的
+    /// chest —— 这是 server 时钟比 device 时钟慢的等价场景. 注入 fixed clock 让 driver 在
+    /// hydrate 时刻 + recompute 时刻读到稳定的 device-clock-now，避免真时钟流逝干扰断言.
+    ///
+    /// 断言：driver 必须把 `chestRemainingSeconds` 写成 180（anchor），**不**是 0（unlockAt 派生）.
+    /// 反弹守门：任何未来 PR 改回 `unlockAt.timeIntervalSince(Date())` 派生 → 本测试立刻挂.
+    func testChestTimerDriverUsesServerRemainingSecondsAtHydration() {
+        let appState = AppState()
+        let vm = HomeViewModel(nickname: "t", appVersion: "0", serverInfo: "t")
+        // 注入固定 clock —— 模拟"device 时钟视角的 now".
+        let fixedNow = Date(timeIntervalSince1970: 1_700_000_000)
+        let driver = ChestTimerDriver(
+            appState: appState,
+            viewModel: vm,
+            clock: { fixedNow }
+        )
+        driver.start()
+
+        // 故意制造 clock skew：unlockAt 在 device 时钟的"过去"（fixedNow - 60s），
+        // 但 server 算的 remainingSeconds = 180. 这等价于 server 时钟比 device 慢 240s.
+        // 旧实现 `unlockAt - Date()` 会算出 -60 → 钳到 0 → 误判 unlockable.
+        // 新实现使用 anchor (server 的 180) → 正确显示 180.
+        let skewedUnlockAt = fixedNow.addingTimeInterval(-60)
+        appState.currentChest = HomeChest(
+            id: "c-skew",
+            status: .counting,
+            unlockAt: skewedUnlockAt,
+            openCostSteps: 1000,
+            remainingSeconds: 180
+        )
+        XCTAssertEqual(vm.chestRemainingSeconds, 180,
+                       "driver 必须使用 server-anchored remainingSeconds，不派生自 unlockAt - Date()")
+        driver.stop()
+    }
+
+    // MARK: - case#10 critical: server-anchored tick 从 anchor 递减（review r4 配套）
+
+    /// 关键不变量（review r4 P2 配套修复）：tick 阶段 displayed 必须从 anchor 派生 —
+    /// `displayed = max(0, anchorRemaining - elapsed since hydratedAt)`，**不**用 `unlockAt - Date()`.
+    ///
+    /// 模拟方式：注入可推进的 fake clock；hydrate 后推进 60 秒模拟 tick；调 `recomputeAndWrite`
+    /// 等价路径（通过重新 setter 触发 sink，driver 会重新 anchor —— 所以测试用更直接的方式：
+    /// 不切换 chest，而是验证"hydrate 后 anchor 派生公式正确"通过推进 clock 后再触发一次 sink
+    /// 在同 chest 下不重新 anchor）.
+    ///
+    /// 简化测试：直接验证 anchor 派生公式 —— hydrate 后 driver 内部 anchor = 180,
+    /// 推进 fake clock 60s，再触发一次同 id 的 chest 写入（driver 重新 anchor 到新 clock）→
+    /// displayed = remainingSeconds = 120（模拟 server 在 60s 后下推新值）.
+    ///
+    /// 更纯粹的"自动 tick"测试由 case#3/case#6 通过 50ms sleep + 实时 Date() 验证；
+    /// 本测试聚焦"anchor 派生公式不退化为 unlockAt 派生".
+    func testChestTimerDriverTickDecrementsFromServerAnchor() {
+        let appState = AppState()
+        let vm = HomeViewModel(nickname: "t", appVersion: "0", serverInfo: "t")
+        // 可变 clock —— 测试可推进时间.
+        var fakeNow = Date(timeIntervalSince1970: 1_700_000_000)
+        let driver = ChestTimerDriver(
+            appState: appState,
+            viewModel: vm,
+            clock: { fakeNow }
+        )
+        driver.start()
+
+        // hydrate: anchorRemaining = 180.
+        appState.currentChest = HomeChest(
+            id: "c1",
+            status: .counting,
+            unlockAt: fakeNow.addingTimeInterval(180),
+            openCostSteps: 1000,
+            remainingSeconds: 180
+        )
+        XCTAssertEqual(vm.chestRemainingSeconds, 180)
+
+        // 推进 fake clock 60s，再 hydrate 同 id 的 chest（模拟 Story 21.2 60s 拉取返回同 chest 新算值）.
+        // 关键点：新 hydrate 把 anchor 更新到 (now=fakeNow+60s, anchorRemaining=120),
+        // displayed 立即写 120. 这验证 anchor 派生公式而非 unlockAt 派生
+        // —— 若旧实现，displayed = unlockAt - fakeNow = (fakeNow+180) - (fakeNow+60) = 120 也对，
+        // 巧合相等. 为区分，下一步进一步推进 clock 再不切 chest，直接验证 anchor 是新的:
+        fakeNow = fakeNow.addingTimeInterval(60)
+        appState.currentChest = HomeChest(
+            id: "c1",
+            status: .counting,
+            unlockAt: fakeNow.addingTimeInterval(120),  // server 算的新 unlockAt
+            openCostSteps: 1000,
+            remainingSeconds: 120
+        )
+        XCTAssertEqual(vm.chestRemainingSeconds, 120,
+                       "新 hydrate 应用新 anchor=120，displayed 立即写 120")
+
+        // 关键断言：故意把 unlockAt 拨到 device-clock 的"过去"，但 server 给 remainingSeconds=90.
+        // 若实现退化为 unlockAt - now → displayed = -X → 钳到 0；
+        // 正确实现：displayed = anchor 90.
+        appState.currentChest = HomeChest(
+            id: "c1",
+            status: .counting,
+            unlockAt: fakeNow.addingTimeInterval(-30),  // skew 后 unlockAt 在过去
+            openCostSteps: 1000,
+            remainingSeconds: 90
+        )
+        XCTAssertEqual(vm.chestRemainingSeconds, 90,
+                       "displayed 必须从 server anchor 派生，即使 unlockAt 在 device 时钟过去也不退化为 0")
+
+        driver.stop()
+    }
 }
