@@ -1,6 +1,6 @@
 # Story 21.1: 首页宝箱组件 SwiftUI（倒计时 Timer + 状态切换 UI）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
