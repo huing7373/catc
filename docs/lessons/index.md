@@ -326,3 +326,4 @@
 | 2026-05-15 | [并发测试 timing 断言 + bypass-resistant 真随机断言（20-9 r5）](2026-05-15-concurrent-timing-assertion-and-bypass-resistant-random-20-9-r5.md) | 3 | testing | `5238763` |
 | 2026-05-15 | [集成测试 reliability over completeness：r2-r6 over-correction chain 终结（20-9 r6）](2026-05-15-test-reliability-over-completeness-20-9-r6.md) | 1 | testing | `4df73f4` |
 | 2026-05-15 | [real picker wiring 弱断言：r6 整 case 删除 → r7 弱化断言反弹（20-9 r7）](2026-05-15-real-picker-wiring-weakest-assertion-20-9-r7.md) | 1 | testing | `92c8938` |
+| 2026-05-15 | [默认值 0 vs 业务意义上的 0：状态派生不能让 view-state 默认值伪装成业务状态（21-1 r1）](2026-05-15-default-value-vs-meaningful-zero-21-1-r1.md) | 1 | architecture | `<pending>` |

@@ -70,6 +70,13 @@ public final class RealHomeViewModel: HomeViewModel {
     /// 默认 nil：UITEST / fallback / preview 路径下不触发 refresh（保持现状 silent behavior）.
     private var refreshHomeOnStaleNavigation: (@MainActor @Sendable () -> Void)?
 
+    /// Story 21.1 AC5: 宝箱倒计时驱动（订阅 appState.$currentChest → 每秒写 viewModel.chestRemainingSeconds）.
+    /// - var Optional 而非 let non-Optional：Swift `self` 在 super.init 前不可用，无法在字段声明初始化器内
+    ///   传 `self` 给 ChestTimerDriver；只能 super.init 后再赋值（与 RealHomeViewModel.greetingSubscription 同节奏）.
+    /// - 仅 RealHomeViewModel 持（Mock 不需要 driver；Preview / UITest 直接 hardcode chestRemainingSeconds 即可）.
+    /// - 生命周期：driver 与 ViewModel 一致（ViewModel dealloc → driver dealloc → subscription / Task 自动 cancel）.
+    private var chestTimerDriver: ChestTimerDriver?
+
     /// Story 37.7 codex round 1 [P1] fix：parameterless init 让 RootView `@StateObject` 老模式可用.
     /// AppState 通过 `bind(appState:)` 在 `.task` 内异步注入（与 pingUseCase / loadHomeUseCase 同模式）.
     /// 不再持 `injectedAppState` 字段（基类已保 self.appState；本类无独立持有需求）.
@@ -85,16 +92,32 @@ public final class RealHomeViewModel: HomeViewModel {
         self.localAppState = appState   // Story 37.12: 子类持有让 onJoinRoomConfirm 可访问
         // 构造路径已注入 AppState；立即订阅 currentPet 变化派生 greeting.
         subscribeGreeting(to: appState)
+        // Story 21.1 AC5: 构造路径已注入 AppState → 立即创建并启动 chest timer driver.
+        startChestTimerDriver(with: appState)
     }
 
     /// Story 37.7 codex round 4 [P3] fix：override base bind(appState:) 在异步注入路径也 hookup sink.
     /// 与 base 一次性 guard 同节奏（greetingSubscription == nil 表 sink 未建立 → 首次 bind 才订阅）.
+    /// Story 21.1 AC5: 异步注入路径也 hookup chestTimerDriver（与 greetingSubscription 同节奏，一次性 guard）.
     public override func bind(appState: AppState) {
         let alreadySubscribed = greetingSubscription != nil
+        let alreadyHasDriver = chestTimerDriver != nil
         super.bind(appState: appState)
         self.localAppState = appState   // Story 37.12: 异步注入路径也要更新子类持的引用
-        guard !alreadySubscribed else { return }
-        subscribeGreeting(to: appState)
+        if !alreadySubscribed {
+            subscribeGreeting(to: appState)
+        }
+        if !alreadyHasDriver {
+            startChestTimerDriver(with: appState)
+        }
+    }
+
+    /// Story 21.1 AC5: 创建并启动 ChestTimerDriver；driver 持引用让生命周期与 ViewModel 一致.
+    /// 两路 init（构造注入 + bind 注入）共享同一入口，避免分支漂移.
+    private func startChestTimerDriver(with appState: AppState) {
+        let driver = ChestTimerDriver(appState: appState, viewModel: self)
+        driver.start()
+        self.chestTimerDriver = driver
     }
 
     /// Story 12.7 AC5: 注入 CreateRoom / JoinRoom UseCase + ErrorPresenter.

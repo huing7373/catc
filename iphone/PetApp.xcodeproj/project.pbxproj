@@ -32,6 +32,7 @@
 		1BC43A46F56D9F43F13E0B37 /* DeviceInfoProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6A56BD4CDD8A553CC16BDF6 /* DeviceInfoProvider.swift */; };
 		1D3F55B63140E9DBDCB65973 /* FriendsViewScaffoldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C38AA4FCA62B305067C947 /* FriendsViewScaffoldTests.swift */; };
 		1D9F1A676E6783E694BA8536 /* EmojiRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2017BE6294021FF0F092B9B2 /* EmojiRepositoryTests.swift */; };
+		21515CB95F9B7176EF8A89D0 /* ChestCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D94E32EFCA69291D7B0DB26 /* ChestCardView.swift */; };
 		21AA1CFEC43BA966B28F2CC5 /* JoinRoomInputNormalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E74C1C217ADEC1F96D50C8C /* JoinRoomInputNormalizer.swift */; };
 		2350C41A505BA17ED976222A /* RoomEmojiReceivedUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B93B3583B3A5165648A5E3F /* RoomEmojiReceivedUITests.swift */; };
 		26C31380DF2EAC255C8985D0 /* EmojiPanelHostView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B17D873230658680FC8DB980 /* EmojiPanelHostView.swift */; };
@@ -193,12 +194,14 @@
 		B3981E19A0361A3285242BE4 /* RoomEndpoints.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AFFBC70D51EF0C753AF1588 /* RoomEndpoints.swift */; };
 		B487E898FA050E99CD615366 /* MockPetRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15A2F3F62E6E432F0414DD7C /* MockPetRepository.swift */; };
 		B5BA34C8B6B95C8532530FB5 /* JoinRoomModalPlaceholder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30D9A6A4BA2E1BE3F7997EEE /* JoinRoomModalPlaceholder.swift */; };
+		B7209C36DD97DB3798A4B067 /* ChestTimerDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF893259276FD176C8079058 /* ChestTimerDriver.swift */; };
 		B7DFA34A128AA017FF589DE6 /* WSMessageCodecEmojiSendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7A2373D85C96B00B455D7F2 /* WSMessageCodecEmojiSendTests.swift */; };
 		B801320C2AED18031E866158 /* KeychainUITestHookView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24EA253A0F2724428AFB87D5 /* KeychainUITestHookView.swift */; };
 		B838B3B43C028B40FE4A7FC9 /* AuthEndpoints.swift in Sources */ = {isa = PBXBuildFile; fileRef = 426B47E14859D36E2054952B /* AuthEndpoints.swift */; };
 		B86D5E92FB7547BCAEAA42A6 /* HomeRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EE3D4E64DE3B434D72C569E /* HomeRepository.swift */; };
 		B89824A7AD22972F4CBAA833 /* HomeContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E82EB03BF2525811F78B66B /* HomeContainerView.swift */; };
 		B961FA6BD6B5402D0E8DDB38 /* Card.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5661F40FD3539A757DB2F76F /* Card.swift */; };
+		BA34AA1350EE2C79E092B0C4 /* ChestCardViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A368D263EE61793223C055D /* ChestCardViewTests.swift */; };
 		BA9DFC3515EEF1DC30464C22 /* EmojiConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0C4E4B4B3AF88BD7FD0285E /* EmojiConfig.swift */; };
 		BB19C945A1F99591F88B055C /* AppErrorMapperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6383C925F6E7A62AF9ABC30A /* AppErrorMapperTests.swift */; };
 		BC8A0DF2A1296C7244D19C30 /* ProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E94000B196080C665C08550 /* ProfileView.swift */; };
@@ -316,6 +319,7 @@
 		1C85CBDB5056F2E2B29C6297 /* LoadEmojisUseCaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadEmojisUseCaseTests.swift; sourceTree = "<group>"; };
 		1CF7B96620ACC7C9E4EE8858 /* PetStateSyncRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PetStateSyncRequest.swift; sourceTree = "<group>"; };
 		1D4B763460336F628BDDB9BF /* RoomViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomViewModel.swift; sourceTree = "<group>"; };
+		1D94E32EFCA69291D7B0DB26 /* ChestCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChestCardView.swift; sourceTree = "<group>"; };
 		1DA210F434F9C5277B8FC5E1 /* StepRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StepRepository.swift; sourceTree = "<group>"; };
 		1E82EB03BF2525811F78B66B /* HomeContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeContainerView.swift; sourceTree = "<group>"; };
 		2017BE6294021FF0F092B9B2 /* EmojiRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiRepositoryTests.swift; sourceTree = "<group>"; };
@@ -399,6 +403,7 @@
 		696768B03ED6B9376F6B00DD /* HomeViewModelPingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeViewModelPingTests.swift; sourceTree = "<group>"; };
 		696D05F92B84441352736D9D /* WardrobeScaffoldDefaults.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WardrobeScaffoldDefaults.swift; sourceTree = "<group>"; };
 		69D3C2A9B9AFEB089423A8B8 /* NavigationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationUITests.swift; sourceTree = "<group>"; };
+		6A368D263EE61793223C055D /* ChestCardViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChestCardViewTests.swift; sourceTree = "<group>"; };
 		6A8E6EBCB9712C0BD5EE9968 /* RoomEndpointsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomEndpointsTests.swift; sourceTree = "<group>"; };
 		6B2A7092710DC8533E9FED3E /* RoomViewPlaceholder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomViewPlaceholder.swift; sourceTree = "<group>"; };
 		6D7F90A0E5C71EF2FC3BF9A1 /* APIClientKeychainSharingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClientKeychainSharingTests.swift; sourceTree = "<group>"; };
@@ -475,6 +480,7 @@
 		AE68A27ED67BFBA619C018E1 /* StepsEndpoints.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StepsEndpoints.swift; sourceTree = "<group>"; };
 		AEC51C8FA46026E39A419461 /* MotionProviderMock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionProviderMock.swift; sourceTree = "<group>"; };
 		AF03C830C761BDD95A1AC14D /* LaunchingViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchingViewTests.swift; sourceTree = "<group>"; };
+		AF893259276FD176C8079058 /* ChestTimerDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChestTimerDriver.swift; sourceTree = "<group>"; };
 		B17D873230658680FC8DB980 /* EmojiPanelHostView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiPanelHostView.swift; sourceTree = "<group>"; };
 		B2A0AF9AA60A6DD6BF330726 /* EmojiAnimationLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiAnimationLayer.swift; sourceTree = "<group>"; };
 		B2C5ED72E2191EE2624B1770 /* KeychainServicesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainServicesStore.swift; sourceTree = "<group>"; };
@@ -902,6 +908,7 @@
 		4730E64865712BF4AC3BC9D7 /* Home */ = {
 			isa = PBXGroup;
 			children = (
+				6A368D263EE61793223C055D /* ChestCardViewTests.swift */,
 				681E4968EE64E93FE1F65BFD /* HomeNicknameResolverTests.swift */,
 				1A5BA8124F4E5700CA7FCD1D /* HomePetNameResolverTests.swift */,
 				C0818A519A3621D34C8F9C2A /* HomeViewModelMotionTests.swift */,
@@ -1019,6 +1026,7 @@
 		68440AE0441C6199EA12A2D7 /* ViewModels */ = {
 			isa = PBXGroup;
 			children = (
+				AF893259276FD176C8079058 /* ChestTimerDriver.swift */,
 				41B91CE72C06EB19940C55CE /* HomeViewModel.swift */,
 				53626EAC744E0B95F75982FC /* MockHomeViewModel.swift */,
 				BD7B647FCD9FBE81E2695896 /* RealHomeViewModel.swift */,
@@ -1515,6 +1523,7 @@
 		DF1CCB0EB3C3986911C22E87 /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				1D94E32EFCA69291D7B0DB26 /* ChestCardView.swift */,
 				1E82EB03BF2525811F78B66B /* HomeContainerView.swift */,
 				F9EFA8790E4F25D6B495C1B8 /* HomeView.swift */,
 				422C789F2854D6FE69DC2F4A /* PetSpriteView.swift */,
@@ -1813,6 +1822,7 @@
 				145A1D039DB3568BD8B5F4EE /* AppStateTests.swift in Sources */,
 				167C1170E9545C630AB52652 /* AsyncTestHelpers.swift in Sources */,
 				010264E3482D2CFA71FE84C8 /* AuthBoundaryAPIClientTests.swift in Sources */,
+				BA34AA1350EE2C79E092B0C4 /* ChestCardViewTests.swift in Sources */,
 				4E906FA8437453586F466483 /* CreateRoomUseCaseTests.swift in Sources */,
 				E1CE2A0DFACE91BB66D23870 /* DeviceInfoProviderTests.swift in Sources */,
 				0A3D713C0672548F258131A1 /* EmojiAnimationLayerTests.swift in Sources */,
@@ -1931,6 +1941,8 @@
 				9B02061CAD1E8A32894C1366 /* AuthRepository.swift in Sources */,
 				8FC456BE0550DA099A786014 /* Avatar.swift in Sources */,
 				B961FA6BD6B5402D0E8DDB38 /* Card.swift in Sources */,
+				21515CB95F9B7176EF8A89D0 /* ChestCardView.swift in Sources */,
+				B7209C36DD97DB3798A4B067 /* ChestTimerDriver.swift in Sources */,
 				5283E11416934A412BE5FF95 /* CosmeticCategory.swift in Sources */,
 				3FDB7C82C62D4FEE419CBE92 /* CosmeticItem.swift in Sources */,
 				26E3D14FA1120264A6D01E26 /* CreateRoomUseCase.swift in Sources */,

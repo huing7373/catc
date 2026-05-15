@@ -72,6 +72,9 @@ private struct HomeContainerRoomViewBridge: View {
 /// EnvironmentObject 与 environment values 注入；本子视图集中读取 environment 后透传给 HomeView.
 private struct HomeContainerHomeViewBridge: View {
     @EnvironmentObject var homeViewModel: HomeViewModel
+    /// Story 21.1 AC4：在 Bridge 子视图追加 AppState 注入，让 chestSlot closure 读 `appState.currentChest`
+    /// 派生 ChestCardView props（与 HomeContainerView 外层 @EnvironmentObject 同模式；RootView 注入路径继承不变）.
+    @EnvironmentObject var appState: AppState
     @Environment(\.resetIdentityViewModel) var resetIdentityViewModel
     @Environment(\.sessionStore) var sessionStore
 
@@ -87,12 +90,24 @@ private struct HomeContainerHomeViewBridge: View {
         // 注：homeViewModel 类型签名是基类 `HomeViewModel`，本 view 通过 EnvironmentObject 拿到的
         //   实例运行时是 RealHomeViewModel（RootView 注入路径），但 .petState 字段在基类 @Published
         //   声明，子类继承零冲突.
+        //
+        // Story 21.1 AC4: chestSlot closure 从 EmptyView() 替换为 ChestCardView(...)；
+        //   onOpenTap 占位 `{}`（Story 21.3 落地真实 OpenChestUseCase 调用）.
         HomeView(
             state: homeViewModel,
             resetIdentityViewModel: resetIdentityViewModel,
             sessionStore: sessionStore,
             petSlot: { PetSpriteView(state: homeViewModel.petState) },
-            chestSlot: { EmptyView() }
+            chestSlot: {
+                ChestCardView(
+                    currentChest: appState.currentChest,
+                    remainingSeconds: homeViewModel.chestRemainingSeconds,
+                    onOpenTap: {
+                        // Story 21.3 落地：替换为 OpenChestUseCase().execute(...).
+                        // 本 story 占位空闭包（按钮可点但无副作用）.
+                    }
+                )
+            }
         )
     }
 }

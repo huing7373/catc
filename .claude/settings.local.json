@@ -93,7 +93,8 @@
       "WebFetch(domain:www.reddit.com)",
       "Read(//Users/zhuming/.claude/**)",
       "Bash(claude config *)",
-      "Bash(claude --version)"
+      "Bash(claude --version)",
+      "Skill(bmad-create-story)"
     ],
     "deny": [
       "Bash(rm -rf:*)",

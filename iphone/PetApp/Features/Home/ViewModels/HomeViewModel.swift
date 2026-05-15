@@ -114,6 +114,30 @@ public class HomeViewModel: ObservableObject {
     ///   override 会破坏 Combine publisher 链路（详 docs/lessons/2026-04-30-real-viewmodel-override-placeholder-must-mutate-state.md）.
     @Published public var petState: MotionState = .rest
 
+    /// Story 21.1 AC1: 本地宝箱倒计时 view-state（Timer 驱动；driver 在 ChestTimerDriver / RealHomeViewModel 落地）.
+    ///
+    /// 单位：秒；初值 0（domain 状态未 hydrate 时不显示倒计时）.
+    ///
+    /// **注意**（review r1 P2 修订）：本字段仅用于 counting 态 mm:ss 文案展示，**不**参与"是否
+    /// unlockable"视觉态决策. unlockable 视觉态由 `HomeChest.status == .unlockable` 单一权威派生
+    /// (ChestCardView.isUnlockableForTesting). 原方案让 `remainingSeconds <= 0` 也触发 unlockable
+    /// 视觉，导致 hydrate 阶段 chestRemainingSeconds=0 默认值会被误判为"已超时"——`.counting` 宝箱
+    /// 在 ChestTimerDriver sink 还没跑前会闪一帧 unlockable. 详见
+    /// `docs/lessons/2026-05-15-default-value-vs-meaningful-zero.md`.
+    ///
+    /// 为何放基类而非子类：
+    /// - 与 Story 8.4 落地的 `petState` 同模式：基类持字段、Mock/Real 子类共享读取路径，
+    ///   ChestCardView 通过 HomeView<ChestSlot, PetSlot>.chestSlot 注入时既能 hardcode mock 数据
+    ///   （MockHomeViewModel 测试 / Preview）也能由 Real 子类 driver 驱动.
+    /// - 该字段是 view-state 而非 domain state（ADR-0010 §3.2 表格"倒计时秒数 → ViewModel"钦定，不上 AppState）；
+    ///   domain 端权威是 `AppState.currentChest.unlockAt`（绝对时间），本字段是 Timer 派生的相对秒数.
+    ///
+    /// 用法（Story 21.1 / 21.2 演进）：
+    /// - 本 story（21.1）：RealHomeViewModel.init 内构造 ChestTimerDriver + 启动；driver 订阅 appState.currentChest
+    ///   变化重新计算并写入 `self.chestRemainingSeconds`；ChestCardView 直接读取展示 mm:ss.
+    /// - Story 21.2：LoadChestUseCase 拉到 server 状态后写 `appState.currentChest`；本字段由 driver 自动 react.
+    @Published public var chestRemainingSeconds: Int = 0
+
     // Story 37.3 删除（ADR-0009 §3.5 步骤 4）：
     //   onRoomTap / onInventoryTap / onComposeTap 三个 closure 字段已删除.
     //   主入口 IA 改 4 Tab + HomeContainerView 互斥状态机后,这三个 closure 不再有 caller.

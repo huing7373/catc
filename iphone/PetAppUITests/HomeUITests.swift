@@ -489,4 +489,38 @@ final class HomeUITests: XCTestCase {
             "RoomScaffoldView 未在 join confirm 后渲染（跨屏跳转链路断）"
         )
     }
+
+    /// Story 21.1 AC8: ChestCardView counting 态 a11y identifier 可定位验证.
+    ///
+    /// 路径：UITEST_SKIP_GUEST_LOGIN 启动 → UITEST_CHEST_COUNTING=1 让 RootView 注入 mock counting chest
+    ///   （unlockAt = now + 5min）→ AppState.currentChest hydrate 触发 HomeContainerHomeViewBridge
+    ///   重新构造 ChestCardView → counting 视觉态 + a11y 锚 "chestCard_counting" 挂在根容器.
+    ///
+    /// 范围：本 UITest case 仅验证 counting 态 a11y 锚 + chestRemaining 倒计时 Text 锚存在；
+    ///   unlockable 态切换需要更复杂的 launchEnvironment 注入路径（属 Story 22.1 E2E 测试范围）.
+    ///   开箱按钮交互（chestOpenButton）属 Story 21.3 OpenChestUseCase 落地范围，本 case 不覆盖.
+    func testChestCardShowsCountingAndUnlockableAnchors() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["UITEST_SKIP_GUEST_LOGIN"] = "1"
+        // Story 21.1: 新加 launch env 让 UITest skip-guest-login 路径下注入 mock counting 态宝箱
+        // （unlockAt = now + 5min）让 ChestCardView 渲染 counting 视觉态.
+        app.launchEnvironment["UITEST_CHEST_COUNTING"] = "1"
+        app.launch()
+
+        let timeout: TimeInterval = 5
+
+        // counting 态 ChestCardView 出现.
+        let chestCardCounting = app.descendants(matching: .any)["chestCard_counting"]
+        XCTAssertTrue(
+            chestCardCounting.waitForExistence(timeout: timeout),
+            "chestCard_counting a11y identifier 未找到（检查 RootView UITEST_CHEST_COUNTING hook + ChestCardView 渲染路径）"
+        )
+
+        // 倒计时 Text 挂 AccessibilityID.Home.chestRemaining = "home_chestRemaining".
+        let chestRemaining = app.descendants(matching: .any)[AccessibilityID.Home.chestRemaining]
+        XCTAssertTrue(
+            chestRemaining.exists,
+            "home_chestRemaining a11y identifier 未找到（chestCard_counting 内 mm:ss Text 应挂此常量）"
+        )
+    }
 }

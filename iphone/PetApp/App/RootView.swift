@@ -566,6 +566,19 @@ struct RootView: View {
             if ProcessInfo.processInfo.environment["UITEST_FORCE_IN_ROOM"] == "1" {
                 appState.setCurrentRoomId("1234567")
             }
+            // Story 21.1 AC8: 注入 mock counting 态宝箱让 UITest 可定位 chestCard_counting 锚.
+            // 命名 `UITEST_CHEST_COUNTING` 与 UITEST_SKIP_GUEST_LOGIN / UITEST_FORCE_IN_ROOM 同前缀.
+            // SKIP_GUEST_LOGIN 是登录态绕过；本 env 是具体 mock 数据精细控制，两个职责正交.
+            // 仅 Debug build 生效；Production 路径忽略.
+            if ProcessInfo.processInfo.environment["UITEST_CHEST_COUNTING"] == "1" {
+                appState.currentChest = HomeChest(
+                    id: "uitest-c1",
+                    status: .counting,
+                    unlockAt: Date().addingTimeInterval(300),
+                    openCostSteps: 1000,
+                    remainingSeconds: 300
+                )
+            }
             return
         }
         #endif

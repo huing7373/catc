@@ -36,6 +36,11 @@ public enum AccessibilityID {
         public static let petName = "home_petName"
         public static let chestRemaining = "home_chestRemaining"
 
+        // Story 21.1 AC3 / AC8: ChestCardView unlockable 态"开宝箱"按钮 a11y identifier
+        // （Story 21.3 落地 OpenChestUseCase 调用时 UITest 通过此 identifier 定位按钮）.
+        // 命名风格：小驼峰 + 下划线前缀（home_），与同 enum 既有 home_chestRemaining 风格一致.
+        public static let chestOpenButton = "home_chestOpenButton"
+
         // Story 37.13 新增：Story 37.7 落地的 inline 字符串收编为常量（值不变）.
         public static let catStage = "homeCatStage"
         public static let teamIdleCardCreate = "homeTeamIdleCard_create"
