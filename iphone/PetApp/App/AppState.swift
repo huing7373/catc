@@ -149,6 +149,24 @@ public final class AppState: ObservableObject {
         self.currentStepAccount = stepAccount
     }
 
+    /// Story 21.2 AC3: 宝箱状态拉取成功后写入 currentChest 单字段.
+    /// 由 LoadChestUseCase.execute() 在 GET /chest/current 成功后调；不动其它 6 字段
+    /// （与 applyHomeData 全字段写入区分；与 applySyncedStepAccount 同模式）.
+    ///
+    /// 命名 `applyCurrentChest` 与 `applyHomeData` / `applySyncedStepAccount` 同前缀（apply* 前缀
+    /// 表示 "hydrate / mutation 入口"；详见 ADR-0010 §3.3）；后缀 `CurrentChest` 表达数据来源
+    /// （GET /chest/current 接口；与 SyncedStepAccount = 步数同步动作返回 同精神）.
+    ///
+    /// **不**包装 Optional：caller LoadChestUseCase 收到 API success 路径必有 5 字段（V1 §7.1
+    /// 响应字段必填；不可能为 nil，schema 已冻结）.
+    ///
+    /// **不**触发 roomNavigationGeneration bump（chest mutation 与 room navigation 完全独立；与
+    /// applySyncedStepAccount 不 bump 同精神 / 同决策依据：Story 12.7 r12 [P2] fix 钦定 generation
+    /// 仅在 room 字段实际变更时 bump；详见 `2026-05-11-apply-home-data-bump-only-on-room-id-change.md`）.
+    public func applyCurrentChest(_ chest: HomeChest) {
+        self.currentChest = chest
+    }
+
     /// 显式 setter（节点 5 后 WS pet.state.changed 自身分支用；ADR-0010 §3.3 WS 流程）.
     /// 节点 5 才接 WS；本 story 仅声明类型契约（让 AppStateTests 可写 case），
     /// 不连真实 WS 入口.

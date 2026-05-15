@@ -117,6 +117,13 @@ struct RootView: View {
     /// 详见 lesson `2026-04-26-stateobject-debug-instance-aliasing.md`.
     @State private var petStateSyncTriggerService: PetStateSyncTriggerService?
 
+    /// Story 21.2 AC6: ChestRefreshTriggerService（持 3 触发器 + in-flight gate + 60s 定时器）.
+    /// 由 RootView @State 持有，避免 body 重建时 service 重启
+    /// （rebuild → factory 返回新 service → 旧 timer 仍在跑 → 资源泄漏；与 stepSyncTriggerService /
+    /// petStateSyncTriggerService 同模式 / 同 lesson 依据 `2026-04-26-stateobject-debug-instance-aliasing.md`）.
+    /// `nil` 守卫让 `ensureChestRefreshWired()` 仅初始化一次（与 ensureStepSyncWired 同模式）.
+    @State private var chestRefreshTriggerService: ChestRefreshTriggerService?
+
     /// Story 8.4 review round 2 P2 fix: scenePhase listener，让 background → foreground reactivate
     /// 时再 bind 一次 motionProvider —— 覆盖 first-launch 用户去 Settings 改权限再回 app 的真实路径.
     ///
@@ -269,6 +276,11 @@ struct RootView: View {
                         // Story 15.4 AC4: 启动 pet state-sync 触发器（subscribe `homeViewModel.$petState` +
                         // dropFirst 抹掉订阅瞬间 replay）；与 stepSync 同时机；start() 幂等 (subscription != nil 短路).
                         petStateSyncTriggerService?.start()
+
+                        // Story 21.2 AC6: 启动宝箱状态拉取触发器（launch 触发首次 + 启动 60s 定时循环）.
+                        // 与 stepSync / petStateSync 同时机；start() 幂等（hasStartedTimer 短路）.
+                        // 失败不破坏 UI（service 内 silently 吞 + 下次 60s/foreground 再试）.
+                        chestRefreshTriggerService?.start()
                     },
                     // Story 8.5 review round 2 [P2] fix: launch state 离开 .ready 时停 step sync timer.
                     //
@@ -291,6 +303,10 @@ struct RootView: View {
                         // （与 stepSync 同精神 —— token expiry / cold-start 后避免无效请求 + 释放订阅引用）.
                         // 详见 lesson `2026-05-04-launch-state-leave-ready-must-stop-feature-services.md`.
                         petStateSyncTriggerService?.stop()
+                        // Story 21.2 AC6: 离开 .ready 时同停 chest refresh 60s timer
+                        // （与 stepSync / petStateSync 同精神 —— token expiry / cold-start 后避免无效请求
+                        // + 防 60s timer 自激循环触发已被 sessionStore.clear() 清掉的 token 路径）.
+                        chestRefreshTriggerService?.stop()
                     }
                 )
             } else {
@@ -449,6 +465,9 @@ struct RootView: View {
             ensureStepSyncWired()
             // Story 15.4 AC4: lazy 注入 petStateSyncTriggerService（与 ensureStepSyncWired 同模式）.
             ensurePetStateSyncWired()
+            // Story 21.2 AC6: lazy 注入 chestRefreshTriggerService（与 ensureStepSyncWired /
+            // ensurePetStateSyncWired 同模式；nil 守卫确保 RootView 重建不重启 60s timer）.
+            ensureChestRefreshWired()
             // Story 15.5 AC3: 把 PetStateSyncTriggerService 作为 reconnect alignment delegate 注入 vm.
             // 时机：vm.bind(appState:webSocketClient:) 之后（vm 字段已就位）+ ensurePetStateSyncWired
             // 之后（service 已构造）. UITEST_SKIP_GUEST_LOGIN=1 路径下 service 仍构造（与 stepSync 同行为）；
@@ -487,9 +506,11 @@ struct RootView: View {
 
             // Story 8.5 AC9: background 进入时 stop step sync timer（节省电；下次 .active 重启）.
             // Story 15.4 AC4: 同时 stop pet state-sync subscription（释放订阅引用；下次 .active 重启幂等）.
+            // Story 21.2 AC6: 同时 stop chest refresh 60s timer（节省电；下次 .active 重启幂等）.
             if newPhase == .background {
                 stepSyncTriggerService?.stop()
                 petStateSyncTriggerService?.stop()
+                chestRefreshTriggerService?.stop()
             }
 
             guard newPhase == .active, oldPhase != .active else { return }
@@ -514,6 +535,10 @@ struct RootView: View {
                 // Story 15.4 AC4: 与 stepSync 同 .ready guard —— 仅当 launch state 在 .ready 时才 start
                 // pet state-sync subscription（幂等：subscription != nil 短路；resume 与 first start 同处理）.
                 petStateSyncTriggerService?.start()
+                // Story 21.2 AC6: 与 stepSync / petStateSync 同 .ready guard —— 仅当 launch state 在
+                // .ready 时才 start chest refresh 触发器（幂等：hasStartedTimer 短路保护;
+                // foreground reactivate 走 spawnRefreshIfIdle(reason: .foreground)，不重启 timer）.
+                chestRefreshTriggerService?.start()
             }
         }
         .errorPresentationHost(presenter: container.errorPresenter)
@@ -548,6 +573,18 @@ struct RootView: View {
         petStateSyncTriggerService = container.makePetStateSyncTriggerService(
             appState: appState,
             homeViewModel: homeViewModel
+        )
+    }
+
+    /// Story 21.2 AC6: lazy 注入 `chestRefreshTriggerService`（与 ensureStepSyncWired /
+    /// ensurePetStateSyncWired 同模式）.
+    /// nil 守卫防 RootView 重建覆盖既有 service instance —— 否则旧 60s timer 仍在跑 + 新 timer 也建
+    /// → 重复触发 GET /chest/current. service 持 loadChestUseCase strong 引用,
+    /// useCase 持 appState strong 引用 + repository value-type 拷贝（无 retain cycle）.
+    private func ensureChestRefreshWired() {
+        guard chestRefreshTriggerService == nil else { return }
+        chestRefreshTriggerService = container.makeChestRefreshTriggerService(
+            appState: appState
         )
     }
 

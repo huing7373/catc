@@ -471,6 +471,33 @@ public final class AppContainer: ObservableObject {
         )
     }
 
+    // MARK: - Story 21.2 AC5: Chest Refresh 链路 factory
+
+    /// Story 21.2 AC1: 构造 ChestRepository（每次调用返回新实例；apiClient 单例由 container 持有）.
+    /// 与 makeHomeRepository / makePetRepository 同模式（value type struct，构造廉价）.
+    public func makeChestRepository() -> ChestRepositoryProtocol {
+        DefaultChestRepository(apiClient: apiClient)
+    }
+
+    /// Story 21.2 AC2: 构造 LoadChestUseCase（每次调用返回新实例；依赖 repository / appState）.
+    /// caller 必须传 appState（AppState 在 RootView 持有；不进 AppContainer 字段；ADR-0010 §3.1）.
+    /// 与 makeSyncStepsUseCase / makeSyncPetStateUseCase 同模式.
+    public func makeLoadChestUseCase(appState: AppState) -> LoadChestUseCaseProtocol {
+        DefaultLoadChestUseCase(
+            repository: makeChestRepository(),
+            appState: appState
+        )
+    }
+
+    /// Story 21.2 AC4: 构造 ChestRefreshTriggerService（**每次调用返回新实例**；caller 应自行通过
+    /// @State 持有 strong 引用，避免 RootView body 重建时重启 timer —— 与
+    /// makeStepSyncTriggerService 同模式 / 同 lesson 依据（`2026-04-26-stateobject-debug-instance-aliasing.md`）.
+    public func makeChestRefreshTriggerService(appState: AppState) -> ChestRefreshTriggerService {
+        ChestRefreshTriggerService(
+            loadChestUseCase: makeLoadChestUseCase(appState: appState)
+        )
+    }
+
     // MARK: - Story 18.1 AC5: Emoji 链路 factory
 
     /// Story 18.1 AC5: 构造 EmojiRepository (每次调用返回新实例; apiClient 单例由 container 持有).

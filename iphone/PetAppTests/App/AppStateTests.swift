@@ -215,4 +215,82 @@ final class AppStateTests: XCTestCase {
         XCTAssertGreaterThan(appState.roomNavigationGeneration, g1,
                              "currentRoomId X → Y（换 room hydrate）→ generation +1")
     }
+
+    // MARK: - Story 21.2 AC3: applyCurrentChest 单字段 mutation
+
+    /// Story 21.2 AC3: applyCurrentChest 仅写 currentChest 字段，不动其它 6 字段.
+    /// 与 applySyncedStepAccount 同模式（单字段 mutation 入口；apply* 前缀；详见 ADR-0010 §3.3）.
+    func testApplyCurrentChestUpdatesOnlyChestField() {
+        let appState = AppState()
+        // 先 hydrate 完整数据让 6 个字段就位
+        appState.applyHomeData(makeSampleHomeData(currentRoomId: "room_1234567"))
+        let originalUser = appState.currentUser
+        let originalPet = appState.currentPet
+        let originalStepAccount = appState.currentStepAccount
+        let originalRoomId = appState.currentRoomId
+
+        // 调 applyCurrentChest 写新 chest
+        let newChest = HomeChest(
+            id: "new_chest",
+            status: .unlockable,
+            unlockAt: Date(timeIntervalSince1970: 2_000_000_000),
+            openCostSteps: 1000,
+            remainingSeconds: 0
+        )
+        appState.applyCurrentChest(newChest)
+
+        // currentChest 应被新值覆盖
+        XCTAssertEqual(appState.currentChest?.id, "new_chest")
+        XCTAssertEqual(appState.currentChest?.status, .unlockable)
+        XCTAssertEqual(appState.currentChest?.remainingSeconds, 0)
+
+        // 其它 6 字段应保持不变
+        XCTAssertEqual(appState.currentUser, originalUser)
+        XCTAssertEqual(appState.currentPet, originalPet)
+        XCTAssertEqual(appState.currentStepAccount, originalStepAccount)
+        XCTAssertEqual(appState.currentRoomId, originalRoomId)
+    }
+
+    /// Story 21.2 AC3 关键决策: applyCurrentChest **不** bump roomNavigationGeneration
+    /// （chest mutation 与 room navigation 完全独立；与 applySyncedStepAccount 不 bump 同精神）.
+    /// 与 Story 12.7 r12 [P2] fix 钦定 generation 仅在 room 字段实际变更时 bump 同精神.
+    func testApplyCurrentChestDoesNotBumpRoomNavigationGeneration() {
+        let appState = AppState()
+        appState.applyHomeData(makeSampleHomeData(currentRoomId: "room_1234567"))
+        let gBefore = appState.roomNavigationGeneration
+
+        let newChest = HomeChest(
+            id: "new_chest",
+            status: .counting,
+            unlockAt: Date(timeIntervalSince1970: 2_000_000_000),
+            openCostSteps: 1000,
+            remainingSeconds: 600
+        )
+        appState.applyCurrentChest(newChest)
+
+        XCTAssertEqual(appState.roomNavigationGeneration, gBefore,
+            "applyCurrentChest 不应 bump roomNavigationGeneration（chest mutation 与 room flow 无关）")
+    }
+
+    /// Story 21.2 AC3: applyCurrentChest 在空 AppState 上写入 OK（hydrate 前调也安全）.
+    func testApplyCurrentChestOnEmptyAppStateWritesChestOnly() {
+        let appState = AppState()
+        XCTAssertNil(appState.currentChest)
+        XCTAssertNil(appState.currentUser)
+
+        let newChest = HomeChest(
+            id: "new_chest",
+            status: .counting,
+            unlockAt: Date(timeIntervalSince1970: 2_000_000_000),
+            openCostSteps: 1000,
+            remainingSeconds: 600
+        )
+        appState.applyCurrentChest(newChest)
+
+        XCTAssertEqual(appState.currentChest?.id, "new_chest")
+        XCTAssertNil(appState.currentUser, "其它字段保持 nil")
+        XCTAssertNil(appState.currentPet)
+        XCTAssertNil(appState.currentStepAccount)
+        XCTAssertNil(appState.currentRoomId)
+    }
 }
