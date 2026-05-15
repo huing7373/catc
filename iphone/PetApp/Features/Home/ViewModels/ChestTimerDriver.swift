@@ -33,9 +33,21 @@ public final class ChestTimerDriver {
     }
 
     /// 启动 driver：订阅 appState.$currentChest，首次启动立即用当前值跑一次 recompute.
+    ///
+    /// **同步初始化契约**（review r2 P2 修订）：subscribe 之前**先同步**用 `appState.currentChest`
+    /// 当前快照跑一次 `handleChestChange`，让 `viewModel.chestRemainingSeconds` 在 start() 返回前
+    /// 就拿到正确的初值。否则 Combine sink 的 `.receive(on: .main)` 派发到下一 runloop 才跑，
+    /// 中间一帧 ChestCardView 会读到 `@Published Int = 0` 默认值。结合 ChestCardView 的
+    /// status-aware 视觉派生（`.counting` 且 `remainingSeconds <= 0` 也算 unlockable，让本地 tick
+    /// 到 0 时能切视觉态），如果 driver 不同步初始化，hydrate 时序就会让 `.counting` 宝箱闪一帧
+    /// unlockable 金色卡片。详 `docs/lessons/2026-05-15-driver-sync-init-on-sink-21-1-r2.md`.
     public func start() {
         guard subscription == nil else { return }  // 防双启
+        // 同步初始化（review r2）：sink 前先用当前 currentChest 跑一次，让 chestRemainingSeconds
+        // 在 start() 返回前就拿到正确初值。CurrentValueSubject 风格的"立即拿当前值"语义.
+        handleChestChange(appState?.currentChest)
         subscription = appState?.$currentChest
+            .dropFirst()  // 上面已同步处理一次，订阅时跳过 Published 首次发送（避免重复 cancel/restart tick task）
             .receive(on: DispatchQueue.main)
             .sink { [weak self] newChest in
                 self?.handleChestChange(newChest)

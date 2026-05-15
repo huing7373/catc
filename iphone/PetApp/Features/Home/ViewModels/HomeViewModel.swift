@@ -118,12 +118,19 @@ public class HomeViewModel: ObservableObject {
     ///
     /// 单位：秒；初值 0（domain 状态未 hydrate 时不显示倒计时）.
     ///
-    /// **注意**（review r1 P2 修订）：本字段仅用于 counting 态 mm:ss 文案展示，**不**参与"是否
-    /// unlockable"视觉态决策. unlockable 视觉态由 `HomeChest.status == .unlockable` 单一权威派生
-    /// (ChestCardView.isUnlockableForTesting). 原方案让 `remainingSeconds <= 0` 也触发 unlockable
-    /// 视觉，导致 hydrate 阶段 chestRemainingSeconds=0 默认值会被误判为"已超时"——`.counting` 宝箱
-    /// 在 ChestTimerDriver sink 还没跑前会闪一帧 unlockable. 详见
-    /// `docs/lessons/2026-05-15-default-value-vs-meaningful-zero.md`.
+    /// **派生契约**（review r2 P2 修订；推翻 r1 over-correction）：
+    /// - 本字段**同时参与** mm:ss 文案展示 **和** unlockable 视觉态派生：
+    ///   `isUnlockable = (status == .unlockable) OR (status == .counting AND remainingSeconds <= 0)`
+    ///   后半枝即本地倒计时归零自动切 unlockable（epic 21 AC "倒计时归零自动切视觉态" 钦定行为）.
+    /// - **hydrate 帧不闪 unlockable 的不变量**：`ChestTimerDriver.start()` 同步初始化让 driver.start()
+    ///   返回前就把本字段写成 server 推下来的真实值（如 300），**不**停在 @Published Int = 0 默认值.
+    ///   即：调用方（如 RealHomeViewModel.init）保证 driver.start() 在第一次 SwiftUI body 求值前
+    ///   完成 → 视图永远读不到默认 0.
+    /// - r1 lesson `docs/lessons/2026-05-15-default-value-vs-meaningful-zero-21-1-r1.md` 没被推翻,
+    ///   只是补充了"hydrate 时机"维度：默认值与业务 0 的混淆有两种解法 —— (1) 派生层不看数值字段
+    ///   (r1 的方案,代价是丢失"倒计时归零自动切"行为); (2) 让 driver 同步初始化让默认 0 永远不被
+    ///   view 读到 (r2 的方案,保住 epic AC).
+    /// - 详 `docs/lessons/2026-05-15-driver-sync-init-on-sink-21-1-r2.md`.
     ///
     /// 为何放基类而非子类：
     /// - 与 Story 8.4 落地的 `petState` 同模式：基类持字段、Mock/Real 子类共享读取路径，

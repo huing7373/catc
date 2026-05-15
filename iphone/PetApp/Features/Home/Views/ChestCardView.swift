@@ -9,12 +9,20 @@
 //   - currentChest.status == .counting → 灰色锁定图标 + mm:ss 倒计时 + "倒计时" 标签.
 //   - currentChest.status == .unlockable → 金色高亮图标 + "可开启" 标签 + 开箱按钮.
 //
-// **状态派生权威：status 字段是 source of truth**（review r1 P2 修订）:
-//   - 原方案 `(status == .unlockable) || (remainingSeconds <= 0)` 把"倒计时未初始化（默认 0）"和
-//     "倒计时刚到 0（已超时）"两种语义混在一起 —— hydrate 阶段 `HomeViewModel.chestRemainingSeconds`
-//     默认 0，`ChestTimerDriver` sink 还没处理 currentChest 之前，`.counting` 宝箱会被错误地渲染成
-//     unlockable 态（金色 + 开箱按钮闪一帧），违反 server 权威态. 现在视觉只看 `status` 一个字段;
-//     server WS / 60s 轮询推送 status 切换才触发 unlockable 视觉. 倒计时数值仅供 counting 态显示.
+// **状态派生权威：status-aware 双轴判定**（review r2 P2 修订；推翻 r1 over-correction）:
+//   - r0 方案 `(status == .unlockable) || (remainingSeconds <= 0)` hydrate 阶段错把默认 0 当超时.
+//   - r1 收敛为纯 status `status == .unlockable` —— 修了 hydrate 闪烁，但**反弹了 epic 钦定的
+//     "本地倒计时归零自动切 unlockable 视觉态"行为**：driver tick 把 chestRemainingSeconds 减到 0
+//     后,view 会一直渲染 counting 卡片直到 server 下一次 status push (Story 21.2 落地的 60s 轮询).
+//     违反 docs/宠物互动App_MVP节点规划与里程碑.md epic 21 AC "倒计时归零时自动切到 unlockable 视觉状态".
+//   - r2 正解：**status-aware 双轴**判定 ——
+//       isUnlockable = (status == .unlockable) OR (status == .counting AND remainingSeconds <= 0)
+//     语义：要么 server 权威态已经是 unlockable，要么 server 仍是 counting 但本地倒计时已 tick 到 0
+//     (乐观切；等 21.2 60s 轮询 / WS push 把 status 改为 unlockable 兜底).
+//     和 r1 的本质区别：r1 view 派生只看 status，hydrate 帧 chestRemainingSeconds=0 不再误判
+//     unlockable —— 这点 r2 也保住，因为 r2 配套 ChestTimerDriver.start() 同步初始化让
+//     chestRemainingSeconds 在 start() 返回前就拿到 server 推下来的真实 remainingSeconds（如 300）,
+//     不会停在默认 0. 真正的"业务 0"只发生在 driver tick 之后，那时候切 unlockable 是 epic 钦定行为.
 //
 // 视觉规则（无现成 ui_design 钦定 chest 区块；本 story 按 home.jsx 同风格自洽落地）：
 //   - 容器：`Card(cornerRadius: theme.radius.cardLg, padding: 20)` (22pt 圆角；与 teamIdleCard 同档)；
@@ -55,11 +63,16 @@ public struct ChestCardView: View {
 
     @ViewBuilder
     private func content(for chest: HomeChest) -> some View {
-        // 视觉派生：纯 status 判定（review r1 P2 修订）.
-        // 不再用 `remainingSeconds <= 0` 短路 —— 该值在 hydrate 阶段默认 0，会让刚 hydrate 的 .counting
-        // 宝箱被误判 unlockable 一帧. status 由 server 权威态推送（WS / 60s 轮询）切换；倒计时数值仅供
-        // counting 态展示 mm:ss，**不**参与视觉态决策.
-        let isUnlockable = ChestCardView.isUnlockableForTesting(status: chest.status)
+        // 视觉派生：status-aware 双轴判定（review r2 P2 修订）.
+        // - status == .unlockable → 直接 unlockable（server 权威）.
+        // - status == .counting 且本地 driver tick 把 remainingSeconds 减到 0 → 乐观切 unlockable
+        //   (epic 钦定"倒计时归零自动切视觉态"；等 Story 21.2 60s 轮询 / WS push 把 server status 兜底).
+        // - hydrate 帧 chestRemainingSeconds=0 默认值不会误判 unlockable，因为 ChestTimerDriver.start()
+        //   同步初始化让 start() 返回前 chestRemainingSeconds 已被写成 server 推下来的真实初值（如 300）.
+        let isUnlockable = ChestCardView.isUnlockableForTesting(
+            status: chest.status,
+            remainingSeconds: remainingSeconds
+        )
         if isUnlockable {
             unlockableView
         } else {
@@ -124,13 +137,28 @@ public struct ChestCardView: View {
         return String(format: "%02d:%02d", minutes, seconds)
     }
 
-    /// 视觉派生条件：纯 status 判定（review r1 P2 修订）.
-    /// - 不变量：当且仅当 `status == .unlockable` 时为 unlockable 态.
-    /// - 不再纳入 `remainingSeconds <= 0` 短路 —— 该值默认 0 与"超时 0"语义无法区分，会让 hydrate 阶段
-    ///   的 .counting 宝箱被误判 unlockable. server WS / 60s 轮询权威推送 status 切换即可.
+    /// 视觉派生条件：status-aware 双轴判定（review r2 P2 修订；推翻 r1 over-correction）.
+    /// - 不变量：
+    ///     status == .unlockable                                   → true (server 权威)
+    ///     status == .counting && remainingSeconds <= 0            → true (本地 tick 归零乐观切)
+    ///     status == .counting && remainingSeconds > 0             → false (倒计时进行中)
+    /// - hydrate 阶段 chestRemainingSeconds=0 默认值**不会**误判 unlockable，**前提**是
+    ///   ChestTimerDriver.start() 已同步初始化（review r2 配套修复）：start() 同步用当前
+    ///   appState.currentChest 跑一次 handleChestChange → recomputeAndWrite，让
+    ///   chestRemainingSeconds 在 driver.start() 返回前就拿到 server 推下来的真实初值（如 300）,
+    ///   不会停在 @Published Int = 0 默认值.
+    /// - 真正的"业务 0"仅发生在 driver tick 之后（unlockAt ≤ now），此时切 unlockable 是
+    ///   docs/宠物互动App_MVP节点规划与里程碑.md epic 21 AC "倒计时归零自动切视觉态" 钦定行为.
     /// - 暴露 internal static 让 ChestCardViewTests 直接断言派生函数（不通过 SwiftUI body 内省）.
-    internal static func isUnlockableForTesting(status: HomeChestStatus) -> Bool {
-        return status == .unlockable
+    internal static func isUnlockableForTesting(
+        status: HomeChestStatus,
+        remainingSeconds: Int
+    ) -> Bool {
+        if status == .unlockable {
+            return true
+        }
+        // status == .counting：仅当本地倒计时已到 0 时乐观切 unlockable.
+        return status == .counting && remainingSeconds <= 0
     }
 }
 

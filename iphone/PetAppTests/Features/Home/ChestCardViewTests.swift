@@ -94,14 +94,34 @@ final class ChestCardViewTests: XCTestCase {
         driver.stop()
     }
 
-    // MARK: - case#5 happy: unlockable 视觉派生（纯 status 判定；review r1 P2 修订）
+    // MARK: - case#5 happy: unlockable 视觉派生（status-aware 双轴判定；review r2 P2 修订）
 
-    /// 关键不变量：当且仅当 `chest.status == .unlockable` 时为 unlockable 态.
-    /// 不再纳入 `remainingSeconds <= 0` 短路 —— 该值默认 0 与"超时 0"语义无法区分，会让 hydrate 阶段
-    /// 的 .counting 宝箱被误判 unlockable. server WS / 60s 轮询权威推送 status 切换即可.
+    /// 真值表（review r2 推翻 r1 over-correction）：
+    ///
+    ///   | status      | remainingSeconds | isUnlockable | 业务语义                                |
+    ///   |-------------|------------------|--------------|----------------------------------------|
+    ///   | .unlockable | 0                | true         | server 权威 unlockable（典型）           |
+    ///   | .unlockable | 999              | true         | server 权威覆盖一切（防御性 case）        |
+    ///   | .counting   | 300              | false        | 倒计时进行中（hydrate 后 driver 写入正值） |
+    ///   | .counting   | 1                | false        | 倒计时边界但未到 0                       |
+    ///   | .counting   | 0                | true         | 本地 driver tick 归零乐观切（epic AC 钦定）|
+    ///   | .counting   | -5               | true         | 负值（防 system clock 跳跃，钳到归零语义） |
+    ///
+    /// 关键 hydrate 帧 chestRemainingSeconds=0 默认值**不会**误判 unlockable —— 因为
+    /// ChestTimerDriver.start() 同步初始化让 chestRemainingSeconds 在 RealHomeViewModel.init
+    /// 返回前就拿到 server 推下来的真实初值（如 300），不会停在 0. 见 case#7 验证.
     func testChestCardViewUnlockableDerivation() {
-        XCTAssertTrue(ChestCardView.isUnlockableForTesting(status: .unlockable))
-        XCTAssertFalse(ChestCardView.isUnlockableForTesting(status: .counting))
+        // status == .unlockable → 总是 true（server 权威）
+        XCTAssertTrue(ChestCardView.isUnlockableForTesting(status: .unlockable, remainingSeconds: 0))
+        XCTAssertTrue(ChestCardView.isUnlockableForTesting(status: .unlockable, remainingSeconds: 999))
+
+        // status == .counting && remainingSeconds > 0 → false（倒计时进行中）
+        XCTAssertFalse(ChestCardView.isUnlockableForTesting(status: .counting, remainingSeconds: 300))
+        XCTAssertFalse(ChestCardView.isUnlockableForTesting(status: .counting, remainingSeconds: 1))
+
+        // status == .counting && remainingSeconds <= 0 → true（本地 tick 归零乐观切）
+        XCTAssertTrue(ChestCardView.isUnlockableForTesting(status: .counting, remainingSeconds: 0))
+        XCTAssertTrue(ChestCardView.isUnlockableForTesting(status: .counting, remainingSeconds: -5))
     }
 
     // MARK: - case#6 happy: RealHomeViewModel 构造时 ChestTimerDriver 自动启动 + chestRemainingSeconds 从 appState 派生
@@ -120,5 +140,33 @@ final class ChestCardViewTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertGreaterThanOrEqual(vm.chestRemainingSeconds, 119)
         XCTAssertLessThanOrEqual(vm.chestRemainingSeconds, 120)
+    }
+
+    // MARK: - case#7 critical: ChestTimerDriver.start() 同步初始化（review r2 配套）
+
+    /// 关键不变量（review r2 P2 配套修复）：appState.currentChest 已 hydrate 时调 driver.start()
+    /// 必须**同步**（在 start() 返回前）把 viewModel.chestRemainingSeconds 写成真实值,
+    /// **不**等 Combine sink 的下一 main runloop 派发.
+    ///
+    /// 不这么做的后果：ChestCardView 在 RealHomeViewModel.init 后第一帧 body 求值时会读到
+    /// chestRemainingSeconds=0（@Published 默认值），结合 status-aware 派生
+    /// `(.counting && remainingSeconds <= 0) → unlockable` 会闪一帧金色 unlockable 卡片.
+    func testChestTimerDriverInitializesSynchronouslyOnStart() {
+        let appState = AppState()
+        appState.currentChest = HomeChest(
+            id: "c1",
+            status: .counting,
+            unlockAt: Date().addingTimeInterval(240),
+            openCostSteps: 1000,
+            remainingSeconds: 240
+        )
+        let vm = HomeViewModel(nickname: "t", appVersion: "0", serverInfo: "t")
+        XCTAssertEqual(vm.chestRemainingSeconds, 0)  // 默认值
+        let driver = ChestTimerDriver(appState: appState, viewModel: vm)
+        driver.start()
+        // 关键断言：start() 返回前就已经写入真实值；**无 await / sleep**.
+        XCTAssertGreaterThanOrEqual(vm.chestRemainingSeconds, 239)
+        XCTAssertLessThanOrEqual(vm.chestRemainingSeconds, 240)
+        driver.stop()
     }
 }
