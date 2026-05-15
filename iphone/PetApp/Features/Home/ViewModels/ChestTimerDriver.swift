@@ -36,11 +36,22 @@ public final class ChestTimerDriver {
     ///
     /// **同步初始化契约**（review r2 P2 修订）：subscribe 之前**先同步**用 `appState.currentChest`
     /// 当前快照跑一次 `handleChestChange`，让 `viewModel.chestRemainingSeconds` 在 start() 返回前
-    /// 就拿到正确的初值。否则 Combine sink 的 `.receive(on: .main)` 派发到下一 runloop 才跑，
-    /// 中间一帧 ChestCardView 会读到 `@Published Int = 0` 默认值。结合 ChestCardView 的
-    /// status-aware 视觉派生（`.counting` 且 `remainingSeconds <= 0` 也算 unlockable，让本地 tick
-    /// 到 0 时能切视觉态），如果 driver 不同步初始化，hydrate 时序就会让 `.counting` 宝箱闪一帧
-    /// unlockable 金色卡片。详 `docs/lessons/2026-05-15-driver-sync-init-on-sink-21-1-r2.md`.
+    /// 就拿到正确的初值。否则 Combine sink 的下次派发才跑，中间一帧 ChestCardView 会读到
+    /// `@Published Int = 0` 默认值。
+    ///
+    /// **同步 sink 契约**（review r3 P2 修订）：**不**走 `.receive(on: DispatchQueue.main)`.
+    /// `@Published` 的 publisher 在 setter 所在线程同步发出 —— driver 整类已 `@MainActor` 标注 +
+    /// AppState 整类已 `@MainActor` 标注 + `currentChest` 所有写入路径（applyHomeData / reset /
+    /// HomeViewModel.refresh / Story 21.2 LoadChestUseCase）都在 main actor，
+    /// **不需要**额外 dispatch hop. 删 `.receive(on:)` 让 sink closure 在 `currentChest` setter
+    /// 调用栈内同步执行，subsequent hydration（如 /home 刷新装入新 `.counting` 宝箱）时
+    /// `chestRemainingSeconds` 的写入 **happens-before** SwiftUI 观察 AppState 触发的 rerender,
+    /// ChestCardView 第一次见到新 `currentChest` 时配套的 `chestRemainingSeconds` 已经是正值,
+    /// 不会闪一帧 `(.counting, 0) → unlockable` 金色卡片.
+    ///
+    /// 同步性测试反弹守门：`testChestTimerDriverPropagatesSubsequentChestChangeSynchronously`,
+    /// 任何未来 PR 重新加 `.receive(on:)` 或异步 hop 都会立刻挂.
+    /// 详 `docs/lessons/2026-05-15-driver-sync-sink-on-subsequent-change-21-1-r3.md`.
     public func start() {
         guard subscription == nil else { return }  // 防双启
         // 同步初始化（review r2）：sink 前先用当前 currentChest 跑一次，让 chestRemainingSeconds
@@ -48,7 +59,7 @@ public final class ChestTimerDriver {
         handleChestChange(appState?.currentChest)
         subscription = appState?.$currentChest
             .dropFirst()  // 上面已同步处理一次，订阅时跳过 Published 首次发送（避免重复 cancel/restart tick task）
-            .receive(on: DispatchQueue.main)
+            // **禁止**在此加 `.receive(on:)` 或任何异步 operator —— 见 start() 文档 "同步 sink 契约".
             .sink { [weak self] newChest in
                 self?.handleChestChange(newChest)
             }

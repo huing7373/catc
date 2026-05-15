@@ -169,4 +169,54 @@ final class ChestCardViewTests: XCTestCase {
         XCTAssertLessThanOrEqual(vm.chestRemainingSeconds, 240)
         driver.stop()
     }
+
+    // MARK: - case#8 critical: subsequent currentChest 变化时 sink 必须同步（review r3 配套）
+
+    /// 关键不变量（review r3 P2 配套修复）：driver.start() 之后 `appState.currentChest` 再次被
+    /// 改写（例如 HomeViewModel.refresh / Story 21.2 LoadChestUseCase 60s 拉取装入新 `.counting`
+    /// 宝箱）时，sink closure 必须**同步**在 `currentChest` setter 调用栈内跑完 → driver 同步
+    /// 把 `viewModel.chestRemainingSeconds` 写成新值. **不**走 await / sleep，**不**等下个 runloop.
+    ///
+    /// 不这么做的后果（review r3 finding）：SwiftUI 观察 `AppState.currentChest` 触发的 rerender
+    /// 与 sink closure 的执行没有 happens-before 关系；ChestCardView 可能先看到新
+    /// `currentChest = .counting(300)`，但配套的 `chestRemainingSeconds` 还是上一帧的 stale 0,
+    /// `isUnlockable(.counting, 0) == true` → 闪一帧金色 unlockable 卡片.
+    ///
+    /// 反弹守门：任何未来 PR 重新加 `.receive(on:)` / `.async` / 其他异步 operator 到 sink 链
+    /// 都会让本测试立刻挂. 配合 case#7 的"初始化同步性"形成双轴防 over-correction 反弹.
+    func testChestTimerDriverPropagatesSubsequentChestChangeSynchronously() {
+        let appState = AppState()
+        let vm = HomeViewModel(nickname: "t", appVersion: "0", serverInfo: "t")
+        let driver = ChestTimerDriver(appState: appState, viewModel: vm)
+        driver.start()
+        // start() 返回时 currentChest 仍 nil → chestRemainingSeconds = 0（同步初始化路径）.
+        XCTAssertEqual(vm.chestRemainingSeconds, 0)
+
+        // 模拟 subsequent hydration：start() 之后 appState.currentChest 被改写（如 /home 刷新）.
+        appState.currentChest = HomeChest(
+            id: "c1",
+            status: .counting,
+            unlockAt: Date().addingTimeInterval(180),
+            openCostSteps: 1000,
+            remainingSeconds: 180
+        )
+        // 关键断言：setter 返回 == sink closure 已同步跑完 == chestRemainingSeconds 已写入正值.
+        // **无 await / sleep**. 如果 sink 链上有任何 `.receive(on:)` / async hop，
+        // chestRemainingSeconds 会停在 0，本测试挂.
+        XCTAssertGreaterThanOrEqual(vm.chestRemainingSeconds, 179)
+        XCTAssertLessThanOrEqual(vm.chestRemainingSeconds, 180)
+
+        // 再换一次（模拟 Story 21.2 60s 拉取装入新 chest）→ 仍然同步.
+        appState.currentChest = HomeChest(
+            id: "c2",
+            status: .counting,
+            unlockAt: Date().addingTimeInterval(60),
+            openCostSteps: 1000,
+            remainingSeconds: 60
+        )
+        XCTAssertGreaterThanOrEqual(vm.chestRemainingSeconds, 59)
+        XCTAssertLessThanOrEqual(vm.chestRemainingSeconds, 60)
+
+        driver.stop()
+    }
 }
