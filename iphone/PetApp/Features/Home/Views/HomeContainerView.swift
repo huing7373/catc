@@ -102,9 +102,11 @@ private struct HomeContainerHomeViewBridge: View {
                 ChestCardView(
                     currentChest: appState.currentChest,
                     remainingSeconds: homeViewModel.chestRemainingSeconds,
+                    isOpening: homeViewModel.isOpening,
                     onOpenTap: {
-                        // Story 21.3 落地：替换为 OpenChestUseCase().execute(...).
-                        // 本 story 占位空闭包（按钮可点但无副作用）.
+                        // Story 21.3 AC7：替换占位空闭包为真实 onChestOpenTap.
+                        // RealHomeViewModel override 调 OpenChestUseCase；MockHomeViewModel 记录 invocation.
+                        homeViewModel.onChestOpenTap()
                     }
                 )
             }

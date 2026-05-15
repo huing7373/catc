@@ -383,6 +383,27 @@ struct RootView: View {
                     errorPresenter: container.errorPresenter,
                     refreshHomeOnStaleNavigation: refreshHomeClosure
                 )
+                // Story 21.3 AC8: 注入 OpenChestUseCase 到 RealHomeViewModel.
+                // 让 onChestOpenTap override 走真实 server 路径（以前 nil fallback 仅 log）.
+                realHomeVM.bind(
+                    openChestUseCase: container.makeOpenChestUseCase(appState: appState)
+                )
+            } else if let realHomeVM = homeViewModel as? RealHomeViewModel, isUITestSkipGuestLogin {
+                // Story 21.3 AC10: UITEST_SKIP_GUEST_LOGIN=1 路径下也注入 OpenChestUseCase ——
+                // 但 ChestRepository 走 UITestMockChestRepository（UITEST_MOCK_CHEST_OPEN=1）让
+                // ChestOpenUITests 能跑 happy 路径（tap → server 200 → AppState 写入 → counting 回归）.
+                // 不传 createRoom/join (与既有 r2/r3 gate 同精神 —— UITEST 无 token 不走 room HTTP).
+                //
+                // 单独 wire openChestUseCase 而非合并到上面 bind：让 ChestOpenUITests 与既有 UITEST
+                // 路径解耦 —— UITEST_MOCK_CHEST_OPEN=0 / UITEST_SKIP_GUEST_LOGIN=1 路径下 openChestUseCase
+                // 也已注入，onChestOpenTap → 调 useCase.execute → repo（默认 DefaultChestRepository）→
+                // 真实 HTTP 失败 → ErrorPresenter 派生 RetryView（不破坏既有 UITest）.
+                //
+                // 即便 errorPresenter nil（UITEST gate 不注入 errorPresenter），useCase 抛错时
+                // RealHomeViewModel.onChestOpenTap catch block 内 presenter? 短路 nil → silently 吞.
+                realHomeVM.bind(
+                    openChestUseCase: container.makeOpenChestUseCase(appState: appState)
+                )
             }
             if let realRoomVM = roomViewModel as? RealRoomViewModel {
                 // Story 12.7 AC8 关键改动：webSocketClient 从 nil 升级为 container.webSocketClient（节点 4 真实 client 接通）.

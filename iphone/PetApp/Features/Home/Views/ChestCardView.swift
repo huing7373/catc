@@ -40,15 +40,20 @@ public struct ChestCardView: View {
 
     private let currentChest: HomeChest?
     private let remainingSeconds: Int
+    private let isOpening: Bool
     private let onOpenTap: () -> Void
 
+    /// Story 21.3 AC7: init 加 `isOpening: Bool = false` 默认参数（让既有 callsite 不变；Preview / 老
+    /// 单测 / Story 21.1 ChestCardViewTests 等不动；生产 callsite HomeContainerView 改造显式传值）.
     public init(
         currentChest: HomeChest?,
         remainingSeconds: Int,
+        isOpening: Bool = false,
         onOpenTap: @escaping () -> Void
     ) {
         self.currentChest = currentChest
         self.remainingSeconds = remainingSeconds
+        self.isOpening = isOpening
         self.onOpenTap = onOpenTap
     }
 
@@ -90,14 +95,27 @@ public struct ChestCardView: View {
                     Text("宝箱已就绪")
                         .font(.system(size: 17, weight: .heavy))
                         .foregroundColor(theme.colors.ink)
-                    Text("可开启")
+                    // Story 21.3 AC7：副标题在 isOpening=true 时切到 "开箱中…"（loading 视觉提示）.
+                    Text(isOpening ? "开箱中…" : "可开启")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(theme.colors.inkSoft)
                 }
                 Spacer()
-                PrimaryButton(title: "开宝箱", variant: .primary, action: onOpenTap)
-                    .frame(width: 96)
-                    .accessibilityIdentifier(AccessibilityID.Home.chestOpenButton)
+                // Story 21.3 AC7：ZStack 包 PrimaryButton + isOpening 时叠 ProgressView 在按钮右侧;
+                // 按钮文字保持 "开宝箱" 但 .disabled(isOpening) + .opacity(0.5) 视觉降透明.
+                ZStack(alignment: .trailing) {
+                    PrimaryButton(title: "开宝箱", variant: .primary, action: onOpenTap)
+                        .frame(width: 96)
+                        .disabled(isOpening)
+                        .opacity(isOpening ? 0.5 : 1.0)
+                        .accessibilityIdentifier(AccessibilityID.Home.chestOpenButton)
+                    if isOpening {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                            .padding(.trailing, 8)
+                            .allowsHitTesting(false)  // hit-test 仍走 PrimaryButton（已 disabled）；保持 a11y tree 干净
+                    }
+                }
             }
         }
         .accessibilityIdentifier("chestCard_unlockable")

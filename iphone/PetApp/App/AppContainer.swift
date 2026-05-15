@@ -106,6 +106,13 @@ public final class AppContainer: ObservableObject {
     /// 仅 DEBUG 编译；通过 `UITEST_MOCK_STEP_SYNC=1` launch arg 启用.
     /// `makeStepRepository()` 检查此字段；非 nil 时返回 mock，nil 时返回 default.
     private let uiTestMockStepRepository: StepRepositoryProtocol?
+
+    /// Story 21.3 AC10: UITest 路径下注入的 mock ChestRepository（替代默认 DefaultChestRepository）.
+    /// 仅 DEBUG 编译；通过 `UITEST_MOCK_CHEST_OPEN=1` launch arg 启用.
+    /// `makeChestRepository()` 检查此字段；非 nil 时返回 mock，nil 时返回 default.
+    /// 让 ChestOpenUITests 验证 happy 路径（unlockable → tap → AppState 写入 → counting 回归）
+    /// 而不依赖真实 server / token.
+    private let uiTestMockChestRepository: ChestRepositoryProtocol?
     #endif
 
     /// 默认 init：用 `APIClient(baseURL:, keychainStore:)` 构造默认 client。
@@ -173,6 +180,18 @@ public final class AppContainer: ObservableObject {
             uitestMockHealth = nil
         }
 
+        // Story 21.3 AC10: UITest 路径走 launch env 注入 mock ChestRepository.
+        //   - UITEST_MOCK_CHEST_OPEN=1 启用 mock；让 POST /api/v1/chest/open 返回一个 happy
+        //     fixture（unlockable chest → counting next chest）, 让 ChestOpenUITests 不依赖真实 server.
+        //   - GET /api/v1/chest/current 也走 mock —— 返回一个 unlockable 态宝箱让"tap 开宝箱按钮"
+        //     UITest 步骤可达.
+        let uitestMockChestRepo: ChestRepositoryProtocol?
+        if env["UITEST_MOCK_CHEST_OPEN"] == "1" {
+            uitestMockChestRepo = UITestMockChestRepository()
+        } else {
+            uitestMockChestRepo = nil
+        }
+
         // Story 18.1 AC8: UITest 路径走 launch env 注入 mock EmojiRepository.
         //   - UITEST_MOCK_EMOJI=1 启用 mock; UITEST_MOCK_EMOJI_JSON (可选) 注入 JSON fixture
         //     (`[{code,name,assetUrl,sortOrder}, ...]` array 形态; 缺省走 4 项内置 fixture).
@@ -194,6 +213,7 @@ public final class AppContainer: ObservableObject {
             webSocketClient: wsClient,
             healthProvider: uitestMockHealth,
             uiTestMockStepRepository: uitestMockStepRepo,
+            uiTestMockChestRepository: uitestMockChestRepo,
             emojiRepository: uitestMockEmojiRepo
         )
         #else
@@ -221,6 +241,7 @@ public final class AppContainer: ObservableObject {
         dateProvider: DateProvider = DefaultDateProvider(),
         healthProvider: HealthProvider? = nil,
         uiTestMockStepRepository: StepRepositoryProtocol? = nil,
+        uiTestMockChestRepository: ChestRepositoryProtocol? = nil,
         emojiRepository: EmojiRepositoryProtocol? = nil
     ) {
         self.apiClient = apiClient
@@ -242,6 +263,7 @@ public final class AppContainer: ObservableObject {
         self.motionProvider = MotionProviderImpl()
         self.dateProvider = dateProvider
         self.uiTestMockStepRepository = uiTestMockStepRepository
+        self.uiTestMockChestRepository = uiTestMockChestRepository
         // Story 18.1 AC5: 用 stable singleton 模式 wire LoadEmojisUseCase, 让 cache 跨 ViewModel 共享.
         // UITest 路径下 emojiRepository 注入 mock (UITestMockEmojiRepository); 默认 nil 时走 DefaultEmojiRepository.
         let resolvedEmojiRepo: EmojiRepositoryProtocol = emojiRepository ?? DefaultEmojiRepository(apiClient: apiClient)
@@ -475,8 +497,14 @@ public final class AppContainer: ObservableObject {
 
     /// Story 21.2 AC1: 构造 ChestRepository（每次调用返回新实例；apiClient 单例由 container 持有）.
     /// 与 makeHomeRepository / makePetRepository 同模式（value type struct，构造廉价）.
+    /// Story 21.3 AC10: DEBUG build 路径下若 UITest 注入了 mock（UITEST_MOCK_CHEST_OPEN=1），则返回 mock 而非 default.
     public func makeChestRepository() -> ChestRepositoryProtocol {
-        DefaultChestRepository(apiClient: apiClient)
+        #if DEBUG
+        if let mock = uiTestMockChestRepository {
+            return mock
+        }
+        #endif
+        return DefaultChestRepository(apiClient: apiClient)
     }
 
     /// Story 21.2 AC2: 构造 LoadChestUseCase（每次调用返回新实例；依赖 repository / appState）.
@@ -495,6 +523,26 @@ public final class AppContainer: ObservableObject {
     public func makeChestRefreshTriggerService(appState: AppState) -> ChestRefreshTriggerService {
         ChestRefreshTriggerService(
             loadChestUseCase: makeLoadChestUseCase(appState: appState)
+        )
+    }
+
+    // MARK: - Story 21.3 AC8: Chest Open 链路 factory
+
+    /// Story 21.3 AC4: 构造 OpenChestUseCase（每次调用返回新实例；依赖 ChestRepository / AppState / keyGenerator）.
+    /// caller 必须传 appState（AppState 在 RootView 持有；不进 AppContainer 字段；ADR-0010 §3.1）.
+    /// 与 makeLoadChestUseCase / makeSyncStepsUseCase 同模式.
+    ///
+    /// **keyGenerator 默认参数**：生产路径用 DefaultIdempotencyKeyGenerator（UUID v4）;
+    /// 测试 / Preview 可自定义注入（与 makeSyncStepsUseCase 内 dateProvider 注入模式同精神）.
+    ///
+    /// **stepSyncTriggerService**：Story 21.5 落地时改默认传 container.makeStepSyncTriggerService(...) 实例；
+    /// 本 story（21.3）默认 nil（不调 sync，直开箱）.
+    public func makeOpenChestUseCase(appState: AppState) -> OpenChestUseCaseProtocol {
+        DefaultOpenChestUseCase(
+            repository: makeChestRepository(),
+            appState: appState,
+            keyGenerator: DefaultIdempotencyKeyGenerator(),
+            stepSyncTriggerService: nil   // Story 21.5 改默认传 service 实例
         )
     }
 
@@ -618,6 +666,54 @@ private final class UITestMockHealthProvider: HealthProvider, @unchecked Sendabl
 
     func readDailyTotalSteps(date: Date) async throws -> Int {
         return stubSteps
+    }
+}
+
+/// Story 21.3 AC10: UITest 路径下注入的 mock ChestRepository；与 UITEST_MOCK_CHEST_OPEN=1 联动启用.
+///
+/// 行为:
+///   - `fetchCurrent()` → 返回固定的 unlockable chest（让 ChestCardView 渲染 unlockableView + 开宝箱按钮）
+///   - `openChest(_:)` → 返回固定的 happy 响应（reward common + 新 counting nextChest）
+///
+/// 仅 DEBUG 编译；不污染 Production binary.
+/// 与 UITestMockStepRepository / UITestMockHealthProvider 同模式（封装在 AppContainer 模块内，仅 UI 测试可达）.
+private final class UITestMockChestRepository: ChestRepositoryProtocol, @unchecked Sendable {
+    func fetchCurrent() async throws -> ChestCurrentResponse {
+        // 返一个 unlockable 态宝箱（remainingSeconds=0 + status=2），让 UI 立即显示 "开宝箱" 按钮.
+        return ChestCurrentResponse(
+            id: "uitest-c1",
+            status: 2,
+            unlockAt: Date(),
+            openCostSteps: 1000,
+            remainingSeconds: 0
+        )
+    }
+
+    func openChest(_ request: ChestOpenRequest) async throws -> ChestOpenResponse {
+        // happy 响应：reward common + 新 counting nextChest（unlockAt = now + 10min）.
+        return ChestOpenResponse(
+            reward: ChestRewardDTO(
+                userCosmeticItemId: "0",
+                cosmeticItemId: "uitest-cos-1",
+                name: "测试装扮",
+                slot: 1,
+                rarity: 1,
+                assetUrl: "https://placehold.co/64x64",
+                iconUrl: "https://placehold.co/32x32"
+            ),
+            stepAccount: StepAccountInOpenResponse(
+                totalSteps: 12000,
+                availableSteps: 11000,
+                consumedSteps: 1000
+            ),
+            nextChest: ChestSnapshotInOpenResponse(
+                id: "uitest-c2",
+                status: 1,   // counting：触发 chestCard_counting 渲染
+                unlockAt: Date().addingTimeInterval(600),
+                openCostSteps: 1000,
+                remainingSeconds: 600
+            )
+        )
     }
 }
 #endif

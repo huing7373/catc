@@ -26,6 +26,7 @@ public final class MockHomeViewModel: HomeViewModel {
         case petTap
         case playTap
         case joinRoomConfirm(roomId: String)   // Story 37.12 新增
+        case chestOpenTap                       // Story 21.3 新增
     }
 
     @Published public var invocations: [Invocation] = []
@@ -82,5 +83,12 @@ public final class MockHomeViewModel: HomeViewModel {
         os_log(.debug, "MockHomeViewModel.onJoinRoomConfirm %{public}@", roomId)
         invocations.append(.joinRoomConfirm(roomId: roomId))
         showJoinModal = false   // 关 sheet（与 Real 同语义）
+    }
+
+    /// Story 21.3: 开宝箱按钮点击 → 记录 invocation（不调 UseCase；Mock 路径仅记录）.
+    /// Preview / UITest 路径下 onChestOpenTap 不会真正发起开箱请求.
+    public override func onChestOpenTap() {
+        os_log(.debug, "MockHomeViewModel.onChestOpenTap")
+        invocations.append(.chestOpenTap)
     }
 }

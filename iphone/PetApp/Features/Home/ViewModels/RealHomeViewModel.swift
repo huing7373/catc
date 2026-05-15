@@ -70,6 +70,9 @@ public final class RealHomeViewModel: HomeViewModel {
     /// 默认 nil：UITEST / fallback / preview 路径下不触发 refresh（保持现状 silent behavior）.
     private var refreshHomeOnStaleNavigation: (@MainActor @Sendable () -> Void)?
 
+    /// Story 21.3 AC6: OpenChestUseCase 注入（默认 nil；caller=RootView 通过 bind() 注入 container.makeOpenChestUseCase）.
+    private var openChestUseCase: OpenChestUseCaseProtocol?
+
     /// Story 21.1 AC5: 宝箱倒计时驱动（订阅 appState.$currentChest → 每秒写 viewModel.chestRemainingSeconds）.
     /// - var Optional 而非 let non-Optional：Swift `self` 在 super.init 前不可用，无法在字段声明初始化器内
     ///   传 `self` 给 ChestTimerDriver；只能 super.init 后再赋值（与 RealHomeViewModel.greetingSubscription 同节奏）.
@@ -135,6 +138,13 @@ public final class RealHomeViewModel: HomeViewModel {
         self.localErrorPresenter = errorPresenter
         // r14 [P1] fix: closure 用 default-nil 让 UITEST / preview / 测试不传时保持向后兼容.
         self.refreshHomeOnStaleNavigation = refreshHomeOnStaleNavigation
+    }
+
+    /// Story 21.3 AC6: 扩 bind 入口（与既有 bind(createRoomUseCase:joinRoomUseCase:errorPresenter:refreshHomeOnStaleNavigation:) 同模式）.
+    /// 幂等：caller=RootView .onAppear 只调一次；多次调用覆盖既有引用（生产路径无意义，仅防错重）.
+    /// **不**破坏基类 bind 的"first-time-only"约定：本入口不调 super 的任何 bind（不重订阅 publisher）.
+    public func bind(openChestUseCase: OpenChestUseCaseProtocol) {
+        self.openChestUseCase = openChestUseCase
     }
 
     /// 订阅 appState.$currentPet —— 任何 hydrate / reset / 单独 mutate 都派生 greeting.
@@ -359,4 +369,88 @@ public final class RealHomeViewModel: HomeViewModel {
     // 老路径仅在 hydrate 入口派生 greeting → reset() 把 currentPet 置 nil 不经 applyHomeData →
     // greeting 残留旧 pet 名. 改为 subscribeGreeting(to:) 订阅 currentPet 任何变化（含 reset → nil）,
     // applyHomeData 入口的派生工作已被 sink 自动覆盖（applyHomeData 内 super 写 currentPet → sink 触发）.
+
+    /// Story 21.3 AC6: 用户点击"开宝箱"按钮的真实路径.
+    /// 流程:
+    ///   1. guard !isOpening（重入防御层 1；与 button .disabled 形成双层防御）.
+    ///   2. guard openChestUseCase != nil（fallback: log + return，与 onCreateTap nil fallback 同精神 ——
+    ///      开箱事务涉及步数扣减 + 抽奖随机，没有合理的本地占位，所以 fallback 是 noop 而非 silent mutate）.
+    ///   3. isOpening = true（同步段，main actor）.
+    ///   4. 起 Task: do { snapshot = try await useCase.execute() → self.pendingReward = snapshot }
+    ///      catch { ErrorPresenter 业务错误码 case-by-case 文案 / 其他错误透传 mapper }.
+    ///      defer { isOpening = false（必恢复，让按钮重新可点）}.
+    ///
+    /// 业务错误码文案策略（V1 §7.2 错误码表 + spec AC 行 3083）:
+    ///   - 4002 宝箱未解锁    → alert "宝箱未解锁"
+    ///   - 3002 步数不足      → alert "步数不足，再走走吧"
+    ///   - 4001 宝箱不存在    → alert "宝箱数据异常，请重启 App"
+    ///   - 1005 操作过于频繁  → alert "操作过于频繁，请稍候"
+    ///   - 1002 参数错误      → alert "请求参数错误（idempotencyKey 不合法）"
+    ///   - 1009 服务繁忙      → present(error) 透传给默认 mapper（→ RetryView 让用户重试）
+    ///   - 未知业务码         → present(error) 透传（保留 server message + requestId）
+    ///   - 非 business error → present(error) 透传给默认 mapper
+    ///
+    /// 与 onJoinRoomConfirm 6001-6005 mapper 同精神（lesson `2026-05-11-business-error-fallback-must-forward-original.md`）.
+    public override func onChestOpenTap() {
+        guard !isOpening else {
+            // 重入防御层 1：UI .disabled 应已挡住；此处 guard 是兜底（lesson 防御性编程 + 防 SwiftUI tap rapid-fire bug）.
+            os_log(.debug, "RealHomeViewModel.onChestOpenTap: reentry blocked (isOpening already true)")
+            return
+        }
+        guard let useCase = self.openChestUseCase else {
+            // useCase nil fallback：保留 UITEST_SKIP_GUEST_LOGIN=1 启动模式 / 老 wire 路径下点开箱按钮不 crash.
+            // 与 onCreateTap useCase nil fallback 同精神（log + return；本路径不能 fallback 直写 AppState
+            // 因为开箱事务涉及步数扣减 + 抽奖随机，没有合理的本地占位）.
+            os_log(.debug, "RealHomeViewModel.onChestOpenTap: no OpenChestUseCase wired (fallback: log + noop)")
+            return
+        }
+        let presenter = self.localErrorPresenter
+        self.isOpening = true
+        Task { @MainActor [weak self] in
+            defer {
+                // 必恢复 isOpening = false（成功 / 失败 / cancel 都走此 defer）.
+                self?.isOpening = false
+            }
+            guard let self else { return }
+            do {
+                let snapshot = try await useCase.execute()
+                // 成功 → 写 transient pendingReward 字段（Story 21.4 RewardPopupView 通过 .sheet(item:) 订阅触发）.
+                self.pendingReward = snapshot
+                // 注：AppState.currentChest + currentStepAccount 已由 UseCase 内部写入；
+                //    ChestTimerDriver 通过 sink 自动 react；ChestCardView 自动重新渲染 counting 态 + nextChest 倒计时.
+            } catch let error as APIError {
+                // APIError 三层映射：business code case-by-case 文案；其他 case 透传给默认 mapper.
+                if case let .business(code, _, _) = error {
+                    let alert: (title: String, message: String)? = {
+                        switch code {
+                        case 4002: return ("提示", "宝箱未解锁")
+                        case 3002: return ("提示", "步数不足，再走走吧")
+                        case 4001: return ("提示", "宝箱数据异常，请重启 App")
+                        case 1005: return ("提示", "操作过于频繁，请稍候")
+                        case 1002: return ("提示", "请求参数错误（idempotencyKey 不合法）")
+                        case 1009: return nil   // 透传给默认 mapper → RetryView 让用户重试
+                        default:   return nil   // 未知业务码透传给默认 mapper（保留 server message + requestId）
+                        }
+                    }()
+                    if let alert {
+                        presenter?.presentAlert(title: alert.title, message: alert.message)
+                    } else {
+                        // 透传**原** error 给 ErrorPresenter 默认 mapper（保留 server message + requestId）.
+                        // 不 rewrap（lesson `2026-05-11-business-error-fallback-must-forward-original.md`）.
+                        presenter?.present(error)
+                    }
+                } else {
+                    // 非 business 的 APIError（network / decoding / unauthorized / missingCredentials） → 透传.
+                    os_log(.error, "RealHomeViewModel.onChestOpenTap OpenChestUseCase APIError: %{public}@",
+                           String(describing: error))
+                    presenter?.present(error)
+                }
+            } catch {
+                // 非 APIError 的兜底（UseCase 内部应只抛 APIError；防御性兜底）.
+                os_log(.error, "RealHomeViewModel.onChestOpenTap OpenChestUseCase non-APIError: %{public}@",
+                       String(describing: error))
+                presenter?.present(error)
+            }
+        }
+    }
 }

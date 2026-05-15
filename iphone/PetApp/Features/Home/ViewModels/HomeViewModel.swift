@@ -145,6 +145,31 @@ public class HomeViewModel: ObservableObject {
     /// - Story 21.2：LoadChestUseCase 拉到 server 状态后写 `appState.currentChest`；本字段由 driver 自动 react.
     @Published public var chestRemainingSeconds: Int = 0
 
+    /// Story 21.3 AC5: 开箱按钮 loading 状态（disabled + ProgressView 视觉派生）.
+    ///
+    /// 单位：Bool；初值 false（idle 态不 disable 按钮 / 不显 ProgressView）.
+    ///
+    /// **派生契约**：
+    /// - ChestCardView.unlockableView 的 PrimaryButton `.disabled(isOpening)` + 右侧叠 ProgressView（isOpening=true）
+    /// - 由 RealHomeViewModel.onChestOpenTap 在 Task 起止位置 set/unset：
+    ///     - 入口：isOpening = true（同步段，guard 短路防重入）
+    ///     - 出口（成功 / 失败 / cancel）：defer 内 isOpening = false（必恢复）
+    /// - **不**上 AppState（ADR-0010 §3.2 "Loading flag → ViewModel @Published"钦定；与 loadingState 同精神）.
+    ///
+    /// 不变量:
+    /// - isOpening = true 期间 onChestOpenTap 早 guard 短路（重入防御层 1）
+    /// - SwiftUI 按钮 .disabled(isOpening) 阻止重入（防御层 2）
+    /// - 两层防御都失败也无业务后果：UseCase 内 idempotencyKey + server 端 DB UNIQUE 兜底（防御层 3）.
+    @Published public var isOpening: Bool = false
+
+    /// Story 21.3 AC5: 开箱成功后的奖励快照（Story 21.4 RewardPopupView 通过 .sheet(item:) 订阅触发）.
+    ///
+    /// 设置时机：RealHomeViewModel.onChestOpenTap 成功路径 await snapshot 后写入.
+    /// 清空时机：Story 21.4 RewardPopupView 关闭时 SwiftUI 自动设 nil（与 showJoinModal sheet 模式同精神）.
+    ///
+    /// **不**上 AppState（与 isOpening 同精神：transient view-state；ADR-0010 §3.2 钦定 toast / popup state 归 ViewModel）.
+    @Published public var pendingReward: ChestRewardSnapshot?
+
     // Story 37.3 删除（ADR-0009 §3.5 步骤 4）：
     //   onRoomTap / onInventoryTap / onComposeTap 三个 closure 字段已删除.
     //   主入口 IA 改 4 Tab + HomeContainerView 互斥状态机后,这三个 closure 不再有 caller.
@@ -628,5 +653,13 @@ public class HomeViewModel: ObservableObject {
     ///   本 story 不实装 server 调用，仅本地 mutate appState 占位.
     public func onJoinRoomConfirm(roomId: String) {
         fatalError("HomeViewModel.onJoinRoomConfirm must be overridden by subclass")
+    }
+
+    /// Story 21.3 AC5: 用户点击 ChestCardView "开宝箱" 按钮（仅 unlockable 态）.
+    /// MockHomeViewModel: 记录 invocation + 可选 mock pendingReward 让 Preview 看 21.4 弹窗.
+    /// RealHomeViewModel: 调 OpenChestUseCase + 写 isOpening / pendingReward + 错误码 case-by-case mapping.
+    /// 基类 `fatalError`：漏 override 时立刻 crash（不接受 default empty 实现 silent miss）.
+    public func onChestOpenTap() {
+        fatalError("HomeViewModel.onChestOpenTap must be overridden by subclass")
     }
 }
