@@ -137,3 +137,95 @@ func TestCosmeticItemRepo_ListEnabledForCatalog_EmptyResult_ReturnsEmptySlice(t 
 		t.Errorf("len(got) = %d, want 0", len(got))
 	}
 }
+
+// Story 23.4 — CosmeticItemRepo.ListByIDsForInventory sqlmock 单测（≥3 case）
+//
+// 与既有 ListEnabledForCatalog 测同模式（sqlmock，非 dockertest）。验证 SQL
+// 生成形态（显式列含 is_enabled、**无** WHERE is_enabled=1、**无** ORDER BY、
+// WHERE id IN ?）+ 空 ids 早返不发 SQL + 透传 + 空集兜底。真实 SQL 关联 + 态 B
+// 不被过滤的真值在集成测试覆盖。
+
+// TestCosmeticItemRepo_ListByIDsForInventory_HappyPath:
+// 多 id → 显式列 SELECT（含 is_enabled）+ WHERE id IN ? + **无** is_enabled=1 +
+// **无** ORDER BY + 透传完整 slice（含 is_enabled=0 行 —— 不被过滤，态 B 契约）。
+func TestCosmeticItemRepo_ListByIDsForInventory_HappyPath(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewCosmeticItemRepo(gormDB)
+
+	rows := sqlmock.NewRows([]string{
+		"id", "name", "slot", "rarity", "icon_url", "asset_url", "is_enabled",
+	}).
+		AddRow(uint64(12), "小黄帽", int8(1), int8(1), "https://x/i12", "https://x/a12", int8(1)).
+		AddRow(uint64(50), "旧帽子", int8(1), int8(2), "https://x/i50", "https://x/a50", int8(0)) // disabled 行仍返回（态 B）
+
+	// 显式列含 is_enabled + WHERE id IN ? + 无 is_enabled=1 过滤 + 无 ORDER BY
+	mock.ExpectQuery(regexp.QuoteMeta(
+		"SELECT id, name, slot, rarity, icon_url, asset_url, is_enabled FROM `cosmetic_items` " +
+			"WHERE id IN (?,?)")).
+		WithArgs(uint64(12), uint64(50)).
+		WillReturnRows(rows)
+
+	got, err := repo.ListByIDsForInventory(context.Background(), []uint64{12, 50})
+	if err != nil {
+		t.Fatalf("ListByIDsForInventory: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	if got[0].ID != 12 || got[0].Name != "小黄帽" || got[0].Slot != 1 || got[0].Rarity != 1 ||
+		got[0].IconURL != "https://x/i12" || got[0].AssetURL != "https://x/a12" || got[0].IsEnabled != 1 {
+		t.Errorf("got[0] = %+v, want id=12 小黄帽 slot=1 rarity=1 icon/asset 非空 is_enabled=1", got[0])
+	}
+	// disabled 行（is_enabled=0）仍被返回 —— **不**加 is_enabled=1 过滤（§8.2 行 1437 态 B 契约）
+	if got[1].ID != 50 || got[1].IsEnabled != 0 {
+		t.Errorf("got[1] = %+v, want id=50 is_enabled=0（disabled 行不被过滤，态 B 契约）", got[1])
+	}
+}
+
+// TestCosmeticItemRepo_ListByIDsForInventory_EmptyIDs_ReturnsEmptySliceNoSQL:
+// ids=[] → 早返 []CosmeticItem{} 非 nil，**不**发任何 SQL（避免 `IN ()` 空集
+// 退化 SQL）。mock 不 ExpectQuery → 若误发 SQL 会 ExpectationsWereMet 失败。
+func TestCosmeticItemRepo_ListByIDsForInventory_EmptyIDs_ReturnsEmptySliceNoSQL(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewCosmeticItemRepo(gormDB)
+
+	got, err := repo.ListByIDsForInventory(context.Background(), []uint64{})
+	if err != nil {
+		t.Fatalf("ListByIDsForInventory: %v", err)
+	}
+	if got == nil {
+		t.Errorf("got == nil, want []CosmeticItem{}")
+	}
+	if len(got) != 0 {
+		t.Errorf("len(got) = %d, want 0", len(got))
+	}
+	// 验证未发任何 SQL（mock 无 ExpectQuery；若误发会有 unexpected query 错误）
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("空 ids 不应发 SQL，但 mock 收到未预期调用: %v", err)
+	}
+}
+
+// TestCosmeticItemRepo_ListByIDsForInventory_NoMatch_ReturnsEmptySlice:
+// IN 不命中任何 id（全部态 C）→ 返 []CosmeticItem{} 非 nil（service 层据
+// config map 是否命中判态 C，repo 仅返空集）。
+func TestCosmeticItemRepo_ListByIDsForInventory_NoMatch_ReturnsEmptySlice(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewCosmeticItemRepo(gormDB)
+
+	mock.ExpectQuery(regexp.QuoteMeta(
+		"SELECT id, name, slot, rarity, icon_url, asset_url, is_enabled FROM `cosmetic_items` " +
+			"WHERE id IN (?)")).
+		WithArgs(uint64(999)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"})) // 0 行
+
+	got, err := repo.ListByIDsForInventory(context.Background(), []uint64{999})
+	if err != nil {
+		t.Fatalf("ListByIDsForInventory: %v", err)
+	}
+	if got == nil {
+		t.Errorf("got == nil, want []CosmeticItem{}")
+	}
+	if len(got) != 0 {
+		t.Errorf("len(got) = %d, want 0", len(got))
+	}
+}

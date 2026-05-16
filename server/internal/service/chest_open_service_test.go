@@ -78,6 +78,15 @@ func (s *stubCosmeticItemRepo) ListEnabledForCatalog(ctx context.Context) ([]mys
 	panic("stubCosmeticItemRepo.ListEnabledForCatalog not expected (chest_open_service_test 仅测开箱加权抽取路径，不走 GET /cosmetics/catalog 路径)")
 }
 
+// ListByIDsForInventory: Story 23.4 给 CosmeticItemRepo interface 加了本方法
+// （GET /cosmetics/inventory config 关联）；本 20.6 stub 仅测开箱加权抽取路径，
+// 不走 inventory 路径 —— 加防御性 panic 让任何意外调用暴露（与
+// ListEnabledForCatalog 同模式；本方法**仅**为 satisfy 扩展后的 interface
+// 编译，不改 20.6 任何既有行为）。
+func (s *stubCosmeticItemRepo) ListByIDsForInventory(ctx context.Context, ids []uint64) ([]mysql.CosmeticItem, error) {
+	panic("stubCosmeticItemRepo.ListByIDsForInventory not expected (chest_open_service_test 仅测开箱加权抽取路径，不走 GET /cosmetics/inventory 路径)")
+}
+
 // stubChestOpenLogRepo: mysql.ChestOpenLogRepo 的 stub
 type stubChestOpenLogRepo struct {
 	createFn    func(ctx context.Context, log *mysql.ChestOpenLog) error

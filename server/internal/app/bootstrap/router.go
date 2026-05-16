@@ -506,7 +506,16 @@ func NewRouter(deps Deps) *gin.Engine {
 		// 与 chestSvc 复用同实例同模式）；CosmeticService.ListCatalog 调
 		// CosmeticItemRepo.ListEnabledForCatalog（23.3 新增独立方法，**不**复用
 		// 20.6 ListEnabledForWeightedPick）。
-		cosmeticSvc := service.NewCosmeticService(cosmeticItemRepo)
+		//
+		// Story 23.4 加：userCosmeticItemRepo（GET /cosmetics/inventory 实例
+		// 数据源）+ NewCosmeticService 扩签名 2 参（复用上面既有 cosmeticItemRepo
+		// 实例 + 新建 userCosmeticItemRepo，**不**新建第二个 cosmeticItemRepo）。
+		// CosmeticService.ListInventory 调 UserCosmeticItemRepo.ListByUserForInventory
+		// + CosmeticItemRepo.ListByIDsForInventory（23.4 新增独立方法，**不**复用
+		// 23.3 ListEnabledForCatalog —— 那带 is_enabled=1 过滤会让 disabled
+		// 配置已拥有项静默丢失，违背 §8.2 态 B 契约）。
+		userCosmeticItemRepo := repomysql.NewUserCosmeticItemRepo(deps.GormDB)
+		cosmeticSvc := service.NewCosmeticService(cosmeticItemRepo, userCosmeticItemRepo)
 		cosmeticsHandler := handler.NewCosmeticsHandler(cosmeticSvc)
 
 		api := r.Group("/api/v1")
@@ -529,6 +538,12 @@ func NewRouter(deps Deps) *gin.Engine {
 		// （auth + RateLimitByUserID 由 authedGroup 既有中间件链兜底，
 		// 对应 §8.1 错误码 1001 / 1005；与 /emojis / /chest/current 同组同模式）
 		authedGroup.GET("/cosmetics/catalog", cosmeticsHandler.GetCatalog)
+		// Story 23.4 加：GET /api/v1/cosmetics/inventory 玩家装扮聚合 + 实例列表
+		// （auth + RateLimitByUserID 由 authedGroup 既有中间件链兜底，
+		// 对应 §8.2 错误码 1001 / 1005；与 /cosmetics/catalog 同组同模式 ——
+		// userCosmeticItemRepo + cosmeticSvc 已在上面同 if deps 完整块内构造，
+		// deps 不完整则该路由不注册，与既有 fallback 行为一致）
+		authedGroup.GET("/cosmetics/inventory", cosmeticsHandler.GetInventory)
 		authedGroup.POST("/steps/sync", stepsHandler.PostSync)     // Story 7.3 加
 		authedGroup.GET("/steps/account", stepsHandler.GetAccount) // Story 7.4 加
 		authedGroup.GET("/chest/current", chestHandler.GetCurrent) // Story 20.5 加

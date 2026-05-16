@@ -58,22 +58,32 @@ type CosmeticItem struct {
 func (CosmeticItem) TableName() string { return "cosmetic_items" }
 
 // CosmeticItemRepo 是 cosmetic_items 表的访问接口（Story 20.6 引入；
-// Story 23.3 扩展加 ListEnabledForCatalog —— GET /cosmetics/catalog 配置目录查询）。
+// Story 23.3 扩展加 ListEnabledForCatalog —— GET /cosmetics/catalog 配置目录查询；
+// Story 23.4 扩展加 ListByIDsForInventory —— GET /cosmetics/inventory config 关联）。
 //
-// **两方法语义独立、各自演进，不可互相复用**：
+// **三方法语义独立、各自演进，不可互相复用**：
 //   - ListEnabledForWeightedPick（Story 20.6）：开箱事务步骤 5g 加权抽取专用，
-//     **无 ORDER BY**（service 内加权采样不需要排序），SELECT *。
+//     **无 ORDER BY**（service 内加权采样不需要排序），SELECT *，WHERE is_enabled=1。
 //   - ListEnabledForCatalog（Story 23.3）：catalog 配置目录查询专用，**必须**
 //     `ORDER BY rarity ASC, slot ASC, id ASC` 三级全序（§8.1 契约 + client grid
-//     防抖动），显式 7 列 Select。
+//     防抖动），显式 7 列 Select，WHERE is_enabled=1。
+//   - ListByIDsForInventory（Story 23.4）：inventory config 关联专用，按 id 集合
+//     批量查（`WHERE id IN (?)`），**无 ORDER BY**（两级排序在 service 层
+//     sort.Slice 做）、**无 is_enabled=1 过滤**（§8.2 契约：实例可见性与配置
+//     enabled 状态完全解耦，态 B disabled-but-exists 必须返回真实 metadata），
+//     显式 6 列 Select（**不**含 code —— §8.2 groups[] 无 code 字段，与 §8.1
+//     catalog 含 code 不同）。
 //
-// 故意**不**复用 ListEnabledForWeightedPick 做 catalog：复用会让 catalog 排序契约
-// 与开箱抽奖路径耦合（任一方改字段 / 改排序就破坏另一方；下游评审找不到 catalog
-// 专用查询的明确边界）。两方法语义独立、并列存在。
+// 故意**不**互相复用：复用会让各路径排序 / 过滤契约耦合（任一方改字段 / 改排序 /
+// 改过滤就破坏另一方；下游评审找不到各专用查询的明确边界）。三方法语义独立、
+// 并列存在。**特别地，ListByIDsForInventory 故意不复用 ListEnabledForCatalog**
+// —— 后者带 `WHERE is_enabled=1` 会让 admin 下架（is_enabled=0）配置的已拥有项
+// 从 inventory config map 消失被误判为态 C（错误降级 + 错误 log error），实际应
+// 是态 B（row 真实值 + 不 log），违背 §8.2 行 1437 "禁止加 is_enabled=1 过滤"
+// 关键约束（用户可见数据丢失回归）。
 //
 // **范围红线**：本 interface 仅含已落地业务路径所需方法；**不**提前实装
-// Create / Update / Delete / FindByID / 23.4 inventory 聚合查询等方法（YAGNI；
-// inventory 由 Epic 23 Story 23.4 落地 GET /cosmetics/inventory 时再补）。
+// Create / Update / Delete / FindByID 等方法（YAGNI）。
 type CosmeticItemRepo interface {
 	// ListEnabledForWeightedPick 返回所有 is_enabled=1 的 cosmetic_items 行
 	// （含 id / rarity / drop_weight / name / slot / asset_url / icon_url；
@@ -110,9 +120,38 @@ type CosmeticItemRepo interface {
 	// 非 error（§8.1 行 1301：catalog 为空 code=0 不报错）。query 失败 → 返 raw
 	// error 透传（service 包成 1009）。
 	//
-	// **范围红线**：本 story（23.3）仅加 catalog 方法；**不**实装 23.4 inventory
-	// 聚合查询方法（YAGNI；inventory 是 Story 23.4 钦定范围）。
+	// **范围红线**：本 story（23.3）仅加 catalog 方法；inventory config 关联
+	// 方法 ListByIDsForInventory 由 Story 23.4 落地（见下）。
 	ListEnabledForCatalog(ctx context.Context) ([]CosmeticItem, error)
+
+	// ListByIDsForInventory 按 id 集合批量查 cosmetic_items 配置元信息
+	// （GET /cosmetics/inventory 服务端逻辑步骤 3 config 关联，V1 §8.2）。
+	//
+	// SQL: SELECT id, name, slot, rarity, icon_url, asset_url FROM cosmetic_items
+	//      WHERE id IN (?)
+	//
+	// **禁止加 is_enabled=1 过滤**（§8.2 行 1342 / 1437 关键约束：实例可见性与
+	// 配置 enabled 状态完全解耦 —— 已拥有道具不得因 admin 下架配置而静默丢失；
+	// 态 B disabled-but-exists 行必须返回真实 metadata，与态 A 一致）。service 层
+	// 据 config map 命中后读 CosmeticItem.IsEnabled 区分态 A/B，据 config map
+	// 是否命中区分态 B/C —— 故本方法必须 SELECT is_enabled 列才能让 service
+	// 区分态 A/B（见下方 impl Select 列说明）。
+	//
+	// 显式 Select（**不**含 code —— §8.2 groups[] 无 code 字段，与 §8.1 catalog
+	// items[] 含 code 不同；**不** SELECT drop_weight / created_at / updated_at ——
+	// inventory 响应不需要）；**含 is_enabled 列**供 service 区分态 A/B。
+	//
+	// **无 ORDER BY**：两级确定性全序排序在 service 层 sort.Slice 做
+	// （§8.2 行 1360 钦定不依赖 DB 天然顺序）。
+	//
+	// ids 为空 → 直接返 []CosmeticItem{}（service 层在 ids 为空时不调本方法 ——
+	// 空背包早已在步骤 2 返回；但本方法仍兜底空 ids → 空 slice，**不**发
+	// `WHERE id IN ()` 空集 SQL）。query 失败 → 返 raw error 透传（service 包成 1009）。
+	//
+	// 故意**不**复用 ListEnabledForCatalog（带 is_enabled=1 会让 disabled 配置
+	// 已拥有项消失 → 违背态 B 契约）/ **不**复用 ListEnabledForWeightedPick
+	// （SELECT * 全表扫，inventory 只需按 id 集合查指定字段）。
+	ListByIDsForInventory(ctx context.Context, ids []uint64) ([]CosmeticItem, error)
 }
 
 // cosmeticItemRepo 是 CosmeticItemRepo 的默认实装。
@@ -170,6 +209,52 @@ func (r *cosmeticItemRepo) ListEnabledForCatalog(ctx context.Context) ([]Cosmeti
 	// GORM Find 在 0 行时返回空 slice 而非 nil（与 emoji_repo.List 同模式）；
 	// 保险起见显式兜底空 slice 让 service 层调用方不需要 nil-check（§8.1 行 1301：
 	// catalog 为空返 {items:[]} code=0 不报错）。
+	if rows == nil {
+		rows = []CosmeticItem{}
+	}
+	return rows, nil
+}
+
+// ListByIDsForInventory 实装：空 ids 早返 + 单 SELECT，显式列（含 is_enabled
+// 供 service 区分态 A/B）+ WHERE id IN ?，**无** is_enabled=1 过滤、**无**
+// ORDER BY。详见 CosmeticItemRepo.ListByIDsForInventory 接口注释
+// （§8.2 服务端逻辑步骤 3 config 关联钦定）。
+//
+// **不**复用 ListEnabledForCatalog（带 is_enabled=1 会让 disabled 配置已拥有项
+// 消失，违背 §8.2 行 1437 态 B 契约）。
+func (r *cosmeticItemRepo) ListByIDsForInventory(ctx context.Context, ids []uint64) ([]CosmeticItem, error) {
+	// 空 ids 早返空 slice —— 避免 GORM 生成 `WHERE id IN (NULL)` / `IN ()` 空集
+	// 退化 SQL（service 层空背包已在步骤 2 早返，正常不会走到这；本方法仍兜底）。
+	if len(ids) == 0 {
+		return []CosmeticItem{}, nil
+	}
+
+	// 与 ListEnabledForCatalog 同模式取 db handle（事务外 r.db / 事务内 txCtx 句柄）；
+	// 本 story inventory 只读不开事务，保持模式一致让 future 扩展无需改 method body。
+	db := tx.FromContext(ctx, r.db).WithContext(ctx)
+
+	var rows []CosmeticItem
+	// 显式 Select：id / name / slot / rarity / icon_url / asset_url（§8.2 groups[]
+	// 字段集，**不**含 code —— 与 §8.1 catalog 含 code 不同）+ **is_enabled**
+	// （service 据此区分态 A enabled vs 态 B disabled-but-exists；缺这一列
+	// service 无法区分两态，会把态 B 误当态 A 也没差，但语义上必须 SELECT 出来
+	// 让 config map 携带真实 is_enabled）。**不** SELECT code / drop_weight /
+	// created_at / updated_at —— inventory 响应不需要，GORM Scan 填 zero-value
+	// 安全（与 ListEnabledForCatalog 行 158-161 同模式）。
+	//
+	// **无 WHERE is_enabled=1**（§8.2 行 1437 关键约束，禁止加该过滤 —— 否则
+	// disabled 配置的已拥有项被静默隐藏，违背态 B 契约）。
+	// **无 ORDER BY**（两级排序在 service 层 sort.Slice 做，§8.2 行 1360）。
+	err := db.
+		Select("id, name, slot, rarity, icon_url, asset_url, is_enabled").
+		Where("id IN ?", ids).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	// GORM Find 0 行返空 slice 而非 nil；显式兜底让 service 层无需 nil-check
+	// （与 ListEnabledForCatalog 同模式；inventory 中某些 id 在 cosmetic_items
+	// 无匹配行 = 态 C，由 service 层据 config map 是否命中判定，不在 repo 层处理）。
 	if rows == nil {
 		rows = []CosmeticItem{}
 	}

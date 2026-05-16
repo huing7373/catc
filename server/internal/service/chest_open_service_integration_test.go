@@ -1383,6 +1383,15 @@ func (f *faultCosmeticItemRepoOnList) ListEnabledForCatalog(ctx context.Context)
 	panic("faultCosmeticItemRepoOnList.ListEnabledForCatalog not expected (chest_open 集成测试仅测开箱加权抽取 ROLLBACK 路径)")
 }
 
+// ListByIDsForInventory: Story 23.4 给 CosmeticItemRepo interface 加了本方法
+// （GET /cosmetics/inventory config 关联）；本 fault stub 仅测开箱加权抽取
+// ROLLBACK 路径，不走 inventory 路径 —— 加防御性 panic 让任何意外调用暴露
+// （与 ListEnabledForCatalog 同模式；仅为 satisfy 扩展后的 interface 编译，
+// 不改 20.6 任何既有行为）。
+func (f *faultCosmeticItemRepoOnList) ListByIDsForInventory(ctx context.Context, ids []uint64) ([]mysql.CosmeticItem, error) {
+	panic("faultCosmeticItemRepoOnList.ListByIDsForInventory not expected (chest_open 集成测试仅测开箱加权抽取 ROLLBACK 路径)")
+}
+
 // faultChestOpenLogRepoOnCreate 让 Create 直接抛 injectErr —— ChestOpenLogRepo interface 仅 Create 一个方法
 // 所以本 wrapper 不需要透传其他方法。
 type faultChestOpenLogRepoOnCreate struct {
