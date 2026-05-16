@@ -2,10 +2,10 @@
 // +build integration
 
 // Story 4.3 集成测试：用 dockertest 起真实 mysql:8.0 容器跑 4 条 case：
-//   1. happy: migrate Up → 11 张表存在 → migrate Down → 11 张表全消失（仅 schema_migrations）
+//   1. happy: migrate Up → 13 张表存在 → migrate Down → 13 张表全消失（仅 schema_migrations）
 //   2. edge: 重复 migrate Up → ErrNoChange 被吞 → 返 nil（幂等）
 //   3. happy: Up 后通过 INFORMATION_SCHEMA 抽样验关键索引 / 字段类型 / 主键约束
-//   4. edge: Up 后 Status 返回 (version=13, dirty=false, nil)
+//   4. edge: Up 后 Status 返回 (version=15, dirty=false, nil)
 //
 // Story 7.2 扩展：把 4 条 case 的断言从 5 张表扩展到 6 张表
 //   （新增 user_step_sync_logs：日志表，含 idx_user_date / idx_user_created_at；
@@ -41,6 +41,23 @@
 //    POST /chest/open 事务步骤 5h 写一条 chest_open_logs 行 / 20.9 Layer 2 集成测试
 //    断言 chest_open_logs 行数 + 字段值 / 未来运营查询路径依赖）；
 //   StatusAfterUp 版本号断言从 v=12 改 v=13。
+//
+// Story 20.6 扩展（漏更新；Story 23.2 顺手对账补记）：Story 20.6 落地
+//   0014_init_chest_open_idempotency_records（开箱接口幂等记录表，含 UNIQUE
+//   uk_user_id_key + KEY idx_status_created_at）时**漏更新**本文件断言 —— 真实
+//   建表数应为 12 张 / StatusAfterUp 版本号应为 v=14，但 expectedTables 仍停在
+//   11 张（停在 0013 chest_open_logs）、StatusAfterUp 仍停在 v=13。该积压由
+//   Story 23.2 在加 0015 时一并对账补齐（不改 0014 migration 本身，仅断言对账）。
+//
+// Story 23.2 扩展：把 4 条 case 的断言一次性对账 + 扩展到 13 张表
+//   （补齐 0014 chest_open_idempotency_records 积压 + 新增 0015
+//    user_cosmetic_items：玩家装扮实例表，含 KEY idx_user_id_status +
+//    KEY idx_user_id_cosmetic_item_id + KEY idx_source，无 UNIQUE；Epic 23 节点 8
+//    仓库 / 穿戴 / 合成业务链路 schema 根基，23.4 GET /cosmetics/inventory 聚合 /
+//    23.5 开箱补入仓 INSERT / Epic 26 穿戴 status 推进 / Epic 32 合成消耗实例
+//    各路径依赖）；StatusAfterUp 版本号断言从 v=13（积压值）一次对账到 v=15
+//    （0014 + 0015 两条）；序号纠偏：epics.md §Story 23.2 文字写 0014，因 0014
+//    被 Story 20.6 占用，本 story 实际用 0015（属历史时序错位，非契约/范围变更）。
 //
 // Story 17.3 r1 review [P2] 重写 SeedIdempotent：原版走 Up→Down→Up 路径但 Down
 //   把整张表 DROP 掉 → 第二次 Up 跑空表 → 没真正触发 duplicate-code 路径。新版改
@@ -145,8 +162,8 @@ func migrationsPath(t *testing.T) string {
 	return abs
 }
 
-// TestMigrateIntegration_UpThenDown 起容器 → migrate Up → 11 张表存在 →
-// migrate Down → 11 张表全消失（仅 schema_migrations）。
+// TestMigrateIntegration_UpThenDown 起容器 → migrate Up → 13 张表存在 →
+// migrate Down → 13 张表全消失（仅 schema_migrations）。
 //
 // **Story 10.3 review r5 [P1] 扩展**：从 6 改 8（多了 0007_init_rooms +
 // 0008_init_room_members；把 Epic 11.2 的"建表"职责拆出来提前到 Story 10.3，
@@ -161,6 +178,13 @@ func migrationsPath(t *testing.T) string {
 // **Story 20.4 扩展**：从 10 改 11（多了 0013_init_chest_open_logs；Epic 20 节点 7
 // 宝箱开箱日志表，append-only 无 updated_at / 无 UNIQUE；为 20.6 开箱事务步骤 5h
 // INSERT chest_open_logs / 20.9 Layer 2 集成测试 / 未来运营查询路径提供 schema 根基）。
+//
+// **Story 23.2 一次性对账 + 扩展**：从 11 改 13 ——
+//   - 补 chest_open_idempotency_records（Story 20.6 落地 0014 时漏更新
+//     expectedTables，本 story 顺手对账补齐；不改 0014 migration 本身）
+//   - 加 user_cosmetic_items（本 story 0015；Epic 23 节点 8 玩家装扮实例表
+//     schema 根基，23.4 inventory 聚合 / 23.5 开箱补入仓 / Epic 26 穿戴 /
+//     Epic 32 合成各路径依赖）。
 func TestMigrateIntegration_UpThenDown(t *testing.T) {
 	dsn, cleanup := startMySQL(t)
 	defer cleanup()
@@ -178,14 +202,15 @@ func TestMigrateIntegration_UpThenDown(t *testing.T) {
 		t.Fatalf("migrate Up: %v", err)
 	}
 
-	// 验证 11 张表存在（Story 20.4 加 chest_open_logs）
+	// 验证 13 张表存在（Story 23.2 一次性对账：补 0014 chest_open_idempotency_records
+	// 积压 + 加 0015 user_cosmetic_items）
 	sqlDB, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	defer sqlDB.Close()
 
-	expectedTables := []string{"users", "user_auth_bindings", "pets", "user_step_accounts", "user_chests", "user_step_sync_logs", "rooms", "room_members", "emoji_configs", "cosmetic_items", "chest_open_logs"}
+	expectedTables := []string{"users", "user_auth_bindings", "pets", "user_step_accounts", "user_chests", "user_step_sync_logs", "rooms", "room_members", "emoji_configs", "cosmetic_items", "chest_open_logs", "chest_open_idempotency_records", "user_cosmetic_items"}
 	for _, table := range expectedTables {
 		var count int
 		err := sqlDB.QueryRowContext(ctx, `
@@ -200,7 +225,7 @@ func TestMigrateIntegration_UpThenDown(t *testing.T) {
 		}
 	}
 
-	// migrate Down → 11 张表全消失（Story 20.4 加 chest_open_logs）
+	// migrate Down → 13 张表全消失（Story 23.2 对账后 13 张）
 	if err := mig.Down(ctx); err != nil {
 		t.Fatalf("migrate Down: %v", err)
 	}
@@ -354,12 +379,12 @@ func TestMigrateIntegration_UpTwice_Idempotent(t *testing.T) {
 	err = sqlDB.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM information_schema.tables
 		WHERE table_schema = 'cat_test' AND table_name IN
-		('users', 'user_auth_bindings', 'pets', 'user_step_accounts', 'user_chests', 'user_step_sync_logs', 'rooms', 'room_members', 'emoji_configs', 'cosmetic_items', 'chest_open_logs')`).Scan(&tableCount)
+		('users', 'user_auth_bindings', 'pets', 'user_step_accounts', 'user_chests', 'user_step_sync_logs', 'rooms', 'room_members', 'emoji_configs', 'cosmetic_items', 'chest_open_logs', 'chest_open_idempotency_records', 'user_cosmetic_items')`).Scan(&tableCount)
 	if err != nil {
 		t.Fatalf("count tables: %v", err)
 	}
-	if tableCount != 11 {
-		t.Errorf("after two Up calls, table count = %d, want 11 (Story 10.3 review r5 [P1] 加 rooms / room_members → Story 17.2 加 emoji_configs → Story 20.2 加 cosmetic_items → Story 20.4 加 chest_open_logs，总计 11 张表)", tableCount)
+	if tableCount != 13 {
+		t.Errorf("after two Up calls, table count = %d, want 13 (Story 10.3 review r5 [P1] 加 rooms / room_members → Story 17.2 加 emoji_configs → Story 20.2 加 cosmetic_items → Story 20.4 加 chest_open_logs → Story 23.2 顺手对账补 0014 chest_open_idempotency_records 积压 + 加 0015 user_cosmetic_items，总计 13 张表)", tableCount)
 	}
 }
 
@@ -571,7 +596,7 @@ func TestMigrateIntegration_TablesPresent_AfterUp(t *testing.T) {
 	}
 }
 
-// TestMigrateIntegration_StatusAfterUp 验证 Up 完成后 Status 返回 (version=13, dirty=false, nil)。
+// TestMigrateIntegration_StatusAfterUp 验证 Up 完成后 Status 返回 (version=15, dirty=false, nil)。
 // Story 7.2 扩展：从 5 改 6（多了 0006_init_user_step_sync_logs）
 // Story 10.3 review r5 [P1] 扩展：从 6 改 8（多了 0007_init_rooms +
 // 0008_init_room_members；把 Epic 11.2 的"建表"职责拆出来提前到 Story 10.3）
@@ -583,6 +608,12 @@ func TestMigrateIntegration_TablesPresent_AfterUp(t *testing.T) {
 // Story 20.3 扩展：从 11 改 12（多了 0012_seed_cosmetic_items；Epic 20 节点 7 cosmetic seed）
 // Story 20.4 扩展：从 12 改 13（多了 0013_init_chest_open_logs；Epic 20 节点 7
 // 宝箱开箱日志表，append-only schema 根基）
+// Story 20.6 扩展：从 13 改 14（多了 0014_init_chest_open_idempotency_records；
+// 开箱接口幂等记录表；**本扩展在 Story 23.2 对账时补记，原 Story 20.6 落地 0014
+// 时漏更新本断言导致 v=13 积压**）
+// Story 23.2 扩展：从 14 改 15（多了 0015_init_user_cosmetic_items；Epic 23 节点 8
+// 玩家装扮实例表 schema 根基；序号纠偏：epics.md §Story 23.2 文字写 0014，因 0014
+// 被 Story 20.6 占用，本 story 实际用 0015，属历史时序错位非契约/范围变更）
 func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	dsn, cleanup := startMySQL(t)
 	defer cleanup()
@@ -613,8 +644,8 @@ func TestMigrateIntegration_StatusAfterUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status after Up: %v", err)
 	}
-	if v != 13 {
-		t.Errorf("Status version = %d, want 13", v)
+	if v != 15 {
+		t.Errorf("Status version = %d, want 15 (0001~0015；Story 23.2 一次性对账：补 Story 20.6 漏更新的 0014 积压 + 加本 story 0015)", v)
 	}
 	if dirty {
 		t.Errorf("Status dirty = true, want false")
@@ -2317,5 +2348,356 @@ func TestMigrateIntegration_ChestOpenLogs_AppendOnly(t *testing.T) {
 	}
 	if count != 3 {
 		t.Errorf("after 3 inserts, chest_open_logs count for user_id=1 = %d, want 3 (append-only 日志表 3 行全部成功，无任何 UNIQUE 阻塞)", count)
+	}
+}
+
+// TestMigrateIntegration_UserCosmeticItems_Schema 验证
+// migrations/0015_init_user_cosmetic_items.up.sql 钦定的 user_cosmetic_items 表
+// schema 与数据库设计.md §5.9（行 487-503）+ §6.10 status / §6.11 source 枚举
+// + V1接口设计.md §8.2 inventory 字段语义一致：
+//
+//   - id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT
+//   - user_id BIGINT UNSIGNED NOT NULL
+//   - cosmetic_item_id BIGINT UNSIGNED NOT NULL
+//   - status TINYINT NOT NULL DEFAULT 1
+//   - source TINYINT NOT NULL DEFAULT 1
+//   - source_ref_id BIGINT UNSIGNED NULL（**IS_NULLABLE = YES 关键断言**）
+//   - obtained_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+//   - consumed_at DATETIME(3) NULL（**IS_NULLABLE = YES 关键断言**）
+//   - created_at / updated_at DATETIME(3)
+//   - KEY idx_user_id_status (user_id, status)
+//   - KEY idx_user_id_cosmetic_item_id (user_id, cosmetic_item_id)
+//   - KEY idx_source (source, source_ref_id)
+//   - **无 UNIQUE 约束**（除 PRIMARY 外 non_unique=0 的索引数 = 0）
+//
+// **关键覆盖点**：
+//   - source_ref_id / consumed_at 的 IS_NULLABLE = YES（可空列断言）—— 与
+//     cosmetic_items 全列 NOT NULL 形成对照；下游 23.4 / Epic 32 判"是否已回填 /
+//     是否已消耗"依赖此可空性，GORM struct 用 *uint64 / *time.Time 指针映射
+//   - 10 列字段计数兜底（防漂移：如有人误加字段会让计数变 11 失败）
+//   - 三个普通索引列顺序断言（与 §5.9 钦定一致）
+//   - **无 UNIQUE 断言**：与 cosmetic_items 有 uk_code 形成对照（实例表，同种
+//     配置可持有多件 —— FR16）
+//
+// **背景（Story 23.2 引入）**：本 case 验证 0015 migration 落地的 schema
+// 与 §5.9 钦定 1:1 对齐；用于在 epics.md §Story 23.2 钦定的"单元测试覆盖 ≥3
+// case"中作为 schema-correctness 路径（happy / migrate up 后表存在 + 字段类型 +
+// 全部索引和约束都符合 §5.9）。与 Story 20.2 落地的
+// TestMigrateIntegration_CosmeticItems_Schema 同模式（INFORMATION_SCHEMA 字段层
+// 精确断言取代不稳定的 SHOW CREATE TABLE 字符串比对）。
+func TestMigrateIntegration_UserCosmeticItems_Schema(t *testing.T) {
+	dsn, cleanup := startMySQL(t)
+	defer cleanup()
+
+	mig, err := migrate.New(dsn, migrationsPath(t))
+	if err != nil {
+		t.Fatalf("migrate.New: %v", err)
+	}
+	defer mig.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := mig.Up(ctx); err != nil {
+		t.Fatalf("migrate Up: %v", err)
+	}
+
+	sqlDB, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	// 1. INFORMATION_SCHEMA.TABLES：user_cosmetic_items 表存在
+	var tableCount int
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.tables
+		WHERE table_schema = 'cat_test' AND table_name = 'user_cosmetic_items'`).Scan(&tableCount)
+	if err != nil {
+		t.Errorf("query user_cosmetic_items table existence: %v", err)
+	} else if tableCount != 1 {
+		t.Errorf("user_cosmetic_items table count = %d, want 1", tableCount)
+	}
+
+	// 2. INFORMATION_SCHEMA.COLUMNS：10 列存在 + 类型 + 可空性对齐
+	//    **关键**：source_ref_id / consumed_at IS_NULLABLE = YES（可空列），
+	//    其余列 IS_NULLABLE = NO（与 cosmetic_items 全列 NOT NULL 形成对照）。
+	ucCols := []struct {
+		col          string
+		wantDataType string
+		wantColType  string
+		wantNullable string // "YES" / "NO"
+	}{
+		{"id", "bigint", "bigint unsigned", "NO"},
+		{"user_id", "bigint", "bigint unsigned", "NO"},
+		{"cosmetic_item_id", "bigint", "bigint unsigned", "NO"},
+		{"status", "tinyint", "tinyint", "NO"},
+		{"source", "tinyint", "tinyint", "NO"},
+		{"source_ref_id", "bigint", "bigint unsigned", "YES"},
+		{"obtained_at", "datetime", "datetime(3)", "NO"},
+		{"consumed_at", "datetime", "datetime(3)", "YES"},
+		{"created_at", "datetime", "datetime(3)", "NO"},
+		{"updated_at", "datetime", "datetime(3)", "NO"},
+	}
+	for _, c := range ucCols {
+		var dt, ct, nullable string
+		err := sqlDB.QueryRowContext(ctx, `
+			SELECT data_type, column_type, is_nullable FROM information_schema.columns
+			WHERE table_schema = 'cat_test' AND table_name = 'user_cosmetic_items' AND column_name = ?`,
+			c.col).Scan(&dt, &ct, &nullable)
+		if err != nil {
+			t.Errorf("query user_cosmetic_items.%s type: %v", c.col, err)
+			continue
+		}
+		if dt != c.wantDataType {
+			t.Errorf("user_cosmetic_items.%s data_type = %q, want %q", c.col, dt, c.wantDataType)
+		}
+		if ct != c.wantColType {
+			t.Errorf("user_cosmetic_items.%s column_type = %q, want %q", c.col, ct, c.wantColType)
+		}
+		if nullable != c.wantNullable {
+			t.Errorf("user_cosmetic_items.%s is_nullable = %q, want %q (§5.9 可空性钦定)", c.col, nullable, c.wantNullable)
+		}
+	}
+
+	// 3. INFORMATION_SCHEMA.COLUMNS：user_cosmetic_items 表总列数 == 10
+	//    兜底防有人误加字段（§5.9 钦定恰 10 列；如计数 = 11 说明漂移）。
+	var colCount int
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema = 'cat_test' AND table_name = 'user_cosmetic_items'`).Scan(&colCount)
+	if err != nil {
+		t.Errorf("query user_cosmetic_items total column count: %v", err)
+	} else if colCount != 10 {
+		t.Errorf("user_cosmetic_items total column count = %d, want 10 (§5.9 钦定恰 10 列；如计数 != 10 说明有人误加/漏字段)", colCount)
+	}
+
+	// 4a. user_cosmetic_items.id PK = id
+	var pkCol string
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT column_name FROM information_schema.key_column_usage
+		WHERE table_schema = 'cat_test' AND table_name = 'user_cosmetic_items' AND constraint_name = 'PRIMARY'`).Scan(&pkCol)
+	if err != nil {
+		t.Errorf("query user_cosmetic_items PK: %v", err)
+	} else if pkCol != "id" {
+		t.Errorf("user_cosmetic_items PK column = %q, want 'id'", pkCol)
+	}
+
+	// 4b. 三个普通索引列顺序断言（与 §5.9 行 500-502 钦定一致）
+	idxCases := []struct {
+		idxName  string
+		wantCols []string
+	}{
+		{"idx_user_id_status", []string{"user_id", "status"}},
+		{"idx_user_id_cosmetic_item_id", []string{"user_id", "cosmetic_item_id"}},
+		{"idx_source", []string{"source", "source_ref_id"}},
+	}
+	for _, ic := range idxCases {
+		rows, err := sqlDB.QueryContext(ctx, `
+			SELECT column_name FROM information_schema.statistics
+			WHERE table_schema = 'cat_test' AND table_name = 'user_cosmetic_items' AND index_name = ?
+			ORDER BY seq_in_index ASC`, ic.idxName)
+		if err != nil {
+			t.Errorf("query user_cosmetic_items.%s columns: %v", ic.idxName, err)
+			continue
+		}
+		var cols []string
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				t.Errorf("scan %s column: %v", ic.idxName, err)
+				continue
+			}
+			cols = append(cols, c)
+		}
+		rows.Close()
+		if len(cols) != len(ic.wantCols) {
+			t.Errorf("user_cosmetic_items.%s column count = %d, want %d (cols=%v)", ic.idxName, len(cols), len(ic.wantCols), cols)
+			continue
+		}
+		for i, w := range ic.wantCols {
+			if cols[i] != w {
+				t.Errorf("user_cosmetic_items.%s column[%d] = %q, want %q", ic.idxName, i, cols[i], w)
+			}
+		}
+	}
+
+	// 4c. **无 UNIQUE 约束断言**：除 PRIMARY 外无 non_unique=0 的索引
+	//     （与 cosmetic_items 有 uk_code 形成对照；实例表同种配置可持有多件 FR16）。
+	var uniqueIdxCount int
+	err = sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics
+		WHERE table_schema = 'cat_test' AND table_name = 'user_cosmetic_items'
+		  AND non_unique = 0 AND index_name != 'PRIMARY'`).Scan(&uniqueIdxCount)
+	if err != nil {
+		t.Errorf("query user_cosmetic_items unique index count: %v", err)
+	} else if uniqueIdxCount != 0 {
+		t.Errorf("user_cosmetic_items 除 PRIMARY 外 UNIQUE 索引数 = %d, want 0 (实例表无 UNIQUE，同种配置可持有多件 FR16)", uniqueIdxCount)
+	}
+
+	// 5. status / source 默认值 = 1（§6.10 status DEFAULT 1=in_bag /
+	//    §6.11 source DEFAULT 1=chest）
+	for _, c := range []struct {
+		col         string
+		wantDefault string
+	}{
+		{"status", "1"},
+		{"source", "1"},
+	} {
+		var def sql.NullString
+		err := sqlDB.QueryRowContext(ctx, `
+			SELECT column_default FROM information_schema.columns
+			WHERE table_schema = 'cat_test' AND table_name = 'user_cosmetic_items' AND column_name = ?`,
+			c.col).Scan(&def)
+		if err != nil {
+			t.Errorf("query user_cosmetic_items.%s default: %v", c.col, err)
+			continue
+		}
+		if !def.Valid || def.String != c.wantDefault {
+			t.Errorf("user_cosmetic_items.%s default = %v, want %q", c.col, def, c.wantDefault)
+		}
+	}
+
+	// obtained_at / created_at / updated_at 默认值 = CURRENT_TIMESTAMP(3)
+	for _, col := range []string{"obtained_at", "created_at", "updated_at"} {
+		var def sql.NullString
+		err := sqlDB.QueryRowContext(ctx, `
+			SELECT column_default FROM information_schema.columns
+			WHERE table_schema = 'cat_test' AND table_name = 'user_cosmetic_items' AND column_name = ?`,
+			col).Scan(&def)
+		if err != nil {
+			t.Errorf("query user_cosmetic_items.%s default: %v", col, err)
+			continue
+		}
+		if !def.Valid || !strings.Contains(strings.ToUpper(def.String), "CURRENT_TIMESTAMP") {
+			t.Errorf("user_cosmetic_items.%s default = %v, want substring 'CURRENT_TIMESTAMP'", col, def)
+		}
+	}
+
+	// source_ref_id / consumed_at 默认值 = NULL（可空列无显式默认）
+	for _, col := range []string{"source_ref_id", "consumed_at"} {
+		var def sql.NullString
+		err := sqlDB.QueryRowContext(ctx, `
+			SELECT column_default FROM information_schema.columns
+			WHERE table_schema = 'cat_test' AND table_name = 'user_cosmetic_items' AND column_name = ?`,
+			col).Scan(&def)
+		if err != nil {
+			t.Errorf("query user_cosmetic_items.%s default: %v", col, err)
+			continue
+		}
+		if def.Valid {
+			t.Errorf("user_cosmetic_items.%s default = %q, want NULL (可空列无显式默认)", col, def.String)
+		}
+	}
+}
+
+// TestMigrateIntegration_UserCosmeticItems_AppendableAndUpdatable 验证
+// migrations/0015_init_user_cosmetic_items.up.sql 钦定的可变实例表运行时语义：
+//   - 同一 user_id 的多行 INSERT 必须**全部成功**（无 UNIQUE 拒绝，验证同种
+//     配置可持有多件 —— FR16）
+//   - status / consumed_at 可被 UPDATE 推进（验证可变实例语义，与
+//     chest_open_logs append-only 不可 UPDATE 形成对照）
+//   - 不带 source_ref_id 插入 → SELECT 回来 source_ref_id IS NULL（验证可空列
+//     默认 NULL 非 0）
+//
+// **背景（Story 23.2 引入）**：与 Story 20.4 落地的
+// TestMigrateIntegration_ChestOpenLogs_AppendOnly 同模式（dockertest 运行时
+// 语义验证，用 database/sql 直跑 raw INSERT/UPDATE 不走 GORM 避免 ORM 行为
+// 差异），但本表额外验证 status 可推进 + consumed_at 可从 NULL 写入 +
+// source_ref_id 可空 NULL 语义 —— user_cosmetic_items 是可变实例表，**非**
+// append-only 日志表。
+//
+// 测试用 user_id / cosmetic_item_id 与未来 23.5 / Epic 26 / 32 业务用 id
+// 完全隔离 —— dockertest 容器内独立 mysql 实例，与 prod 数据无关，容器测试
+// 结束后自动 purge（startMySQL t.Cleanup）。
+func TestMigrateIntegration_UserCosmeticItems_AppendableAndUpdatable(t *testing.T) {
+	dsn, cleanup := startMySQL(t)
+	defer cleanup()
+
+	mig, err := migrate.New(dsn, migrationsPath(t))
+	if err != nil {
+		t.Fatalf("migrate.New: %v", err)
+	}
+	defer mig.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := mig.Up(ctx); err != nil {
+		t.Fatalf("migrate Up: %v", err)
+	}
+
+	sqlDB, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	// 步骤 1：同 user_id 插入 2 行（同 cosmetic_item_id）→ 都必须成功
+	//        （无 UNIQUE 拒绝，验证同种配置可持有多件 FR16）；
+	//        source_ref_id 显式给值（开箱来源 = chest_id 非空场景）。
+	res1, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO user_cosmetic_items (user_id, cosmetic_item_id, status, source, source_ref_id) VALUES (1, 100, 1, 1, 500)`)
+	if err != nil {
+		t.Fatalf("first insert user_cosmetic_items (user=1, cosmetic=100) should succeed: %v", err)
+	}
+	row1ID, err := res1.LastInsertId()
+	if err != nil {
+		t.Fatalf("LastInsertId of first insert: %v", err)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO user_cosmetic_items (user_id, cosmetic_item_id, status, source, source_ref_id) VALUES (1, 100, 1, 1, 501)`); err != nil {
+		t.Fatalf("second insert user_cosmetic_items (user=1, cosmetic=100 dup) should succeed (无 UNIQUE，同种配置可持有多件 FR16): %v", err)
+	}
+
+	var cnt int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM user_cosmetic_items WHERE user_id = 1 AND cosmetic_item_id = 100`).Scan(&cnt); err != nil {
+		t.Fatalf("SELECT COUNT user_cosmetic_items WHERE user_id=1 AND cosmetic_item_id=100: %v", err)
+	}
+	if cnt != 2 {
+		t.Errorf("after 2 inserts, user_cosmetic_items count for (user=1, cosmetic=100) = %d, want 2 (无 UNIQUE 阻塞，同种配置可持有多件 FR16)", cnt)
+	}
+
+	// 步骤 2：UPDATE 其中一行 status=3 + consumed_at=NOW(3) → 成功
+	//        （验证 status 可推进 + consumed_at 可从 NULL 写入；与
+	//        chest_open_logs append-only 不可 UPDATE 形成对照）。
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE user_cosmetic_items SET status = 3, consumed_at = NOW(3) WHERE id = ?`, row1ID); err != nil {
+		t.Fatalf("UPDATE user_cosmetic_items SET status=3, consumed_at=NOW(3) should succeed (可变实例表): %v", err)
+	}
+	var gotStatus int
+	var gotConsumedAt sql.NullTime
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT status, consumed_at FROM user_cosmetic_items WHERE id = ?`, row1ID).Scan(&gotStatus, &gotConsumedAt); err != nil {
+		t.Fatalf("SELECT status, consumed_at after UPDATE: %v", err)
+	}
+	if gotStatus != 3 {
+		t.Errorf("after UPDATE, status = %d, want 3 (status 可推进到 consumed)", gotStatus)
+	}
+	if !gotConsumedAt.Valid {
+		t.Errorf("after UPDATE, consumed_at IS NULL, want non-NULL (consumed_at 可从 NULL 写入)")
+	}
+
+	// 步骤 3：插入不带 source_ref_id 的一行（依赖 NULL 默认）→ SELECT 回来
+	//        source_ref_id IS NULL（验证可空列默认 NULL 非 0；合成产出实例先
+	//        NULL 后回填 compose_log_id 场景）。
+	res3, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO user_cosmetic_items (user_id, cosmetic_item_id, status, source) VALUES (2, 200, 1, 2)`)
+	if err != nil {
+		t.Fatalf("insert user_cosmetic_items without source_ref_id should succeed (可空列默认 NULL): %v", err)
+	}
+	row3ID, err := res3.LastInsertId()
+	if err != nil {
+		t.Fatalf("LastInsertId of third insert: %v", err)
+	}
+	var gotSourceRefID sql.NullInt64
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT source_ref_id FROM user_cosmetic_items WHERE id = ?`, row3ID).Scan(&gotSourceRefID); err != nil {
+		t.Fatalf("SELECT source_ref_id after insert without it: %v", err)
+	}
+	if gotSourceRefID.Valid {
+		t.Errorf("source_ref_id = %d after insert without it, want NULL (可空列默认 NULL 非 0；下游判'是否已回填'依赖此语义)", gotSourceRefID.Int64)
 	}
 }
