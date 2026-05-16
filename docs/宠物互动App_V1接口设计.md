@@ -76,7 +76,7 @@
 - `cosmetic_items` 表 seed 数量约束（epics.md AR18 钦定 common ≥ 8 / rare ≥ 4 / epic ≥ 2 / legendary ≥ 1）属契约一部分；admin 后台增删 cosmetic_items 行**不**视为契约变更，但删到不足 AR18 约束视为线上事故。
 - `drop_weight` 加权抽奖算法（按 `cumulative_weight / total_weight` 比例抽取，仅 `is_enabled = 1` 行参与）属契约一部分；切换为非加权 / 加权但不按 drop_weight 排序 视为契约变更。
 - 自 2026-05-16（Story 23.1 完成日，对应 git commit hash 见 commit message）起，§8.1（GET /api/v1/cosmetics/catalog）/ §8.2（GET /api/v1/cosmetics/inventory）两个节点 8 装扮查询 REST 接口的 schema 进入**冻结**状态。
-- 任何字段名 / 字段类型 / `slot` 枚举（`{1,2,3,4,5,6,7,99}`）/ `rarity` 枚举（`{1,2,3,4}`）/ `instances[].status` 枚举（`{1,2}`，inventory 仅返回 in_bag + equipped）/ `groups` 按 `cosmetic_item_id` 聚合维度 / `count` = `instances` 数组长度（含 equipped）语义 / catalog 排序 `rarity ASC + slot ASC + id ASC`（全序确定，`id ASC` 为决定性 tie-breaker，client 可依赖整个列表顺序） / 空背包 `{groups: []}` 契约 / `iconUrl` / `assetUrl` 允许空字符串契约 / 不分页声明 / 错误码（1001 / 1005 / 1009）触发条件 的修改都必须（**冻结边界说明**：`cosmetic_items` 行的 admin 增删（满足 AR18 数量约束前提下）/ `user_cosmetic_items` 行的正常业务增减（开箱 / 合成产生）/ §7.2 `reward.userCosmeticItemId` 节点 7 → 节点 8 真实化（已在 §1 Story 20.1 冻结边界说明锚定，字段类型 / 名 / 必填性不变，仅服务端语义升级）**不**视为契约变更；1001 / 1005 / 1009 等"触发条件"冻结在**抽象层** —— "走 §3 错误码表对应映射"这一不变量，**具体限频阈值**（如 60/min）由 Story 4.5 默认值 + 配置层管理，调整阈值**不**视为本接口契约变更；删除 auth / rate_limit 中间件 / 改聚合维度 / 改 status 过滤范围 / 把 `count` 改成"仅 in_bag 计数" / 把空背包改成 `null` 或省略 groups 字段 / 把 catalog 排序改掉 / 引入分页 才视为契约变更）：
+- 任何字段名 / 字段类型 / `slot` 枚举（`{1,2,3,4,5,6,7,99}`）/ `rarity` 枚举（`{1,2,3,4}`）/ `instances[].status` 枚举（`{1,2}`，inventory 仅返回 in_bag + equipped）/ `groups` 按 `cosmetic_item_id` 聚合维度 / `count` = `instances` 数组长度（含 equipped）语义 / catalog 排序 `rarity ASC + slot ASC + id ASC`（全序确定，`id ASC` 为决定性 tie-breaker，client 可依赖整个列表顺序） / 空背包 `{groups: []}` 契约 / `iconUrl` / `assetUrl` **非空字符串**契约（enabled cosmetic 正常行 / catalog 全量返回 / inventory 正常组 `1 ≤ length ≤ 255` 非空，与 §7.2 `reward.iconUrl` / `reward.assetUrl` 非空冻结对齐；空字符串 `""` **仅**限 §8.2 配置缺失 deleted / missing-item 降级占位路径，**不**适用于正常 enabled 行 —— 此契约 fix-review r2 [P2] 收紧，消除"catalog 空 URL vs chest-open 非空冻结"跨接口矛盾） / 不分页声明 / 错误码（1001 / 1005 / 1009）触发条件 的修改都必须（**冻结边界说明**：`cosmetic_items` 行的 admin 增删（满足 AR18 数量约束前提下）/ `user_cosmetic_items` 行的正常业务增减（开箱 / 合成产生）/ §7.2 `reward.userCosmeticItemId` 节点 7 → 节点 8 真实化（已在 §1 Story 20.1 冻结边界说明锚定，字段类型 / 名 / 必填性不变，仅服务端语义升级）**不**视为契约变更；1001 / 1005 / 1009 等"触发条件"冻结在**抽象层** —— "走 §3 错误码表对应映射"这一不变量，**具体限频阈值**（如 60/min）由 Story 4.5 默认值 + 配置层管理，调整阈值**不**视为本接口契约变更；删除 auth / rate_limit 中间件 / 改聚合维度 / 改 status 过滤范围 / 把 `count` 改成"仅 in_bag 计数" / 把空背包改成 `null` 或省略 groups 字段 / 把 catalog 排序改掉 / 引入分页 才视为契约变更）：
   1. 触发 iOS Epic 24 重新评审（影响 Story 24.1 ~ 24.5 所有仓库页 / 聚合 grid / 实例列表 / 筛选 / 穿戴入口预留 story）
   2. 触发 server Epic 23 已完成 story 的回归（影响 Story 23.2 ~ 23.5 已落地的 migration / handler / service / 开箱事务修改）
   3. 触发下游 Epic 26（穿戴）/ Epic 32（合成）契约 story（26.1 / 32.1）回归（穿戴 / 合成基于 inventory 实例模型扩展）
@@ -1264,8 +1264,8 @@ JSON 示例：
 | `name` | string | 必填 | 1 ≤ length ≤ 64 | 装扮名称（如 `小黄帽`）；与数据库 §5.8 `cosmetic_items.name` 同义 |
 | `slot` | int | 必填 | 枚举 `{1,2,3,4,5,6,7,99}`，与数据库 §6.8 `cosmetic_items.slot` 同义（`1=hat / 2=gloves / 3=glasses / 4=neck / 5=back / 6=body / 7=tail / 99=other`） | 装扮部位 |
 | `rarity` | int | 必填 | 枚举 `{1,2,3,4}`，与数据库 §6.9 `cosmetic_items.rarity` 同义（`1=common / 2=rare / 3=epic / 4=legendary`） | 装扮品质 |
-| `iconUrl` | string | 必填 | 0 ≤ length ≤ 255；**允许空字符串 `""`**（catalog 配置可能未配图标，与 §7.2 `reward.iconUrl` "不允许空字符串"约束**不同** —— reward 是抽中的奖励必须有图，catalog 是全量配置可能含未配图 placeholder） | 装扮图标 URL（小尺寸预览图）；与数据库 §5.8 `cosmetic_items.icon_url`（`DEFAULT ''`）同义；MVP 阶段允许 placeholder URL |
-| `assetUrl` | string | 必填 | 0 ≤ length ≤ 255；**允许空字符串 `""`**（同 `iconUrl` 理由） | 装扮资源 URL；与数据库 §5.8 `cosmetic_items.asset_url`（`DEFAULT ''`）同义；MVP 阶段允许 placeholder URL |
+| `iconUrl` | string | 必填 | 1 ≤ length ≤ 255；**禁止空字符串 `""`**（enabled cosmetic 必须有图，与 §7.2 `reward.iconUrl` "不允许空字符串"约束**一致** —— catalog 返回的均为 `is_enabled = 1` 行，`/chest/open` 从同一批 `is_enabled = 1` 行抽奖且已冻结 `reward.iconUrl` 非空，故 catalog 同源行也必须非空，否则 server 要么违反 chest-open 冻结契约要么特判永不可奖励数据）；数据库 `cosmetic_items.icon_url VARCHAR(255) NOT NULL DEFAULT ''` 的 `DEFAULT ''` 仅是 DDL 兜底，**不**意味着允许 enabled 行留空 —— Story 20.3 seed 层 / admin 写入层**必须**保证每个 `is_enabled = 1` 行有非空 `icon_url`（MVP 阶段允许 placeholder URL，如 `https://placehold.co/64x64?text=Hat-Yellow`，但**必须**非空）。空字符串 `""` **仅**允许出现在 §8.2 配置缺失（deleted / missing-item）降级占位路径（见 §8.2 服务端逻辑步骤 3），catalog 本接口仅返回正常 enabled 行故**永不**返回空串 | 装扮图标 URL（小尺寸预览图）；与数据库 §5.8 `cosmetic_items.icon_url` 同义 |
+| `assetUrl` | string | 必填 | 1 ≤ length ≤ 255；**禁止空字符串 `""`**（同 `iconUrl` 理由：enabled cosmetic 必须有图，与 §7.2 `reward.assetUrl` 非空约束一致；seed / admin 写入层必须保证非空；空串仅限 §8.2 missing-item 降级占位路径） | 装扮资源 URL；与数据库 §5.8 `cosmetic_items.asset_url` 同义；MVP 阶段允许 placeholder URL（必须非空） |
 
 ##### 返回示例
 
@@ -1304,7 +1304,7 @@ JSON 示例：
 
 - `items` 列表**不分页**（约 15-50 条，与 epics.md §Story 23.3 AC + §1 catalog seed 数量约束 AR18 一致）；如未来配置数量增长需引入分页，视为契约变更。
 - 排序契约 `ORDER BY rarity ASC, slot ASC, id ASC` 属契约一部分，且为**全序确定**（total order）：`rarity ASC` → `slot ASC` → `id ASC` 三级排序，`id ASC` 是决定性 tie-breaker。因 §1 catalog seed AR18 数量约束下同 (rarity, slot) 必然存在多行（如两顶 common 帽子 `hat_yellow`/`hat_red`、两副 common 手套 `gloves_white`/`gloves_brown`），若缺 `id ASC` 则 MySQL 对同 (rarity, slot) 行返回顺序不保证稳定（同一份数据跨请求可抖动），故 `id ASC` 是契约**必需**部分而非可选优化。client **可**依赖 catalog **整个列表**的稳定顺序做 UI 渲染（不仅组间、组内同样稳定）。如未来移除 `id ASC` tie-breaker 或改任一排序键，视为契约变更（走 §1 冻结流程）。
-- `iconUrl` / `assetUrl` 允许空字符串契约属契约一部分（与 §7.2 reward.* "不允许空"差异已显式标注）；如未来收紧为"catalog 也不允许空"，视为契约变更。
+- `iconUrl` / `assetUrl` **非空字符串**契约属契约一部分：catalog 仅返回 `is_enabled = 1` 行，且 `/chest/open` 从同一批 `is_enabled = 1` 行抽奖、§7.2 已冻结 `reward.iconUrl` / `reward.assetUrl` 非空，故 catalog（与 §8.2 inventory 正常组）的 `iconUrl` / `assetUrl` 必须 `1 ≤ length ≤ 255` 非空，与 §7.2 reward.* 非空约束**对齐**（消除"catalog 空 URL vs chest-open 非空冻结"的跨接口契约矛盾）。空字符串 `""` **仅**允许出现在 §8.2 配置缺失（deleted / missing-item）降级占位路径（见 §8.2 服务端逻辑步骤 3），属 round-1 引入的 missing-item fallback 专用语义，**不**适用于 catalog 正常返回。如未来放宽为"enabled 行也允许空 URL"，视为契约变更（且会重新引入与 chest-open 冻结契约的矛盾）。
 
 ---
 
@@ -1342,7 +1342,7 @@ JSON 示例：
 3. **按 cosmetic_item_id 聚合**：把步骤 2 结果按 `cosmetic_item_id` 分组；每组关联 `cosmetic_items` 拿配置元信息（`name / slot / rarity / icon_url / asset_url`）。
    - 配置缺失的 `cosmetic_item_id`（即步骤 2 的某 `cosmetic_item_id` 在 `cosmetic_items` 表无匹配行 —— §1 允许 admin 删 `cosmetic_items` 行，删除后该配置下用户**已拥有**的实例仍存在于 `user_cosmetic_items`）→ **保留该组（不 skip）+ 用降级占位元信息组装 + log error**。
      - **保留可见性原则**：用户已拥有的实例**不得**因 admin 删配置而从 inventory 静默消失（= 用户可见数据丢失）。该组照常出现在 `groups[]`，`count` / `instances[]` 与正常组一致（实例数与实例 id 始终来自 `user_cosmetic_items`，与配置是否存在无关）。
-     - **降级占位元信息**（仅配置缺失组使用）：`name = "未知装扮"`、`slot = 99`（other，§6.8 枚举内）、`rarity = 1`（common，§6.9 枚举内）、`iconUrl = ""`、`assetUrl = ""`（空字符串契约已允许，见下方响应体字段表）。这些占位值均落在既有枚举 / 约束值域内，**不**扩展任何 schema；client 据此渲染"配置已下架的已拥有道具"占位卡，仍能看到持有数量。
+     - **降级占位元信息**（仅配置缺失组使用）：`name = "未知装扮"`、`slot = 99`（other，§6.8 枚举内）、`rarity = 1`（common，§6.9 枚举内）、`iconUrl = ""`、`assetUrl = ""`。**这是空字符串 `iconUrl` / `assetUrl` 的唯一合法出现路径** —— 正常组（含 §8.1 catalog 全量返回 + §8.2 正常聚合组）的 `iconUrl` / `assetUrl` 必须非空，与 §7.2 `reward.iconUrl` / `reward.assetUrl` 冻结契约对齐（catalog / inventory 正常行与 chest-open 抽奖同源 `is_enabled = 1` 行，不能让同源行出现"永不可奖励"的空 URL 数据）；空串**仅**作为 admin 删配置后已拥有实例的降级 placeholder。这些占位值均落在既有枚举 / 约束值域内，**不**扩展任何 schema；client 据此渲染"配置已下架的已拥有道具"占位卡，仍能看到持有数量。
      - **log error**（非 warning）：配置缺失意味着 admin 删了仍有用户持有的 cosmetic_items 行，是需运维介入的数据治理事件（应补 down-migration / 恢复配置 / 走废弃流程），日志级别为 error 以触发告警，**不**报 client 错误码（只读查询不因单组配置缺失整体失败 —— 见关键约束）。
 4. **组装响应**：每组 = `{cosmeticItemId, name, slot, rarity, iconUrl, assetUrl, count, instances: [{userCosmeticItemId, status}]}`；`count` = 该组 instances 数组长度（含 status=1 与 status=2，**不**只算 in_bag）；配置缺失组按步骤 3 降级占位规则填充元信息字段。
 5. **响应**：返回 `{groups: [...]}`；空背包返回 `{groups: []}`；**不分页**。
@@ -1358,8 +1358,8 @@ JSON 示例：
 | `name` | string | 必填 | 1 ≤ length ≤ 64 | 装扮名称；与 §8.1 `items[].name` 同义 |
 | `slot` | int | 必填 | 枚举 `{1,2,3,4,5,6,7,99}`，与数据库 §6.8 同义 | 装扮部位（与 §8.1 `items[].slot` 同义） |
 | `rarity` | int | 必填 | 枚举 `{1,2,3,4}`，与数据库 §6.9 同义 | 装扮品质（与 §8.1 `items[].rarity` 同义） |
-| `iconUrl` | string | 必填 | 0 ≤ length ≤ 255；允许空字符串 `""`（同 §8.1 理由） | 装扮图标 URL；与 §8.1 `items[].iconUrl` 同义 |
-| `assetUrl` | string | 必填 | 0 ≤ length ≤ 255；允许空字符串 `""`（同 §8.1 理由） | 装扮资源 URL；与 §8.1 `items[].assetUrl` 同义 |
+| `iconUrl` | string | 必填 | 正常组：`1 ≤ length ≤ 255` **非空**（同 §8.1 理由，与 §7.2 `reward.iconUrl` 非空对齐）；**仅**配置缺失（deleted / missing-item）降级占位组允许空字符串 `""`（见服务端逻辑步骤 3 降级占位元信息） | 装扮图标 URL；与 §8.1 `items[].iconUrl` 同义 |
+| `assetUrl` | string | 必填 | 正常组：`1 ≤ length ≤ 255` **非空**（同 §8.1 理由，与 §7.2 `reward.assetUrl` 非空对齐）；**仅**配置缺失降级占位组允许空字符串 `""`（同 `iconUrl`） | 装扮资源 URL；与 §8.1 `items[].assetUrl` 同义 |
 | `count` | int | 必填 | ≥ 1（空组不出现在 groups 中 —— 一个组必有 ≥ 1 实例）；= `instances` 数组长度 | 该配置玩家持有实例数（含 in_bag + equipped，**不**只算 in_bag） |
 | `instances` | array | 必填 | length = `count` ≥ 1 | 该组下的实例列表 |
 | `instances[].userCosmeticItemId` | string | 必填 | BIGINT 字符串化；length ≥ 1 | 玩家**实例** id（**不是**配置 id）；与 §7.2 `reward.userCosmeticItemId`（节点 8 真实化后）同义 —— 节点 8 起开箱奖励 INSERT 的 `user_cosmetic_items.id` 即此值；与数据库 §5.9 `user_cosmetic_items.id` 同义 |
@@ -1428,6 +1428,7 @@ JSON 示例：
 - **`count` 语义**契约：`count` = 该组 instances 数组长度（含 equipped），**不**等于"可用于合成的数量"（合成需 in_bag 且未装备的实例，由 client / Story 33.x 自行按 `instances[].status` 过滤）。如未来把 `count` 改成"仅 in_bag 计数"，视为契约变更。
 - **空背包**契约：返回 `{groups: []}`（**不**是 `null`、**不**是 `{}` 缺 groups 字段、**不**报错）；防 Swift Codable 解析 `groups` 为 nil（client `InventoryResponse.groups` 严格按 `[InventoryGroup]` 非可选解析，空时为 `[]`）。如未来改成省略 groups 字段，视为契约变更。
 - **`userCosmeticItemId` 跨节点同义对齐**契约：§8.2 `instances[].userCosmeticItemId` 与 §7.2 `reward.userCosmeticItemId`（节点 8 Story 23.5 真实化后）是**同一玩家实例主键的字符串化**（数据库 §5.9 `user_cosmetic_items.id`）；节点 7 阶段 §7.2 该字段为占位 `"0"` 且 inventory 必为空（建表前），节点 8 起两处均为真实主键。§7.2 节点 7 → 节点 8 升级**不**视为契约变更（已在 §1 Story 20.1 冻结边界说明锚定）；本 story **不**反向修改 §7.x。
+- **`iconUrl` / `assetUrl` 非空字符串**契约：正常组的 `iconUrl` / `assetUrl` 必须 `1 ≤ length ≤ 255` 非空，与 §8.1 catalog + §7.2 `reward.iconUrl` / `reward.assetUrl` 非空冻结对齐（三处同源 `is_enabled = 1` cosmetic 行，不能让 chest-open 抽奖源数据出现"永不可奖励"的空 URL）。空字符串 `""` **仅**允许出现在配置缺失（deleted / missing-item）降级占位组（见服务端逻辑步骤 3），属 round-1 引入的 missing-item fallback 专用语义。如未来放宽为"正常组也允许空 URL"，视为契约变更（且会重新引入与 chest-open 冻结契约的跨接口矛盾，fix-review r2 [P2] 已收紧）。
 - **不分页**契约：单用户预期实例数 < 1000，单查询返回全量；client 一次拿全做本地筛选（iOS Story 24.3 纯客户端筛选）。如未来引入分页，视为契约变更。
 
 ---

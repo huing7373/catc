@@ -333,3 +333,4 @@
 | 2026-05-16 | [根级本地 build 产物未 gitignore，dev-story change set 携带 61MB 机器特定缓存（21-4 r1）](2026-05-16-gitignore-local-build-artifacts-21-4-r1.md) | 1 | hygiene | `531a05b` |
 | 2026-05-16 | [开箱前 await in-flight + 自己再 sync 一次的双 sync 是事务正确性 safe choice，不是可消除的浪费（21-5 r1）](2026-05-16-double-sync-before-chest-open-is-transactional-safe-21-5-r1.md) | 1 | architecture | `f1827e7` |
 | 2026-05-16 | [冻结契约必须全序确定 & 不得对已拥有数据静默丢失（23-1 r1）](2026-05-16-frozen-contract-must-be-total-order-and-not-silently-drop-owned-data-23-1-r1.md) | 2 | architecture | `<pending>` |
+| 2026-05-16 | [跨接口共享数据源的字段约束必须自洽：catalog 空 URL vs chest-open 非空冻结的矛盾（23-1 r2）](2026-05-16-cross-interface-url-contract-must-not-self-contradict-23-1-r2.md) | 1 | architecture | `<pending>` |
