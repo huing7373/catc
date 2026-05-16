@@ -332,6 +332,6 @@
 | 2026-05-15 | [Server-anchored time：device clock skew 时 unlockAt 派生破坏 source of truth（21-1 r4）](2026-05-15-driver-server-anchored-time-21-1-r4.md) | 1 | architecture | `1d7c39c` |
 | 2026-05-16 | [根级本地 build 产物未 gitignore，dev-story change set 携带 61MB 机器特定缓存（21-4 r1）](2026-05-16-gitignore-local-build-artifacts-21-4-r1.md) | 1 | hygiene | `531a05b` |
 | 2026-05-16 | [开箱前 await in-flight + 自己再 sync 一次的双 sync 是事务正确性 safe choice，不是可消除的浪费（21-5 r1）](2026-05-16-double-sync-before-chest-open-is-transactional-safe-21-5-r1.md) | 1 | architecture | `f1827e7` |
-| 2026-05-16 | [冻结契约必须全序确定 & 不得对已拥有数据静默丢失（23-1 r1）](2026-05-16-frozen-contract-must-be-total-order-and-not-silently-drop-owned-data-23-1-r1.md) | 2 | architecture | `<pending>` |
-| 2026-05-16 | [跨接口共享数据源的字段约束必须自洽：catalog 空 URL vs chest-open 非空冻结的矛盾（23-1 r2）](2026-05-16-cross-interface-url-contract-must-not-self-contradict-23-1-r2.md) | 1 | architecture | `<pending>` |
-| 2026-05-16 | [冻结的列表契约必须一次性枚举全部边界 case：两级全序排序 + config 三态完整矩阵（23-1 r3）](2026-05-16-frozen-list-contract-must-enumerate-all-boundary-cases-23-1-r3.md) | 2 | docs, architecture | `<pending>` |
+| 2026-05-16 | [冻结契约必须全序确定 & 不得对已拥有数据静默丢失（23-1 r1）](2026-05-16-frozen-contract-must-be-total-order-and-not-silently-drop-owned-data-23-1-r1.md) | 2 | architecture | `a4ba50e` |
+| 2026-05-16 | [跨接口共享数据源的字段约束必须自洽：catalog 空 URL vs chest-open 非空冻结的矛盾（23-1 r2）](2026-05-16-cross-interface-url-contract-must-not-self-contradict-23-1-r2.md) | 1 | architecture | `f98dad1` |
+| 2026-05-16 | [冻结的列表契约必须一次性枚举全部边界 case：两级全序排序 + config 三态完整矩阵（23-1 r3）](2026-05-16-frozen-list-contract-must-enumerate-all-boundary-cases-23-1-r3.md) | 2 | docs, architecture | `36fe5fa` |
