@@ -58,6 +58,11 @@ public struct HomeView<ChestSlot: View, PetSlot: View>: View {
     /// 详见 spec Dev Notes "joinRoomInput @State vs @Published 决策".
     @State private var joinRoomInput: String = ""
 
+    /// Story 21.4 AC4: RewardPopup sheet onDismiss 防双触发 reason tag.
+    /// 本 story 仅 confirm + swipe-dismiss 两路径行为同义，但走 dismissReason 模式留接缝
+    /// (lesson `2026-05-02-sheet-onDismiss-fires-on-button-close-too.md`).
+    @State private var rewardDismissReason: RewardDismissReason?
+
     /// Story 37.7 AC3 / Story 8.4 AC3: 唯一 init —— 删除老 3 个重载，caller 漏改靠编译器报错驱动.
     /// 参数名 `state` 而非 `viewModel`（v2 提案钦定）.
     /// Story 8.4 AC3：新增 `petSlot:` ViewBuilder closure（位于 chestSlot 之前；视觉 top-to-bottom 顺序对应 statusBar → catStage 内嵌 petSlot → actionRow → chestSlot 槽位）.
@@ -119,6 +124,37 @@ public struct HomeView<ChestSlot: View, PetSlot: View>: View {
                 onCancel: {
                     state.showJoinModal = false
                     // 注：onDismiss 闭包稍后被 SwiftUI 调用，自动清空 joinRoomInput.
+                }
+            )
+            .presentationDetents([.medium])
+            .presentationCornerRadius(28)
+        }
+        // Story 21.4 AC4：RewardPopup sheet 装配 + onDismiss 防双触发 reason tag.
+        // .sheet(item: $state.pendingReward) 模式：SwiftUI 自动负责 binding 双向 nil ↔ non-nil 切换 ——
+        //   - 21.3 OpenChestUseCase 成功路径 set pendingReward = snapshot → 自动触发 sheet 弹出
+        //   - 用户点 "确定" → onClose closure 内 set pendingReward = nil → 自动 dismiss sheet
+        //   - 用户 swipe-dismiss → SwiftUI 框架自动 set pendingReward = nil
+        //
+        // onDismiss 闭包**不**调 `state.pendingReward = nil`（lesson 钦定: 按钮闭包已显式 set,
+        // onDismiss 内若再调一次就是双触发 → 反例 1）；仅 reset rewardDismissReason reason tag 接缝，
+        // 让未来加 "立即穿戴 / 立即再开" 按钮时按 lesson 模式派发差异化分支不会引入 bug.
+        .sheet(
+            item: $state.pendingReward,
+            onDismiss: {
+                // 仅 reset reason tag —— pendingReward 由 SwiftUI binding 自动 nil 化（item: 模式契约）
+                // + onClose closure 已显式 set nil（按钮路径）.
+                // 详见 docs/lessons/2026-05-02-sheet-onDismiss-fires-on-button-close-too.md.
+                rewardDismissReason = nil
+            }
+        ) { reward in
+            RewardPopupView(
+                reward: reward,
+                onClose: {
+                    // 用户点 "确定" → 显式 set pendingReward = nil（让意图清晰 + 测试可断言 closure 被调）.
+                    // SwiftUI item: binding 模式契约会自动 nil 化 swipe-dismiss 路径，
+                    // 但按钮路径走 closure 显式 mutate 让单测能验证.
+                    rewardDismissReason = .confirm   // 留接缝；本 story 不使用差异化分支
+                    state.pendingReward = nil
                 }
             )
             .presentationDetents([.medium])
@@ -535,6 +571,16 @@ public enum HomePetNameResolver {
         guard let pet = pet else { return noPetPlaceholder }
         return pet.name
     }
+}
+
+/// Story 21.4 AC4: RewardPopup sheet onDismiss 派发的 reason tag.
+///
+/// 本 story 仅 .confirm（按钮关闭）+ nil（swipe-dismiss / 编程关闭）两路径，行为同义；
+/// 但走 reason enum 模式留接缝防未来加 "立即穿戴 / 立即再开 / 分享" 等差异化按钮时
+/// 按 lesson `2026-05-02-sheet-onDismiss-fires-on-button-close-too.md` 钦定路径派发.
+private enum RewardDismissReason {
+    case confirm   // 用户点 "确定" 按钮关闭
+    // nil = swipe-dismiss / 编程关闭
 }
 
 /// catStage floatUp emoji 浮层子视图（Story 37.7 codex round 5 [P2] fix）.

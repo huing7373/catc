@@ -209,6 +209,19 @@ public enum AccessibilityID {
         public static let modalPlaceholder = "joinRoomModalPlaceholder"
     }
 
+    /// Story 21.4 AC3 落地的 RewardPopupView a11y identifier.
+    /// 命名风格: `rewardPopup` 根容器 + `rewardPopup_<element>` 子元素（与同 enum 内 Home.chestRemaining /
+    /// Home.petSpriteRest 等同模式 —— 父容器单字段名 + 子元素带下划线前缀）.
+    /// 与 JoinRoomModal `joinRoomModal` / `joinRoom<Element>Button` 风格略不同（join 用 camelCase 拼接);
+    /// reward 用 underline 让 popup 内层级在 a11y tree 内更直观.
+    public enum RewardPopup {
+        public static let popup = "rewardPopup"
+        public static let icon = "rewardPopup_icon"
+        public static let nameLabel = "rewardPopup_nameLabel"
+        public static let rarityTag = "rewardPopup_rarityTag"
+        public static let confirmButton = "rewardPopup_confirmButton"
+    }
+
     /// Story 37.3 落地的占位 view a11y identifier（RootView.swift line 449 ComposeSheetPlaceholder, dummy compose route）.
     /// ADR-0009 §3.4 SheetType 白名单仍保留 `.compose`（Story 33.1 决定具体形式 / 落地真实合成 view）.
     public enum Compose {

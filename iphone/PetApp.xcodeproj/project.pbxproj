@@ -32,6 +32,7 @@
 		167C1170E9545C630AB52652 /* AsyncTestHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55E034E99B4679572E6ACB32 /* AsyncTestHelpers.swift */; };
 		16F26221EE8C1E95667CCD85 /* HomeEndpoints.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A9498ED4B7189FF05A4DFAC /* HomeEndpoints.swift */; };
 		1838CF8B3EBEC81738117BBA /* StepSyncTriggerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 530FB3CDB2CBB412BE2B0AFE /* StepSyncTriggerService.swift */; };
+		19A76F498694412B9B23FC94 /* ChestOpenRewardPopupUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82EC9E3C8979375035AFD455 /* ChestOpenRewardPopupUITests.swift */; };
 		19E70B9E9CCA11AAF3EF4933 /* TerminalErrorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202D06A1D0A71F260B651929 /* TerminalErrorView.swift */; };
 		1BC43A46F56D9F43F13E0B37 /* DeviceInfoProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6A56BD4CDD8A553CC16BDF6 /* DeviceInfoProvider.swift */; };
 		1D3F55B63140E9DBDCB65973 /* FriendsViewScaffoldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C38AA4FCA62B305067C947 /* FriendsViewScaffoldTests.swift */; };
@@ -64,6 +65,7 @@
 		3850A7F0D3CA11A7304E4911 /* RetryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1369A3F537485008A6066B8F /* RetryView.swift */; };
 		38802607E5107149270AF777 /* ErrorComponentSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 598DFB9DFABF82C3D9C33645 /* ErrorComponentSnapshotTests.swift */; };
 		39326C3DBDB59A8B79C9FA43 /* WebSocketClientImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B972013291833B073EE04C8 /* WebSocketClientImpl.swift */; };
+		394BC55B6074CFF02098C1EE /* RewardPopupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6F6224D53EF64FF1D57505B /* RewardPopupView.swift */; };
 		3A17175565015AE8694093C4 /* WardrobeScaffoldDefaults.swift in Sources */ = {isa = PBXBuildFile; fileRef = 696D05F92B84441352736D9D /* WardrobeScaffoldDefaults.swift */; };
 		3AB75F44CAA4FEC4CA8F135E /* Friend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51C7B1DDF6EBE8D4659AB4C8 /* Friend.swift */; };
 		3BCCF2DE9191DCBFD3A4D5DD /* ChestOpenResponse.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6122C2FB56EBCFE8B53E0747 /* ChestOpenResponse.swift */; };
@@ -153,6 +155,7 @@
 		82A201AA42B16E5DA2DFE002 /* MockProfileViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E29C985B53B9A4C5F53AADEC /* MockProfileViewModel.swift */; };
 		862FD51DFC8CD996340EB9E7 /* ThemeRadius.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF6F6BF990741F1FFFD46A2F /* ThemeRadius.swift */; };
 		8679EA86DF3E207A39AFCBDA /* AppLaunchState.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF1A8971F2840EEC5BE3311A /* AppLaunchState.swift */; };
+		875CACAD86EEC501EFCA4AB3 /* HomeViewModelPendingRewardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C1ACD1367CC0DCAD1492F1 /* HomeViewModelPendingRewardTests.swift */; };
 		8869825C3D8C60B931E7CA64 /* HomeResponse.swift in Sources */ = {isa = PBXBuildFile; fileRef = 873BE255FEE4A4D407B2E425 /* HomeResponse.swift */; };
 		886D70A781F0AB57F38AA13E /* ThemeSpacing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C0714D4EFFFDAE1112D45FB /* ThemeSpacing.swift */; };
 		88F0A75661D816189F57E791 /* PetStateEndpoints.swift in Sources */ = {isa = PBXBuildFile; fileRef = F41735FC23052F504C08CEEE /* PetStateEndpoints.swift */; };
@@ -230,6 +233,7 @@
 		C36CE412012A9D83B4531EAE /* RealHomeViewModelChestOpenTapTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D78F97573D790FEB58AB26 /* RealHomeViewModelChestOpenTapTests.swift */; };
 		C4A74F2241EDE99CAD987FAD /* KeychainServicesStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B0DC4D9B2A7F167B1955EB5 /* KeychainServicesStoreTests.swift */; };
 		C56CC0B015043BDFBCD890FB /* StepSyncTriggerServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F8747B6A10C8F9FE4D25710 /* StepSyncTriggerServiceTests.swift */; };
+		C6040C85EA03827E0504B993 /* RewardRarityTagMapperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AACB6F74BD36D8CA6984F5D /* RewardRarityTagMapperTests.swift */; };
 		C783A1232D342672FC8395C8 /* RealFriendsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77D74E92F06F929BC8876E94 /* RealFriendsViewModel.swift */; };
 		C80F8175F8AD6E003CF15744 /* SessionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 047B6AA8183B489ECCA148EC /* SessionStoreTests.swift */; };
 		C88253EFC5DB861DA4829769 /* RootViewWireTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 483E90AE12F6E9CD76C4A806 /* RootViewWireTests.swift */; };
@@ -283,6 +287,7 @@
 		F3D8FDF2450016ED3A42538D /* PetStateSyncTriggerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E7FADD41A5C80AA030B7B19 /* PetStateSyncTriggerService.swift */; };
 		F40AC48AA0ED123A50A24441 /* RealHomeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD7B647FCD9FBE81E2695896 /* RealHomeViewModel.swift */; };
 		F430B3185D052D71DF4E1B5B /* MockRoomRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBB152DBC935D025C9235235 /* MockRoomRepository.swift */; };
+		F539437AA2601D648AF9EC28 /* RewardRarityTagMapper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04648CBCE73C3E5280B96E1F /* RewardRarityTagMapper.swift */; };
 		F7526C83559976D7C0658CA1 /* WardrobeViewScaffoldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD34A43C0913617AB41B14EF /* WardrobeViewScaffoldTests.swift */; };
 		F78603C7E795CCC20CE4444F /* MockAuthRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB48C86EC0A0561EEFDB99CA /* MockAuthRepository.swift */; };
 		F81121F7AF5571797A59EF9A /* ProfileViewScaffoldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C6A4A98102338869A350D8 /* ProfileViewScaffoldTests.swift */; };
@@ -313,6 +318,7 @@
 		0284ED9AF0302AAB120343E4 /* JoinRoomUseCase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoinRoomUseCase.swift; sourceTree = "<group>"; };
 		0356656CC2DBA0B7ED4D2B9A /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		037A03497312B6CC6305D89B /* ErrorPresentationHostModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorPresentationHostModifier.swift; sourceTree = "<group>"; };
+		04648CBCE73C3E5280B96E1F /* RewardRarityTagMapper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RewardRarityTagMapper.swift; sourceTree = "<group>"; };
 		047B6AA8183B489ECCA148EC /* SessionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStoreTests.swift; sourceTree = "<group>"; };
 		048F7B657E1260FE3B7E0106 /* EmojisEndpoints.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojisEndpoints.swift; sourceTree = "<group>"; };
 		0565A1742A225D9D006BA655 /* Icons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Icons.swift; sourceTree = "<group>"; };
@@ -339,6 +345,7 @@
 		19F7FB8E00CDE2AE29A5EFD3 /* ChestOpenUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChestOpenUITests.swift; sourceTree = "<group>"; };
 		1A5BA8124F4E5700CA7FCD1D /* HomePetNameResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomePetNameResolverTests.swift; sourceTree = "<group>"; };
 		1A9498ED4B7189FF05A4DFAC /* HomeEndpoints.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeEndpoints.swift; sourceTree = "<group>"; };
+		1AACB6F74BD36D8CA6984F5D /* RewardRarityTagMapperTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RewardRarityTagMapperTests.swift; sourceTree = "<group>"; };
 		1AFFBC70D51EF0C753AF1588 /* RoomEndpoints.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomEndpoints.swift; sourceTree = "<group>"; };
 		1B084E76E0B4DD936A100277 /* MockHomeRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockHomeRepository.swift; sourceTree = "<group>"; };
 		1C85CBDB5056F2E2B29C6297 /* LoadEmojisUseCaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadEmojisUseCaseTests.swift; sourceTree = "<group>"; };
@@ -464,6 +471,7 @@
 		800342275B5B2E2689E21B85 /* RoomScaffoldView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomScaffoldView.swift; sourceTree = "<group>"; };
 		8063CF019C57AE4A403B2750 /* AppCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCoordinator.swift; sourceTree = "<group>"; };
 		82ABF15FF804D417E12C08F6 /* LoadChestUseCaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadChestUseCaseTests.swift; sourceTree = "<group>"; };
+		82EC9E3C8979375035AFD455 /* ChestOpenRewardPopupUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChestOpenRewardPopupUITests.swift; sourceTree = "<group>"; };
 		85E5B3C72E4F48EB18246EBF /* LoadHomeUseCase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadHomeUseCase.swift; sourceTree = "<group>"; };
 		86A8627A92C76774272E6EEC /* IdempotencyKeyGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdempotencyKeyGenerator.swift; sourceTree = "<group>"; };
 		873BE255FEE4A4D407B2E425 /* HomeResponse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeResponse.swift; sourceTree = "<group>"; };
@@ -500,6 +508,7 @@
 		A67BA2AE8B846A8622DA39DF /* GuestLoginRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuestLoginRequest.swift; sourceTree = "<group>"; };
 		A6B0E0D7FA4E35E61E70DE13 /* RarityTag.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RarityTag.swift; sourceTree = "<group>"; };
 		A773C979015CB0BC2641E422 /* HomeContainerViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeContainerViewTests.swift; sourceTree = "<group>"; };
+		A7C1ACD1367CC0DCAD1492F1 /* HomeViewModelPendingRewardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeViewModelPendingRewardTests.swift; sourceTree = "<group>"; };
 		A97641FABBB15B8262102DB5 /* InMemoryKeychainStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InMemoryKeychainStoreTests.swift; sourceTree = "<group>"; };
 		A97B3FDFA80DE7BD738FB30A /* ProfileViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileViewModel.swift; sourceTree = "<group>"; };
 		A994F1189BB18B4147B358EC /* HomeRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeRepositoryTests.swift; sourceTree = "<group>"; };
@@ -519,6 +528,7 @@
 		B2C5ED72E2191EE2624B1770 /* KeychainServicesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainServicesStore.swift; sourceTree = "<group>"; };
 		B39E94DF59D63BB7B44DACA0 /* ResetIdentityButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResetIdentityButton.swift; sourceTree = "<group>"; };
 		B433BA798A041C7AA978179C /* KeychainKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainKey.swift; sourceTree = "<group>"; };
+		B6F6224D53EF64FF1D57505B /* RewardPopupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RewardPopupView.swift; sourceTree = "<group>"; };
 		B7213E6B5CAEC2E5615097D5 /* StubURLProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StubURLProtocol.swift; sourceTree = "<group>"; };
 		B75295C260CB8C58C10561AA /* SessionState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionState.swift; sourceTree = "<group>"; };
 		B7A2373D85C96B00B455D7F2 /* WSMessageCodecEmojiSendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WSMessageCodecEmojiSendTests.swift; sourceTree = "<group>"; };
@@ -927,6 +937,7 @@
 			isa = PBXGroup;
 			children = (
 				E13185203AFBFE4069761426 /* HomeViewModelLoadHomeTests.swift */,
+				A7C1ACD1367CC0DCAD1492F1 /* HomeViewModelPendingRewardTests.swift */,
 				C3D78F97573D790FEB58AB26 /* RealHomeViewModelChestOpenTapTests.swift */,
 				EB0FA1241723FAAED3D62FBD /* RealHomeViewModelTests.swift */,
 			);
@@ -966,8 +977,17 @@
 				3BD648D79A777FEAC6304617 /* Services */,
 				9C0A938A92A2D7C22324E7E6 /* UseCases */,
 				444D4799DF6A180AF62343E3 /* ViewModels */,
+				49DC5AD0F0E464B690073BF0 /* Views */,
 			);
 			path = Home;
+			sourceTree = "<group>";
+		};
+		49DC5AD0F0E464B690073BF0 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				1AACB6F74BD36D8CA6984F5D /* RewardRarityTagMapperTests.swift */,
+			);
+			path = Views;
 			sourceTree = "<group>";
 		};
 		4CE54BF86F3CD0F7540B775F /* DesignSystem */ = {
@@ -1372,6 +1392,7 @@
 		AF8FEC6759D77EB9DFE1EE93 /* PetAppUITests */ = {
 			isa = PBXGroup;
 			children = (
+				82EC9E3C8979375035AFD455 /* ChestOpenRewardPopupUITests.swift */,
 				19F7FB8E00CDE2AE29A5EFD3 /* ChestOpenUITests.swift */,
 				B8DCA03F81514912BF5A05C2 /* ChestRefreshUITests.swift */,
 				209005BD922487C8EEA8A567 /* HealthProviderIntegrationTests.swift */,
@@ -1583,6 +1604,8 @@
 				1E82EB03BF2525811F78B66B /* HomeContainerView.swift */,
 				F9EFA8790E4F25D6B495C1B8 /* HomeView.swift */,
 				422C789F2854D6FE69DC2F4A /* PetSpriteView.swift */,
+				B6F6224D53EF64FF1D57505B /* RewardPopupView.swift */,
+				04648CBCE73C3E5280B96E1F /* RewardRarityTagMapper.swift */,
 				D7E5BE574E8C5101955ADFD0 /* JoinRoomModal */,
 			);
 			path = Views;
@@ -1904,6 +1927,7 @@
 				A67C4D0E57AD1062D5A2900E /* HomeResponseDecodingTests.swift in Sources */,
 				4158EEBFA7D1499EC398928A /* HomeViewModelLoadHomeTests.swift in Sources */,
 				9C869E809A6BCBC527DA5D7B /* HomeViewModelMotionTests.swift in Sources */,
+				875CACAD86EEC501EFCA4AB3 /* HomeViewModelPendingRewardTests.swift in Sources */,
 				0C891BA53EA646D2720013FC /* HomeViewModelPingTests.swift in Sources */,
 				6DD1861C7B81F5DBB2EFDAD1 /* HomeViewModelTests.swift in Sources */,
 				D1FA721D837E36CD0348DA8F /* HomeViewScaffoldTests.swift in Sources */,
@@ -1944,6 +1968,7 @@
 				D8383EB906E73155F80A89B5 /* RealRoomViewModelTests.swift in Sources */,
 				4F360144802CDBAC475EE364 /* ResetIdentityViewModelTests.swift in Sources */,
 				6F6F17C2B5631A4546CE0776 /* ResetKeychainUseCaseTests.swift in Sources */,
+				C6040C85EA03827E0504B993 /* RewardRarityTagMapperTests.swift in Sources */,
 				D95CF956D40CD9DC16B70D43 /* RoomEndpointsTests.swift in Sources */,
 				CF16A08C38ACA3BC15586955 /* RoomRepositoryTests.swift in Sources */,
 				49815446413E48E5145CEFFB /* RoomViewModelEmojiPanelTests.swift in Sources */,
@@ -1973,6 +1998,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				98254ACE6BE190BB8E11DE19 /* AccessibilityID.swift in Sources */,
+				19A76F498694412B9B23FC94 /* ChestOpenRewardPopupUITests.swift in Sources */,
 				383CF7301F76558D19A5B1BF /* ChestOpenUITests.swift in Sources */,
 				62F64C4F2660FF7A773E32BC /* ChestRefreshUITests.swift in Sources */,
 				7516CB500D88EBAE63284557 /* EmojiPanelViewUITests.swift in Sources */,
@@ -2119,6 +2145,8 @@
 				6CEDA7C38D65B50578790DBE /* ResetIdentityViewModel.swift in Sources */,
 				8CA0BD54EB51F3C870F11165 /* ResetKeychainUseCase.swift in Sources */,
 				3850A7F0D3CA11A7304E4911 /* RetryView.swift in Sources */,
+				394BC55B6074CFF02098C1EE /* RewardPopupView.swift in Sources */,
+				F539437AA2601D648AF9EC28 /* RewardRarityTagMapper.swift in Sources */,
 				7C0BCD33B25FD4903FA832DC /* RoomActiveEmoji.swift in Sources */,
 				A0F2DF91DB67F8EABCAD684D /* RoomEndpointDTO.swift in Sources */,
 				B3981E19A0361A3285242BE4 /* RoomEndpoints.swift in Sources */,

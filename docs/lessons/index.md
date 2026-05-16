@@ -330,3 +330,4 @@
 | 2026-05-15 | [Driver 必须在 sink 时同步初始化 view-state，否则 over-correction chain 永远收不住（21-1 r2）](2026-05-15-driver-sync-init-on-sink-21-1-r2.md) | 1 | architecture | `9a603d6` |
 | 2026-05-15 | [Combine sink 异步 hop 破坏 happens-before：subsequent hydration 闪一帧（21-1 r3）](2026-05-15-driver-sync-sink-on-subsequent-change-21-1-r3.md) | 1 | architecture | `1da2869` |
 | 2026-05-15 | [Server-anchored time：device clock skew 时 unlockAt 派生破坏 source of truth（21-1 r4）](2026-05-15-driver-server-anchored-time-21-1-r4.md) | 1 | architecture | `1d7c39c` |
+| 2026-05-16 | [根级本地 build 产物未 gitignore，dev-story change set 携带 61MB 机器特定缓存（21-4 r1）](2026-05-16-gitignore-local-build-artifacts-21-4-r1.md) | 1 | hygiene | `<pending>` |
