@@ -2,7 +2,7 @@
 date: 2026-05-16
 source_review: codex review file /tmp/epic-loop-review-21-4-r1.md (epic-loop r1)
 story: 21-4-奖励弹窗-popup
-commit: <pending>
+commit: 531a05b
 lesson_count: 1
 ---
 
