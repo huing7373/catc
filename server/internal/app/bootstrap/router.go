@@ -501,6 +501,14 @@ func NewRouter(deps Deps) *gin.Engine {
 		)
 		chestHandler := handler.NewChestHandler(chestSvc, idempotencyRepo, deps.RateLimitCfg)
 
+		// Story 23.3 加：cosmetic service + handler（GET /cosmetics/catalog）。
+		// 复用 line 486 既有 cosmeticItemRepo 实例（**不**新建第二个实例 ——
+		// 与 chestSvc 复用同实例同模式）；CosmeticService.ListCatalog 调
+		// CosmeticItemRepo.ListEnabledForCatalog（23.3 新增独立方法，**不**复用
+		// 20.6 ListEnabledForWeightedPick）。
+		cosmeticSvc := service.NewCosmeticService(cosmeticItemRepo)
+		cosmeticsHandler := handler.NewCosmeticsHandler(cosmeticSvc)
+
 		api := r.Group("/api/v1")
 
 		// /auth 子组：RateLimitByIP（V1 §4.1 行 218）
@@ -517,6 +525,10 @@ func NewRouter(deps Deps) *gin.Engine {
 		authedGroup.GET("/home", homeHandler.LoadHome)
 		// Story 17.4 加：GET /api/v1/emojis 表情列表（auth + RateLimitByUserID）
 		authedGroup.GET("/emojis", emojisHandler.GetEmojis)
+		// Story 23.3 加：GET /api/v1/cosmetics/catalog 装扮配置目录
+		// （auth + RateLimitByUserID 由 authedGroup 既有中间件链兜底，
+		// 对应 §8.1 错误码 1001 / 1005；与 /emojis / /chest/current 同组同模式）
+		authedGroup.GET("/cosmetics/catalog", cosmeticsHandler.GetCatalog)
 		authedGroup.POST("/steps/sync", stepsHandler.PostSync)     // Story 7.3 加
 		authedGroup.GET("/steps/account", stepsHandler.GetAccount) // Story 7.4 加
 		authedGroup.GET("/chest/current", chestHandler.GetCurrent) // Story 20.5 加

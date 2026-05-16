@@ -58,11 +58,22 @@ type CosmeticItem struct {
 func (CosmeticItem) TableName() string { return "cosmetic_items" }
 
 // CosmeticItemRepo 是 cosmetic_items 表的访问接口（Story 20.6 引入；
-// 本 story 阶段唯一方法 ListEnabledForWeightedPick —— 开箱事务步骤 5g 加权抽取）。
+// Story 23.3 扩展加 ListEnabledForCatalog —— GET /cosmetics/catalog 配置目录查询）。
 //
-// **范围红线**：本 interface 仅含本 story 业务路径所需方法；**不**提前实装
-// Create / Update / Delete / FindByID 等方法（YAGNI；那些路径未来 catalog / inventory
-// epic owner —— Epic 23 落地 GET /cosmetics/catalog / inventory 接口时再补）。
+// **两方法语义独立、各自演进，不可互相复用**：
+//   - ListEnabledForWeightedPick（Story 20.6）：开箱事务步骤 5g 加权抽取专用，
+//     **无 ORDER BY**（service 内加权采样不需要排序），SELECT *。
+//   - ListEnabledForCatalog（Story 23.3）：catalog 配置目录查询专用，**必须**
+//     `ORDER BY rarity ASC, slot ASC, id ASC` 三级全序（§8.1 契约 + client grid
+//     防抖动），显式 7 列 Select。
+//
+// 故意**不**复用 ListEnabledForWeightedPick 做 catalog：复用会让 catalog 排序契约
+// 与开箱抽奖路径耦合（任一方改字段 / 改排序就破坏另一方；下游评审找不到 catalog
+// 专用查询的明确边界）。两方法语义独立、并列存在。
+//
+// **范围红线**：本 interface 仅含已落地业务路径所需方法；**不**提前实装
+// Create / Update / Delete / FindByID / 23.4 inventory 聚合查询等方法（YAGNI；
+// inventory 由 Epic 23 Story 23.4 落地 GET /cosmetics/inventory 时再补）。
 type CosmeticItemRepo interface {
 	// ListEnabledForWeightedPick 返回所有 is_enabled=1 的 cosmetic_items 行
 	// （含 id / rarity / drop_weight / name / slot / asset_url / icon_url；
@@ -76,6 +87,32 @@ type CosmeticItemRepo interface {
 	//
 	// query 失败 → 返 raw error 透传（service 包成 1009）。
 	ListEnabledForWeightedPick(ctx context.Context) ([]CosmeticItem, error)
+
+	// ListEnabledForCatalog 返回所有 is_enabled=1 的 cosmetic_items 行，按
+	// V1 §8.1 服务端逻辑步骤 2 钦定排序（GET /cosmetics/catalog 配置目录查询）。
+	//
+	// SQL: SELECT id, code, name, slot, rarity, icon_url, asset_url FROM cosmetic_items
+	//      WHERE is_enabled = 1 ORDER BY rarity ASC, slot ASC, id ASC
+	//
+	// **排序契约（§8.1 行 1306 + 23.1 r1 [P2] 钦定全序确定）**：
+	//   - rarity ASC → slot ASC → **id ASC**（决定性 tie-breaker，不可省）。
+	//   - id ASC 不可省理由：§1 catalog seed AR18 数量约束下同 (rarity, slot) 必有
+	//     多行（如 hat_yellow/hat_red 同为 (rarity=1, slot=1)、gloves_white/
+	//     gloves_brown 同为 (rarity=1, slot=2)），缺 id ASC 则 MySQL 同 (rarity,
+	//     slot) 行顺序跨请求可抖动 → client grid 抖动违背契约。
+	//
+	// 显式 Select 7 列（id / code / name / slot / rarity / icon_url / asset_url）
+	// 与 §8.1 服务端逻辑步骤 2 钦定 1:1；**不** SELECT *（避免 future 表加列污染
+	// payload；drop_weight / is_enabled / created_at / updated_at 不在 SELECT —
+	// client 不需要，GORM Scan 填 zero-value 安全，与 emoji_repo.List 同模式）。
+	//
+	// 空结果集 → 返回 []CosmeticItem{}（非 nil）；service 层透传为 {items:[]}
+	// 非 error（§8.1 行 1301：catalog 为空 code=0 不报错）。query 失败 → 返 raw
+	// error 透传（service 包成 1009）。
+	//
+	// **范围红线**：本 story（23.3）仅加 catalog 方法；**不**实装 23.4 inventory
+	// 聚合查询方法（YAGNI；inventory 是 Story 23.4 钦定范围）。
+	ListEnabledForCatalog(ctx context.Context) ([]CosmeticItem, error)
 }
 
 // cosmeticItemRepo 是 CosmeticItemRepo 的默认实装。
@@ -102,4 +139,39 @@ func (r *cosmeticItemRepo) ListEnabledForWeightedPick(ctx context.Context) ([]Co
 		return nil, err
 	}
 	return items, nil
+}
+
+// ListEnabledForCatalog 实装：单 SELECT，显式 7 列 + WHERE is_enabled=1 +
+// ORDER BY rarity ASC, slot ASC, id ASC 三级全序。详见 CosmeticItemRepo.ListEnabledForCatalog
+// 接口注释（§8.1 服务端逻辑步骤 2 钦定）。
+//
+// **不**复用 ListEnabledForWeightedPick（后者无 ORDER BY、SELECT *、加权抽取语义）。
+func (r *cosmeticItemRepo) ListEnabledForCatalog(ctx context.Context) ([]CosmeticItem, error) {
+	// 用 tx.FromContext 取 db handle：事务外调用走 r.db；事务内调用走 txCtx 注入的
+	// tx 句柄（与 emoji_repo.List / 20.6 既有 repo 同模式；本 story 阶段实际不在
+	// 事务内调，但保持模式一致让 future 扩展无需改 method body）。
+	db := tx.FromContext(ctx, r.db).WithContext(ctx)
+
+	var rows []CosmeticItem
+	// 显式 Select 字段集（不依赖 GORM 自动 SELECT *），与 §8.1 服务端逻辑步骤 2
+	// 钦定 7 列 1:1 对齐；避免 future 表加字段时被自动拉过来污染 query payload。
+	// **注**：drop_weight / is_enabled / created_at / updated_at **不**在 SELECT
+	// 列表中（client 不需要 + service 层不做 wire DTO 转换），但 GORM Scan 会把
+	// 它们填为 zero-value；service 层 DTO 转换不读这些字段，所以 zero-value 安全
+	// （与 emoji_repo.go 行 144-148 同模式）。
+	err := db.
+		Select("id, code, name, slot, rarity, icon_url, asset_url").
+		Where("is_enabled = ?", 1).
+		Order("rarity ASC, slot ASC, id ASC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	// GORM Find 在 0 行时返回空 slice 而非 nil（与 emoji_repo.List 同模式）；
+	// 保险起见显式兜底空 slice 让 service 层调用方不需要 nil-check（§8.1 行 1301：
+	// catalog 为空返 {items:[]} code=0 不报错）。
+	if rows == nil {
+		rows = []CosmeticItem{}
+	}
+	return rows, nil
 }

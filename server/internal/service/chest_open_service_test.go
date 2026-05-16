@@ -70,6 +70,14 @@ func (s *stubCosmeticItemRepo) ListEnabledForWeightedPick(ctx context.Context) (
 	return s.listFn(ctx)
 }
 
+// ListEnabledForCatalog: Story 23.3 给 CosmeticItemRepo interface 加了本方法
+// （GET /cosmetics/catalog 配置目录查询）；本 20.6 stub 仅测开箱加权抽取路径，
+// 不走 catalog 路径 —— 加防御性 panic 让任何意外调用暴露（与 cosmetic_service_test
+// 同模式；本方法**仅**为 satisfy 扩展后的 interface 编译，不改 20.6 任何既有行为）。
+func (s *stubCosmeticItemRepo) ListEnabledForCatalog(ctx context.Context) ([]mysql.CosmeticItem, error) {
+	panic("stubCosmeticItemRepo.ListEnabledForCatalog not expected (chest_open_service_test 仅测开箱加权抽取路径，不走 GET /cosmetics/catalog 路径)")
+}
+
 // stubChestOpenLogRepo: mysql.ChestOpenLogRepo 的 stub
 type stubChestOpenLogRepo struct {
 	createFn    func(ctx context.Context, log *mysql.ChestOpenLog) error

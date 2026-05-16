@@ -67,3 +67,73 @@ func TestCosmeticItemRepo_ListEnabledForWeightedPick_EmptyResult_ReturnsEmptySli
 		t.Errorf("len(got) = %d, want 0", len(got))
 	}
 }
+
+// Story 23.3 — CosmeticItemRepo.ListEnabledForCatalog sqlmock 单测（≥2 case）
+//
+// 与既有 ListEnabledForWeightedPick 测同模式（sqlmock，非 dockertest）。
+// 排序契约的真实 SQL 验证在集成测试（cosmetic_service_integration_test.go），
+// 本 repo 层 sqlmock 验证 SQL 生成形态（显式 7 列 Select + WHERE + ORDER BY）+
+// 透传 + 空集兜底。
+
+// TestCosmeticItemRepo_ListEnabledForCatalog_HappyPath:
+// 多行 enabled → repo 显式 7 列 SELECT + WHERE is_enabled=1 + ORDER BY
+// rarity ASC, slot ASC, id ASC + 透传完整 slice。
+func TestCosmeticItemRepo_ListEnabledForCatalog_HappyPath(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewCosmeticItemRepo(gormDB)
+
+	rows := sqlmock.NewRows([]string{
+		"id", "code", "name", "slot", "rarity", "icon_url", "asset_url",
+	}).
+		AddRow(uint64(1), "hat_yellow", "小黄帽", int8(1), int8(1), "https://x/i1", "https://x/a1").
+		AddRow(uint64(2), "hat_red", "小红帽", int8(1), int8(1), "https://x/i2", "https://x/a2").
+		AddRow(uint64(13), "hat_crown", "金王冠", int8(1), int8(3), "https://x/i3", "https://x/a3")
+
+	// 显式 Select 7 列 + WHERE is_enabled=? + ORDER BY rarity ASC, slot ASC, id ASC
+	mock.ExpectQuery(regexp.QuoteMeta(
+		"SELECT id, code, name, slot, rarity, icon_url, asset_url FROM `cosmetic_items` " +
+			"WHERE is_enabled = ? ORDER BY rarity ASC, slot ASC, id ASC")).
+		WithArgs(1).
+		WillReturnRows(rows)
+
+	got, err := repo.ListEnabledForCatalog(context.Background())
+	if err != nil {
+		t.Fatalf("ListEnabledForCatalog: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len(got) = %d, want 3", len(got))
+	}
+	if got[0].ID != 1 || got[0].Code != "hat_yellow" || got[0].Name != "小黄帽" ||
+		got[0].Slot != 1 || got[0].Rarity != 1 ||
+		got[0].IconURL != "https://x/i1" || got[0].AssetURL != "https://x/a1" {
+		t.Errorf("got[0] = %+v, want id=1 code=hat_yellow name=小黄帽 slot=1 rarity=1 icon=https://x/i1 asset=https://x/a1", got[0])
+	}
+	if got[2].ID != 13 || got[2].Rarity != 3 {
+		t.Errorf("got[2] = %+v, want id=13 rarity=3", got[2])
+	}
+}
+
+// TestCosmeticItemRepo_ListEnabledForCatalog_EmptyResult_ReturnsEmptySlice:
+// 空结果 → 返 []CosmeticItem{}（非 nil），service 层透传为 {items:[]} 非 error
+// （§8.1 行 1301：catalog 为空 code=0 不报错）。
+func TestCosmeticItemRepo_ListEnabledForCatalog_EmptyResult_ReturnsEmptySlice(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewCosmeticItemRepo(gormDB)
+
+	mock.ExpectQuery(regexp.QuoteMeta(
+		"SELECT id, code, name, slot, rarity, icon_url, asset_url FROM `cosmetic_items` " +
+			"WHERE is_enabled = ? ORDER BY rarity ASC, slot ASC, id ASC")).
+		WithArgs(1).
+		WillReturnRows(sqlmock.NewRows([]string{"id"})) // 0 行
+
+	got, err := repo.ListEnabledForCatalog(context.Background())
+	if err != nil {
+		t.Fatalf("ListEnabledForCatalog: %v", err)
+	}
+	if got == nil {
+		t.Errorf("got == nil, want []CosmeticItem{}")
+	}
+	if len(got) != 0 {
+		t.Errorf("len(got) = %d, want 0", len(got))
+	}
+}
