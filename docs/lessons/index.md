@@ -331,4 +331,4 @@
 | 2026-05-15 | [Combine sink 异步 hop 破坏 happens-before：subsequent hydration 闪一帧（21-1 r3）](2026-05-15-driver-sync-sink-on-subsequent-change-21-1-r3.md) | 1 | architecture | `1da2869` |
 | 2026-05-15 | [Server-anchored time：device clock skew 时 unlockAt 派生破坏 source of truth（21-1 r4）](2026-05-15-driver-server-anchored-time-21-1-r4.md) | 1 | architecture | `1d7c39c` |
 | 2026-05-16 | [根级本地 build 产物未 gitignore，dev-story change set 携带 61MB 机器特定缓存（21-4 r1）](2026-05-16-gitignore-local-build-artifacts-21-4-r1.md) | 1 | hygiene | `531a05b` |
-| 2026-05-16 | [开箱前 await in-flight + 自己再 sync 一次的双 sync 是事务正确性 safe choice，不是可消除的浪费（21-5 r1）](2026-05-16-double-sync-before-chest-open-is-transactional-safe-21-5-r1.md) | 1 | architecture | `<pending>` |
+| 2026-05-16 | [开箱前 await in-flight + 自己再 sync 一次的双 sync 是事务正确性 safe choice，不是可消除的浪费（21-5 r1）](2026-05-16-double-sync-before-chest-open-is-transactional-safe-21-5-r1.md) | 1 | architecture | `f1827e7` |

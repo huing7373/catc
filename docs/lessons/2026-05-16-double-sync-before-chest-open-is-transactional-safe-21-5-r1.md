@@ -2,7 +2,7 @@
 date: 2026-05-16
 source_review: codex review round 1 of Story 21-5-开箱前主动同步步数（/tmp/epic-loop-review-21-5-r1.md）
 story: 21-5-开箱前主动同步步数
-commit: <pending>
+commit: f1827e7
 lesson_count: 1
 related_lessons:
   - 2026-05-04-manual-trigger-must-await-in-flight.md
