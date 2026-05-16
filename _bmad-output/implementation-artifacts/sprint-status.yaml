@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-05-15 (story 21-2 done)
+# last_updated: 2026-05-16 (epic-21 done + retrospective done)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-05-16  # Story 21-5 done
+last_updated: 2026-05-16  # epic-21 done + retrospective done
 # Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
 # 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
@@ -215,13 +215,13 @@ development_status:
   20-8-dev-端点-post-dev-grant-cosmetic-batch: done
   20-9-layer-2-集成测试-开箱事务全流程: done
   epic-20-retrospective: done
-  epic-21: in-progress
+  epic-21: done
   21-1-首页宝箱组件-swiftui: done
   21-2-get-chest-current-调用-状态展示-主动定时纠正: done
   21-3-开箱按钮-调用-post-chest-open: done
   21-4-奖励弹窗-popup: done
   21-5-开箱前主动同步步数: done
-  epic-21-retrospective: optional
+  epic-21-retrospective: done
   epic-22: backlog
   22-1-跨端集成测试场景-宝箱开箱-e2e: backlog
   22-2-节点-7-demo-验收: backlog
