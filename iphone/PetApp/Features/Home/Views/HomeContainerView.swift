@@ -103,6 +103,9 @@ private struct HomeContainerHomeViewBridge: View {
                     currentChest: appState.currentChest,
                     remainingSeconds: homeViewModel.chestRemainingSeconds,
                     isOpening: homeViewModel.isOpening,
+                    // Story 21.5 AC2: 传 state.isSyncingSteps（与既有 state.isOpening 对称）——
+                    // 开箱前步数同步 > 2s 时副标题切 "同步步数中…".
+                    isSyncingSteps: homeViewModel.isSyncingSteps,
                     onOpenTap: {
                         // Story 21.3 AC7：替换占位空闭包为真实 onChestOpenTap.
                         // RealHomeViewModel override 调 OpenChestUseCase；MockHomeViewModel 记录 invocation.

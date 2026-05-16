@@ -376,9 +376,15 @@ public final class RealHomeViewModel: HomeViewModel {
     ///   2. guard openChestUseCase != nil（fallback: log + return，与 onCreateTap nil fallback 同精神 ——
     ///      开箱事务涉及步数扣减 + 抽奖随机，没有合理的本地占位，所以 fallback 是 noop 而非 silent mutate）.
     ///   3. isOpening = true（同步段，main actor）.
-    ///   4. 起 Task: do { snapshot = try await useCase.execute() → self.pendingReward = snapshot }
-    ///      catch { ErrorPresenter 业务错误码 case-by-case 文案 / 其他错误透传 mapper }.
-    ///      defer { isOpening = false（必恢复，让按钮重新可点）}.
+    ///   4. 起 Task:
+    ///      - Story 21.5 AC2: 起 syncHintTask（sleep 2s → 若 execute 仍未返回则 isSyncingSteps = true）.
+    ///      - do { snapshot = try await useCase.execute() → self.pendingReward = snapshot }
+    ///        catch { ErrorPresenter 业务错误码 case-by-case 文案 / 其他错误透传 mapper }.
+    ///      - defer { isOpening = false + syncHintTask.cancel() + isSyncingSteps = false
+    ///                （必恢复，让按钮重新可点 + 隐藏 "同步步数中…"）}.
+    ///   注：execute() 内 Step 0 已 await stepSyncTriggerService.triggerManual()（21.3 落地编排；
+    ///      21.5 DI 让该 service 非 nil）—— sync 失败被 triggerManual 静默吞（非 async throws）,
+    ///      不阻塞后续 openChest（AC3 不变量；本 ViewModel 不需新增兜底）.
     ///
     /// 业务错误码文案策略（V1 §7.2 错误码表 + spec AC 行 3083）:
     ///   - 4002 宝箱未解锁    → alert "宝箱未解锁"
@@ -407,9 +413,23 @@ public final class RealHomeViewModel: HomeViewModel {
         let presenter = self.localErrorPresenter
         self.isOpening = true
         Task { @MainActor [weak self] in
+            // Story 21.5 AC2: 起 2s 延迟 task —— execute()（内含 Step 0 triggerManual sync）
+            // 超 2s 仍未返回 → 显 "同步步数中…"（钦定折中：以 execute 整体为基准，不改 21.3 冻结的
+            // execute() 内部加回调；spec Dev Notes "实装折中" 钦定 + 防过度工程）.
+            let syncHintTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled else { return }
+                self?.isSyncingSteps = true
+            }
             defer {
                 // 必恢复 isOpening = false（成功 / 失败 / cancel 都走此 defer）.
                 self?.isOpening = false
+                // Story 21.5 AC2 / AC3: execute() 返回（成功 / 失败 / catch）后必复位 ——
+                // syncHintTask.cancel() 防 execute 在 2s 内返回时延迟 task 仍 set true
+                // （cancel 后延迟 task 内 `guard !Task.isCancelled` 短路）；isSyncingSteps = false
+                // 走 defer 与 isOpening 同精神保证三路径（成功 / 抛 APIError / 抛非 APIError）都复位.
+                syncHintTask.cancel()
+                self?.isSyncingSteps = false
             }
             guard let self else { return }
             do {

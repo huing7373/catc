@@ -376,6 +376,35 @@ struct RootView: View {
                     await homeViewModel?.loadHome()
                 }
             }
+            // Story 21.5 AC1: ensure*Wired() 组**上移到两处 bind(openChestUseCase:) 之前** ——
+            // 让 makeOpenChestUseCase 能复用 RootView @State 持有的同一个 stepSyncTriggerService 实例
+            // （ensureStepSyncWired() 在此处 lazy 构造它）.原位置（在 bind(openChestUseCase:) 之后）
+            // 时序上 makeOpenChestUseCase 被调时 stepSyncTriggerService 还是 nil → 21.3 hook 短路不 sync.
+            //
+            // **依赖安全性论证**（spec AC1 钦定）：
+            //   - ensureLaunchStateMachineWired() 仅依赖 container + appState/homeViewModel/sessionStore
+            //     （@StateObject，整个 RootView 生命周期存在，不依赖任何前置 bind）→ 安全上移；
+            //   - ensureStepSyncWired() 仅依赖 appState（@StateObject）+ homeViewModel（@StateObject）
+            //     + container；不依赖 line ~380 的 bind(createRoomUseCase:) / bind(openChestUseCase:)；
+            //     上移后 homeViewModel.bind(appState:)（line 337）+ homeViewModel.bind(motionProvider:)
+            //     仍在其前（同 .onAppear 块同步顺序执行）→ 安全上移；
+            //   - ensurePetStateSyncWired() / ensureChestRefreshWired() 同 ensureStepSyncWired 仅依赖
+            //     appState/homeViewModel/container → 同样安全上移.
+            //   - **组内相对顺序保持不变**（ensureLaunchStateMachineWired → ensureStepSyncWired →
+            //     ensurePetStateSyncWired → ensureChestRefreshWired；RootView 钦定「与未来 audit 期望
+            //     顺序一致」）；本 story 整组上移，组内顺序零改动.
+            //   - nil 守卫幂等不变（RootView 重建不重造）：每个 ensure*Wired() 内的
+            //     `guard xxx == nil else { return }` 上移后仍生效（守卫与位置无关，仅与 @State 当前值有关）.
+            ensureLaunchStateMachineWired()
+            // Story 8.5 AC9: lazy 注入 stepSyncTriggerService（与 ensureLaunchStateMachineWired 同模式）.
+            // 必须在 ensureLaunchStateMachineWired 之后调（与未来 audit 期望顺序一致）.
+            ensureStepSyncWired()
+            // Story 15.4 AC4: lazy 注入 petStateSyncTriggerService（与 ensureStepSyncWired 同模式）.
+            ensurePetStateSyncWired()
+            // Story 21.2 AC6: lazy 注入 chestRefreshTriggerService（与 ensureStepSyncWired /
+            // ensurePetStateSyncWired 同模式；nil 守卫确保 RootView 重建不重启 60s timer）.
+            ensureChestRefreshWired()
+
             if let realHomeVM = homeViewModel as? RealHomeViewModel, !isUITestSkipGuestLogin {
                 realHomeVM.bind(
                     createRoomUseCase: container.makeCreateRoomUseCase(appState: appState),
@@ -383,10 +412,15 @@ struct RootView: View {
                     errorPresenter: container.errorPresenter,
                     refreshHomeOnStaleNavigation: refreshHomeClosure
                 )
-                // Story 21.3 AC8: 注入 OpenChestUseCase 到 RealHomeViewModel.
-                // 让 onChestOpenTap override 走真实 server 路径（以前 nil fallback 仅 log）.
+                // Story 21.3 AC8 / Story 21.5 AC1: 注入 OpenChestUseCase 到 RealHomeViewModel.
+                // 让 onChestOpenTap override 走真实 server 路径（21.3 落地）+ 开箱前先 await
+                // stepSyncTriggerService.triggerManual()（21.5；传 RootView @State 持有的**同一**实例,
+                // 不是新 make 的 —— ensureStepSyncWired() 已在上方构造该 @State）.
                 realHomeVM.bind(
-                    openChestUseCase: container.makeOpenChestUseCase(appState: appState)
+                    openChestUseCase: container.makeOpenChestUseCase(
+                        appState: appState,
+                        stepSyncTriggerService: stepSyncTriggerService
+                    )
                 )
             } else if let realHomeVM = homeViewModel as? RealHomeViewModel, isUITestSkipGuestLogin {
                 // Story 21.3 AC10: UITEST_SKIP_GUEST_LOGIN=1 路径下也注入 OpenChestUseCase ——
@@ -401,8 +435,16 @@ struct RootView: View {
                 //
                 // 即便 errorPresenter nil（UITEST gate 不注入 errorPresenter），useCase 抛错时
                 // RealHomeViewModel.onChestOpenTap catch block 内 presenter? 短路 nil → silently 吞.
+                //
+                // Story 21.5 AC1 / AC5: UITEST_SKIP_GUEST_LOGIN=1 路径下 ensureStepSyncWired() 仍调
+                // （上方组上移后此路径也已构造 stepSyncTriggerService —— UITEST_MOCK_STEP_SYNC=1 时
+                // 内核走 UITestMockStepRepository，不发真实 HTTP）→ 传同一 @State 实例进 makeOpenChestUseCase,
+                // 让 ChestOpenStepSyncUITests 能验证开箱前 sync wire 不破回归.
                 realHomeVM.bind(
-                    openChestUseCase: container.makeOpenChestUseCase(appState: appState)
+                    openChestUseCase: container.makeOpenChestUseCase(
+                        appState: appState,
+                        stepSyncTriggerService: stepSyncTriggerService
+                    )
                 )
             }
             if let realRoomVM = roomViewModel as? RealRoomViewModel {
@@ -480,15 +522,6 @@ struct RootView: View {
             //   未授权时 CMMotionActivityManager 默默不发事件 → handler 不被调 → petState 保持 .rest 默认值.
             homeViewModel.bind(motionProvider: container.motionProvider)
 
-            ensureLaunchStateMachineWired()
-            // Story 8.5 AC9: lazy 注入 stepSyncTriggerService（与 ensureLaunchStateMachineWired 同模式）.
-            // 必须在 ensureLaunchStateMachineWired 之后调（与未来 audit 期望顺序一致）.
-            ensureStepSyncWired()
-            // Story 15.4 AC4: lazy 注入 petStateSyncTriggerService（与 ensureStepSyncWired 同模式）.
-            ensurePetStateSyncWired()
-            // Story 21.2 AC6: lazy 注入 chestRefreshTriggerService（与 ensureStepSyncWired /
-            // ensurePetStateSyncWired 同模式；nil 守卫确保 RootView 重建不重启 60s timer）.
-            ensureChestRefreshWired()
             // Story 15.5 AC3: 把 PetStateSyncTriggerService 作为 reconnect alignment delegate 注入 vm.
             // 时机：vm.bind(appState:webSocketClient:) 之后（vm 字段已就位）+ ensurePetStateSyncWired
             // 之后（service 已构造）. UITEST_SKIP_GUEST_LOGIN=1 路径下 service 仍构造（与 stepSync 同行为）；

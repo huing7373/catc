@@ -41,19 +41,25 @@ public struct ChestCardView: View {
     private let currentChest: HomeChest?
     private let remainingSeconds: Int
     private let isOpening: Bool
+    private let isSyncingSteps: Bool
     private let onOpenTap: () -> Void
 
     /// Story 21.3 AC7: init 加 `isOpening: Bool = false` 默认参数（让既有 callsite 不变；Preview / 老
     /// 单测 / Story 21.1 ChestCardViewTests 等不动；生产 callsite HomeContainerView 改造显式传值）.
+    /// Story 21.5 AC2: 同模式加 `isSyncingSteps: Bool = false` 默认参数 —— 既有 callsite / Preview /
+    /// countingView 路径不传走默认 false（零破坏）；生产 callsite HomeContainerView 显式传
+    /// `state.isSyncingSteps`（与 `state.isOpening` 对称）.
     public init(
         currentChest: HomeChest?,
         remainingSeconds: Int,
         isOpening: Bool = false,
+        isSyncingSteps: Bool = false,
         onOpenTap: @escaping () -> Void
     ) {
         self.currentChest = currentChest
         self.remainingSeconds = remainingSeconds
         self.isOpening = isOpening
+        self.isSyncingSteps = isSyncingSteps
         self.onOpenTap = onOpenTap
     }
 
@@ -95,8 +101,10 @@ public struct ChestCardView: View {
                     Text("宝箱已就绪")
                         .font(.system(size: 17, weight: .heavy))
                         .foregroundColor(theme.colors.ink)
-                    // Story 21.3 AC7：副标题在 isOpening=true 时切到 "开箱中…"（loading 视觉提示）.
-                    Text(isOpening ? "开箱中…" : "可开启")
+                    // Story 21.3 AC7 → Story 21.5 AC2：副标题三态优先级
+                    // isSyncingSteps → "同步步数中…" > isOpening → "开箱中…" > "可开启".
+                    // 抽 computed `subtitleText` 让三态可读 + 防嵌套三元（与既有 isUnlockable helper 同精神）.
+                    Text(subtitleText)
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(theme.colors.inkSoft)
                 }
@@ -144,7 +152,26 @@ public struct ChestCardView: View {
         .accessibilityElement(children: .contain)
     }
 
+    /// Story 21.5 AC2: unlockableView 副标题三态派生（isSyncingSteps > isOpening > idle）.
+    /// instance computed 直接读 self.isSyncingSteps / self.isOpening；底层逻辑委托给
+    /// `subtitleTextForTesting` static helper 让 ChestCardViewTests 可不经 SwiftUI body 直接断言.
+    private var subtitleText: String {
+        ChestCardView.subtitleTextForTesting(isSyncingSteps: isSyncingSteps, isOpening: isOpening)
+    }
+
     // MARK: - Testing helpers (internal visibility 让单测可直接断言；与 Story 8.4 PetSpriteView helper 同模式)
+
+    /// Story 21.5 AC2: 副标题三态派生纯函数（优先级 isSyncingSteps > isOpening > idle）.
+    /// - 不变量：
+    ///     isSyncingSteps == true                       → "同步步数中…"（sync 在 open 之前，时序优先）
+    ///     isSyncingSteps == false && isOpening == true  → "开箱中…"
+    ///     两者皆 false                                  → "可开启"
+    /// - 暴露 internal static 让 ChestCardViewTests 直接断言（与 isUnlockableForTesting 同模式）.
+    internal static func subtitleTextForTesting(isSyncingSteps: Bool, isOpening: Bool) -> String {
+        if isSyncingSteps { return "同步步数中…" }
+        if isOpening { return "开箱中…" }
+        return "可开启"
+    }
 
     /// 把秒数格式化为 mm:ss 字符串；负值钳到 0；秒数 ≥ 60 时分母进位.
     /// - 暴露 internal static 让 ChestCardViewTests 直接断言 formatter 行为（不通过 SwiftUI body 内省）.
@@ -207,6 +234,25 @@ public struct ChestCardView: View {
             remainingSeconds: 0
         ),
         remainingSeconds: 0,
+        onOpenTap: {}
+    )
+    .padding()
+    .environment(\.theme, ThemeName.candy.theme)
+}
+
+#Preview("ChestCardView — syncing steps · candy") {
+    // Story 21.5 AC2: isSyncingSteps=true 抽样 —— 副标题应显 "同步步数中…"（优先于 isOpening）.
+    ChestCardView(
+        currentChest: HomeChest(
+            id: "c1",
+            status: .unlockable,
+            unlockAt: Date(),
+            openCostSteps: 1000,
+            remainingSeconds: 0
+        ),
+        remainingSeconds: 0,
+        isOpening: true,
+        isSyncingSteps: true,
         onOpenTap: {}
     )
     .padding()

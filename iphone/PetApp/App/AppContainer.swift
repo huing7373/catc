@@ -535,14 +535,29 @@ public final class AppContainer: ObservableObject {
     /// **keyGenerator 默认参数**：生产路径用 DefaultIdempotencyKeyGenerator（UUID v4）;
     /// 测试 / Preview 可自定义注入（与 makeSyncStepsUseCase 内 dateProvider 注入模式同精神）.
     ///
-    /// **stepSyncTriggerService**：Story 21.5 落地时改默认传 container.makeStepSyncTriggerService(...) 实例；
-    /// 本 story（21.3）默认 nil（不调 sync，直开箱）.
-    public func makeOpenChestUseCase(appState: AppState) -> OpenChestUseCaseProtocol {
+    /// **stepSyncTriggerService（Story 21.5 落地）**：caller（RootView）**必须**传它通过 @State
+    /// 持有的同一个 `stepSyncTriggerService` 实例（即 `ensureStepSyncWired()` lazy 构造的那一个）.
+    ///
+    /// **红线（AC1）：本 factory 内部绝不调 `makeStepSyncTriggerService(...)`** —— 该 factory
+    /// 每次返回**新实例**（Story 8.5 钦定 + lesson `2026-04-26-stateobject-debug-instance-aliasing.md`）；
+    /// 在此处 make 会造出第二个独立实例：第二个 5min timer + 第二个 in-flight gate +
+    /// 第二个 weak homeViewModel 借用链，违反 Story 8.5「同步不重叠」「单 timer」不变量
+    /// （lesson `2026-05-04-scenephase-idempotent-start-no-duplicate-trigger.md`）.
+    /// 复用 RootView @State 持有的唯一实例 → 开箱前 sync 与 launch/foreground/5min timer sync
+    /// 共享同一 in-flight gate（triggerManual 会 await in-flight 而非重复发请求）.
+    ///
+    /// 入参类型 `StepSyncTriggerService?`（Optional）：与 `DefaultOpenChestUseCase.init` 既有签名
+    /// 一致；RootView lazy 注入路径上 `ensureStepSyncWired()` 调用前该 @State 仍 nil，Optional
+    /// 让 OpenChestUseCase 走 21.3 已落地的 `if let stepSync` 短路（不 sync 直开箱，不 crash）.
+    public func makeOpenChestUseCase(
+        appState: AppState,
+        stepSyncTriggerService: StepSyncTriggerService?
+    ) -> OpenChestUseCaseProtocol {
         DefaultOpenChestUseCase(
             repository: makeChestRepository(),
             appState: appState,
             keyGenerator: DefaultIdempotencyKeyGenerator(),
-            stepSyncTriggerService: nil   // Story 21.5 改默认传 service 实例
+            stepSyncTriggerService: stepSyncTriggerService
         )
     }
 

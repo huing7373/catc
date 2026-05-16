@@ -170,6 +170,30 @@ public class HomeViewModel: ObservableObject {
     /// **不**上 AppState（与 isOpening 同精神：transient view-state；ADR-0010 §3.2 钦定 toast / popup state 归 ViewModel）.
     @Published public var pendingReward: ChestRewardSnapshot?
 
+    /// Story 21.5 AC2: 开箱前步数同步耗时 > 2s 时的 loading 提示标志.
+    ///
+    /// 单位：Bool；初值 false.
+    ///
+    /// **派生契约**：
+    /// - ChestCardView.unlockableView 副标题三态优先级：
+    ///     isSyncingSteps → "同步步数中…" > isOpening → "开箱中…" > "可开启"
+    ///   （isSyncingSteps 优先于 isOpening，因为 sync 发生在 open 之前，时序上先 sync 提示后 open 提示；
+    ///    isOpening 整个 execute 期间为 true，sync 阶段两标志同时 true → 需 isSyncingSteps 优先）.
+    /// - 由 RealHomeViewModel.onChestOpenTap 控制：
+    ///     - 起 2s 延迟 Task：sleep 2s 后若 execute() 仍未返回 → isSyncingSteps = true；
+    ///     - execute()（内含 Step 0 triggerManual）返回后立即 cancel 该延迟 task + isSyncingSteps = false.
+    ///   钦定折中（spec Dev Notes "实装折中"）：以 execute() 整体调用为基准起 2s（execute 内 Step 0 sync
+    ///   是第一步且通常最慢的网络往返；chest/open 单请求通常 < 1s → "execute > 2s" 即 "sync 慢"）.
+    ///   **不**为追求精确 sync 边界改 OpenChestUseCase.execute()（21.3 冻结红线 + 过度工程）.
+    /// - **不**上 AppState（与 isOpening / pendingReward 同精神：transient view-state；
+    ///   ADR-0010 §3.2 钦定 loading flag 归 ViewModel @Published）.
+    ///
+    /// 不变量:
+    /// - isSyncingSteps 仅在 "开箱按钮已点 + execute() in-flight 且已超 2s" 窗口为 true.
+    /// - execute() 完成（不论成功 / 失败 / cancel）后必复位 false（与 isOpening defer 复位同精神）.
+    /// - 同步耗时 < 2s 时该标志全程 false（2s 延迟 task 在 execute 完成时被 cancel，没机会 set true）.
+    @Published public var isSyncingSteps: Bool = false
+
     // Story 37.3 删除（ADR-0009 §3.5 步骤 4）：
     //   onRoomTap / onInventoryTap / onComposeTap 三个 closure 字段已删除.
     //   主入口 IA 改 4 Tab + HomeContainerView 互斥状态机后,这三个 closure 不再有 caller.
