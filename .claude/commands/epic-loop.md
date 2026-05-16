@@ -410,6 +410,36 @@ review 原文文件: <review_findings_path>
   反例：把上轮 lesson 里的"反例"段当成本轮 finding 又修一遍 → 重复修复 +
   浪费一轮 review_round 计数。
 
+⚠️ **关键 override #3 — over-correction chain 防御（必须严格遵守）**:
+  来源：Epic 20 retro AP1 + Epic 21 主旋律 1（21-1 跑满 4 轮 fix-review 才
+  在 r4 根因翻转收敛）。over-correction chain = 当前轮 finding 是**上一轮
+  你自己修复引入的症状反弹**，而非新缺陷。三次实证模式：
+    - 20.7 race chain（5 轮）：RowsAffected 表层微调 → r4 用事务约束根因解决
+    - 20.9 testing chain（7 轮）：断言强弱反复横跳 → r8 责任分离收敛
+    - 21.1 driver chain（4 轮）：默认值 0 → status-only → async hop →
+      r4 才翻转到 server-anchored time + 注入 clock 根因解决
+
+  **强制判定（修复前先做）**：
+    1) 对比本轮 finding 与上一轮你的修复改动。若本轮 finding 指向的代码
+       正是上轮你改过的地方 / 本轮要改的方向与上轮相反 → 这是 chain 第
+       N 跳信号
+    2) chain 信号触发时**禁止继续表层微调**。必须先回答元问题：
+       "上 N 轮都在同一个抽象层打转，根因是不是在更低/更高一层？"
+       - driver/状态派生模糊 → 用类型/事务/happens-before 约束消除歧义
+       - 错误码/语义微调 → 改路由/metrics/中间件层过滤
+       - 测试断言强弱 trade-off → 单测算法 / 集成 wiring / observability
+         race 三层责任分离
+       - 时间/时钟派生 bug → source-of-truth 锚定（server 值）+ 注入式
+         clock（21.1 r4 范例）
+    3) 修复后**必须加一条守门测试**断言根因约束（如 21.1 注入 fake clock
+       + 同步断言），让未来任何人把表层 hack 加回来时测试立刻挂
+    4) 若判断当前 finding 属于"为消除理论瑕疵而动一个历经多轮 race-fix
+       的稳定组件" → 走 **wontfix-with-rationale**（21.5 r1 范例）：正式
+       记 wontfix + 归档决策推理 lesson + 引用前次 race-fix lesson，**不**
+       盲改
+
+  违反这条会让 review 轮次线性膨胀（21.1 本可 r2 收敛却跑了 r5）。
+
 其他约束:
   - 修完后**正常 commit**（按 fix-review 步骤 7 既定行为）
   - lesson 文档归档到 docs/lessons/ 按 fix-review 标准模板
