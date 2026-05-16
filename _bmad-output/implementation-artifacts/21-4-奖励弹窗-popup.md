@@ -1,6 +1,6 @@
 # Story 21.4: 奖励弹窗 popup（RewardPopupView + .sheet(item:) wire）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
