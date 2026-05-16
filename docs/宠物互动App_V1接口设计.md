@@ -75,6 +75,12 @@
 - `user_chests.status` 枚举（`1 = counting` / `2 = unlockable`）属契约一部分；新增枚举值（如 `3 = opened`）视为契约变更（**注**：当前设计中 opened 状态不存在 —— 开箱后立即创建下一轮 chest，opened 是 transient state，仅在事务内瞬间存在）。
 - `cosmetic_items` 表 seed 数量约束（epics.md AR18 钦定 common ≥ 8 / rare ≥ 4 / epic ≥ 2 / legendary ≥ 1）属契约一部分；admin 后台增删 cosmetic_items 行**不**视为契约变更，但删到不足 AR18 约束视为线上事故。
 - `drop_weight` 加权抽奖算法（按 `cumulative_weight / total_weight` 比例抽取，仅 `is_enabled = 1` 行参与）属契约一部分；切换为非加权 / 加权但不按 drop_weight 排序 视为契约变更。
+- 自 2026-05-16（Story 23.1 完成日，对应 git commit hash 见 commit message）起，§8.1（GET /api/v1/cosmetics/catalog）/ §8.2（GET /api/v1/cosmetics/inventory）两个节点 8 装扮查询 REST 接口的 schema 进入**冻结**状态。
+- 任何字段名 / 字段类型 / `slot` 枚举（`{1,2,3,4,5,6,7,99}`）/ `rarity` 枚举（`{1,2,3,4}`）/ `instances[].status` 枚举（`{1,2}`，inventory 仅返回 in_bag + equipped）/ `groups` 按 `cosmetic_item_id` 聚合维度 / `count` = `instances` 数组长度（含 equipped）语义 / catalog 排序 `rarity ASC + slot ASC + id ASC`（全序确定，`id ASC` 为决定性 tie-breaker，client 可依赖整个列表顺序） / 空背包 `{groups: []}` 契约 / `iconUrl` / `assetUrl` 允许空字符串契约 / 不分页声明 / 错误码（1001 / 1005 / 1009）触发条件 的修改都必须（**冻结边界说明**：`cosmetic_items` 行的 admin 增删（满足 AR18 数量约束前提下）/ `user_cosmetic_items` 行的正常业务增减（开箱 / 合成产生）/ §7.2 `reward.userCosmeticItemId` 节点 7 → 节点 8 真实化（已在 §1 Story 20.1 冻结边界说明锚定，字段类型 / 名 / 必填性不变，仅服务端语义升级）**不**视为契约变更；1001 / 1005 / 1009 等"触发条件"冻结在**抽象层** —— "走 §3 错误码表对应映射"这一不变量，**具体限频阈值**（如 60/min）由 Story 4.5 默认值 + 配置层管理，调整阈值**不**视为本接口契约变更；删除 auth / rate_limit 中间件 / 改聚合维度 / 改 status 过滤范围 / 把 `count` 改成"仅 in_bag 计数" / 把空背包改成 `null` 或省略 groups 字段 / 把 catalog 排序改掉 / 引入分页 才视为契约变更）：
+  1. 触发 iOS Epic 24 重新评审（影响 Story 24.1 ~ 24.5 所有仓库页 / 聚合 grid / 实例列表 / 筛选 / 穿戴入口预留 story）
+  2. 触发 server Epic 23 已完成 story 的回归（影响 Story 23.2 ~ 23.5 已落地的 migration / handler / service / 开箱事务修改）
+  3. 触发下游 Epic 26（穿戴）/ Epic 32（合成）契约 story（26.1 / 32.1）回归（穿戴 / 合成基于 inventory 实例模型扩展）
+  4. 在本 story 文件 + epics.md 同步标注变更原因 + 影响范围
 
 ---
 
@@ -1219,7 +1225,49 @@ JSON 示例：
 
 ### `GET /api/v1/cosmetics/catalog`
 
-#### 返回示例
+> 已由 Story 23.1 锚定（节点 8 装扮查询契约定稿；契约自 Epic 23 起冻结，见 §1）。
+
+#### 接口元信息
+
+| 字段 | 值 |
+|---|---|
+| HTTP Method | GET |
+| Path | /api/v1/cosmetics/catalog |
+| 认证 | **需要** Bearer token（auth 中间件） |
+| 限频 | 默认（按 Story 4.5 rate_limit 默认值 60 次/分按 user_id 计） |
+| 幂等 | 天然幂等（GET 查询，无副作用） |
+| 节点 | 节点 8（Epic 23 落地 / Epic 24 客户端集成） |
+| 分页 | **无**（约 15-50 条配置，不分页；与 epics.md §Story 23.3 AC 一致） |
+| Query 参数 | **无**（不接受任何 query string） |
+
+#### 请求
+
+无请求体（GET 接口）；仅需 `Authorization: Bearer <token>` Header。
+
+#### 服务端逻辑
+
+1. **认证 & 限频**：auth 中间件校验 Bearer token；rate_limit 中间件按默认配置（user_id 60/min）限频。
+2. **查询配置目录**：`SELECT id, code, name, slot, rarity, icon_url, asset_url FROM cosmetic_items WHERE is_enabled = 1 ORDER BY rarity ASC, slot ASC, id ASC`。
+   - 仅返回 `is_enabled = 1` 的配置（disabled 配置**不**返回）。
+   - 排序：`rarity ASC` 优先，再 `slot ASC`，最后 **`id ASC`** 作为决定性 tie-breaker（与 epics.md §Story 23.3 AC "按 rarity ASC + slot ASC 排序" 一致；`id ASC` 是 §1 catalog seed AR18 数量约束下"同 (rarity, slot) 必有多行"——如 `hat_yellow`/`hat_red` 同为 (rarity=1, slot=1)、`gloves_white`/`gloves_brown` 同为 (rarity=1, slot=2)——的必需补充，保证全序确定、client 可依赖**整个**列表顺序而非仅组间顺序）。
+3. **响应**：返回 `{items: [{cosmeticItemId, code, name, slot, rarity, iconUrl, assetUrl}]}`；列表大约 15-50 条，**不分页**。
+4. **事务边界规则**：本接口**不**需要 MySQL 事务（仅 1 个 SELECT 查询）。
+
+#### 响应体
+
+成功（code = 0）`data.items[]` 每个元素：
+
+| 字段 | 类型 | 必填 | 约束 | 说明 |
+|---|---|---|---|---|
+| `cosmeticItemId` | string | 必填 | BIGINT 字符串化（与 §2.5 全局约定 + 数据库 `cosmetic_items.id BIGINT UNSIGNED` 一致）；length ≥ 1 | 装扮**配置** id（**不是**玩家实例 id）；与 §7.2 `reward.cosmeticItemId` / §8.2 `groups[].cosmeticItemId` 同义；与数据库 §5.8 `cosmetic_items.id` 同义 |
+| `code` | string | 必填 | 1 ≤ length ≤ 64；字符集与数据库 `cosmetic_items.code VARCHAR(64)` 一致 | 全局唯一业务编码（如 `hat_yellow_01`）；与数据库 §5.8 `cosmetic_items.code` 同义 |
+| `name` | string | 必填 | 1 ≤ length ≤ 64 | 装扮名称（如 `小黄帽`）；与数据库 §5.8 `cosmetic_items.name` 同义 |
+| `slot` | int | 必填 | 枚举 `{1,2,3,4,5,6,7,99}`，与数据库 §6.8 `cosmetic_items.slot` 同义（`1=hat / 2=gloves / 3=glasses / 4=neck / 5=back / 6=body / 7=tail / 99=other`） | 装扮部位 |
+| `rarity` | int | 必填 | 枚举 `{1,2,3,4}`，与数据库 §6.9 `cosmetic_items.rarity` 同义（`1=common / 2=rare / 3=epic / 4=legendary`） | 装扮品质 |
+| `iconUrl` | string | 必填 | 0 ≤ length ≤ 255；**允许空字符串 `""`**（catalog 配置可能未配图标，与 §7.2 `reward.iconUrl` "不允许空字符串"约束**不同** —— reward 是抽中的奖励必须有图，catalog 是全量配置可能含未配图 placeholder） | 装扮图标 URL（小尺寸预览图）；与数据库 §5.8 `cosmetic_items.icon_url`（`DEFAULT ''`）同义；MVP 阶段允许 placeholder URL |
+| `assetUrl` | string | 必填 | 0 ≤ length ≤ 255；**允许空字符串 `""`**（同 `iconUrl` 理由） | 装扮资源 URL；与数据库 §5.8 `cosmetic_items.asset_url`（`DEFAULT ''`）同义；MVP 阶段允许 placeholder URL |
+
+##### 返回示例
 
 ```json
 {
@@ -1242,6 +1290,22 @@ JSON 示例：
 }
 ```
 
+#### 可能的错误码
+
+| code | 含义 | 触发条件 |
+|---|---|---|
+| 1001 | 未登录 / token 无效 | auth 中间件拦截（无 Authorization 头 / token 非法 / token 过期 / token 解析失败） |
+| 1005 | 操作过于频繁 | rate_limit 中间件拦截（**已认证路由**按 `user_id` 限频，每用户每分钟 > 60 次；按 Story 4.5 默认值，配置可调） |
+| 1009 | 服务繁忙 | DB 异常（SELECT 执行返回 `err != nil`，含 driver / 网络 / 慢查询超时等）/ 内部 panic |
+
+> **注**：本接口**不**触发 1002（GET 无 body / 无 query 参数，无可校验输入）；catalog 为空（理论不该 —— Story 20.3 已 seed 满足 AR18 数量约束）时返回 `{items: []}`（code = 0，**不**报错）。
+
+#### 关键约束
+
+- `items` 列表**不分页**（约 15-50 条，与 epics.md §Story 23.3 AC + §1 catalog seed 数量约束 AR18 一致）；如未来配置数量增长需引入分页，视为契约变更。
+- 排序契约 `ORDER BY rarity ASC, slot ASC, id ASC` 属契约一部分，且为**全序确定**（total order）：`rarity ASC` → `slot ASC` → `id ASC` 三级排序，`id ASC` 是决定性 tie-breaker。因 §1 catalog seed AR18 数量约束下同 (rarity, slot) 必然存在多行（如两顶 common 帽子 `hat_yellow`/`hat_red`、两副 common 手套 `gloves_white`/`gloves_brown`），若缺 `id ASC` 则 MySQL 对同 (rarity, slot) 行返回顺序不保证稳定（同一份数据跨请求可抖动），故 `id ASC` 是契约**必需**部分而非可选优化。client **可**依赖 catalog **整个列表**的稳定顺序做 UI 渲染（不仅组间、组内同样稳定）。如未来移除 `id ASC` tie-breaker 或改任一排序键，视为契约变更（走 §1 冻结流程）。
+- `iconUrl` / `assetUrl` 允许空字符串契约属契约一部分（与 §7.2 reward.* "不允许空"差异已显式标注）；如未来收紧为"catalog 也不允许空"，视为契约变更。
+
 ---
 
 ## 8.2 获取背包
@@ -1250,7 +1314,58 @@ JSON 示例：
 
 返回“聚合展示 + 实例列表”。
 
-#### 返回示例
+> 已由 Story 23.1 锚定（节点 8 装扮查询契约定稿；契约自 Epic 23 起冻结，见 §1）。
+
+#### 接口元信息
+
+| 字段 | 值 |
+|---|---|
+| HTTP Method | GET |
+| Path | /api/v1/cosmetics/inventory |
+| 认证 | **需要** Bearer token（auth 中间件） |
+| 限频 | 默认（按 Story 4.5 rate_limit 默认值 60 次/分按 user_id 计） |
+| 幂等 | 天然幂等（GET 查询，无副作用） |
+| 节点 | 节点 8（Epic 23 落地 / Epic 24 客户端集成） |
+| 分页 | **无**（单用户预期实例数 < 1000，单 SQL 查询足够；与 epics.md §Story 23.4 AC 一致） |
+| Query 参数 | **无**（不接受任何 query string；筛选纯客户端，由 iOS Story 24.3 在 client 侧做） |
+
+#### 请求
+
+无请求体（GET 接口）；仅需 `Authorization: Bearer <token>` Header。
+
+#### 服务端逻辑
+
+1. **认证 & 限频**：auth 中间件校验 Bearer token；rate_limit 中间件按默认配置（user_id 60/min）限频。
+2. **查询玩家实例**：`SELECT id, cosmetic_item_id, status FROM user_cosmetic_items WHERE user_id = ? AND status IN (1, 2)`。
+   - 仅返回 `status = 1 (in_bag)` 与 `status = 2 (equipped)`；**不含** `status = 3 (consumed)`（合成已消耗）/ `status = 4 (invalid)`（无效，数据库 §6.10 定义但 inventory 不返回）。
+   - 用户无任何实例 → 后续步骤产出 `{groups: []}`（**不**报错）。
+3. **按 cosmetic_item_id 聚合**：把步骤 2 结果按 `cosmetic_item_id` 分组；每组关联 `cosmetic_items` 拿配置元信息（`name / slot / rarity / icon_url / asset_url`）。
+   - 配置缺失的 `cosmetic_item_id`（即步骤 2 的某 `cosmetic_item_id` 在 `cosmetic_items` 表无匹配行 —— §1 允许 admin 删 `cosmetic_items` 行，删除后该配置下用户**已拥有**的实例仍存在于 `user_cosmetic_items`）→ **保留该组（不 skip）+ 用降级占位元信息组装 + log error**。
+     - **保留可见性原则**：用户已拥有的实例**不得**因 admin 删配置而从 inventory 静默消失（= 用户可见数据丢失）。该组照常出现在 `groups[]`，`count` / `instances[]` 与正常组一致（实例数与实例 id 始终来自 `user_cosmetic_items`，与配置是否存在无关）。
+     - **降级占位元信息**（仅配置缺失组使用）：`name = "未知装扮"`、`slot = 99`（other，§6.8 枚举内）、`rarity = 1`（common，§6.9 枚举内）、`iconUrl = ""`、`assetUrl = ""`（空字符串契约已允许，见下方响应体字段表）。这些占位值均落在既有枚举 / 约束值域内，**不**扩展任何 schema；client 据此渲染"配置已下架的已拥有道具"占位卡，仍能看到持有数量。
+     - **log error**（非 warning）：配置缺失意味着 admin 删了仍有用户持有的 cosmetic_items 行，是需运维介入的数据治理事件（应补 down-migration / 恢复配置 / 走废弃流程），日志级别为 error 以触发告警，**不**报 client 错误码（只读查询不因单组配置缺失整体失败 —— 见关键约束）。
+4. **组装响应**：每组 = `{cosmeticItemId, name, slot, rarity, iconUrl, assetUrl, count, instances: [{userCosmeticItemId, status}]}`；`count` = 该组 instances 数组长度（含 status=1 与 status=2，**不**只算 in_bag）；配置缺失组按步骤 3 降级占位规则填充元信息字段。
+5. **响应**：返回 `{groups: [...]}`；空背包返回 `{groups: []}`；**不分页**。
+6. **事务边界规则**：本接口**不**需要 MySQL 事务（只读查询；步骤 2 + 步骤 3 关联可用单 JOIN 或两次 SELECT，实装层 Story 23.4 决定，契约层不约束）。
+
+#### 响应体
+
+成功（code = 0）`data.groups[]` 每个元素：
+
+| 字段 | 类型 | 必填 | 约束 | 说明 |
+|---|---|---|---|---|
+| `cosmeticItemId` | string | 必填 | BIGINT 字符串化；length ≥ 1 | 装扮**配置** id（聚合 key）；与 §8.1 `items[].cosmeticItemId` / §7.2 `reward.cosmeticItemId` 同义；与数据库 §5.8 `cosmetic_items.id` 同义 |
+| `name` | string | 必填 | 1 ≤ length ≤ 64 | 装扮名称；与 §8.1 `items[].name` 同义 |
+| `slot` | int | 必填 | 枚举 `{1,2,3,4,5,6,7,99}`，与数据库 §6.8 同义 | 装扮部位（与 §8.1 `items[].slot` 同义） |
+| `rarity` | int | 必填 | 枚举 `{1,2,3,4}`，与数据库 §6.9 同义 | 装扮品质（与 §8.1 `items[].rarity` 同义） |
+| `iconUrl` | string | 必填 | 0 ≤ length ≤ 255；允许空字符串 `""`（同 §8.1 理由） | 装扮图标 URL；与 §8.1 `items[].iconUrl` 同义 |
+| `assetUrl` | string | 必填 | 0 ≤ length ≤ 255；允许空字符串 `""`（同 §8.1 理由） | 装扮资源 URL；与 §8.1 `items[].assetUrl` 同义 |
+| `count` | int | 必填 | ≥ 1（空组不出现在 groups 中 —— 一个组必有 ≥ 1 实例）；= `instances` 数组长度 | 该配置玩家持有实例数（含 in_bag + equipped，**不**只算 in_bag） |
+| `instances` | array | 必填 | length = `count` ≥ 1 | 该组下的实例列表 |
+| `instances[].userCosmeticItemId` | string | 必填 | BIGINT 字符串化；length ≥ 1 | 玩家**实例** id（**不是**配置 id）；与 §7.2 `reward.userCosmeticItemId`（节点 8 真实化后）同义 —— 节点 8 起开箱奖励 INSERT 的 `user_cosmetic_items.id` 即此值；与数据库 §5.9 `user_cosmetic_items.id` 同义 |
+| `instances[].status` | int | 必填 | 枚举 `{1,2}`（inventory **仅**返回 in_bag + equipped；`3=consumed` / `4=invalid` 被服务端过滤，**不**出现在 inventory），与数据库 §6.10 `user_cosmetic_items.status` 子集同义（`1=in_bag / 2=equipped`） | 实例当前状态 |
+
+##### 返回示例
 
 ```json
 {
@@ -1292,6 +1407,28 @@ JSON 示例：
 - `1 = in_bag`
 - `2 = equipped`
 - `3 = consumed`
+
+> **注**：`3 = consumed`（与数据库 §6.10 `4 = invalid` 一并）**被服务端过滤**，**不**出现在 inventory 响应中 —— `instances[].status` 仅可能为 `1` / `2`（详见上方响应体字段表与服务端逻辑步骤 2）。
+
+#### 可能的错误码
+
+| code | 含义 | 触发条件 |
+|---|---|---|
+| 1001 | 未登录 / token 无效 | auth 中间件拦截（无 Authorization 头 / token 非法 / token 过期 / token 解析失败） |
+| 1005 | 操作过于频繁 | rate_limit 中间件拦截（**已认证路由**按 `user_id` 限频，每用户每分钟 > 60 次；按 Story 4.5 默认值，配置可调） |
+| 1009 | 服务繁忙 | DB 异常（SELECT 执行返回 `err != nil`，含 driver / 网络 / 慢查询超时等）/ 内部 panic |
+
+> **注**：本接口**不**触发 1002（GET 无 body / 无 query 参数）；用户背包为空**不**报错 —— 返回 `{groups: []}`（code = 0）；配置缺失的 cosmetic_item_id（admin 删了仍有用户持有的 `cosmetic_items` 行）是**保留该组 + 降级占位元信息 + log error**（保住用户可见性，**不** skip，**不**报 1009 / 1003 —— 单组配置缺失不让只读 inventory 整体失败；详见服务端逻辑步骤 3）。
+
+#### 关键约束
+
+- **groups 聚合维度**契约：按 `cosmetic_item_id` 聚合（不是按 instance 平铺，也不是按 slot / rarity 聚合）；client 渲染"小黄帽 x 3"靠 `count` + 展开看 `instances[]`。如未来改聚合维度，视为契约变更。
+- **已拥有实例可见性**契约：用户已拥有的 `user_cosmetic_items` 实例（`status IN (1,2)`）**永远**出现在 inventory，**禁止**因关联的 `cosmetic_items` 配置被 admin 删除 / 缺失而 skip 该组（= 用户可见数据静默丢失）。§1 显式允许 admin 增删 `cosmetic_items`，故"配置缺失"是受支持的运维动作而非异常脏数据；契约保证：实例的存在性 / 数量 / 实例 id 只取决于 `user_cosmetic_items`，与配置是否存在解耦。配置缺失时用步骤 3 降级占位元信息组装该组（值全部落在既有枚举值域内）+ log error 供运维告警。如未来改为"配置缺失则 skip"或"配置缺失则整体报错"，视为契约变更（前者是数据丢失回归，后者破坏只读接口对单组脏数据的容错性）。
+- **status 过滤范围**契约：inventory **仅**含 `status IN (1, 2)`（in_bag + equipped）；`consumed` / `invalid` 被服务端过滤。如未来需要"已消耗道具历史 tab"，应走新接口或新 query 参数（视为契约变更，不在本接口内扩展）。
+- **`count` 语义**契约：`count` = 该组 instances 数组长度（含 equipped），**不**等于"可用于合成的数量"（合成需 in_bag 且未装备的实例，由 client / Story 33.x 自行按 `instances[].status` 过滤）。如未来把 `count` 改成"仅 in_bag 计数"，视为契约变更。
+- **空背包**契约：返回 `{groups: []}`（**不**是 `null`、**不**是 `{}` 缺 groups 字段、**不**报错）；防 Swift Codable 解析 `groups` 为 nil（client `InventoryResponse.groups` 严格按 `[InventoryGroup]` 非可选解析，空时为 `[]`）。如未来改成省略 groups 字段，视为契约变更。
+- **`userCosmeticItemId` 跨节点同义对齐**契约：§8.2 `instances[].userCosmeticItemId` 与 §7.2 `reward.userCosmeticItemId`（节点 8 Story 23.5 真实化后）是**同一玩家实例主键的字符串化**（数据库 §5.9 `user_cosmetic_items.id`）；节点 7 阶段 §7.2 该字段为占位 `"0"` 且 inventory 必为空（建表前），节点 8 起两处均为真实主键。§7.2 节点 7 → 节点 8 升级**不**视为契约变更（已在 §1 Story 20.1 冻结边界说明锚定）；本 story **不**反向修改 §7.x。
+- **不分页**契约：单用户预期实例数 < 1000，单查询返回全量；client 一次拿全做本地筛选（iOS Story 24.3 纯客户端筛选）。如未来引入分页，视为契约变更。
 
 ---
 
