@@ -45,7 +45,8 @@ func (s *stubCosmeticService) ListInventory(ctx context.Context, userID uint64) 
 // 须传一个 equip stub 满足扩展后的构造签名）。equipFn 注入自定义返回；
 // 不注入则 panic（GetCatalog/GetInventory case 不走 equip 路径）。
 type stubCosmeticEquipService struct {
-	equipFn func(ctx context.Context, in service.EquipParams) (*service.EquipResult, error)
+	equipFn   func(ctx context.Context, in service.EquipParams) (*service.EquipResult, error)
+	unequipFn func(ctx context.Context, in service.UnequipParams) (*service.UnequipResult, error)
 }
 
 func (s *stubCosmeticEquipService) Equip(ctx context.Context, in service.EquipParams) (*service.EquipResult, error) {
@@ -53,6 +54,16 @@ func (s *stubCosmeticEquipService) Equip(ctx context.Context, in service.EquipPa
 		panic("stubCosmeticEquipService.Equip not configured (本 case 走 GetCatalog/GetInventory 路径，不期望走 POST /cosmetics/equip)")
 	}
 	return s.equipFn(ctx, in)
+}
+
+// Unequip（Story 26.4 加：CosmeticEquipService interface 扩 Unequip →
+// stub 须实现否则 NewCosmeticsHandler 构造编译失败）。unequipFn 注入自定义
+// 返回；不注入则 panic（非 unequip case 不走本路径）。
+func (s *stubCosmeticEquipService) Unequip(ctx context.Context, in service.UnequipParams) (*service.UnequipResult, error) {
+	if s.unequipFn == nil {
+		panic("stubCosmeticEquipService.Unequip not configured (本 case 不期望走 POST /cosmetics/unequip)")
+	}
+	return s.unequipFn(ctx, in)
 }
 
 // buildCosmeticsInventoryHandlerRouter 构造 GetInventory test router。
@@ -700,6 +711,221 @@ func TestCosmeticsHandler_Equip_ServiceError_PassThrough(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assertEnvelopeCode(t, w.Body.Bytes(), apperror.ErrCosmeticAlreadyEquipped)
+}
+
+// ================================================================
+// Story 26.4 — CosmeticsHandler.Unequip 单测（POST /cosmetics/unequip）
+//
+// 与 Equip 同模式：gin TestMode + httptest + ErrorMappingMiddleware
+// + stub equip service（复用 stubCosmeticEquipService，注入 unequipFn）。
+// 覆盖：happy DTO 形状 {petId,slot,unequipped:true} + 1002（缺 petId /
+// petId 非 BIGINT / 缺 slot / slot 不在枚举 / JSON 类型错）+ userID 缺失
+// 1009 + service error 透传。
+// ================================================================
+
+// buildCosmeticsUnequipHandlerRouter 构造 POST /cosmetics/unequip test router
+// （Story 26.4）。挂 ErrorMappingMiddleware（c.Error → envelope）+ 可选注入
+// userID（mockUserID=nil → 测 unreachable userID 缺失分支，与
+// buildCosmeticsEquipHandlerRouter 同模式）。unequip **读** userID。
+func buildCosmeticsUnequipHandlerRouter(equipSvc service.CosmeticEquipService, mockUserID *uint64) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(middleware.ErrorMappingMiddleware())
+	if mockUserID != nil {
+		uid := *mockUserID
+		r.Use(func(c *gin.Context) {
+			c.Set(middleware.UserIDKey, uid)
+			c.Next()
+		})
+	}
+	h := handler.NewCosmeticsHandler(&stubCosmeticService{}, equipSvc)
+	r.POST("/api/v1/cosmetics/unequip", h.Unequip)
+	return r
+}
+
+// AC1/AC2 happy: 合法 body + userID → service 返 UnequipResult → envelope
+// code=0 + petId 是 **string** + slot 是 **number** + unequipped 是 **bool
+// true** + 字段名严格 camelCase。
+func TestCosmeticsHandler_Unequip_HappyPath(t *testing.T) {
+	uid := uint64(42)
+	var gotIn service.UnequipParams
+	equipSvc := &stubCosmeticEquipService{
+		unequipFn: func(ctx context.Context, in service.UnequipParams) (*service.UnequipResult, error) {
+			gotIn = in
+			return &service.UnequipResult{PetID: 2001, Slot: 1, Unequipped: true}, nil
+		},
+	}
+	r := buildCosmeticsUnequipHandlerRouter(equipSvc, &uid)
+
+	body := `{"petId":"2001","slot":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cosmetics/unequip", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if gotIn.UserID != 42 || gotIn.PetID != 2001 || gotIn.Slot != 1 {
+		t.Errorf("UnequipParams = %+v, want {UserID:42 PetID:2001 Slot:1}", gotIn)
+	}
+
+	bodyBytes := w.Body.Bytes()
+	var parsed struct {
+		Code int `json:"code"`
+		Data struct {
+			PetID      string `json:"petId"`
+			Slot       int    `json:"slot"`
+			Unequipped bool   `json:"unequipped"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(bodyBytes, &parsed); err != nil {
+		t.Fatalf("json.Unmarshal: %v; body=%s", err, string(bodyBytes))
+	}
+	if parsed.Code != 0 {
+		t.Errorf("code = %d, want 0", parsed.Code)
+	}
+	if parsed.Data.PetID != "2001" {
+		t.Errorf("petId = %q, want \"2001\" (BIGINT 字符串化)", parsed.Data.PetID)
+	}
+	if parsed.Data.Slot != 1 {
+		t.Errorf("slot = %d, want 1 (int 直接下发)", parsed.Data.Slot)
+	}
+	if !parsed.Data.Unequipped {
+		t.Errorf("unequipped = %v, want true", parsed.Data.Unequipped)
+	}
+
+	// 防 id 序列化成 number / unequipped 序列化成非 bool 回归：raw 校验
+	var raw map[string]json.RawMessage
+	_ = json.Unmarshal(bodyBytes, &raw)
+	var rawData map[string]json.RawMessage
+	_ = json.Unmarshal(raw["data"], &rawData)
+	if string(rawData["petId"]) != `"2001"` {
+		t.Errorf("raw petId = %s, want \"2001\" (JSON string 带引号)", rawData["petId"])
+	}
+	if string(rawData["slot"]) != `1` {
+		t.Errorf("raw slot = %s, want 1 (JSON number 无引号)", rawData["slot"])
+	}
+	if string(rawData["unequipped"]) != `true` {
+		t.Errorf("raw unequipped = %s, want true (JSON bool)", rawData["unequipped"])
+	}
+	// 字段集严格 = §8.4 钦定 3 字段
+	allowed := map[string]bool{"petId": true, "slot": true, "unequipped": true}
+	for k := range rawData {
+		if !allowed[k] {
+			t.Errorf("data 含 §8.4 未声明字段 %q", k)
+		}
+	}
+	for k := range allowed {
+		if _, ok := rawData[k]; !ok {
+			t.Errorf("data 缺字段 %q（§8.4 钦定必有）", k)
+		}
+	}
+}
+
+// AC2 edge: petId 缺失 → 1002（不调 service）。
+func TestCosmeticsHandler_Unequip_MissingPetId_Returns1002(t *testing.T) {
+	uid := uint64(42)
+	called := false
+	equipSvc := &stubCosmeticEquipService{unequipFn: func(ctx context.Context, in service.UnequipParams) (*service.UnequipResult, error) {
+		called = true
+		return nil, nil
+	}}
+	r := buildCosmeticsUnequipHandlerRouter(equipSvc, &uid)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cosmetics/unequip", strings.NewReader(`{"slot":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assertEnvelopeCode(t, w.Body.Bytes(), apperror.ErrInvalidParam)
+	if called {
+		t.Errorf("service.Unequip 不应被调用（参数校验在 handler 层拦截）")
+	}
+}
+
+// AC2 edge: petId 非合法 BIGINT 字符串 → 1002。
+func TestCosmeticsHandler_Unequip_InvalidBigintString_Returns1002(t *testing.T) {
+	uid := uint64(42)
+	r := buildCosmeticsUnequipHandlerRouter(&stubCosmeticEquipService{}, &uid)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cosmetics/unequip", strings.NewReader(`{"petId":"abc","slot":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assertEnvelopeCode(t, w.Body.Bytes(), apperror.ErrInvalidParam)
+}
+
+// AC2 edge: slot 缺失 → 1002（指针 mirror struct 区分缺失 vs 显式 0）。
+func TestCosmeticsHandler_Unequip_MissingSlot_Returns1002(t *testing.T) {
+	uid := uint64(42)
+	r := buildCosmeticsUnequipHandlerRouter(&stubCosmeticEquipService{}, &uid)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cosmetics/unequip", strings.NewReader(`{"petId":"2001"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assertEnvelopeCode(t, w.Body.Bytes(), apperror.ErrInvalidParam)
+}
+
+// AC2 edge: slot 不在枚举 {1,2,3,4,5,6,7,99} 内 → 1002。
+func TestCosmeticsHandler_Unequip_SlotNotInEnum_Returns1002(t *testing.T) {
+	uid := uint64(42)
+	r := buildCosmeticsUnequipHandlerRouter(&stubCosmeticEquipService{}, &uid)
+
+	// slot=8 不在枚举内
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cosmetics/unequip", strings.NewReader(`{"petId":"2001","slot":8}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assertEnvelopeCode(t, w.Body.Bytes(), apperror.ErrInvalidParam)
+}
+
+// AC2 edge: JSON 类型错（slot 是 string 非 int）→ ShouldBindJSON 失败 → 1002。
+func TestCosmeticsHandler_Unequip_JSONTypeMismatch_Returns1002(t *testing.T) {
+	uid := uint64(42)
+	r := buildCosmeticsUnequipHandlerRouter(&stubCosmeticEquipService{}, &uid)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cosmetics/unequip", strings.NewReader(`{"petId":"2001","slot":"1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assertEnvelopeCode(t, w.Body.Bytes(), apperror.ErrInvalidParam)
+}
+
+// AC1 edge: userID 未注入（auth 中间件缺失模拟）→ 1009 unreachable 兜底。
+func TestCosmeticsHandler_Unequip_NoUserID_Returns1009(t *testing.T) {
+	r := buildCosmeticsUnequipHandlerRouter(&stubCosmeticEquipService{}, nil) // 不注入 userID
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cosmetics/unequip", strings.NewReader(`{"petId":"2001","slot":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assertEnvelopeCode(t, w.Body.Bytes(), apperror.ErrServiceBusy)
+}
+
+// AC1 edge: service 返业务 error（如 5004）→ handler c.Error 透传 →
+// envelope code=5004（验证 handler 不吞 / 不改 service 错误码）。
+func TestCosmeticsHandler_Unequip_ServiceError_PassThrough(t *testing.T) {
+	uid := uint64(42)
+	equipSvc := &stubCosmeticEquipService{
+		unequipFn: func(ctx context.Context, in service.UnequipParams) (*service.UnequipResult, error) {
+			return nil, apperror.New(apperror.ErrCosmeticSlotMismatch, apperror.DefaultMessages[apperror.ErrCosmeticSlotMismatch])
+		},
+	}
+	r := buildCosmeticsUnequipHandlerRouter(equipSvc, &uid)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cosmetics/unequip", strings.NewReader(`{"petId":"2001","slot":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assertEnvelopeCode(t, w.Body.Bytes(), apperror.ErrCosmeticSlotMismatch)
 }
 
 // assertEnvelopeCode 解析 envelope 并断言 code 字段（Story 26.3 测试 helper）。

@@ -141,6 +141,60 @@ type UserPetEquipRepo interface {
 	// 1009，与 room_member_repo.go fallback 行 379-380 同模式）。0016 两个
 	// UNIQUE 约束已穷举，本 fallback 理论不触发。
 	InsertInTx(ctx context.Context, e *UserPetEquip) error
+
+	// FindUserCosmeticItemIDByPetSlotForUpdate 取 FOR UPDATE 排他锁查
+	// (pet_id, slot) 对应的 user_cosmetic_item_id（Story 26.4 引入；V1
+	// §8.4 服务端逻辑步骤 5，fix-review 26-1 r2 [P1] 锁定）。
+	//
+	// SQL: SELECT user_cosmetic_item_id FROM user_pet_equips
+	//      WHERE pet_id = ? AND slot = ? LIMIT 1 FOR UPDATE
+	//
+	// **MySQL 8.0 语法红线**：LIMIT 必须在 FOR UPDATE **之前**
+	// （`... FOR UPDATE LIMIT 1` 在 MySQL 5.7+ 是 ER_PARSE_ERROR 1064；
+	// GORM 不重写 Raw SQL 顺序，与 room_member_repo.ExistsForShareByRoomAndUser
+	// FOR SHARE 语法约束同源）。用 Raw + Scan 路径（**不**用 GORM
+	// Clauses(clause.Locking{...})）以显式可控 LIMIT/FOR UPDATE 顺序。
+	//
+	// **必须在事务内调用**（与 §8.4 步骤 6 DELETE + UPDATE 实例 status
+	// 同事务原子提交；事务外 FOR UPDATE 锁立即释放——autocommit 模式下
+	// SELECT 完成即 commit，并发卸下串行化失效，V1 §8.4 行 1657 钦定的
+	// "并发卸下串行化"契约破坏，SELECT-then-DELETE TOCTOU 竞态重现）。
+	//
+	// **NotFound 语义**：该 slot 无装备（0 行）→ 返 (0, ErrUserPetEquipNotFound)
+	// 哨兵（**合法 case**，**非**异常 —— service 层用 errors.Is 区分"slot
+	// 无装备 → 5004 装备槽位不匹配"vs "DB 异常 → 1009"）。**注意**：Raw +
+	// Scan 在 0 行时**不**返 gorm.ErrRecordNotFound 而是保持 dst zero-value
+	// 不报错（与 room_member_repo.ExistsForShareByRoomAndUser 行 457-458
+	// 注释同源）—— 故须**显式判 0 行**：用 Scan(...).RowsAffected == 0 →
+	// 返哨兵，**不**靠 errors.Is(err, gorm.ErrRecordNotFound)。
+	// query 失败 → 返 (0, raw error 透传给 service（service 包成 1009）)。
+	FindUserCosmeticItemIDByPetSlotForUpdate(ctx context.Context, petID uint64, slot int8) (uint64, error)
+
+	// DeleteByPetSlotInTxReturningAffected 删除 (pet_id, slot) 对应的
+	// user_pet_equips 行并返回 RowsAffected（Story 26.4 引入；V1 §8.4
+	// 服务端逻辑步骤 6，fix-review 26-1 r2 [P1] 锁定）。
+	//
+	// SQL: DELETE FROM user_pet_equips WHERE pet_id = ? AND slot = ?
+	//
+	// **必须在事务内调用**（与同事务的 §8.4 步骤 5 FOR UPDATE 行锁查 +
+	// UPDATE 实例 status 回 in_bag 一起原子提交；理由同 DeleteByPetSlotInTx）。
+	//
+	// **与 DeleteByPetSlotInTx 的关键差异**（**不**复用 DeleteByPetSlotInTx）：
+	// 本方法返 RowsAffected 让 service 层做契约级冗余兜底分流（V1 §8.4
+	// 行 1609 / 1651 / 1657 钦定，与 room_member_repo.DeleteByRoomAndUser
+	// 行 432-441 同根因模式）：
+	//   - == 1：删除成功（happy path）→ service 继续 UPDATE 实例 status
+	//   - == 0：步骤 5 与本步之间该行已被并发事务删除（理论上已由步骤 5
+	//     FOR UPDATE 排他锁阻止，本检查为不依赖锁实现细节的契约级冗余兜底）
+	//     → service 层**回滚事务 + 返回 5004**（**禁止** 0 affected rows
+	//     继续 commit 误返 unequipped: true）
+	//   - >  1：理论不可能（user_pet_equips 有 uk_pet_slot UNIQUE(pet_id,
+	//     slot)，最多 1 行匹配）；service 层兜底视为成功路径（!= 0 即继续）
+	//
+	// 返 (result.RowsAffected, result.Error)：result.Error != nil →
+	// (0, raw error 透传给 service（service 包成 1009）)；否则
+	// (result.RowsAffected, nil)。
+	DeleteByPetSlotInTxReturningAffected(ctx context.Context, petID uint64, slot int8) (int64, error)
 }
 
 // userPetEquipRepo 是 UserPetEquipRepo 的默认实装。
@@ -202,4 +256,44 @@ func (r *userPetEquipRepo) InsertInTx(ctx context.Context, e *UserPetEquip) erro
 		return err
 	}
 	return nil
+}
+
+// FindUserCosmeticItemIDByPetSlotForUpdate 实装：Raw FOR UPDATE 行锁 SELECT
+// + Scan 显式判 0 行（详见接口注释；与 room_member_repo
+// .ExistsForShareByRoomAndUser FOR SHARE Raw+Scan 模式同源，锁子句改 FOR
+// UPDATE）。
+func (r *userPetEquipRepo) FindUserCosmeticItemIDByPetSlotForUpdate(ctx context.Context, petID uint64, slot int8) (uint64, error) {
+	db := tx.FromContext(ctx, r.db)
+	var uciID uint64
+	// MySQL 8.0 SQL syntax: LIMIT 必须在 locking clause（FOR UPDATE）**之前**；
+	// `... FOR UPDATE LIMIT 1` 在 MySQL 5.7+ 是 ER_PARSE_ERROR (1064)。GORM 不会
+	// 重写顺序，raw SQL 必须按 MySQL 钦定顺序写（与 room_member_repo
+	// .ExistsForShareByRoomAndUser 行 463-466 注释钦定一致）。
+	result := db.WithContext(ctx).
+		Raw("SELECT user_cosmetic_item_id FROM user_pet_equips WHERE pet_id = ? AND slot = ? LIMIT 1 FOR UPDATE", petID, slot).
+		Scan(&uciID)
+	if result.Error != nil {
+		// Raw + Scan 0 行不产 gorm.ErrRecordNotFound（与 ExistsForShareByRoomAndUser
+		// 行 457-458 注释同源）；走到这里是真 query 失败 → raw 透传（service 包 1009）
+		return 0, result.Error
+	}
+	if result.RowsAffected == 0 {
+		// 该 slot 无装备 → 合法 case，返哨兵（service 翻 5004，**非** 1009）
+		return 0, ErrUserPetEquipNotFound
+	}
+	return uciID, nil
+}
+
+// DeleteByPetSlotInTxReturningAffected 实装：DELETE WHERE pet_id=? AND slot=?
+// 返 (result.RowsAffected, result.Error)（详见接口注释；与
+// room_member_repo.DeleteByRoomAndUser 行 432-441 1:1 同模式）。
+func (r *userPetEquipRepo) DeleteByPetSlotInTxReturningAffected(ctx context.Context, petID uint64, slot int8) (int64, error) {
+	db := tx.FromContext(ctx, r.db)
+	result := db.WithContext(ctx).
+		Where("pet_id = ? AND slot = ?", petID, slot).
+		Delete(&UserPetEquip{})
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
 }

@@ -578,6 +578,14 @@ func NewRouter(deps Deps) *gin.Engine {
 		// userPetEquipRepo + cosmeticEquipSvc 已在上面同 if deps 完整块内构造，
 		// deps 不完整则该路由不注册，与既有 fallback 行为一致）
 		authedGroup.POST("/cosmetics/equip", cosmeticsHandler.Equip)
+		// Story 26.4 加：POST /api/v1/cosmetics/unequip 卸下装扮（按 slot 指定）
+		// （auth + RateLimitByUserID 由 authedGroup 既有中间件链兜底，对应
+		// §8.4 错误码 1001 / 1005；与 /cosmetics/equip 同组同模式。**不**走
+		// chestOpenGroup —— unequip 无 idempotency、限频走标准 authedGroup
+		// 中间件，V1 §8.4 行 1583 钦定。复用 26.3 落地的 cosmeticEquipSvc /
+		// cosmeticsHandler 实例不新建 —— Unequip 在同 CosmeticEquipService
+		// interface；deps 不完整则该路由不注册，与既有 fallback 行为一致）
+		authedGroup.POST("/cosmetics/unequip", cosmeticsHandler.Unequip)
 		authedGroup.POST("/steps/sync", stepsHandler.PostSync)     // Story 7.3 加
 		authedGroup.GET("/steps/account", stepsHandler.GetAccount) // Story 7.4 加
 		authedGroup.GET("/chest/current", chestHandler.GetCurrent) // Story 20.5 加

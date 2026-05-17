@@ -21,9 +21,9 @@ import (
 //   - Equip（POST /api/v1/cosmetics/equip，Story 26.3）—— 写事务，注入
 //     独立 CosmeticEquipService（与 catalog/inventory 只读 CosmeticService
 //     分 interface；service 层 chest_open_service vs chest_service 分文件先例）
-//
-// future epic 加 POST /cosmetics/unequip（Story 26.4）等能力（与
-// emojis_handler 行 10-13 同模式）。
+//   - Unequip（POST /api/v1/cosmetics/unequip，Story 26.4）—— 写事务，
+//     复用同一 CosmeticEquipService（equip/unequip 同为 user_pet_equips 写
+//     事务，职责同族故同 interface，**不**新建第三个 service / handler 字段）
 type CosmeticsHandler struct {
 	svc      service.CosmeticService
 	equipSvc service.CosmeticEquipService
@@ -370,5 +370,130 @@ func equipResponseDTO(out *service.EquipResult) gin.H {
 			"cosmeticItemId":     strconv.FormatUint(out.Equipped.CosmeticItemID, 10),
 			"name":               out.Equipped.Name,
 		},
+	}
+}
+
+// unequipRequest 是 V1 §8.4 钦定请求体的 Go mirror（行 1590-1600）。
+//
+// petId 是 BIGINT 字符串化（string）；slot 是 int 枚举。两字段都用指针类型 +
+// 显式 nil 校验区分"字段缺失"vs"显式传零值"（与 equipRequest 同模式 ——
+// 值类型 int 缺失会解析为 0，与显式传 0 无法区分；0 不在枚举内即便误判也会
+// 被枚举校验拦截，但仍用 *int 显式区分保持与 equipRequest 模式一致 + 错误
+// 消息更精确）。**注意**：equip 请求**无 slot**（由 server 反查），unequip
+// 请求**有 slot 且必须校枚举** —— 这是 unequip 与 equip 的请求侧关键差异。
+type unequipRequest struct {
+	PetID *string `json:"petId"`
+	Slot  *int    `json:"slot"`
+}
+
+// isValidSlot 判 slot 是否在 §6.8 枚举 {1,2,3,4,5,6,7,99} 内（V1 §8.4
+// 行 1593 + 行 1643 钦定；handler 层校验，缺失 / 不在枚举 → 1002）。
+// 就近置于本 handler 文件（**不**新建 pkg；与既有 handler 参数校验同原则）。
+func isValidSlot(s int) bool {
+	switch s {
+	case 1, 2, 3, 4, 5, 6, 7, 99:
+		return true
+	default:
+		return false
+	}
+}
+
+// Unequip 处理 POST /api/v1/cosmetics/unequip（Story 26.4）。
+//
+// # 流程
+//
+//  1. ShouldBindJSON（JSON 类型错 → 1002）
+//  2. 参数校验：petId 非 nil + 非空串 + 可被 strconv.ParseUint 解析为合法
+//     BIGINT；slot 非 nil + 在枚举 {1,2,3,4,5,6,7,99} 内（否则 1002，
+//     V1 §8.4 步骤 2 行 1605）
+//  3. 从 c.Get(UserIDKey) 拿 userID（auth 中间件已注入；不存在 / 类型断言
+//     失败 → 1009 unreachable 兜底）—— 与 Equip 1:1 同模式
+//  4. 调 equipSvc.Unequip(ctx, UnequipParams{...}) —— ctx =
+//     c.Request.Context()（**不**用 *gin.Context；ADR-0007 §2.2）
+//  5. 成功 → response.Success(c, unequipResponseDTO(out), "ok")
+//  6. 失败 → c.Error(err) + return（ErrorMappingMiddleware 写 envelope）
+//
+// # 关键
+//
+// 本 handler **不**直接调 response.Error 写 envelope（ADR-0006 单一 envelope
+// 生产者；与 Equip / GetCatalog / GetInventory 同模式）。unequip **无**
+// idempotencyKey（V1 §8.4 行 1583 钦定；与 equip 同理由 —— 故走标准
+// authedGroup 中间件链而非 chestOpenGroup）。复用既有 equipSvc 字段
+// （Unequip 在同 CosmeticEquipService interface）。
+func (h *CosmeticsHandler) Unequip(c *gin.Context) {
+	var req unequipRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		_ = c.Error(apperror.Wrap(err, apperror.ErrInvalidParam, apperror.DefaultMessages[apperror.ErrInvalidParam]))
+		return
+	}
+
+	// petId 必填 + 合法 BIGINT 字符串（V1 §8.4 步骤 2 行 1605；与 Equip 同模式）
+	if req.PetID == nil || *req.PetID == "" {
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "petId 必填"))
+		return
+	}
+	petID, err := strconv.ParseUint(*req.PetID, 10, 64)
+	if err != nil || petID == 0 {
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "petId 非合法 BIGINT 字符串"))
+		return
+	}
+	// slot 必填 + 在枚举 {1,2,3,4,5,6,7,99} 内（V1 §8.4 行 1593 + 1643）。
+	// 用指针区分"字段缺失"（nil）vs"显式传值"——equip 请求无 slot，这是
+	// unequip 与 equip 的请求侧关键差异。
+	if req.Slot == nil {
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "slot 必填"))
+		return
+	}
+	if !isValidSlot(*req.Slot) {
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "slot 不在枚举 {1,2,3,4,5,6,7,99} 内"))
+		return
+	}
+
+	// 从 auth 中间件取 userID（与 Equip 行 320-330 1:1 同模式）
+	v, ok := c.Get(middleware.UserIDKey)
+	if !ok {
+		_ = c.Error(apperror.New(apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy]))
+		return
+	}
+	userID, ok := v.(uint64)
+	if !ok {
+		_ = c.Error(apperror.New(apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy]))
+		return
+	}
+
+	out, err := h.equipSvc.Unequip(c.Request.Context(), service.UnequipParams{
+		UserID: userID,
+		PetID:  petID,
+		Slot:   int8(*req.Slot),
+	})
+	if err != nil {
+		// service 已 wrap *AppError；handler 透传，让 ErrorMappingMiddleware 写 envelope
+		_ = c.Error(err)
+		return
+	}
+
+	response.Success(c, unequipResponseDTO(out), "ok")
+}
+
+// unequipResponseDTO 把 service 输出转成 V1 §8.4 钦定的 wire 格式
+// （响应体字段表行 1617-1621 + 返回示例行 1625-1635）。
+//
+// # 关键转换
+//
+//   - **`petId` 必须字符串化**：§8.4 行 1619 钦定 string（BIGINT 字符串化，
+//     与 §2.5 全局约定一致）；用 strconv.FormatUint —— **不**直接塞 uint64
+//     （会序列化成 JSON number 破坏契约，iOS String 解码失败）。
+//   - `slot` 是 **int** 直接下发（§8.4 行 1620 钦定 int 枚举，**不**字符串化）。
+//   - `unequipped` 是 **bool** 直接下发，**恒 true**（§8.4 行 1621 / 1660
+//     钦定 —— 失败走错误码不返 false；service 成功路径必返 Unequipped=true）。
+//   - 字段名全 camelCase（V1 §2.4 + §8.4；与 equip 同模式）。
+func unequipResponseDTO(out *service.UnequipResult) gin.H {
+	return gin.H{
+		// petId 必须 string（§8.4 行 1619 BIGINT 字符串化）
+		"petId": strconv.FormatUint(out.PetID, 10),
+		// slot 是 int 直接下发（§8.4 行 1620，**不**字符串化）
+		"slot": out.Slot,
+		// unequipped 是 bool 直接下发，恒 true（§8.4 行 1621 / 1660）
+		"unequipped": out.Unequipped,
 	}
 }

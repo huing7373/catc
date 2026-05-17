@@ -34,6 +34,7 @@ import (
 
 	"github.com/huing/cat/server/internal/infra/config"
 	"github.com/huing/cat/server/internal/infra/db"
+	apperror "github.com/huing/cat/server/internal/pkg/errors"
 	"github.com/huing/cat/server/internal/repo/mysql"
 	"github.com/huing/cat/server/internal/repo/tx"
 	"github.com/huing/cat/server/internal/service"
@@ -158,4 +159,80 @@ func TestCosmeticEquipServiceIntegration_EquipAndSwapSameSlot(t *testing.T) {
 	assertCount(t, rawDB,
 		"user_cosmetic_items WHERE id = ? AND status = 2", []any{inst2}, 1,
 		"场景2 后新 inst2 status=2 equipped")
+}
+
+// TestCosmeticEquipServiceIntegration_UnequipHappyPath（Story 26.4 AC6）：
+// 创建 user + pet + 1 件 hat 实例 → 先 Equip 装上（status→2 + user_pet_equips
+// 1 行）→ 再 Unequip(petId, slot=1) → 断言 DB user_pet_equips 该 (pet,slot)
+// 行不存在（0 行）+ 实例 status=1 (in_bag) + UnequipResult.Unequipped=true。
+//
+// 建议补（V1 §8.4 行 1651 "已空槽必 5004" 不变量）：unequip 成功后**再次**
+// Unequip 同 (petId, slot) → 断言返 5004（apperror.ErrCosmeticSlotMismatch，
+// **非**幂等成功）+ DB 状态不变（验证 unequip 非幂等 + 空槽显式报错契约）。
+//
+// **范围红线**：深度回滚 / 100 并发 unequip 串行化压测 / 状态一致性矩阵归
+// Story 26.5（本文件仅 happy + 重复 unequip 5004 两场景，epics.md 行 3592-3616）。
+func TestCosmeticEquipServiceIntegration_UnequipHappyPath(t *testing.T) {
+	svc, rawDB, cleanup := buildCosmeticEquipServiceIntegration(t)
+	defer cleanup()
+
+	const userID = uint64(900401)
+	const petID = uint64(700401)
+	insertUser(t, rawDB, userID, "guest-unequip-26-4", "卸下测试用户", "")
+	insertPet(t, rawDB, petID, userID, 1, "默认小猫", 1, 1)
+
+	hatYellowCfgID := cosmeticIDByCode(t, rawDB, "hat_yellow")
+	inst1 := insertUserCosmeticItem(t, rawDB, userID, hatYellowCfgID, 1) // status=1 in_bag
+
+	// ===== 前置：Equip 把 hat 装上（slot 1，status→2 + user_pet_equips 1 行）=====
+	_, err := svc.Equip(context.Background(), service.EquipParams{
+		UserID: userID, PetID: petID, UserCosmeticItemID: inst1,
+	})
+	if err != nil {
+		t.Fatalf("前置 Equip(inst1=%d): err = %v, want nil", inst1, err)
+	}
+	assertCount(t, rawDB,
+		"user_pet_equips WHERE pet_id = ? AND slot = 1", []any{petID}, 1,
+		"前置 Equip 后 user_pet_equips slot=1 行存在")
+	assertCount(t, rawDB,
+		"user_cosmetic_items WHERE id = ? AND status = 2", []any{inst1}, 1,
+		"前置 Equip 后 inst1 status=2 equipped")
+
+	// ===== 场景 1：Unequip(petId, slot=1) → 卸下成功 =====
+	out, err := svc.Unequip(context.Background(), service.UnequipParams{
+		UserID: userID, PetID: petID, Slot: 1,
+	})
+	if err != nil {
+		t.Fatalf("场景1 Unequip(slot=1): err = %v, want nil", err)
+	}
+	if out.PetID != petID || out.Slot != 1 || !out.Unequipped {
+		t.Errorf("场景1 UnequipResult = %+v, want petId=%d slot=1 unequipped=true", out, petID)
+	}
+	// user_pet_equips 该 (pet, slot) 行不存在（0 行）
+	assertCount(t, rawDB,
+		"user_pet_equips WHERE pet_id = ? AND slot = 1", []any{petID}, 0,
+		"场景1 Unequip 后 user_pet_equips slot=1 行已删")
+	// 实例 status 回 1 in_bag
+	assertCount(t, rawDB,
+		"user_cosmetic_items WHERE id = ? AND status = 1", []any{inst1}, 1,
+		"场景1 Unequip 后 inst1 status 回 1 in_bag")
+
+	// ===== 场景 2：再次 Unequip 同 (petId, slot) → 5004（非幂等成功）=====
+	_, err = svc.Unequip(context.Background(), service.UnequipParams{
+		UserID: userID, PetID: petID, Slot: 1,
+	})
+	if err == nil {
+		t.Fatalf("场景2 重复 Unequip 空槽: err = nil, want 5004（非幂等成功）")
+	}
+	ae, ok := apperror.As(err)
+	if !ok || ae.Code != apperror.ErrCosmeticSlotMismatch {
+		t.Errorf("场景2 重复 Unequip err = %v, want AppError code=5004 (ErrCosmeticSlotMismatch)", err)
+	}
+	// DB 状态不变（实例仍 status=1，user_pet_equips 仍 0 行）
+	assertCount(t, rawDB,
+		"user_cosmetic_items WHERE id = ? AND status = 1", []any{inst1}, 1,
+		"场景2 后 inst1 status 仍 1 in_bag（重复 unequip 不改状态）")
+	assertCount(t, rawDB,
+		"user_pet_equips WHERE pet_id = ? AND slot = 1", []any{petID}, 0,
+		"场景2 后 user_pet_equips slot=1 仍 0 行")
 }

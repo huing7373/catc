@@ -71,8 +71,37 @@ type EquipResult struct {
 	Equipped EquippedItem
 }
 
-// CosmeticEquipService 是 POST /api/v1/cosmetics/equip 的 service 接口
-// （Story 26.3 引入）。handler 单测注入 stub 实现本 interface。
+// UnequipParams 是 CosmeticEquipService.Unequip 输入 DTO（handler → service
+// 转换；Story 26.4 引入，V1 §8.4 请求体行 1590-1600）。
+//
+// petId 由 handler 已 strconv.ParseUint 解析（解析失败在 handler 1002 拦截）；
+// slot 由 handler 已校验在枚举 {1,2,3,4,5,6,7,99} 内（与 EquipParams 三字段
+// 均 uint64 同模式 —— 但 unequip 请求**有 slot 无 userCosmeticItemId**，按
+// slot 不按实例 id 定位，§5.10 UNIQUE(pet_id,slot) 保证唯一）。
+type UnequipParams struct {
+	UserID uint64 // auth 中间件注入；handler 兜底校验非 0
+	PetID  uint64 // 目标 pet id（请求 petId 解析）
+	Slot   int8   // 要卸下的槽位（请求 slot；§6.8 枚举）
+}
+
+// UnequipResult 是 CosmeticEquipService.Unequip 输出 DTO（handler 转译为
+// V1 §8.4 wire DTO：petId 字符串化、slot int 直下、unequipped bool 直下）。
+//
+// 字段值规则（V1 §8.4 响应体字段表行 1617-1621）：
+//   - PetID：回显请求 petId
+//   - Slot：回显请求 slot
+//   - Unequipped：**恒 true**（成功路径才返结果；失败路径 return error 不构造
+//     result —— V1 §8.4 行 1611 / 行 1660 钦定，防 client 解析为可选/可 false）
+type UnequipResult struct {
+	PetID      uint64
+	Slot       int8
+	Unequipped bool
+}
+
+// CosmeticEquipService 是 POST /api/v1/cosmetics/equip + /unequip 的 service
+// 接口（Story 26.3 引入 Equip；Story 26.4 加 Unequip —— equip/unequip 同为
+// user_pet_equips 写事务，职责同族故同 interface/同 impl，**不**新建第三个
+// service）。handler 单测注入 stub 实现本 interface。
 type CosmeticEquipService interface {
 	// Equip 执行穿戴事务（V1 §8.3 服务端逻辑步骤 3-11；步骤 4-9 全部在同一
 	// txMgr.WithTx 事务内，任一步 err → 整体回滚 NFR1/NFR2）。
@@ -85,6 +114,20 @@ type CosmeticEquipService interface {
 	//   - missing-no-row（cosmetic_items 行被删）→ 5003 + slog error
 	//   - DB UNIQUE 并发冲突 / 任何其他 DB 错 → 1009 ErrServiceBusy
 	Equip(ctx context.Context, in EquipParams) (*EquipResult, error)
+
+	// Unequip 执行卸下事务（V1 §8.4 服务端逻辑步骤 3-8；步骤 4-7 全部在同一
+	// txMgr.WithTx 事务内，任一步 err → 整体回滚 NFR1/NFR2）。
+	//
+	// 错误码集合 {5002,5004,1002,1009}（V1 §1 节点 9 冻结的 unequip 错误码集
+	// {1001,1002,1005,5002,5004,1009} 中由 service 层产出的子集；1001/1005
+	// 由 authedGroup 中间件兜底，**不**在 service 层；**无** 5001/5003/5008
+	// —— unequip 按 slot 不按实例 id，不查实例归属/不校实例状态）：
+	//   - 入参兜底（UserID==0 / PetID==0 / slot 不在枚举）→ 1002 ErrInvalidParam
+	//   - pet 不属于当前用户（含 pet 不存在）→ 5002 ErrCosmeticNotOwned
+	//   - 该 slot 无装备（步骤 5 NotFound）/ 步骤 6 RowsAffected==0 并发兜底
+	//     → 5004 ErrCosmeticSlotMismatch（回滚）
+	//   - 任何 DB 错（步骤 4/5/6 raw error）→ 1009 ErrServiceBusy
+	Unequip(ctx context.Context, in UnequipParams) (*UnequipResult, error)
 }
 
 // cosmeticEquipServiceImpl 是 CosmeticEquipService 的默认实装。
@@ -269,5 +312,113 @@ func (s *cosmeticEquipServiceImpl) runEquipTx(txCtx context.Context, in EquipPar
 			CosmeticItemID:     item.CosmeticItemID,
 			Name:               name,
 		},
+	}, nil
+}
+
+// validUnequipSlot 判 slot 是否在 §6.8 枚举 {1,2,3,4,5,6,7,99} 内（V1 §8.4
+// 行 1593 / 行 1643；handler 已校验过，service 入参兜底再校一遍 —— 与 Equip
+// 入参兜底 UserID/PetID 非 0 同防御性原则）。
+func validUnequipSlot(s int8) bool {
+	switch s {
+	case 1, 2, 3, 4, 5, 6, 7, 99:
+		return true
+	default:
+		return false
+	}
+}
+
+// Unequip 实装：入参兜底校验 + txMgr.WithTx 内严格按 V1 §8.4 步骤 4-7 顺序。
+//
+// **关键**：WithTx fn 内所有 repo 调用用传入的 `txCtx`（**不**是外层 ctx）；
+// ADR-0007 §2.4 + CLAUDE.md ctx 必传节（与 Equip 同骨架）。
+func (s *cosmeticEquipServiceImpl) Unequip(ctx context.Context, in UnequipParams) (*UnequipResult, error) {
+	// 入参兜底（handler 已校验过 BIGINT 字符串 + slot 枚举；这里防御性兜底）
+	if in.UserID == 0 || in.PetID == 0 || !validUnequipSlot(in.Slot) {
+		return nil, apperror.New(apperror.ErrInvalidParam, apperror.DefaultMessages[apperror.ErrInvalidParam])
+	}
+
+	var output *UnequipResult
+	err := s.txMgr.WithTx(ctx, func(txCtx context.Context) error {
+		out, err := s.runUnequipTx(txCtx, in)
+		if err != nil {
+			return err
+		}
+		output = out
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return output, nil
+}
+
+// runUnequipTx 步骤 4-7 业务全流程（事务内调用）。
+//
+// **关键**：本函数内所有 repo 调用必须用传入的 `txCtx`（**不**是外层 ctx）；
+// 与 ADR-0007 §2.4 钦定一致（与 runEquipTx 同模式）。
+//
+// 步骤顺序严格锚定 V1 §8.4：先校 pet 归属（ACL 边界，不属主泄漏"该 pet
+// 该 slot 有无装备"信息）→ 再 FOR UPDATE 查装备关系（并发卸下串行化）→
+// DELETE 检查 RowsAffected（==0 回滚 + 5004 冗余兜底）→ UPDATE 实例
+// status 回 in_bag。
+func (s *cosmeticEquipServiceImpl) runUnequipTx(txCtx context.Context, in UnequipParams) (*UnequipResult, error) {
+	// 步骤 4 — 校验 pet 归属（pet 不存在亦视为 5002 —— V1 §8.4 错误码表只给
+	// 5002 一个出口；与 runEquipTx 步骤 6 pet 不存在恒 5002 不变量 1:1 一致）。
+	// 顺序锚定：步骤 4 在步骤 5 查装备关系**之前**（先校 ACL 再查资源）。
+	pet, err := s.petRepo.FindByID(txCtx, in.PetID)
+	if err != nil {
+		if stderrors.Is(err, mysql.ErrPetNotFound) {
+			// pet 不存在 → 与"非本人 pet"同处理为 5002（V1 §8.4 步骤 4 + 行 1645）
+			return nil, apperror.Wrap(err, apperror.ErrCosmeticNotOwned, apperror.DefaultMessages[apperror.ErrCosmeticNotOwned])
+		}
+		// DB 异常 → 1009
+		return nil, apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+	}
+	if pet.UserID != in.UserID {
+		// pet 不属于当前用户 → 5002
+		return nil, apperror.New(apperror.ErrCosmeticNotOwned, apperror.DefaultMessages[apperror.ErrCosmeticNotOwned])
+	}
+
+	// 步骤 5 — 查装备关系（FOR UPDATE 行锁串行化；fix-review 26-1 r2 [P1]
+	// 锁定）。并发 unequip 在该 pet_id+slot 行排他锁上排队，输家进入本步时
+	// 行已被赢家 DELETE → 查不到 → 5004，杜绝两个并发请求都越过本步。
+	uciID, err := s.userPetEquipRepo.FindUserCosmeticItemIDByPetSlotForUpdate(txCtx, in.PetID, in.Slot)
+	if err != nil {
+		if stderrors.Is(err, mysql.ErrUserPetEquipNotFound) {
+			// 该 slot 当前无装备，无可卸下对象 → 5004（V1 §8.4 行 1608 + 1646；
+			// **非**幂等成功 —— V1 §8.4 行 1649/1651 钦定空槽显式报错）
+			return nil, apperror.Wrap(err, apperror.ErrCosmeticSlotMismatch, apperror.DefaultMessages[apperror.ErrCosmeticSlotMismatch])
+		}
+		// DB 异常 → 1009
+		return nil, apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+	}
+
+	// 步骤 6 — 解绑 + 状态回退（DELETE 必须检查 affected rows；fix-review
+	// 26-1 r2 [P1] 锁定）。
+	affected, err := s.userPetEquipRepo.DeleteByPetSlotInTxReturningAffected(txCtx, in.PetID, in.Slot)
+	if err != nil {
+		// DB 异常 → 1009
+		return nil, apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+	}
+	if affected == 0 {
+		// 步骤 5 与本步之间该行已被并发事务删除（理论上已由步骤 5 FOR UPDATE
+		// 排他锁阻止，本检查为不依赖锁实现细节的契约级冗余兜底）→ 回滚事务 +
+		// 返回 5004（**禁止**带着 0 affected rows 继续 commit 而误返
+		// unequipped: true；V1 §8.4 行 1609 / 1651 / 1657 钦定）。
+		return nil, apperror.New(apperror.ErrCosmeticSlotMismatch, apperror.DefaultMessages[apperror.ErrCosmeticSlotMismatch])
+	}
+	// affected >= 1（理论上恒 1，uk_pet_slot UNIQUE 保证至多 1 行；> 1 不可能
+	// 但按 != 0 即成功兜底，与 room_member_repo.DeleteByRoomAndUser service
+	// 兜底同模式）→ 继续 UPDATE 实例 status 回 in_bag(1)
+	if err := s.userCosmeticRepo.UpdateStatusInTx(txCtx, uciID, cosmeticStatusInBag); err != nil {
+		return nil, apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+	}
+
+	// 步骤 7 — 提交（WithTx fn return nil → 自动 commit）
+	// 步骤 8 — 响应（unequipped 恒 true —— 失败走错误码不返 false）
+	return &UnequipResult{
+		PetID:      in.PetID,
+		Slot:       in.Slot,
+		Unequipped: true,
 	}, nil
 }

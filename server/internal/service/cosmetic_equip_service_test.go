@@ -80,12 +80,23 @@ func (s *stubEquipCosmeticItemRepo) FindSlotNameByID(ctx context.Context, id uin
 //   - deleteByPetSlotInTxCalls：记录步骤 8 删旧行调用 (petID, slot)
 //   - insertInTxFn：步骤 9 INSERT（注入返 ErrUserPetEquipPetSlotDuplicate
 //     等哨兵模拟 DB UNIQUE 兜底）；insertInTxCall 记录插入的 *UserPetEquip
+//
+// Story 26.4 加：unequip 专用 2 方法 hook（findUCIDByPetSlotForUpdateFn /
+// deleteByPetSlotReturningAffectedFn）+ 调用计数（findUCIDForUpdateCalls /
+// deleteReturningAffectedArg）。未注入 fn → panic-default（与既有 stub 风格
+// 一致；equip 路径不调这两个方法，unequip case 必须显式注入）。
 type stubUserPetEquipRepo struct {
 	findByPetSlotFn        func(ctx context.Context, petID uint64, slot int8) (*mysql.UserPetEquip, error)
 	deleteByPetSlotInTxFn  func(ctx context.Context, petID uint64, slot int8) error
 	insertInTxFn           func(ctx context.Context, e *mysql.UserPetEquip) error
 	deleteByPetSlotInTxArg []petSlotArg
 	insertInTxCall         []*mysql.UserPetEquip
+
+	// Story 26.4 unequip 专用
+	findUCIDByPetSlotForUpdateFn  func(ctx context.Context, petID uint64, slot int8) (uint64, error)
+	deleteByPetSlotReturningAffFn func(ctx context.Context, petID uint64, slot int8) (int64, error)
+	findUCIDForUpdateCalls        []petSlotArg
+	deleteReturningAffArg         []petSlotArg
 }
 
 type petSlotArg struct {
@@ -109,6 +120,20 @@ func (s *stubUserPetEquipRepo) InsertInTx(ctx context.Context, e *mysql.UserPetE
 		return s.insertInTxFn(ctx, e)
 	}
 	return nil
+}
+func (s *stubUserPetEquipRepo) FindUserCosmeticItemIDByPetSlotForUpdate(ctx context.Context, petID uint64, slot int8) (uint64, error) {
+	s.findUCIDForUpdateCalls = append(s.findUCIDForUpdateCalls, petSlotArg{petID: petID, slot: slot})
+	if s.findUCIDByPetSlotForUpdateFn == nil {
+		panic("stubUserPetEquipRepo.FindUserCosmeticItemIDByPetSlotForUpdate not configured (仅 unequip 路径走本方法；equip case 不期望调用)")
+	}
+	return s.findUCIDByPetSlotForUpdateFn(ctx, petID, slot)
+}
+func (s *stubUserPetEquipRepo) DeleteByPetSlotInTxReturningAffected(ctx context.Context, petID uint64, slot int8) (int64, error) {
+	s.deleteReturningAffArg = append(s.deleteReturningAffArg, petSlotArg{petID: petID, slot: slot})
+	if s.deleteByPetSlotReturningAffFn == nil {
+		panic("stubUserPetEquipRepo.DeleteByPetSlotInTxReturningAffected not configured (仅 unequip 路径走本方法；equip case 不期望调用)")
+	}
+	return s.deleteByPetSlotReturningAffFn(ctx, petID, slot)
 }
 
 // buildEquipService 装配 CosmeticEquipService（defaultStubTxMgr 直接调 fn）。
@@ -457,4 +482,215 @@ func TestEquip_ZeroUserID_Returns1002(t *testing.T) {
 
 	_, err := svc.Equip(context.Background(), service.EquipParams{UserID: 0, PetID: 2001, UserCosmeticItemID: 90001})
 	assertEquipAppErrCode(t, err, apperror.ErrInvalidParam) // 1002
+}
+
+// ================================================================
+// Story 26.4 — CosmeticEquipService.Unequip 单测（POST /cosmetics/unequip；
+// V1 §8.4 步骤 4-8）。AC5 钦定 ≥4 case 全覆盖 + 强烈建议补
+// RowsAffected==0 → 5004 回滚（本 story 区别于 equip 的核心防御逻辑）/
+// pet not found → 5002 / 步骤 4/5 DB error → 1009 / 入参兜底 1002。
+// ================================================================
+
+// happy：该槽位有装备 → 卸下成功（步骤 4 pet 属主 → 步骤 5 FOR UPDATE 命中
+// → 步骤 6 DELETE 返 (1,nil) → 实例 status→in_bag(1) → result Unequipped=true）。
+func TestUnequip_HappyPath(t *testing.T) {
+	uc := &stubUserCosmeticItemRepo{}
+	pet := &stubEquipPetRepo{
+		findByIDFn: func(ctx context.Context, petID uint64) (*mysql.Pet, error) {
+			return &mysql.Pet{ID: 2001, UserID: 42}, nil
+		},
+	}
+	upe := &stubUserPetEquipRepo{
+		findUCIDByPetSlotForUpdateFn: func(ctx context.Context, petID uint64, slot int8) (uint64, error) {
+			return 90001, nil // slot 有装备，实例 id=90001
+		},
+		deleteByPetSlotReturningAffFn: func(ctx context.Context, petID uint64, slot int8) (int64, error) {
+			return 1, nil // 删 1 行
+		},
+	}
+	svc := buildEquipService(uc, &stubEquipCosmeticItemRepo{}, pet, upe)
+
+	out, err := svc.Unequip(context.Background(), service.UnequipParams{UserID: 42, PetID: 2001, Slot: 1})
+	if err != nil {
+		t.Fatalf("Unequip happy: err = %v, want nil", err)
+	}
+	if out.PetID != 2001 || out.Slot != 1 || !out.Unequipped {
+		t.Errorf("UnequipResult = %+v, want petId=2001 slot=1 unequipped=true", out)
+	}
+	// 步骤 5 / 步骤 6 各被调 1 次（pet=2001, slot=1）
+	if len(upe.findUCIDForUpdateCalls) != 1 || upe.findUCIDForUpdateCalls[0] != (petSlotArg{petID: 2001, slot: 1}) {
+		t.Errorf("FindUCIDByPetSlotForUpdate args = %+v, want [{2001 1}]", upe.findUCIDForUpdateCalls)
+	}
+	if len(upe.deleteReturningAffArg) != 1 || upe.deleteReturningAffArg[0] != (petSlotArg{petID: 2001, slot: 1}) {
+		t.Errorf("DeleteByPetSlotReturningAffected args = %+v, want [{2001 1}]", upe.deleteReturningAffArg)
+	}
+	// 实例 status→in_bag(1) 被调 1 次（id=90001）
+	if len(uc.updateStatusInTxCalls) != 1 {
+		t.Fatalf("UpdateStatusInTx called %d times, want 1", len(uc.updateStatusInTxCalls))
+	}
+	if uc.updateStatusInTxCalls[0].id != 90001 || uc.updateStatusInTxCalls[0].status != 1 {
+		t.Errorf("UpdateStatusInTx = %+v, want {id:90001 status:1 in_bag}", uc.updateStatusInTxCalls[0])
+	}
+}
+
+// edge：该槽位无装备 → 5004（步骤 5 返 ErrUserPetEquipNotFound；DELETE /
+// UpdateStatus 未被调，事务在步骤 5 即 return error 回滚）。
+func TestUnequip_SlotEmpty_Returns5004(t *testing.T) {
+	uc := &stubUserCosmeticItemRepo{}
+	pet := &stubEquipPetRepo{
+		findByIDFn: func(ctx context.Context, petID uint64) (*mysql.Pet, error) {
+			return &mysql.Pet{ID: 2001, UserID: 42}, nil
+		},
+	}
+	upe := &stubUserPetEquipRepo{
+		findUCIDByPetSlotForUpdateFn: func(ctx context.Context, petID uint64, slot int8) (uint64, error) {
+			return 0, mysql.ErrUserPetEquipNotFound // slot 无装备
+		},
+	}
+	svc := buildEquipService(uc, &stubEquipCosmeticItemRepo{}, pet, upe)
+
+	_, err := svc.Unequip(context.Background(), service.UnequipParams{UserID: 42, PetID: 2001, Slot: 1})
+	assertEquipAppErrCode(t, err, apperror.ErrCosmeticSlotMismatch) // 5004
+	// DELETE / UpdateStatus 未被调
+	if len(upe.deleteReturningAffArg) != 0 {
+		t.Errorf("DeleteByPetSlotReturningAffected 被调 %d 次，want 0（步骤 5 即回滚）", len(upe.deleteReturningAffArg))
+	}
+	if len(uc.updateStatusInTxCalls) != 0 {
+		t.Errorf("UpdateStatusInTx 被调 %d 次，want 0", len(uc.updateStatusInTxCalls))
+	}
+}
+
+// edge：pet 不属于当前用户 → 5002（步骤 4 即返；步骤 5/6 未被调）。
+func TestUnequip_PetNotOwned_Returns5002(t *testing.T) {
+	uc := &stubUserCosmeticItemRepo{}
+	pet := &stubEquipPetRepo{
+		findByIDFn: func(ctx context.Context, petID uint64) (*mysql.Pet, error) {
+			return &mysql.Pet{ID: 2001, UserID: 999}, nil // 属他人
+		},
+	}
+	upe := &stubUserPetEquipRepo{}
+	svc := buildEquipService(uc, &stubEquipCosmeticItemRepo{}, pet, upe)
+
+	_, err := svc.Unequip(context.Background(), service.UnequipParams{UserID: 42, PetID: 2001, Slot: 1})
+	assertEquipAppErrCode(t, err, apperror.ErrCosmeticNotOwned) // 5002
+	if len(upe.findUCIDForUpdateCalls) != 0 {
+		t.Errorf("步骤 5 被调 %d 次，want 0（步骤 4 即回滚）", len(upe.findUCIDForUpdateCalls))
+	}
+}
+
+// edge（补全 pet ACL 矩阵）：pet 不存在 → 5002（与 26.3 步骤 6 不变量对齐）。
+func TestUnequip_PetNotFound_Returns5002(t *testing.T) {
+	uc := &stubUserCosmeticItemRepo{}
+	pet := &stubEquipPetRepo{
+		findByIDFn: func(ctx context.Context, petID uint64) (*mysql.Pet, error) {
+			return nil, mysql.ErrPetNotFound
+		},
+	}
+	svc := buildEquipService(uc, &stubEquipCosmeticItemRepo{}, pet, &stubUserPetEquipRepo{})
+
+	_, err := svc.Unequip(context.Background(), service.UnequipParams{UserID: 42, PetID: 9999, Slot: 1})
+	assertEquipAppErrCode(t, err, apperror.ErrCosmeticNotOwned) // 5002
+}
+
+// edge：卸下时事务部分失败（DELETE 返 (1,nil) 但 UpdateStatusInTx 返 DB
+// error）→ 1009 + 整体回滚（fn return non-nil → WithTx rollback；单测 mock
+// txMgr 验证 fn 返 error 即可）。
+func TestUnequip_PartialFailure_Returns1009(t *testing.T) {
+	uc := &stubUserCosmeticItemRepo{
+		updateStatusInTxFn: func(ctx context.Context, id uint64, status int8) error {
+			return stderrors.New("mysql: connection reset") // UPDATE 实例 status 失败
+		},
+	}
+	pet := &stubEquipPetRepo{
+		findByIDFn: func(ctx context.Context, petID uint64) (*mysql.Pet, error) {
+			return &mysql.Pet{ID: 2001, UserID: 42}, nil
+		},
+	}
+	upe := &stubUserPetEquipRepo{
+		findUCIDByPetSlotForUpdateFn: func(ctx context.Context, petID uint64, slot int8) (uint64, error) {
+			return 90001, nil
+		},
+		deleteByPetSlotReturningAffFn: func(ctx context.Context, petID uint64, slot int8) (int64, error) {
+			return 1, nil
+		},
+	}
+	svc := buildEquipService(uc, &stubEquipCosmeticItemRepo{}, pet, upe)
+
+	_, err := svc.Unequip(context.Background(), service.UnequipParams{UserID: 42, PetID: 2001, Slot: 1})
+	assertEquipAppErrCode(t, err, apperror.ErrServiceBusy) // 1009
+}
+
+// edge（强烈建议补，本 story 区别于 equip 的核心防御逻辑）：步骤 5 命中但
+// 步骤 6 DELETE 返 (0,nil)（步骤 5/6 间被并发删模拟）→ **5004** 回滚
+// （**不**是 1009 / **不**是误成功）+ UpdateStatusInTx **未被调**。
+func TestUnequip_DeleteRowsAffectedZero_Returns5004(t *testing.T) {
+	uc := &stubUserCosmeticItemRepo{}
+	pet := &stubEquipPetRepo{
+		findByIDFn: func(ctx context.Context, petID uint64) (*mysql.Pet, error) {
+			return &mysql.Pet{ID: 2001, UserID: 42}, nil
+		},
+	}
+	upe := &stubUserPetEquipRepo{
+		findUCIDByPetSlotForUpdateFn: func(ctx context.Context, petID uint64, slot int8) (uint64, error) {
+			return 90001, nil // 步骤 5 命中
+		},
+		deleteByPetSlotReturningAffFn: func(ctx context.Context, petID uint64, slot int8) (int64, error) {
+			return 0, nil // 步骤 5/6 间被并发删 → 0 affected rows
+		},
+	}
+	svc := buildEquipService(uc, &stubEquipCosmeticItemRepo{}, pet, upe)
+
+	_, err := svc.Unequip(context.Background(), service.UnequipParams{UserID: 42, PetID: 2001, Slot: 1})
+	assertEquipAppErrCode(t, err, apperror.ErrCosmeticSlotMismatch) // 5004（**不** 1009 / **不**误成功）
+	// UpdateStatusInTx 未被调（步骤 6 RowsAffected==0 即回滚）
+	if len(uc.updateStatusInTxCalls) != 0 {
+		t.Errorf("UpdateStatusInTx 被调 %d 次，want 0（RowsAffected==0 即回滚，禁止继续 commit）", len(uc.updateStatusInTxCalls))
+	}
+}
+
+// edge（补）：步骤 4 petRepo.FindByID 返非 NotFound 的 DB error → 1009。
+func TestUnequip_FindPetDBError_Returns1009(t *testing.T) {
+	pet := &stubEquipPetRepo{
+		findByIDFn: func(ctx context.Context, petID uint64) (*mysql.Pet, error) {
+			return nil, stderrors.New("mysql: connection reset")
+		},
+	}
+	svc := buildEquipService(&stubUserCosmeticItemRepo{}, &stubEquipCosmeticItemRepo{}, pet, &stubUserPetEquipRepo{})
+
+	_, err := svc.Unequip(context.Background(), service.UnequipParams{UserID: 42, PetID: 2001, Slot: 1})
+	assertEquipAppErrCode(t, err, apperror.ErrServiceBusy) // 1009
+}
+
+// edge（补）：步骤 5 FindUCIDByPetSlotForUpdate 返非哨兵 raw DB error → 1009。
+func TestUnequip_FindUCIDDBError_Returns1009(t *testing.T) {
+	pet := &stubEquipPetRepo{
+		findByIDFn: func(ctx context.Context, petID uint64) (*mysql.Pet, error) {
+			return &mysql.Pet{ID: 2001, UserID: 42}, nil
+		},
+	}
+	upe := &stubUserPetEquipRepo{
+		findUCIDByPetSlotForUpdateFn: func(ctx context.Context, petID uint64, slot int8) (uint64, error) {
+			return 0, stderrors.New("mysql: deadlock found")
+		},
+	}
+	svc := buildEquipService(&stubUserCosmeticItemRepo{}, &stubEquipCosmeticItemRepo{}, pet, upe)
+
+	_, err := svc.Unequip(context.Background(), service.UnequipParams{UserID: 42, PetID: 2001, Slot: 1})
+	assertEquipAppErrCode(t, err, apperror.ErrServiceBusy) // 1009
+}
+
+// edge（补）：入参兜底（UserID=0）→ 1002（handler 已校验，service 防御性兜底）。
+func TestUnequip_ZeroUserID_Returns1002(t *testing.T) {
+	svc := buildEquipService(&stubUserCosmeticItemRepo{}, &stubEquipCosmeticItemRepo{}, &stubEquipPetRepo{}, &stubUserPetEquipRepo{})
+
+	_, err := svc.Unequip(context.Background(), service.UnequipParams{UserID: 0, PetID: 2001, Slot: 1})
+	assertEquipAppErrCode(t, err, apperror.ErrInvalidParam) // 1002
+}
+
+// edge（补）：入参兜底（slot 不在枚举）→ 1002（handler 已校验，service 防御性兜底）。
+func TestUnequip_InvalidSlot_Returns1002(t *testing.T) {
+	svc := buildEquipService(&stubUserCosmeticItemRepo{}, &stubEquipCosmeticItemRepo{}, &stubEquipPetRepo{}, &stubUserPetEquipRepo{})
+
+	_, err := svc.Unequip(context.Background(), service.UnequipParams{UserID: 42, PetID: 2001, Slot: 8}) // 8 不在 {1..7,99}
+	assertEquipAppErrCode(t, err, apperror.ErrInvalidParam)                                              // 1002
 }

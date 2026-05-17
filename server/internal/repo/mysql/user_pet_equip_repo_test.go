@@ -138,3 +138,128 @@ func TestUserPetEquipRepo_InsertInTx_OtherDBError_RawPassThrough(t *testing.T) {
 		t.Errorf("err = nil, want raw DB error 透传")
 	}
 }
+
+// ================================================================
+// Story 26.4 — unequip 专用 2 方法 sqlmock 单测
+// （FindUserCosmeticItemIDByPetSlotForUpdate FOR UPDATE 行锁 Raw SQL +
+// DeleteByPetSlotInTxReturningAffected 返 RowsAffected）。
+// FOR UPDATE Raw SQL 用 ExpectQuery 正则匹配 `FOR UPDATE` 子串（与
+// room_member_repo_test ExistsForShare FOR SHARE 测试同模式）。
+// ================================================================
+
+// FindUserCosmeticItemIDByPetSlotForUpdate happy：命中 1 行 → 返
+// user_cosmetic_item_id。
+func TestUserPetEquipRepo_FindUCIDByPetSlotForUpdate_Happy(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserPetEquipRepo(gormDB)
+
+	rows := sqlmock.NewRows([]string{"user_cosmetic_item_id"}).AddRow(uint64(90001))
+	mock.ExpectQuery("FOR UPDATE").
+		WithArgs(uint64(2001), int8(1)).
+		WillReturnRows(rows)
+
+	got, err := repo.FindUserCosmeticItemIDByPetSlotForUpdate(context.Background(), 2001, 1)
+	if err != nil {
+		t.Fatalf("FindUserCosmeticItemIDByPetSlotForUpdate: %v", err)
+	}
+	if got != 90001 {
+		t.Errorf("got = %d, want 90001", got)
+	}
+}
+
+// FindUserCosmeticItemIDByPetSlotForUpdate 0 行 → ErrUserPetEquipNotFound
+// 哨兵（Raw + Scan 0 行不返 gorm.ErrRecordNotFound，须显式判 RowsAffected==0）。
+func TestUserPetEquipRepo_FindUCIDByPetSlotForUpdate_NotFound_ReturnsSentinel(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserPetEquipRepo(gormDB)
+
+	mock.ExpectQuery("FOR UPDATE").
+		WithArgs(uint64(2001), int8(1)).
+		WillReturnRows(sqlmock.NewRows([]string{"user_cosmetic_item_id"})) // 0 行
+
+	got, err := repo.FindUserCosmeticItemIDByPetSlotForUpdate(context.Background(), 2001, 1)
+	if got != 0 {
+		t.Errorf("got = %d, want 0", got)
+	}
+	if !stderrors.Is(err, ErrUserPetEquipNotFound) {
+		t.Errorf("err = %v, want ErrUserPetEquipNotFound", err)
+	}
+}
+
+// FindUserCosmeticItemIDByPetSlotForUpdate query 失败 → raw error 透传。
+func TestUserPetEquipRepo_FindUCIDByPetSlotForUpdate_DBError_RawPassThrough(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserPetEquipRepo(gormDB)
+
+	rawErr := &mysql.MySQLError{Number: 1213, Message: "Deadlock found"}
+	mock.ExpectQuery("FOR UPDATE").
+		WithArgs(uint64(2001), int8(1)).
+		WillReturnError(rawErr)
+
+	got, err := repo.FindUserCosmeticItemIDByPetSlotForUpdate(context.Background(), 2001, 1)
+	if got != 0 {
+		t.Errorf("got = %d, want 0", got)
+	}
+	if stderrors.Is(err, ErrUserPetEquipNotFound) {
+		t.Errorf("err = %v, want raw 透传（非哨兵）", err)
+	}
+	if err == nil {
+		t.Errorf("err = nil, want raw DB error 透传")
+	}
+}
+
+// DeleteByPetSlotInTxReturningAffected 删 1 行 → (1, nil)。
+func TestUserPetEquipRepo_DeleteByPetSlotReturningAffected_DeleteOne(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserPetEquipRepo(gormDB)
+
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM `user_pet_equips`")).
+		WithArgs(uint64(2001), int8(1)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	n, err := repo.DeleteByPetSlotInTxReturningAffected(context.Background(), 2001, 1)
+	if err != nil {
+		t.Fatalf("DeleteByPetSlotInTxReturningAffected: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("rowsAffected = %d, want 1", n)
+	}
+}
+
+// DeleteByPetSlotInTxReturningAffected 删 0 行 → (0, nil)（步骤 5/6 间被并发删
+// 模拟；service 层据此 → 5004 回滚兜底）。
+func TestUserPetEquipRepo_DeleteByPetSlotReturningAffected_DeleteZero(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserPetEquipRepo(gormDB)
+
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM `user_pet_equips`")).
+		WithArgs(uint64(2001), int8(1)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	n, err := repo.DeleteByPetSlotInTxReturningAffected(context.Background(), 2001, 1)
+	if err != nil {
+		t.Fatalf("DeleteByPetSlotInTxReturningAffected: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("rowsAffected = %d, want 0", n)
+	}
+}
+
+// DeleteByPetSlotInTxReturningAffected DB 错 → (0, err)。
+func TestUserPetEquipRepo_DeleteByPetSlotReturningAffected_DBError(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserPetEquipRepo(gormDB)
+
+	rawErr := &mysql.MySQLError{Number: 1213, Message: "Deadlock found"}
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM `user_pet_equips`")).
+		WithArgs(uint64(2001), int8(1)).
+		WillReturnError(rawErr)
+
+	n, err := repo.DeleteByPetSlotInTxReturningAffected(context.Background(), 2001, 1)
+	if n != 0 {
+		t.Errorf("rowsAffected = %d, want 0", n)
+	}
+	if err == nil {
+		t.Errorf("err = nil, want raw DB error")
+	}
+}
