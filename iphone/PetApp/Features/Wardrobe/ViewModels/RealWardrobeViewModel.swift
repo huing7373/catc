@@ -1,26 +1,45 @@
 // RealWardrobeViewModel.swift
-// Story 37.9 AC2: WardrobeViewModel 生产实装子类（构造注入 AppState；override 1 个 abstract method 占位 stub）.
+// Story 37.9 AC2: WardrobeViewModel 生产实装子类（构造注入 AppState；override 1 个 abstract method）.
+// Story 24.1: subscribeInventory 真实 inventory 派生落地（替换 37.9 占位 sink）.
 //
-// 范围（本 story 占位；Story 24.1 / 24.2 / 27.1 等填充真实 UseCase 调用）：
+// 范围（Story 24.1 落地点；Story 24.2 / 27.1 等继续填充）：
 //   - 构造注入 AppState（按 ADR-0010 §3.1 ViewModel 注入规则）+ parameterless init() 走 bind(appState:)
+//   - subscribeInventory：订阅 appState.$currentInventory（类型 [HomeEquip]），closure 内
+//     `[HomeEquip] → [CosmeticItem]` 真实 mapping 写 self.inventory；空（启动 / reset）→ self.inventory = []
+//     （空仓库走 Story 37.9 已实装空态 placeholder；**不**再退回 WardrobeScaffoldDefaults.inventory mock）.
+//   - 上游触发归属：Story 24.2 LoadInventoryUseCase 调 GET /cosmetics/inventory 后写
+//     appState.currentInventory —— 写入后零 edit 通过本 sink 反映到 Wardrobe（本 story 实装 closure
+//     mapping 即完成「Story 24.2 写 → Wardrobe 显示真实装扮」闭环）；本 story **不**加 .task/.onAppear
+//     触发 load（避免与 Story 24.2 UseCase 触发点冲突）.
 //   - override onEquipTap：本地 toggle equipped 映射 + log（占位）；Story 27.1 后改调 EquipUseCase 写 appState.currentEquips
 //     round 1 P1 fix（codex review）：本 override 必须 mutate equipped — 仅 log 会让 production "装备/已装备" 按钮 no-op
 //     （lesson `2026-04-30-real-viewmodel-override-placeholder-must-mutate-state.md`）
 //
-// **不**调用任何 UseCase / Repository / APIClient（Epic 37 红线：UI Scaffold 数据完全 mock）.
-// **不**订阅真实 LoadInventoryUseCase（Story 24.2 落地；本 story RealWardrobeViewModel 仅占位骨架）.
+// **不**调用任何 UseCase / Repository / APIClient（LoadInventoryUseCase 本体属 Story 24.2；本 story 仅 sink mapping）.
 //
-// Story 37.7 / 37.8 沉淀 lesson 预防性应用（**不重蹈覆辙**）：
+// HomeEquip → CosmeticItem mapping 形状（Story 24.1 AC2 钦定；mapToCosmeticItems(_:)）：
+//   - id       ← HomeEquip.userCosmeticItemId（实例级唯一 id；同 cosmetic 多实例各成独立 CosmeticItem，
+//                 不在 ViewModel 层去重 —— count 由 WardrobeScaffoldView filter().count 自然得出，
+//                 与 37.9 既有 grid 渲染契约一致）
+//   - name     ← HomeEquip.name
+//   - category ← CosmeticCategory.category(forSlot: HomeEquip.slot)（V1 §6.8 slot 8 值归并到 client 5 桶；未知 slot fallback .bow 不丢实例）
+//   - rarity   ← HomeEquip.rarity int → Rarity enum（{1,2,3,4} → .N/.R/.SR/.SSR；未知值 fallback .N，视觉降级不 crash）
+//   - owned    ← 恒 true（inventory 全是「已拥有实例」；空仓库时数组为空，不出现 owned=false）
+//   - iconEmoji← category.iconEmoji 派生占位（Story 30.x 接真实 sprite 时升级）
+//
+// Story 37.7 / 37.8 / 37.9 沉淀 lesson（预防性应用，**不重蹈覆辙**）：
 //   - lesson `2026-04-30-real-home-viewmodel-injection-must-not-leave-base-fatalerror.md`：
-//     RootView `@StateObject wardrobeViewModel` 用 `RealWardrobeViewModel()` 而非基类 `WardrobeViewModel()` —
-//     基类 onEquipTap 是 fatalError 占位，用户点装备按钮即 crash.
+//     RootView `@StateObject wardrobeViewModel` 用 `RealWardrobeViewModel()` 而非基类（基类 onEquipTap fatalError）.
 //   - lesson `2026-04-30-real-viewmodel-init-must-seed-scaffold-defaults.md`：
-//     两条 init 路径都走 `WardrobeScaffoldDefaults` seed —— 让 launch 后 / hydrate 前 / reset 后任何
-//     Real path 都立刻有 mock inventory 占位（不让 WardrobeScaffoldView 渲染空衣柜）.
+//     **本 story 部分偏离此 lesson（有意决策，AC5 钦定）**：catName / equipped / selectedCategory 仍 seed
+//     WardrobeScaffoldDefaults（保留 lesson 精神：hydrate 前 UI 不空白崩溃）；但 `inventory` seed 改 `[]`
+//     —— 理由：本 story 后 Real 路径语义是「真实 inventory」，hydrate 前显示 mock 18 件假装扮会误导用户
+//     （开箱前应显示空仓库 placeholder）；37.9 用 mock seed 是因当时无真实数据源，本 story 接通后 seed
+//     应反映真实初值（空）。**非未遵守 seed lesson，是语义正确性优先的有意偏离**.
 //   - lesson `2026-04-30-published-derived-state-needs-publisher-subscription.md`：
 //     派生 state 用 sink 路径而非一次性 hydrate —— catName 订阅 appState.$currentPet,
 //     inventory 订阅 appState.$currentInventory；reset 路径（appState.reset() 把 currentPet / currentInventory 置空）
-//     也能即时反映到字段（不残留旧值；fallback 回 WardrobeScaffoldDefaults 占位）.
+//     即时反映（不残留旧值；inventory 空 → []，catName → WardrobeScaffoldDefaults 占位）.
 //   - lesson `2026-04-30-room-host-name-must-not-derive-from-local-current-pet.md`：
 //     **本 story 反向应用 lesson** —— Wardrobe 域的 catName 语义合法派生自 appState.currentPet
 //     （Wardrobe 是"看自己衣柜"单一视角；与 Room 域 host 可能是别人的语境不同）.
@@ -40,8 +59,10 @@ public final class RealWardrobeViewModel: WardrobeViewModel {
     private var inventorySubscription: AnyCancellable?
 
     /// parameterless init —— RootView `@StateObject` 老模式可用; AppState 通过 bind 异步注入.
-    /// round 1 P2 fix（Story 37.8 lesson 预防性应用）：seed `catName` / `inventory` / `equipped` / `selectedCategory`
-    /// 全部走 WardrobeScaffoldDefaults，让 launch / hydrate 前 / reset 后任何走 Real path 都立刻有 mock 占位.
+    /// Story 24.1 调整（AC5）：catName / equipped / selectedCategory 仍 seed WardrobeScaffoldDefaults
+    /// （保留 37.8 lesson 精神：hydrate 前 UI 不空白崩溃）；`inventory` seed 改 `[]`
+    /// —— 本 story 后 Real 路径语义是「真实 inventory」，hydrate 前空仓库 placeholder 才是正确初值
+    /// （文件头注释记录此有意偏离 seed lesson 的理由，防 review 误判）.
     ///
     /// 注：必写 `override` —— 基类 WardrobeViewModel 有显式 `public init() {}`（与 RoomViewModel 同模式
     /// 但与 spec 注释相反；保留 override 让编译通过；与 MockWardrobeViewModel.init() 行为一致）.
@@ -50,7 +71,7 @@ public final class RealWardrobeViewModel: WardrobeViewModel {
         self.appState = nil
         // 视觉初值（hydrate 前 placeholder）；bind(appState:) 后 sink 派生覆盖 catName / inventory.
         self.catName = WardrobeScaffoldDefaults.catName
-        self.inventory = WardrobeScaffoldDefaults.inventory
+        self.inventory = []  // Story 24.1 AC5：真实 inventory 语义下空仓库占位（非 mock 18 件）
         self.equipped = WardrobeScaffoldDefaults.equipped
         self.selectedCategory = WardrobeScaffoldDefaults.selectedCategory
         self.selectedCosmeticId = nil
@@ -59,9 +80,11 @@ public final class RealWardrobeViewModel: WardrobeViewModel {
     public init(appState: AppState) {
         super.init()
         self.appState = appState
-        // round 1 P2 fix：先 seed scaffold defaults（让 sink 还没派发前 WardrobeScaffoldView 有数据可渲染）.
+        // catName / equipped / selectedCategory seed scaffold defaults（sink 派发前 view 有数据可渲染）；
+        // inventory seed [] —— Story 24.1 AC5：真实 inventory 语义；init(appState:) 路径下方 subscribeInventory
+        // 立即用 appState.currentInventory（启动时通常为空）覆盖，行为一致.
         self.catName = WardrobeScaffoldDefaults.catName
-        self.inventory = WardrobeScaffoldDefaults.inventory
+        self.inventory = []
         self.equipped = WardrobeScaffoldDefaults.equipped
         self.selectedCategory = WardrobeScaffoldDefaults.selectedCategory
         self.selectedCosmeticId = nil
@@ -96,27 +119,63 @@ public final class RealWardrobeViewModel: WardrobeViewModel {
             }
     }
 
-    /// 订阅 appState.$currentInventory —— Story 24.2 LoadInventoryUseCase 落地后会写入此字段；本期 sink 路径已 hookup,
-    /// 让 Story 24.1 落地时零 edit RealWardrobeViewModel.
-    /// 当前 appState.currentInventory 是 [HomeEquip]，本 story 不引入 HomeEquip → CosmeticItem mapping
-    /// （Story 24.1 决定 mapping shape；本 story 仅订阅了，但 sink closure 内只让 inventory fallback 到 defaults
-    /// 当前 currentInventory 为空时 —— 真有数据时 mapping 留 Story 24.1）.
+    /// 订阅 appState.$currentInventory（类型 [HomeEquip]）—— Story 24.1 实装真实 inventory 派生.
+    /// 上游 Story 24.2 LoadInventoryUseCase 调 GET /cosmetics/inventory 后写 appState.currentInventory,
+    /// 写入即通过本 sink 零 edit 反映到 Wardrobe（本 story 实装 closure mapping 完成「24.2 写 → Wardrobe 显示」闭环）.
+    ///
+    ///   - currentInventory 为空（启动后 / reset 后 / hydrate 前）→ self.inventory = []
+    ///     （**不**再退回 WardrobeScaffoldDefaults.inventory；空仓库走 37.9 已实装空态 placeholder）
+    ///   - currentInventory 非空 → self.inventory = mapToCosmeticItems(homeEquips)
+    ///
+    /// **保持 sink 路径不退化为一次性 hydrate**（lesson `2026-04-30-published-derived-state-needs-publisher-subscription`）：
+    /// reset() 把 currentInventory = [] 时 sink 派发 [] → self.inventory = []（不残留旧 inventory）.
     private func subscribeInventory(to appState: AppState) {
         inventorySubscription = appState.$currentInventory
             .sink { [weak self] homeEquips in
                 guard let self else { return }
-                // 本期占位策略（Story 24.1 落地时改 mapping）：
-                //   - currentInventory 为空（启动后 / reset 后）→ 用 WardrobeScaffoldDefaults.inventory 占位
-                //   - currentInventory 非空（Story 24.1 落地后才会非空）→ TODO: HomeEquip → CosmeticItem mapping
-                //     当前留占位 mock（避免本 story 引入 mapping 让 Story 24.1 dev 重写）
                 if homeEquips.isEmpty {
-                    self.inventory = WardrobeScaffoldDefaults.inventory
+                    self.inventory = []  // 空仓库占位（37.9 空态 placeholder 生效；非 mock 18 件）
                 } else {
-                    // 占位：保持当前 inventory 不动（Story 24.1 落地真 mapping）
-                    // 行为等价于"Real 看到 hydrate 进来就用最新 mock data"；不会触发 user-visible bug
-                    // 因为本 story 范围内 currentInventory 永远是 [].
+                    self.inventory = self.mapToCosmeticItems(homeEquips)
                 }
             }
+    }
+
+    /// `[HomeEquip] → [CosmeticItem]` 真实 mapping（Story 24.1 AC2 钦定形状）.
+    ///
+    /// 抽独立私有方法便于单测直接断言（ADR-0002 §3.1 XCTest only —— 不经 view 内省）.
+    /// 逐元素转换（**不去重不聚合**）：同 cosmetic 的多个实例各成独立 CosmeticItem,
+    /// 分类 count 由 WardrobeScaffoldView `inventory.filter { $0.category == }.count` 自然得出
+    /// （与 Story 37.9 既有 grid 渲染契约一致；V1 §8.2 server 侧 count = instances 数组长度的 client 等价）.
+    ///
+    /// fallback 不丢实例（V1 §8.2「已拥有不得静默丢失」精神的 client 侧延续）：
+    ///   - 未知 slot → CosmeticCategory.category(forSlot:) 内归 .bow 兜底桶
+    ///   - 未知 rarity int → .N（最低品质，视觉降级而非 crash）
+    private func mapToCosmeticItems(_ equips: [HomeEquip]) -> [CosmeticItem] {
+        equips.map { equip in
+            let category = CosmeticCategory.category(forSlot: equip.slot)
+            return CosmeticItem(
+                id: equip.userCosmeticItemId,           // 实例级唯一 id（多实例各独立）
+                name: equip.name,
+                category: category,
+                rarity: Self.rarity(forServerValue: equip.rarity),
+                owned: true,                            // inventory 全是已拥有实例
+                iconEmoji: category.iconEmoji           // 占位（Story 30.x 接真实 sprite 升级）
+            )
+        }
+    }
+
+    /// server rarity int（V1 §6.9 `{1,2,3,4}`）→ `Rarity` enum（`.N/.R/.SR/.SSR`）.
+    /// 未知值 fallback `.N`（最低品质，视觉降级而非 crash —— Rarity enum rawValue 是 String 非 Int,
+    /// 不能用 `Rarity(rawValue:)`，故显式 switch 映射）.
+    private static func rarity(forServerValue value: Int) -> Rarity {
+        switch value {
+        case 1:  return .N
+        case 2:  return .R
+        case 3:  return .SR
+        case 4:  return .SSR
+        default: return .N  // 未知 rarity int 视觉降级（不丢实例 / 不 crash）
+        }
     }
 
     // MARK: - override abstract methods（本 story 占位；Story 27.1 实装真实 EquipUseCase / UnequipUseCase）

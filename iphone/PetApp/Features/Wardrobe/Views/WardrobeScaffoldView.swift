@@ -231,7 +231,7 @@ public struct WardrobeScaffoldView: View {
                 Text(category.iconEmoji)
                 Text(category.label)
                     .font(.system(size: 12, weight: .heavy))
-                Text("\(count)")
+                Text(CosmeticCategory.badgeText(forCount: count))   // Story 24.1: count>99 → "99+" 纯函数 clamp
                     .font(.system(size: 10, weight: .bold))
                     .opacity(0.7)
             }

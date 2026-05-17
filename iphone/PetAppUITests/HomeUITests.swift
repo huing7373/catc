@@ -249,10 +249,13 @@ final class HomeUITests: XCTestCase {
             "wardrobeEquipButton 未找到"
         )
 
-        // 验证 grid 至少有一个 wardrobeItem_*（默认 hat 分类应显示 h1 贝雷帽）
-        XCTAssertTrue(
+        // Story 24.1 AC4/AC5：RootView 走 RealWardrobeViewModel，UITEST_SKIP_GUEST_LOGIN 下
+        // appState.currentInventory 为空（LoadInventoryUseCase 属 Story 24.2 未触发）→ inventory == [] →
+        // 空仓库 placeholder（**不**再显示 37.9 的 mock 18 件，wardrobeItem_h1 不应存在）.
+        // 真实库存渲染验证移交 Story 24.2（接 GET /cosmetics/inventory 后）；本 case 仅守 a11y 结构锚不回归.
+        XCTAssertFalse(
             app.descendants(matching: .any)[AccessibilityID.Wardrobe.item("h1")].exists,
-            "默认 hat 分类应显示 wardrobeItem_h1"
+            "Story 24.1: Real 路径空 inventory → 不应出现 mock wardrobeItem_h1（空仓库占位）"
         )
     }
 

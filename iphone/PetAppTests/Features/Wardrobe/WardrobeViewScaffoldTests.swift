@@ -99,31 +99,38 @@ final class WardrobeViewScaffoldTests: XCTestCase {
     func testRealWardrobeViewModelConstructionAndAbstractMethodDoesNotCrash() {
         let appState = AppState()
         let vm = RealWardrobeViewModel(appState: appState)
-        XCTAssertEqual(vm.catName, WardrobeScaffoldDefaults.catName, "init 走 defaults seed")
-        XCTAssertFalse(vm.inventory.isEmpty, "init 走 defaults seed inventory")
+        XCTAssertEqual(vm.catName, WardrobeScaffoldDefaults.catName, "init 走 defaults seed (catName)")
+        // Story 24.1 AC5：inventory seed 改 []（真实 inventory 语义；非 37.9 mock 18 件）.
+        // appState.currentInventory 启动时为空 → subscribeInventory sink 派发 [] → inventory == [].
+        XCTAssertTrue(vm.inventory.isEmpty, "Story 24.1 AC5: init/空 appState → inventory == [] (空仓库占位)")
 
-        let testItem = vm.inventory[0]
-        // 调用 onEquipTap override 验证不进入基类 fatalError 路径.
+        // onEquipTap override 验证不进入基类 fatalError 路径（用 mock item，inventory 现为空）.
         // round 1 P1 fix 后行为变更：Real 路径与 Mock 一样本地 toggle equipped（详见 case#11 守护测试）.
+        let testItem = CosmeticItem(id: "h1", name: "贝雷帽", category: .hat, rarity: .R, owned: true, iconEmoji: "🎩")
         vm.onEquipTap(item: testItem)
     }
 
     // MARK: - case#8 守护: Real init 必 seed scaffold defaults（lesson 预防性应用）
 
     /// 与 Story 37.8 testRealRoomViewModelInitSeedsRoomScaffoldDefaults 同模式 ——
-    /// 防未来 Claude 重构 init 时漏 seed inventory / equipped / catName 让 RealWardrobeViewModel 渲染空衣柜.
+    /// 防未来 Claude 重构 init 时漏 seed equipped / catName / selectedCategory.
     /// lesson: 2026-04-30-real-viewmodel-init-must-seed-scaffold-defaults.md
+    ///
+    /// **Story 24.1 AC5 有意偏离**：catName / equipped / selectedCategory 仍 seed
+    /// WardrobeScaffoldDefaults（保留 lesson 精神：hydrate 前 UI 不空白崩溃）；
+    /// 但 `inventory` seed 改 `[]`（真实 inventory 语义下空仓库 placeholder 才是正确初值，
+    /// hydrate 前显示 mock 18 件假装扮会误导用户）—— 本断言改为验证 inventory 空 + 其余 3 字段仍 seed.
     func testRealWardrobeViewModelInitSeedsScaffoldDefaults() {
         // parameterless init 路径
         let vm1 = RealWardrobeViewModel()
-        XCTAssertFalse(vm1.inventory.isEmpty)
+        XCTAssertTrue(vm1.inventory.isEmpty, "Story 24.1 AC5: inventory seed [] (真实语义空仓库占位)")
         XCTAssertEqual(vm1.catName, WardrobeScaffoldDefaults.catName)
         XCTAssertEqual(vm1.equipped, WardrobeScaffoldDefaults.equipped)
         XCTAssertEqual(vm1.selectedCategory, WardrobeScaffoldDefaults.selectedCategory)
 
-        // init(appState:) 路径
+        // init(appState:) 路径（空 appState → sink 派发 [] → inventory 仍空）
         let vm2 = RealWardrobeViewModel(appState: AppState())
-        XCTAssertFalse(vm2.inventory.isEmpty)
+        XCTAssertTrue(vm2.inventory.isEmpty, "Story 24.1 AC5: 空 appState → inventory == []")
         XCTAssertEqual(vm2.equipped, WardrobeScaffoldDefaults.equipped)
     }
 
@@ -177,12 +184,15 @@ final class WardrobeViewScaffoldTests: XCTestCase {
     ///   1) owned + 未装备 → 装备（equipped[bow] = b2）
     ///   2) owned + 已装备同 id → 卸下（equipped[bow] = nil）
     ///   3) unowned 道具 → equipped 不变（owned guard 保留）
+    /// Story 24.1 AC5：Real init 改 inventory seed []，本测试不再依赖 seeded mock inventory，
+    /// 改为直接构造 CosmeticItem 传入 onEquipTap（测试真实意图是「override 必须 mutate equipped」
+    /// 而非依赖 inventory 内容，构造法更稳健）.
     func testRealWardrobeViewModelOnEquipTapTogglesEquipped() {
         let appState = AppState()
         let vm = RealWardrobeViewModel(appState: appState)
 
         // case 1: owned + 未装备 → 装备
-        let bowB2 = vm.inventory.first { $0.category == .bow && $0.id == "b2" }!
+        let bowB2 = CosmeticItem(id: "b2", name: "星星发夹", category: .bow, rarity: .R, owned: true, iconEmoji: "🎀")
         XCTAssertTrue(bowB2.owned, "fixture 前提：b2 owned")
         XCTAssertNotEqual(vm.equipped[.bow], bowB2.id, "默认 b1 装备，b2 未装备")
         vm.onEquipTap(item: bowB2)
@@ -193,7 +203,7 @@ final class WardrobeViewScaffoldTests: XCTestCase {
         XCTAssertNil(vm.equipped[.bow], "Real path: 再点同 item 卸下 → equipped[.bow] = nil")
 
         // case 3: unowned → equipped 不变（owned guard）
-        let unownedHat = vm.inventory.first { $0.category == .hat && !$0.owned }!
+        let unownedHat = CosmeticItem(id: "h6", name: "警官帽", category: .hat, rarity: .R, owned: false, iconEmoji: "🎩")
         let originalHat = vm.equipped[.hat]
         vm.onEquipTap(item: unownedHat)
         XCTAssertEqual(vm.equipped[.hat], originalHat, "Real path: unowned 道具点击 equipped[.hat] 不变（与 Mock 一致）")
