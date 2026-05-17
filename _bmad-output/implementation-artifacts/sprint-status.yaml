@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-05-17  # Story 26-2（user_pet_equips migration）→ done；epic-26 进行中
+last_updated: 2026-05-17  # Story 26-3（POST /cosmetics/equip 事务）→ done；epic-26 进行中
 # Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
 # 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
@@ -249,7 +249,7 @@ development_status:
   epic-26: in-progress
   26-1-接口契约最终化: done
   26-2-user_pet_equips-migration: done
-  26-3-post-cosmetics-equip-事务: backlog
+  26-3-post-cosmetics-equip-事务: done
   26-4-post-cosmetics-unequip-事务: backlog
   26-5-layer-2-集成测试-穿戴事务全流程: backlog
   26-6-get-home-扩展-pet-equips-真实数据: backlog
