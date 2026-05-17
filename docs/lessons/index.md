@@ -343,3 +343,4 @@
 | 2026-05-17 | [并发集成测试断言必须匹配被测系统真实语义（swap≠互斥）& setup 构造必须满足相关表全部 UNIQUE（26-5 r1）](2026-05-17-concurrent-test-assertions-must-match-system-semantics-26-5-r1.md) | 2 | testing | `<pending>` |
 | 2026-05-18 | [并发断言强弱 ping-pong 的根因在"测试初始状态/并发结构"层而非"断言"层：用空槽 setup + 同步屏障钉死确定路径 + 守门注释终结 chain（26-5 r2）](2026-05-18-concurrent-assertion-strength-pingpong-root-cause-is-test-structure-26-5-r2.md) | 1 | testing | `<pending>` |
 | 2026-05-18 | [并发断言 over-correction chain 的终结根因：断言编码的不变量与契约语义（swap≠互斥）不符，靠实证 + 契约语义层收敛（26-5 r3）](2026-05-18-concurrent-pseudo-invariant-vs-frozen-contract-swap-semantics-26-5-r3.md) | 1 | testing, docs | `<pending>` |
+| 2026-05-18 | [放松 flaky 并发断言后必须新增独立确定性测试补回安全网（非回退强断言）& 双向一致性 helper 用 INNER JOIN 会把违例悬挂行 join 掉而误绿（26-5 r4）](2026-05-18-relax-flaky-concurrency-then-add-deterministic-targeted-test-and-inner-join-false-green-26-5-r4.md) | 2 | testing | `<pending>` |

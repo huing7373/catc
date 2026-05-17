@@ -427,16 +427,34 @@ func assertEquipStateConsistency(t *testing.T, rawDB *sql.DB, userID uint64) {
 			userID, orphanEquipped)
 	}
 
-	// 反向：user_pet_equips 行 ⟹ 实例 status=2（孤儿装备关系行计数必须 0）
+	// 反向：user_pet_equips 行 ⟹ 实例 status=2（孤儿装备关系行计数必须 0）。
+	//
+	// **codex r4 [P2] 修复**：旧实现用 INNER JOIN
+	// `user_pet_equips upe JOIN user_cosmetic_items uci ON uci.id =
+	// upe.user_cosmetic_item_id WHERE uci.status <> 2`——任何
+	// user_cosmetic_item_id **错/缺/指向不存在实例** 的悬挂装备行会在 JOIN
+	// 阶段被丢弃（matchless 行不进结果集），COUNT 计不到它 → helper 误报
+	// 一致（false green）。这违反「user_pet_equips ↔ equipped 实例 双向不
+	// 变量」：任何悬挂行本身就是违例。多个 rollback/matrix case 复用本
+	// helper，悬挂行回归会全部漏网。
+	//
+	// 修复：用 LEFT JOIN + `WHERE uci.id IS NULL OR uci.status <> 2` 计数 ——
+	// LEFT JOIN 保留**所有** user_pet_equips 行；user_cosmetic_item_id 指向
+	// 不存在实例 → uci.id 全列为 NULL（`uci.id IS NULL` 抓住「缺/错指向」
+	// 悬挂行）；指向存在但非 equipped 实例 → `uci.status <> 2` 抓住「指向
+	// 非 equipped」悬挂行。两类违例都计入 → 任何悬挂装备行都会让本断言
+	// fail 而非误绿。正常一致状态下每行都 JOIN 到一个 status=2 实例，
+	// `uci.id IS NULL`(false) AND `uci.status <> 2`(false) → 计 0，既有
+	// 正常路径不误报。
 	var orphanRow int64
 	if err := rawDB.QueryRow(
 		`SELECT COUNT(*) FROM user_pet_equips upe
-		 JOIN user_cosmetic_items uci ON uci.id = upe.user_cosmetic_item_id
-		 WHERE upe.user_id = ? AND uci.status <> 2`, userID).Scan(&orphanRow); err != nil {
+		 LEFT JOIN user_cosmetic_items uci ON uci.id = upe.user_cosmetic_item_id
+		 WHERE upe.user_id = ? AND (uci.id IS NULL OR uci.status <> 2)`, userID).Scan(&orphanRow); err != nil {
 		t.Fatalf("一致性反向查询失败 (userID=%d): %v", userID, err)
 	}
 	if orphanRow != 0 {
-		t.Fatalf("NFR2 一致性破坏【反向】: userID=%d 有 %d 个 user_pet_equips 行对应实例 status<>2（孤儿装备关系行）",
+		t.Fatalf("NFR2 一致性破坏【反向】: userID=%d 有 %d 个 user_pet_equips 行对应实例缺失/status<>2（孤儿/悬挂装备关系行；LEFT JOIN 保留无匹配行，codex r4 修复 INNER JOIN 漏检）",
 			userID, orphanRow)
 	}
 }
@@ -1080,4 +1098,185 @@ func TestCosmeticEquipServiceIntegration_UnequipEmptySlot_Returns5004(t *testing
 	assertCount(t, rawDB,
 		"user_pet_equips WHERE pet_id = ?", []any{petID}, 0,
 		"边界3 后 user_pet_equips 0 行")
+}
+
+// ============================================================================
+// Story 26.5 Task 4 补强 — uk_pet_slot 重复键兜底**确定性**覆盖
+// （codex r4 [P2] over-correction chain 收尾）
+// ============================================================================
+//
+// **背景（r1→r4 over-correction chain）**：并发1 case
+// _Concurrent100SamePetSlot_FinalStateConsistent 历经 r0`==1` → r1 放松
+// `>=1`+终态矩阵 → r2 错误收回`==1`+99 个 1009 逐个断言 → r3 实证证伪
+// （91/100 swap 合法成功）回 `>=1`+终态矩阵。r3 终态对 swap 语义是正确的，
+// **但**放松后留下一个覆盖缺口（codex r4 [P2] 行 4843）：若未来 Equip 在
+// InsertInTx 前变**全串行化**（如给 slot lookup 加锁），即使 uk_pet_slot
+// 重复键→回滚路径**完全坏掉**，并发1 的每个 goroutine 也都能作为合法
+// swap 成功、终态仍 1 行 1 equipped，并发1 case 照样绿——它**不再确定性
+// exercise** uk_pet_slot 这条 DB 兜底路径。
+//
+// **收尾范式（非回退到 flaky 强断言）**：放松 flaky 并发断言后，必须用一个
+// **独立的、确定性（无 goroutine race / 无 flaky）测试**补回被放松掉的那
+// 条特定安全网覆盖。**不**把并发1 的成功计数收回 `==1`（swap 语义下伪
+// 不变量，已被实证 3 次否定）——并发1 case 的成功计数语义/守门注释/终态
+// 矩阵**保持 r3 现状不动**，本测试是**新增的、正交的**确定性补充。
+//
+// **为何走 service-stub + repo 双段而非纯 service 路径**：service.Equip
+// 步骤 8 **总是先** FindByPetSlot；若该 slot 已有行 → 走 swap 分支（删旧
+// + 插新），**不会**让 InsertInTx 撞上已存在的 (pet,slot) 行。真实生产中
+// uk_pet_slot 兜底**只在并发**下触发（goroutine A 的 FindByPetSlot 读到
+// 空、B 已 commit、A 的 InsertInTx 才撞 UNIQUE）——这正是并发1 的非确定性
+// 来源。要**不靠并发**确定性命中，分两段确定性覆盖「UNIQUE fallback + 错误
+// 映射」：
+//
+//	(A) repo 层：预 INSERT 一条 (pet,slot) 行 → 直接对**同 (pet,slot)** 调
+//	    InsertInTx → 真实 MySQL uk_pet_slot 拒绝 → 断言返
+//	    mysql.ErrUserPetEquipPetSlotDuplicate 哨兵（确定性，无并发）。
+//	(B) service 层：用 findByPetSlotNotFoundStub 包真 repo——FindByPetSlot
+//	    **恒返 NotFound 哨兵**（迫使 service 跳过 swap 分支、直奔
+//	    InsertInTx），而真 InsertInTx 撞上预 seed 的 (pet,slot) 行 → 真实
+//	    uk_pet_slot 拒绝 → repo 返 PetSlotDuplicate 哨兵 → service errors.Is
+//	    → 映射成冻结契约钦定的 1009 ErrServiceBusy（确定性，无并发）。
+//
+// (A)+(B) 合起来确定性覆盖 codex r4 要的「uk_pet_slot 重复键 → 回滚 →
+// 错误映射」全链，无 goroutine race / 无 flaky。
+//
+// **与 Story 26-2 既有覆盖的分工（避免 reviewer 误判重复造轮子）**：
+// server/internal/infra/migrate/migrate_integration_test.go
+// TestMigrateIntegration_UserPetEquips_UniqueConstraints_Rejected 已在
+// **纯 DB schema 约束层**用 raw database/sql INSERT 确定性验证双 UNIQUE
+// （uk_pet_slot + uk_user_cosmetic_item_id）被 MySQL 拒绝。本测试聚焦点
+// **正交且互补**：验证的是**穿戴事务 / repo 哨兵 / service 错误映射语境**
+// 下 uk_pet_slot 兜底——即「GORM Create → 1062 → repo 按 Message 含约束名
+// 分流 PetSlotDuplicate 哨兵 → service errors.Is → 1009」这条**应用层翻译
+// 链**，而非 26-2 的纯 DDL 约束存在性。不重复造轮子。
+
+// findByPetSlotNotFoundStub 包真实 mysql.UserPetEquipRepo：FindByPetSlot
+// **恒返 ErrUserPetEquipNotFound 哨兵**（迫使 service.Equip 步骤 8 判定
+// 「slot 无装备」→ 跳过 swap 分支 → 直奔步骤 9 InsertInTx），其余 4 方法
+// 透传委托真实 repo（按方法包装范式与 faultUserPetEquipRepoOnDelete 行
+// ~292 一致）。
+//
+// **用途**：确定性（**非并发**）触发 service 层 InsertInTx 撞已存在
+// (pet,slot) 行的 uk_pet_slot 兜底 → 验证 repo PetSlotDuplicate 哨兵 →
+// service 1009 错误映射链（codex r4 [P2] 收尾）。InsertInTx **透传真 repo**
+// （撞真实 MySQL UNIQUE，不是 stub 假错误——保证覆盖的是真实 DB 兜底路径）。
+type findByPetSlotNotFoundStub struct {
+	delegate mysql.UserPetEquipRepo
+}
+
+func (f *findByPetSlotNotFoundStub) FindByPetSlot(ctx context.Context, petID uint64, slot int8) (*mysql.UserPetEquip, error) {
+	// 恒返 NotFound 哨兵 → service 步骤 8 走「slot 无装备 → 跳过 swap」分支，
+	// 步骤 9 InsertInTx 直接撞预 seed 的 (pet,slot) 行（确定性命中 uk_pet_slot）。
+	return nil, mysql.ErrUserPetEquipNotFound
+}
+
+func (f *findByPetSlotNotFoundStub) DeleteByPetSlotInTx(ctx context.Context, petID uint64, slot int8) error {
+	return f.delegate.DeleteByPetSlotInTx(ctx, petID, slot)
+}
+
+func (f *findByPetSlotNotFoundStub) InsertInTx(ctx context.Context, e *mysql.UserPetEquip) error {
+	return f.delegate.InsertInTx(ctx, e) // 透传真 repo → 撞真实 MySQL uk_pet_slot
+}
+
+func (f *findByPetSlotNotFoundStub) FindUserCosmeticItemIDByPetSlotForUpdate(ctx context.Context, petID uint64, slot int8) (uint64, error) {
+	return f.delegate.FindUserCosmeticItemIDByPetSlotForUpdate(ctx, petID, slot)
+}
+
+func (f *findByPetSlotNotFoundStub) DeleteByPetSlotInTxReturningAffected(ctx context.Context, petID uint64, slot int8) (int64, error) {
+	return f.delegate.DeleteByPetSlotInTxReturningAffected(ctx, petID, slot)
+}
+
+// TestCosmeticEquipServiceIntegration_UkPetSlotDuplicateKey_DeterministicFallback
+// （codex r4 [P2] 收尾；epics.md 行 3608 AC「DB UNIQUE(pet_id,slot) 兜底」
+// 的**确定性**覆盖，补并发1 case 放松 `>=1` 后留下的覆盖缺口）：
+// **不靠并发**、无 goroutine race、无 flaky 地确定性命中 uk_pet_slot
+// 重复键 → 回滚 → 错误映射全链，分两段：
+//
+//	段 A（repo 直测）：seed user/pet + 预 INSERT (pet,slot=1) 一行
+//	  user_pet_equips → 在事务内对**同 (pet,slot=1)** 不同实例调
+//	  userPetEquipRepo.InsertInTx → 真实 MySQL uk_pet_slot 拒绝 → 断言
+//	  errors.Is(err, mysql.ErrUserPetEquipPetSlotDuplicate) 哨兵
+//	  + 兜底 user_pet_equips 仍恰 1 行（重复 INSERT 未落库）。
+//
+//	段 B（service 全链）：findByPetSlotNotFoundStub 迫 service 跳 swap
+//	  分支 → 步骤 9 InsertInTx 撞段 A 预 seed 的 (pet,slot=1) 行 → 真实
+//	  uk_pet_slot 拒绝 → repo PetSlotDuplicate 哨兵 → service errors.Is
+//	  → 映射成冻结契约钦定 1009 ErrServiceBusy；断言 requireEquipAppError
+//	  得 1009 + 事务回滚（被 equip 的实例仍 status=1 in_bag、
+//	  user_pet_equips 仍恰 1 行指向预 seed 实例，新行未落库）。
+//
+// 与并发1 case **正交**：本测试**不动**并发1 case 的成功计数语义/守门
+// 注释/终态矩阵（保持 r3 现状）；本测试是**新增的确定性安全网**，专门在
+// 「Equip 假想全串行化回归」下仍能确定性 exercise uk_pet_slot DB 兜底
+// + repo 哨兵 + service 1009 映射这条应用层翻译链。
+func TestCosmeticEquipServiceIntegration_UkPetSlotDuplicateKey_DeterministicFallback(t *testing.T) {
+	userCosmeticRepo, cosmeticRepo, petRepo, userPetEquipRepo, txMgr, rawDB, cleanup :=
+		buildCosmeticEquipServiceIntegrationWithRepos(t)
+	defer cleanup()
+
+	const userID = uint64(900621)
+	const petID = uint64(700621)
+	insertUser(t, rawDB, userID, "guest-equip-26-5-ukps", "uk_pet_slot 兜底测试用户", "")
+	insertPet(t, rawDB, petID, userID, 1, "默认小猫", 1, 1)
+
+	hatYellowCfgID := cosmeticIDByCode(t, rawDB, "hat_yellow") // slot=1
+	// 预 seed 的「并发赢家已提交」装备实例（占住 (pet,slot=1)）
+	winnerInst := insertUserCosmeticItem(t, rawDB, userID, hatYellowCfgID, 2) // status=2 equipped
+	// 待 equip 的另一件 hat 实例（同 slot=1，模拟「输家」goroutine 要装的实例）
+	loserInst := insertUserCosmeticItem(t, rawDB, userID, hatYellowCfgID, 1) // status=1 in_bag
+
+	// 直接 INSERT 一条 (pet,slot=1) user_pet_equips 行模拟「并发赢家已提交」
+	// 前置态（slot 已被占）。
+	if _, err := rawDB.ExecContext(context.Background(),
+		"INSERT INTO user_pet_equips (user_id, pet_id, slot, user_cosmetic_item_id) VALUES (?, ?, 1, ?)",
+		userID, petID, winnerInst); err != nil {
+		t.Fatalf("前置 INSERT user_pet_equips (pet=%d,slot=1,inst=%d): %v", petID, winnerInst, err)
+	}
+	assertCount(t, rawDB,
+		"user_pet_equips WHERE pet_id = ? AND slot = 1", []any{petID}, 1,
+		"前置：(pet,slot=1) 恰 1 行（赢家已占）")
+
+	// ===== 段 A：repo 直测 —— 对同 (pet,slot=1) 调 InsertInTx 确定性命中
+	// uk_pet_slot 重复键 → 断言 PetSlotDuplicate 哨兵（无并发） =====
+	errA := txMgr.WithTx(context.Background(), func(txCtx context.Context) error {
+		return userPetEquipRepo.InsertInTx(txCtx, &mysql.UserPetEquip{
+			UserID: userID, PetID: petID, Slot: 1, UserCosmeticItemID: loserInst,
+		})
+	})
+	if !stderrors.Is(errA, mysql.ErrUserPetEquipPetSlotDuplicate) {
+		t.Fatalf("段A repo InsertInTx 同 (pet=%d,slot=1) 重复: err = %v, want mysql.ErrUserPetEquipPetSlotDuplicate 哨兵（确定性命中 uk_pet_slot，无并发）",
+			petID, errA)
+	}
+	// 兜底：重复 INSERT 被 DB 拒绝未落库（仍恰 1 行，指向预 seed 赢家）
+	assertCount(t, rawDB,
+		"user_pet_equips WHERE pet_id = ? AND slot = 1", []any{petID}, 1,
+		"段A 后 (pet,slot=1) 仍恰 1 行（重复 INSERT 被 uk_pet_slot 拒绝未落库）")
+	assertCount(t, rawDB,
+		"user_pet_equips WHERE pet_id = ? AND slot = 1 AND user_cosmetic_item_id = ?",
+		[]any{petID, winnerInst}, 1, "段A 后该行仍指向预 seed 赢家实例（未被覆盖）")
+
+	// ===== 段 B：service 全链 —— stub 迫跳 swap 分支 → 步骤 9 InsertInTx
+	// 撞 uk_pet_slot → repo 哨兵 → service errors.Is → 1009（无并发） =====
+	stubPetEquipRepo := &findByPetSlotNotFoundStub{delegate: userPetEquipRepo}
+	stubSvc := service.NewCosmeticEquipService(txMgr, userCosmeticRepo, cosmeticRepo, petRepo, stubPetEquipRepo)
+
+	_, errB := stubSvc.Equip(context.Background(), service.EquipParams{
+		UserID: userID, PetID: petID, UserCosmeticItemID: loserInst,
+	})
+	requireEquipAppError(t, errB, apperror.ErrServiceBusy,
+		"段B service Equip 撞 uk_pet_slot（stub 迫跳 swap）→ repo PetSlotDuplicate 哨兵 → 1009 ErrServiceBusy 映射")
+
+	// 段 B 事务回滚验证：loserInst 仍 status=1 in_bag（未变 equipped）+
+	// user_pet_equips 仍恰 1 行指向预 seed 赢家（service 步骤 9 InsertInTx
+	// 被 uk_pet_slot 拒 → fn return error → 真 InnoDB ROLLBACK，新行未落库）。
+	assertCount(t, rawDB,
+		"user_cosmetic_items WHERE id = ? AND status = 1", []any{loserInst}, 1,
+		"段B 后 loserInst 仍 status=1 in_bag（uk_pet_slot 兜底 → ROLLBACK，未变 equipped）")
+	assertCount(t, rawDB,
+		"user_pet_equips WHERE pet_id = ? AND slot = 1", []any{petID}, 1,
+		"段B 后 (pet,slot=1) 仍恰 1 行（service InsertInTx 撞 uk_pet_slot → ROLLBACK，新行未落库）")
+	assertCount(t, rawDB,
+		"user_pet_equips WHERE pet_id = ? AND slot = 1 AND user_cosmetic_item_id = ?",
+		[]any{petID, winnerInst}, 1, "段B 后该行仍指向预 seed 赢家实例（service 兜底未脏写）")
 }
