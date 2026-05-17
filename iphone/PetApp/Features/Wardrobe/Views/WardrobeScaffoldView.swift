@@ -37,6 +37,7 @@ public struct WardrobeScaffoldView: View {
             topCard               // 区块 1: 顶部 Card（收藏数 + "{猫名}的衣柜" + 钻石货币 + 合成按钮）
             previewCard           // 区块 2: 预览区 Card（左 cat 占位 + 右 active item 详情 + 装备按钮）
             categoryTabs          // 区块 3: 5 分类 Tab 横向滚动
+            rarityFilterBar       // 区块 3.5: Story 24.3 品质筛选条（分类 Tab 下 / grid 上）
             grid                  // 区块 4: 3 列 LazyVGrid 道具网格
         }
         .background(theme.colors.pageBg.ignoresSafeArea())
@@ -226,7 +227,11 @@ public struct WardrobeScaffoldView: View {
     private func categoryTabButton(_ category: CosmeticCategory) -> some View {
         let isSelected = state.selectedCategory == category
         let count = state.inventory.filter { $0.category == category }.count
-        return Button(action: { state.selectCategory(category) }) {
+        return Button(action: {
+            // Story 24.3 Task 4.4：37.9 既有 selectCategory action 未包动画 → 补最小 withAnimation,
+            // 让切分类时 grid 内容（filteredCategoryItems）平滑过渡，与品质 chip 切换手感一致.
+            withAnimation(.easeInOut(duration: 0.2)) { state.selectCategory(category) }
+        }) {
             HStack(spacing: 6) {
                 Text(category.iconEmoji)
                 Text(category.label)
@@ -256,16 +261,75 @@ public struct WardrobeScaffoldView: View {
         .accessibilityIdentifier(AccessibilityID.Wardrobe.category(category.rawValue))
     }
 
+    // MARK: - 区块 3.5: rarityFilterBar (Story 24.3 —— 分类 Tab 下 / grid 上)
+
+    /// 品质筛选条：横向 chip 排（全部 / N / R / SR / SSR）.
+    /// reconcile：epics.md §24.3 字面「品质 segment + 4 区段并列」→ 与已交付 37.9 单一 grid 架构兼容的
+    /// 单选 chip 过滤条（详见 story Dev Notes「epics.md 偏离登记」）；纯客户端，selectRarity 只写
+    /// view transient，filteredCategoryItems 据此过滤，**不发任何 API**.
+    private var rarityFilterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                rarityFilterChip(label: "全部", rawValue: "all", rarity: nil)
+                ForEach(Rarity.allCases) { rarity in
+                    rarityFilterChip(label: rarity.rawValue, rawValue: rarity.rawValue, rarity: rarity)
+                }
+            }
+            .padding(.horizontal, 20)
+        }
+        .padding(.bottom, 6)
+    }
+
+    /// 单个品质 chip：选中态视觉复用 categoryTabButton 规则（accent fill 白字 / surface+border stroke）.
+    /// shadow 必须挂在 `RoundedRectangle.fill(...).shadow(...)` 那一层（遵守 37.6 round5 lesson
+    /// `2026-04-30-swiftui-state-survives-id-and-shadow-over-children.md`，**不**在最外层 chain .shadow
+    /// 投影 children Text/RarityTag）—— 与 categoryTabButton line 244-249 同写法.
+    private func rarityFilterChip(label: String, rawValue: String, rarity: Rarity?) -> some View {
+        let isSelected = state.selectedRarity == rarity
+        return Button(action: {
+            // Story 24.3 AC3：切换 chip 时 grid 平滑过渡（@Published 变 → SwiftUI diff → ForEach 数据源变）.
+            withAnimation(.easeInOut(duration: 0.2)) { state.selectRarity(rarity) }
+        }) {
+            HStack(spacing: 6) {
+                Text(label)
+                    .font(.system(size: 12, weight: .heavy))
+                if let rarity {
+                    RarityTag(rarity: rarity, width: 18, height: 3)
+                }
+            }
+            .padding(.vertical, 8)
+            .padding(.horizontal, 14)
+            .foregroundColor(isSelected ? .white : theme.colors.ink)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(isSelected ? theme.colors.accent : theme.colors.surface)
+                    .shadow(
+                        color: isSelected ? theme.shadow.sm.color : .clear,
+                        radius: theme.shadow.sm.radius,
+                        x: theme.shadow.sm.x,
+                        y: theme.shadow.sm.y
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(isSelected ? .clear : theme.colors.border, lineWidth: 1)
+            )
+        }
+        .accessibilityIdentifier(AccessibilityID.Wardrobe.rarityFilter(rawValue))
+    }
+
     // MARK: - 区块 4: grid (wardrobe.jsx:127-164)
 
-    /// 道具网格：3 列 LazyVGrid + ForEach state.currentCategoryItems Button cell.
+    /// 道具网格：3 列 LazyVGrid + ForEach state.filteredCategoryItems Button cell.
+    /// Story 24.3 Task 4.3：ForEach 数据源由 currentCategoryItems → filteredCategoryItems（grid 唯一 edit 点；
+    /// 分类 Tab badge count 的 state.inventory.filter{...}.count 不改 —— badge = 该分类总件数不受品质筛选影响）.
     private var grid: some View {
         ScrollView {
             LazyVGrid(
                 columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3),
                 spacing: 10
             ) {
-                ForEach(state.currentCategoryItems) { item in
+                ForEach(state.filteredCategoryItems) { item in
                     gridCell(item: item)
                 }
             }

@@ -78,6 +78,12 @@ final class AccessibilityIDTests: XCTestCase {
         XCTAssertEqual(AccessibilityID.Wardrobe.equipButton, "wardrobeEquipButton")
         XCTAssertEqual(AccessibilityID.Wardrobe.category("hat"), "wardrobeCategory_hat")
         XCTAssertEqual(AccessibilityID.Wardrobe.item("abc123"), "wardrobeItem_abc123")
+        // Story 24.3: 品质筛选条 chip helper（"全部"→"all" / 4 品质→Rarity.rawValue）.
+        XCTAssertEqual(AccessibilityID.Wardrobe.rarityFilter("all"), "wardrobeRarityFilter_all")
+        XCTAssertEqual(AccessibilityID.Wardrobe.rarityFilter("N"), "wardrobeRarityFilter_N")
+        XCTAssertEqual(AccessibilityID.Wardrobe.rarityFilter("R"), "wardrobeRarityFilter_R")
+        XCTAssertEqual(AccessibilityID.Wardrobe.rarityFilter("SR"), "wardrobeRarityFilter_SR")
+        XCTAssertEqual(AccessibilityID.Wardrobe.rarityFilter("SSR"), "wardrobeRarityFilter_SSR")
 
         // Friends.
         XCTAssertEqual(AccessibilityID.Friends.view, "friendsView")

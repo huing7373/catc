@@ -158,6 +158,10 @@ public enum AccessibilityID {
         public static func category(_ rawValue: String) -> String { "wardrobeCategory_\(rawValue)" }
         /// `wardrobeItem_<id>` 模式；caller 走 helper.
         public static func item(_ id: String) -> String { "wardrobeItem_\(id)" }
+        /// Story 24.3: 品质筛选条 chip `wardrobeRarityFilter_<rawValue>` 模式；caller 走 helper.
+        /// "全部" chip 用 rawValue = "all"（→ "wardrobeRarityFilter_all"），4 品质用各自 Rarity.rawValue
+        /// （"N"/"R"/"SR"/"SSR" → "wardrobeRarityFilter_N" 等，与既有 RarityTag a11y 命名一致）.
+        public static func rarityFilter(_ rawValue: String) -> String { "wardrobeRarityFilter_\(rawValue)" }
     }
 
     /// Story 37.10 / 37.3 落地的 FriendsScaffoldView a11y identifier.

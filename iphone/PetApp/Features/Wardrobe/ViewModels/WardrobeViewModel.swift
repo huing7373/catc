@@ -37,6 +37,12 @@ public class WardrobeViewModel: ObservableObject {
     /// 与 selectedCategory 同精神：view-specific transient @Published（ADR-0010 §3.2）.
     @Published public var selectedCosmeticId: String?
 
+    /// Story 24.3: 当前选中的品质筛选（nil = "全部"，不按品质过滤）.
+    /// view-specific transient @Published（ADR-0010 §3.2「current Tab/sheet/loading/筛选选中 →
+    /// ViewModel transient，不进 AppState」）—— 与 selectedCategory / selectedCosmeticId 同归属.
+    /// 纯客户端：filteredCategoryItems 据此对 currentCategoryItems 再叠加 rarity 过滤，不发任何 API.
+    @Published public var selectedRarity: Rarity? = nil
+
     public init() {}
 
     // MARK: - abstract method（基类 fatalError 占位，子类必 override）
@@ -59,6 +65,9 @@ public class WardrobeViewModel: ObservableObject {
     public func selectCategory(_ category: CosmeticCategory) {
         self.selectedCategory = category
         self.selectedCosmeticId = nil
+        // Story 24.3: 切分类回「全部品质」（用户心智：换一个分类重新看；
+        // **不**改既有「清空 selectedCosmeticId」副作用，仅追加本行）.
+        self.selectedRarity = nil
     }
 
     /// 切换选中道具（用户点 grid cell 调）.
@@ -67,17 +76,41 @@ public class WardrobeViewModel: ObservableObject {
         self.selectedCosmeticId = cosmeticId
     }
 
+    /// Story 24.3: 切换品质筛选（用户点品质 chip 调；nil = "全部"）.
+    /// **不是** abstract —— 纯 view-state 行为，无 Mock/Real 分化需求（与 selectCategory / selectItem 同精神，
+    /// 放基类避免子类重复实装 → Mock/Real 零 edit 自动继承）.
+    /// 副作用：清空 selectedCosmeticId（与 selectCategory 同精神 —— 过滤变化后老选中 id 可能不在
+    /// filteredCategoryItems 内，让预览区 activeItem fallback，防止选中态指向已被过滤掉的 item）.
+    public func selectRarity(_ rarity: Rarity?) {
+        self.selectedRarity = rarity
+        self.selectedCosmeticId = nil
+    }
+
     // MARK: - derived helper（view 层方便用，子类不 override）
 
-    /// 当前选中分类的 inventory（按 selectedCategory 过滤；grid 渲染数据源）.
+    /// 当前选中分类的 inventory（按 selectedCategory 过滤；分类 Tab badge / isEquipped 等既有派生数据源）.
+    /// **保持原样不改**（37.9/24.1 既有契约依赖；Story 24.3 在其上叠加 filteredCategoryItems，不替换）.
     public var currentCategoryItems: [CosmeticItem] {
         inventory.filter { $0.category == selectedCategory }
     }
 
+    /// Story 24.3: 在 currentCategoryItems 之上再叠加 rarity 过滤的 grid 渲染数据源（纯客户端，零 API）.
+    /// selectedRarity == nil ⇒ 原样返回 currentCategoryItems（"全部"）；
+    /// selectedRarity == r ⇒ currentCategoryItems.filter { $0.rarity == r }.
+    /// 是**新增叠加层**不替换 currentCategoryItems —— 仅 grid 的 ForEach 数据源 + activeItem 底层源
+    /// 改用本属性；分类 Tab badge count 仍用原 currentCategoryItems 语义不受品质筛选影响.
+    public var filteredCategoryItems: [CosmeticItem] {
+        guard let rarity = selectedRarity else { return currentCategoryItems }
+        return currentCategoryItems.filter { $0.rarity == rarity }
+    }
+
     /// 当前选中的 active item（selectedCosmeticId → CosmeticItem 查找；nil 时 fallback 到当前分类已装备 item 或第一个 item）.
     /// 与 ui_design wardrobe.jsx:25 `activeItem` 派生逻辑等价：selected || items.find(i => i.equip === cat) || items[0]
+    /// Story 24.3: 底层 items 源由 currentCategoryItems 换为 filteredCategoryItems —— 让预览区与可见 grid
+    /// 一致（选中只可能落在可见项；fallback equipped/first 也在过滤后集合内，预览区不显示被过滤掉的道具）.
+    /// fallback 优先级 selected→equipped→first 逻辑不动，仅换 `let items =` 源那一行.
     public var activeItem: CosmeticItem? {
-        let items = currentCategoryItems
+        let items = filteredCategoryItems
         if let selectedId = selectedCosmeticId,
            let selected = items.first(where: { $0.id == selectedId }) {
             return selected
