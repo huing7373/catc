@@ -561,6 +561,33 @@ public final class AppContainer: ObservableObject {
         )
     }
 
+    // MARK: - Story 24.2 AC5: Inventory 链路 factory
+
+    /// Story 24.2 AC2: 构造 InventoryRepository（每次调用返回新实例；apiClient 单例由 container 持有）.
+    /// 与 makeChestRepository / makeEmojiRepository 同模式（value type struct，构造廉价）.
+    ///
+    /// **不加 UITest mock gate**：Story 24.2 iOS UI 验证走真实游客登录 + 真实 server
+    /// GET /cosmetics/inventory + dev 工具 /dev/grant-cosmetic-batch 开箱链路（不走
+    /// UITEST_SKIP_GUEST_LOGIN）；无 XCUITest 路径依赖固定 fixture，故不预建
+    /// UITestMockInventoryRepository（与 story Task 5.1「仅在 UITest 路径需要时加，不过度预建」一致）.
+    public func makeInventoryRepository() -> InventoryRepositoryProtocol {
+        DefaultInventoryRepository(apiClient: apiClient)
+    }
+
+    /// Story 24.2 AC3: 构造 LoadInventoryUseCase（每次调用返回新实例；依赖 repository / appState）.
+    /// caller 必须传 appState（AppState 在 RootView 持有；不进 AppContainer 字段；ADR-0010 §3.1）.
+    /// 与 makeLoadChestUseCase / makeSyncStepsUseCase 同模式.
+    ///
+    /// **struct 无 cache**（epics.md 行 3367「每次打开都重新加载，不缓存」）：每次 Wardrobe Tab
+    /// 出现都调一次 execute()，不复用结果；与 makeLoadChestUseCase 同精神（反 LoadEmojisUseCase
+    /// 单例 cache 模式 —— inventory 开箱后必须立即变）.
+    public func makeLoadInventoryUseCase(appState: AppState) -> LoadInventoryUseCaseProtocol {
+        DefaultLoadInventoryUseCase(
+            repository: makeInventoryRepository(),
+            appState: appState
+        )
+    }
+
     // MARK: - Story 18.1 AC5: Emoji 链路 factory
 
     /// Story 18.1 AC5: 构造 EmojiRepository (每次调用返回新实例; apiClient 单例由 container 持有).

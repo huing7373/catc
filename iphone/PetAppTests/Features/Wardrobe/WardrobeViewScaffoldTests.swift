@@ -208,4 +208,57 @@ final class WardrobeViewScaffoldTests: XCTestCase {
         vm.onEquipTap(item: unownedHat)
         XCTAssertEqual(vm.equipped[.hat], originalHat, "Real path: unowned 道具点击 equipped[.hat] 不变（与 Mock 一致）")
     }
+
+    // MARK: - case#12 守护: WardrobeView.isSilentCancellation 三形态取消静默 + 真实网络失败不静默
+    //         （fix-review 24-2 r1 [P2] 守门测试 —— 防 hack 回归）
+
+    /// codex review 24-2 r1 [P2]：用户切走 Wardrobe Tab 时 `.task(id:)` cancel，
+    /// `URLSession` 抛 `URLError(.cancelled)`，被 `APIClient` 包成
+    /// `APIError.network(URLError.cancelled)`（**非**裸 `CancellationError`）。
+    /// 旧实装只 `catch is CancellationError` → 这条取消落进通用 catch → 误弹 RetryView。
+    ///
+    /// 本守门测试把「哪些 error 算静默取消、哪些必须弹 RetryView」钉成机器可校验，
+    /// 防未来任何人：
+    ///   (a) 把"被网络层包裹的取消"识别删掉 → 切 Tab 又误弹 RetryView；
+    ///   (b) over-correct 成"所有 APIError.network 都静默吞" → 真实 timeout / 离线
+    ///       也被静默掉，用户切到 Wardrobe 永远看不到 RetryView（下一轮 review 必反弹）。
+    /// lesson: docs/lessons/2026-05-17-wrapped-cancellation-must-not-trigger-retry.md
+    func testIsSilentCancellationClassifiesAllCancellationFormsButNotRealNetworkFailures() {
+        // 形态 1：裸 CancellationError（Swift Concurrency 结构化取消）→ 静默
+        XCTAssertTrue(WardrobeView.isSilentCancellation(CancellationError()),
+            "裸 CancellationError 必须静默吞（切走不是错误）")
+
+        // 形态 2：裸 URLError(.cancelled)（防御性：未经 APIClient 包裹直达）→ 静默
+        XCTAssertTrue(WardrobeView.isSilentCancellation(URLError(.cancelled)),
+            "裸 URLError(.cancelled) 必须静默吞")
+
+        // 形态 3：APIError.network(URLError.cancelled)（**本 finding 主路径** —— APIClient
+        // 把 URLSession 取消包成 .network；APIClient.swift:139-140）→ 静默
+        XCTAssertTrue(
+            WardrobeView.isSilentCancellation(APIError.network(underlying: URLError(.cancelled))),
+            "被网络层包裹的 URLError.cancelled 必须静默吞（review 24-2 r1 [P2] 主路径）")
+
+        // 反例 1：真实网络失败 timeout —— 必须**不**静默（要弹 RetryView）
+        XCTAssertFalse(
+            WardrobeView.isSilentCancellation(APIError.network(underlying: URLError(.timedOut))),
+            "APIError.network(timedOut) 是真实失败，必须弹 RetryView（防 over-correct 吞所有 .network）")
+
+        // 反例 2：真实网络失败 离线 —— 必须**不**静默
+        XCTAssertFalse(
+            WardrobeView.isSilentCancellation(
+                APIError.network(underlying: URLError(.notConnectedToInternet))),
+            "APIError.network(notConnectedToInternet) 是真实失败，必须弹 RetryView")
+
+        // 反例 3：业务错误 —— 必须**不**静默
+        XCTAssertFalse(
+            WardrobeView.isSilentCancellation(
+                APIError.business(code: 1001, message: "x", requestId: "r")),
+            "业务错误不是取消，必须弹 RetryView")
+
+        // 反例 4：解码错误 —— 必须**不**静默
+        XCTAssertFalse(
+            WardrobeView.isSilentCancellation(
+                APIError.decoding(underlying: URLError(.cannotDecodeRawData))),
+            "解码错误不是取消，必须弹 RetryView")
+    }
 }

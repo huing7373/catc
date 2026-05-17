@@ -249,6 +249,11 @@ struct RootView: View {
                     // .environment(\.loadEmojisUseCase, ...) → RoomScaffoldView → EmojiAnimationLayer → FloatingEmojiCellView
                     // .task 查 catalog 拿 assetUrl. UITEST 路径下 loadEmojisUseCase 单例不变 (mock fixture 已注入).
                     loadEmojisUseCase: container.loadEmojisUseCase,
+                    // Story 24.2 AC5: LoadInventoryUseCase（每次 Wardrobe Tab 出现 execute 一次,
+                    // struct 无 cache）+ container.errorPresenter（与下方 .errorPresentationHost
+                    // 同实例，让 WardrobeView 失败弹的 RetryView 由既有 host modifier 渲染）.
+                    loadInventoryUseCase: container.makeLoadInventoryUseCase(appState: appState),
+                    wardrobeErrorPresenter: container.errorPresenter,
                     onReadyAppear: {
                         #if DEBUG
                         // lazy 注入：第一次 .onAppear 时从已稳定的 container 拿 keychainStore，
@@ -794,6 +799,15 @@ private struct LaunchedContentView: View {
     /// 注入 .ready 子树, HomeContainerRoomViewBridge 读取后传给 RoomScaffoldView init →
     /// EmojiAnimationLayer 内 FloatingEmojiCellView .task 查 catalog 拿 assetUrl.
     let loadEmojisUseCase: LoadEmojisUseCaseProtocol?
+    /// Story 24.2 AC5: LoadInventoryUseCase；通过 `\.loadInventoryUseCase` environment value
+    /// 注入 .ready 子树, WardrobeView `.task(id: coordinator.currentTab)` 读取后在 Wardrobe Tab
+    /// 出现时调 execute() → 写 appState.currentInventory → Story 24.1 sink 渲染真实装扮.
+    /// 每次调返回新 struct 实例（不缓存；epics.md 行 3367）.
+    let loadInventoryUseCase: LoadInventoryUseCaseProtocol?
+    /// Story 24.2 AC5: ErrorPresenter（与 RootView .errorPresentationHost 同实例）；通过
+    /// `\.wardrobeErrorPresenter` environment value 注入 .ready 子树, WardrobeView 加载失败时
+    /// 调 present(error, onRetry:) → 既有 host modifier 渲染全屏 RetryView.
+    let wardrobeErrorPresenter: ErrorPresenter?
     let onReadyAppear: () -> Void
     let onReadyTask: () async -> Void
     /// Story 8.5 review round 2 [P2] fix: launch state 离开 `.ready` 时回调（同步路径）.
@@ -816,6 +830,8 @@ private struct LaunchedContentView: View {
         resetIdentityViewModel: ResetIdentityViewModel?,
         emojiPanelViewModelFactory: @escaping () -> EmojiPanelViewModel,
         loadEmojisUseCase: LoadEmojisUseCaseProtocol?,
+        loadInventoryUseCase: LoadInventoryUseCaseProtocol?,
+        wardrobeErrorPresenter: ErrorPresenter?,
         onReadyAppear: @escaping () -> Void,
         onReadyTask: @escaping () async -> Void = { },
         onLeaveReady: @escaping () -> Void = { }
@@ -833,6 +849,8 @@ private struct LaunchedContentView: View {
         self.resetIdentityViewModel = resetIdentityViewModel
         self.emojiPanelViewModelFactory = emojiPanelViewModelFactory
         self.loadEmojisUseCase = loadEmojisUseCase
+        self.loadInventoryUseCase = loadInventoryUseCase
+        self.wardrobeErrorPresenter = wardrobeErrorPresenter
         self.onReadyAppear = onReadyAppear
         self.onReadyTask = onReadyTask
         self.onLeaveReady = onLeaveReady
@@ -865,6 +883,13 @@ private struct LaunchedContentView: View {
                     // (UITEST_MOCK_EMOJI=1) container.loadEmojisUseCase 已是 UITestMockEmojiRepository fixture,
                     // 注入路径不变.
                     .environment(\.loadEmojisUseCase, loadEmojisUseCase)
+                    // Story 24.2 AC5: LoadInventoryUseCase + ErrorPresenter 注入 .ready 子树
+                    // environment, WardrobeView `.task(id: coordinator.currentTab)` 读取后在
+                    // Wardrobe Tab 出现时触发 GET /cosmetics/inventory → 写 appState.currentInventory
+                    // → Story 24.1 sink 零 edit 渲染真实装扮；失败经 errorPresenter 派生 RetryView
+                    // （与 \.loadEmojisUseCase 同 environment 注入模式）.
+                    .environment(\.loadInventoryUseCase, loadInventoryUseCase)
+                    .environment(\.wardrobeErrorPresenter, wardrobeErrorPresenter)
                     .onAppear { onReadyAppear() }
                     .task {
                         await onReadyTask()

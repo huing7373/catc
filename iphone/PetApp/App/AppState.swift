@@ -167,6 +167,30 @@ public final class AppState: ObservableObject {
         self.currentChest = chest
     }
 
+    /// Story 24.2 AC4: 背包拉取成功后写入 currentInventory 单字段.
+    /// 由 LoadInventoryUseCase.execute() 在 GET /cosmetics/inventory 成功后调；
+    /// 仅写 currentInventory，不动其它字段（与 applyHomeData 全字段写入区分；
+    /// 与 applyCurrentChest / applySyncedStepAccount 同模式）.
+    ///
+    /// 命名 `applyInventory` 与 `applyHomeData` / `applyCurrentChest` / `applySyncedStepAccount`
+    /// 同前缀（apply* 前缀表示 "hydrate / mutation 入口"；详见 ADR-0010 §3.3）.
+    ///
+    /// **写 @Published 赋值触发 publisher 派发**（lesson
+    /// `2026-04-30-published-derived-state-needs-publisher-subscription.md`）：
+    /// `self.currentInventory = inventory` 即正确派发给 Story 24.1
+    /// RealWardrobeViewModel.subscribeInventory sink（与 applyCurrentChest 同写法；
+    /// **不**绕过 publisher 直接 mutate）.
+    ///
+    /// **不**触发 roomNavigationGeneration bump（inventory mutation 与 room navigation
+    /// 完全独立；与 applyCurrentChest / applySyncedStepAccount 不 bump 同决策依据：lesson
+    /// `2026-05-11-apply-home-data-bump-only-on-room-id-change.md`）.
+    ///
+    /// **空背包**：caller 传 `[]`（V1 §8.2「空背包 `{groups: []}`，不报错」展平后为 `[]`）→
+    /// currentInventory = [] → Story 24.1 sink 派发 [] → 空仓库 placeholder（不报错）.
+    public func applyInventory(_ inventory: [HomeEquip]) {
+        self.currentInventory = inventory
+    }
+
     /// 显式 setter（节点 5 后 WS pet.state.changed 自身分支用；ADR-0010 §3.3 WS 流程）.
     /// 节点 5 才接 WS；本 story 仅声明类型契约（让 AppStateTests 可写 case），
     /// 不连真实 WS 入口.
