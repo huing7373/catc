@@ -61,6 +61,14 @@ func (s *stubDevCosmeticItemRepo) ListEnabledIDsByRarity(ctx context.Context, ra
 	return s.listPoolFn(ctx, rarity)
 }
 
+// FindSlotNameByID: Story 26.3 给 CosmeticItemRepo interface 加了本方法
+// （POST /cosmetics/equip 步骤 7）；dev grant 仅走 ListEnabledIDsByRarity，
+// 不走 equip —— 防御性 panic 让意外调用暴露（仅为 satisfy 扩展后的
+// interface 编译，不改 dev grant 既有行为）。
+func (s *stubDevCosmeticItemRepo) FindSlotNameByID(ctx context.Context, id uint64) (int8, string, bool, error) {
+	panic("stubDevCosmeticItemRepo.FindSlotNameByID not expected (dev grant 仅走 ListEnabledIDsByRarity，不走 POST /cosmetics/equip)")
+}
+
 // stubDevUserCosmeticItemRepo: mysql.UserCosmeticItemRepo 的 stub（仅 CreateInTx
 // 走真实路径，ListByUserForInventory panic 暴露意外调用）。
 type stubDevUserCosmeticItemRepo struct {
@@ -78,6 +86,18 @@ func (s *stubDevUserCosmeticItemRepo) CreateInTx(ctx context.Context, item *mysq
 		return s.createInTxFn(ctx, item)
 	}
 	return nil
+}
+
+// FindByIDForEquip / UpdateStatusInTx: Story 26.3 给 UserCosmeticItemRepo
+// interface 加了这两方法（POST /cosmetics/equip 步骤 4 / 8-9）；dev grant
+// 仅走 CreateInTx，不走 equip —— 防御性 panic 让意外调用暴露（仅为 satisfy
+// 扩展后的 interface 编译，不改 dev grant 既有行为）。
+func (s *stubDevUserCosmeticItemRepo) FindByIDForEquip(ctx context.Context, id uint64) (*mysql.UserCosmeticItem, error) {
+	panic("stubDevUserCosmeticItemRepo.FindByIDForEquip not expected (dev grant 仅走 CreateInTx，不走 POST /cosmetics/equip)")
+}
+
+func (s *stubDevUserCosmeticItemRepo) UpdateStatusInTx(ctx context.Context, id uint64, status int8) error {
+	panic("stubDevUserCosmeticItemRepo.UpdateStatusInTx not expected (dev grant 仅走 CreateInTx，不走 POST /cosmetics/equip)")
 }
 
 // stubDevTxMgr 模拟事务原子性（fix-review 23-5 r2 [P2] #2 守门基建）：

@@ -526,7 +526,22 @@ func NewRouter(deps Deps) *gin.Engine {
 		// 23.3 ListEnabledForCatalog —— 那带 is_enabled=1 过滤会让 disabled
 		// 配置已拥有项静默丢失，违背 §8.2 态 B 契约）。
 		cosmeticSvc := service.NewCosmeticService(cosmeticItemRepo, userCosmeticItemRepo)
-		cosmeticsHandler := handler.NewCosmeticsHandler(cosmeticSvc)
+
+		// Story 26.3 加：cosmetic equip service（POST /cosmetics/equip 写事务）。
+		// 复用上方上移的 cosmeticItemRepo / userCosmeticItemRepo / petRepo 实例
+		// （**不**新建第二个 —— 与 cosmeticSvc / chestSvc 复用同实例同模式）；
+		// userPetEquipRepo 是 Story 26.3 新建（user_pet_equips 表首个 repo —— 26.2
+		// 仅落 struct/TableName）。equip 是写事务故注入 deps.TxMgr（catalog/inventory
+		// 只读不依赖 txMgr，故 NewCosmeticService 不收 txMgr）。
+		userPetEquipRepo := repomysql.NewUserPetEquipRepo(deps.GormDB)
+		cosmeticEquipSvc := service.NewCosmeticEquipService(
+			deps.TxMgr,
+			userCosmeticItemRepo,
+			cosmeticItemRepo,
+			petRepo,
+			userPetEquipRepo,
+		)
+		cosmeticsHandler := handler.NewCosmeticsHandler(cosmeticSvc, cosmeticEquipSvc)
 
 		api := r.Group("/api/v1")
 
@@ -554,6 +569,15 @@ func NewRouter(deps Deps) *gin.Engine {
 		// userCosmeticItemRepo + cosmeticSvc 已在上面同 if deps 完整块内构造，
 		// deps 不完整则该路由不注册，与既有 fallback 行为一致）
 		authedGroup.GET("/cosmetics/inventory", cosmeticsHandler.GetInventory)
+		// Story 26.3 加：POST /api/v1/cosmetics/equip 穿戴装扮（含同槽换装）
+		// （auth + RateLimitByUserID 由 authedGroup 既有中间件链兜底，
+		// 对应 §8.3 错误码 1001 / 1005；与 /cosmetics/catalog /
+		// /cosmetics/inventory 同组同模式。**不**走 chestOpenGroup —— 那是
+		// POST /chest/open 专属、handler 内层 rate_limit 特例；equip 无
+		// idempotency、限频走标准 authedGroup 中间件，V1 §8.3 行 1467-1468 钦定。
+		// userPetEquipRepo + cosmeticEquipSvc 已在上面同 if deps 完整块内构造，
+		// deps 不完整则该路由不注册，与既有 fallback 行为一致）
+		authedGroup.POST("/cosmetics/equip", cosmeticsHandler.Equip)
 		authedGroup.POST("/steps/sync", stepsHandler.PostSync)     // Story 7.3 加
 		authedGroup.GET("/steps/account", stepsHandler.GetAccount) // Story 7.4 加
 		authedGroup.GET("/chest/current", chestHandler.GetCurrent) // Story 20.5 加

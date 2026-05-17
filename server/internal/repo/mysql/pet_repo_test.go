@@ -96,3 +96,43 @@ func TestPetRepo_UpdateCurrentStateByID_DBError(t *testing.T) {
 		t.Errorf("err = %v, want connection refused", err)
 	}
 }
+
+// Story 26.3 — PetRepo.FindByID sqlmock 单测（equip 步骤 6 校 pet 归属用）。
+
+// FindByID happy：命中 1 行 → 返 *Pet（含 UserID 供 service 比对归属）。
+func TestPetRepo_FindByID_Happy(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewPetRepo(gormDB)
+
+	rows := sqlmock.NewRows([]string{"id", "user_id", "pet_type", "name", "current_state", "is_default"}).
+		AddRow(uint64(2001), uint64(42), int8(1), "默认小猫", int8(1), int8(1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `pets`")).
+		WithArgs(uint64(2001), 1). // id, LIMIT 1
+		WillReturnRows(rows)
+
+	got, err := repo.FindByID(context.Background(), 2001)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if got.ID != 2001 || got.UserID != 42 {
+		t.Errorf("got = %+v, want id=2001 userID=42", got)
+	}
+}
+
+// FindByID NotFound → ErrPetNotFound 哨兵（service 在 equip 调用点视为 5002）。
+func TestPetRepo_FindByID_NotFound_ReturnsErrPetNotFound(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewPetRepo(gormDB)
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `pets`")).
+		WithArgs(uint64(9999), 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	got, err := repo.FindByID(context.Background(), 9999)
+	if got != nil {
+		t.Errorf("got = %+v, want nil", got)
+	}
+	if !stderrors.Is(err, ErrPetNotFound) {
+		t.Errorf("err = %v, want ErrPetNotFound", err)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -39,6 +40,21 @@ func (s *stubCosmeticService) ListInventory(ctx context.Context, userID uint64) 
 	return s.listInventoryFn(ctx, userID)
 }
 
+// stubCosmeticEquipService 实现 service.CosmeticEquipService（Story 26.3 加：
+// NewCosmeticsHandler 扩参后既有 GetCatalog/GetInventory 测试 router helper
+// 须传一个 equip stub 满足扩展后的构造签名）。equipFn 注入自定义返回；
+// 不注入则 panic（GetCatalog/GetInventory case 不走 equip 路径）。
+type stubCosmeticEquipService struct {
+	equipFn func(ctx context.Context, in service.EquipParams) (*service.EquipResult, error)
+}
+
+func (s *stubCosmeticEquipService) Equip(ctx context.Context, in service.EquipParams) (*service.EquipResult, error) {
+	if s.equipFn == nil {
+		panic("stubCosmeticEquipService.Equip not configured (本 case 走 GetCatalog/GetInventory 路径，不期望走 POST /cosmetics/equip)")
+	}
+	return s.equipFn(ctx, in)
+}
+
 // buildCosmeticsInventoryHandlerRouter 构造 GetInventory test router。
 //
 // 与 newChestHandlerRouter 同模式：挂 ErrorMappingMiddleware（否则 c.Error 不写
@@ -56,7 +72,7 @@ func buildCosmeticsInventoryHandlerRouter(svc service.CosmeticService, mockUserI
 			c.Next()
 		})
 	}
-	h := handler.NewCosmeticsHandler(svc)
+	h := handler.NewCosmeticsHandler(svc, &stubCosmeticEquipService{})
 	r.GET("/api/v1/cosmetics/inventory", h.GetInventory)
 	return r
 }
@@ -74,8 +90,29 @@ func buildCosmeticsHandlerRouter(svc service.CosmeticService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(middleware.ErrorMappingMiddleware())
-	h := handler.NewCosmeticsHandler(svc)
+	h := handler.NewCosmeticsHandler(svc, &stubCosmeticEquipService{})
 	r.GET("/api/v1/cosmetics/catalog", h.GetCatalog)
+	return r
+}
+
+// buildCosmeticsEquipHandlerRouter 构造 POST /cosmetics/equip test router
+// （Story 26.3）。挂 ErrorMappingMiddleware（c.Error → envelope）+ 可选注入
+// userID 到 c.Keys（mockUserID=nil 不挂 → 测 unreachable userID 缺失分支，
+// 与 buildCosmeticsInventoryHandlerRouter 同模式）。equip **读** userID。
+func buildCosmeticsEquipHandlerRouter(equipSvc service.CosmeticEquipService, mockUserID *uint64) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(middleware.ErrorMappingMiddleware())
+	if mockUserID != nil {
+		uid := *mockUserID
+		r.Use(func(c *gin.Context) {
+			c.Set(middleware.UserIDKey, uid)
+			c.Next()
+		})
+	}
+	// catalog/inventory 只读 stub 传 noop（equip case 不走那两路径）。
+	h := handler.NewCosmeticsHandler(&stubCosmeticService{}, equipSvc)
+	r.POST("/api/v1/cosmetics/equip", h.Equip)
 	return r
 }
 
@@ -484,5 +521,197 @@ func TestCosmeticsHandler_GetInventory_ServiceError_Returns1009(t *testing.T) {
 	}
 	if body.Code != apperror.ErrServiceBusy {
 		t.Errorf("body.code = %d, want %d (1009)", body.Code, apperror.ErrServiceBusy)
+	}
+}
+
+// ================================================================
+// Story 26.3 — CosmeticsHandler.Equip 单测（POST /cosmetics/equip）
+//
+// 与 GetCatalog/GetInventory 同模式：gin TestMode + httptest +
+// ErrorMappingMiddleware（c.Error → envelope）+ stub equip service。
+// 覆盖：1002 参数校验（缺字段 / 非 BIGINT / JSON 类型错）+ userID 缺失兜底
+// 1009 + service error 透传 + 成功 DTO 形状（id 字符串化 / slot int）。
+// ================================================================
+
+// AC1/AC2 happy: 合法 body + userID → service 返 EquipResult → envelope
+// code=0 + petId/userCosmeticItemId/cosmeticItemId 是 **string** + slot 是
+// **number** + name string + 字段名严格 camelCase。
+func TestCosmeticsHandler_Equip_HappyPath(t *testing.T) {
+	uid := uint64(42)
+	var gotIn service.EquipParams
+	equipSvc := &stubCosmeticEquipService{
+		equipFn: func(ctx context.Context, in service.EquipParams) (*service.EquipResult, error) {
+			gotIn = in
+			return &service.EquipResult{
+				PetID: 2001,
+				Equipped: service.EquippedItem{
+					Slot:               1,
+					UserCosmeticItemID: 90001,
+					CosmeticItemID:     12,
+					Name:               "小黄帽",
+				},
+			}, nil
+		},
+	}
+	r := buildCosmeticsEquipHandlerRouter(equipSvc, &uid)
+
+	body := `{"petId":"2001","userCosmeticItemId":"90001"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cosmetics/equip", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	// service 收到正确解析后的 uint64 入参
+	if gotIn.UserID != 42 || gotIn.PetID != 2001 || gotIn.UserCosmeticItemID != 90001 {
+		t.Errorf("EquipParams = %+v, want {UserID:42 PetID:2001 UserCosmeticItemID:90001}", gotIn)
+	}
+
+	bodyBytes := w.Body.Bytes()
+	var parsed struct {
+		Code int `json:"code"`
+		Data struct {
+			PetID    string `json:"petId"`
+			Equipped struct {
+				Slot               int    `json:"slot"`
+				UserCosmeticItemID string `json:"userCosmeticItemId"`
+				CosmeticItemID     string `json:"cosmeticItemId"`
+				Name               string `json:"name"`
+			} `json:"equipped"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(bodyBytes, &parsed); err != nil {
+		t.Fatalf("json.Unmarshal: %v; body=%s", err, string(bodyBytes))
+	}
+	if parsed.Code != 0 {
+		t.Errorf("code = %d, want 0", parsed.Code)
+	}
+	if parsed.Data.PetID != "2001" {
+		t.Errorf("petId = %q, want \"2001\" (BIGINT 字符串化)", parsed.Data.PetID)
+	}
+	if parsed.Data.Equipped.Slot != 1 {
+		t.Errorf("equipped.slot = %d, want 1 (int 直接下发)", parsed.Data.Equipped.Slot)
+	}
+	if parsed.Data.Equipped.UserCosmeticItemID != "90001" || parsed.Data.Equipped.CosmeticItemID != "12" {
+		t.Errorf("equipped ids = %q/%q, want \"90001\"/\"12\" (BIGINT 字符串化)",
+			parsed.Data.Equipped.UserCosmeticItemID, parsed.Data.Equipped.CosmeticItemID)
+	}
+	if parsed.Data.Equipped.Name != "小黄帽" {
+		t.Errorf("equipped.name = %q, want 小黄帽", parsed.Data.Equipped.Name)
+	}
+
+	// 防 id 被序列化成 number 回归：raw 校验 petId / userCosmeticItemId /
+	// cosmeticItemId 是 JSON string（带引号）+ slot 是 JSON number。
+	var raw map[string]json.RawMessage
+	_ = json.Unmarshal(bodyBytes, &raw)
+	var rawData map[string]json.RawMessage
+	_ = json.Unmarshal(raw["data"], &rawData)
+	if string(rawData["petId"]) != `"2001"` {
+		t.Errorf("raw petId = %s, want \"2001\" (JSON string 带引号)", rawData["petId"])
+	}
+	var rawEquipped map[string]json.RawMessage
+	_ = json.Unmarshal(rawData["equipped"], &rawEquipped)
+	if string(rawEquipped["slot"]) != `1` {
+		t.Errorf("raw equipped.slot = %s, want 1 (JSON number 无引号)", rawEquipped["slot"])
+	}
+	if string(rawEquipped["userCosmeticItemId"]) != `"90001"` {
+		t.Errorf("raw equipped.userCosmeticItemId = %s, want \"90001\"", rawEquipped["userCosmeticItemId"])
+	}
+}
+
+// AC2 edge: petId 缺失 → 1002（不调 service）。
+func TestCosmeticsHandler_Equip_MissingPetId_Returns1002(t *testing.T) {
+	uid := uint64(42)
+	called := false
+	equipSvc := &stubCosmeticEquipService{equipFn: func(ctx context.Context, in service.EquipParams) (*service.EquipResult, error) {
+		called = true
+		return nil, nil
+	}}
+	r := buildCosmeticsEquipHandlerRouter(equipSvc, &uid)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cosmetics/equip", strings.NewReader(`{"userCosmeticItemId":"90001"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assertEnvelopeCode(t, w.Body.Bytes(), apperror.ErrInvalidParam)
+	if called {
+		t.Errorf("service.Equip 不应被调用（参数校验在 handler 层拦截）")
+	}
+}
+
+// AC2 edge: userCosmeticItemId 非合法 BIGINT 字符串 → 1002。
+func TestCosmeticsHandler_Equip_InvalidBigintString_Returns1002(t *testing.T) {
+	uid := uint64(42)
+	equipSvc := &stubCosmeticEquipService{}
+	r := buildCosmeticsEquipHandlerRouter(equipSvc, &uid)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cosmetics/equip", strings.NewReader(`{"petId":"2001","userCosmeticItemId":"abc"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assertEnvelopeCode(t, w.Body.Bytes(), apperror.ErrInvalidParam)
+}
+
+// AC2 edge: JSON 类型错（petId 是 number 非 string）→ ShouldBindJSON 失败 → 1002。
+func TestCosmeticsHandler_Equip_JSONTypeMismatch_Returns1002(t *testing.T) {
+	uid := uint64(42)
+	equipSvc := &stubCosmeticEquipService{}
+	r := buildCosmeticsEquipHandlerRouter(equipSvc, &uid)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cosmetics/equip", strings.NewReader(`{"petId":2001,"userCosmeticItemId":"90001"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assertEnvelopeCode(t, w.Body.Bytes(), apperror.ErrInvalidParam)
+}
+
+// AC1 edge: userID 未注入（auth 中间件缺失模拟）→ 1009 unreachable 兜底。
+func TestCosmeticsHandler_Equip_NoUserID_Returns1009(t *testing.T) {
+	equipSvc := &stubCosmeticEquipService{}
+	r := buildCosmeticsEquipHandlerRouter(equipSvc, nil) // mockUserID=nil → 不注入 userID
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cosmetics/equip", strings.NewReader(`{"petId":"2001","userCosmeticItemId":"90001"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assertEnvelopeCode(t, w.Body.Bytes(), apperror.ErrServiceBusy)
+}
+
+// AC1 edge: service 返业务 error（如 5008）→ handler c.Error 透传 →
+// envelope code=5008（验证 handler 不吞 / 不改 service 错误码）。
+func TestCosmeticsHandler_Equip_ServiceError_PassThrough(t *testing.T) {
+	uid := uint64(42)
+	equipSvc := &stubCosmeticEquipService{
+		equipFn: func(ctx context.Context, in service.EquipParams) (*service.EquipResult, error) {
+			return nil, apperror.New(apperror.ErrCosmeticAlreadyEquipped, apperror.DefaultMessages[apperror.ErrCosmeticAlreadyEquipped])
+		},
+	}
+	r := buildCosmeticsEquipHandlerRouter(equipSvc, &uid)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cosmetics/equip", strings.NewReader(`{"petId":"2001","userCosmeticItemId":"90001"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assertEnvelopeCode(t, w.Body.Bytes(), apperror.ErrCosmeticAlreadyEquipped)
+}
+
+// assertEnvelopeCode 解析 envelope 并断言 code 字段（Story 26.3 测试 helper）。
+func assertEnvelopeCode(t *testing.T, bodyBytes []byte, wantCode int) {
+	t.Helper()
+	var body struct {
+		Code int `json:"code"`
+	}
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
+		t.Fatalf("json.Unmarshal: %v; body=%s", err, string(bodyBytes))
+	}
+	if body.Code != wantCode {
+		t.Errorf("envelope code = %d, want %d; body=%s", body.Code, wantCode, string(bodyBytes))
 	}
 }

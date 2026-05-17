@@ -17,19 +17,26 @@ import (
 //   - GetCatalog（GET /api/v1/cosmetics/catalog，Story 23.3）
 //   - GetInventory（GET /api/v1/cosmetics/inventory，Story 23.4）
 //
-// future epic 加 POST / PATCH /cosmetics 等 admin 端能力（MVP 节点 8 无 admin
-// 后台需求，与 emojis_handler 行 10-13 同模式）。
+// 节点 9 阶段：
+//   - Equip（POST /api/v1/cosmetics/equip，Story 26.3）—— 写事务，注入
+//     独立 CosmeticEquipService（与 catalog/inventory 只读 CosmeticService
+//     分 interface；service 层 chest_open_service vs chest_service 分文件先例）
+//
+// future epic 加 POST /cosmetics/unequip（Story 26.4）等能力（与
+// emojis_handler 行 10-13 同模式）。
 type CosmeticsHandler struct {
-	svc service.CosmeticService
+	svc      service.CosmeticService
+	equipSvc service.CosmeticEquipService
 }
 
 // NewCosmeticsHandler 构造 CosmeticsHandler。
 //
-// 注入 CosmeticService（service 层 interface）—— handler 单测直接传 stub struct
-// 实现该 interface，不需要起 *gorm.DB / 真 mysql。与 EmojisHandler /
+// 注入 CosmeticService（catalog/inventory 只读）+ CosmeticEquipService
+// （Story 26.3 加：equip 写事务）—— handler 单测直接传 stub struct
+// 实现这两个 interface，不需要起 *gorm.DB / 真 mysql。与 EmojisHandler /
 // HomeHandler / ChestHandler 同模式。
-func NewCosmeticsHandler(svc service.CosmeticService) *CosmeticsHandler {
-	return &CosmeticsHandler{svc: svc}
+func NewCosmeticsHandler(svc service.CosmeticService, equipSvc service.CosmeticEquipService) *CosmeticsHandler {
+	return &CosmeticsHandler{svc: svc, equipSvc: equipSvc}
 }
 
 // GetCatalog 处理 GET /api/v1/cosmetics/catalog。
@@ -248,5 +255,120 @@ func inventoryResponseDTO(groups []service.InventoryGroup) gin.H {
 
 	return gin.H{
 		"groups": groupsOut,
+	}
+}
+
+// equipRequest 是 V1 §8.3 钦定请求体的 Go mirror（行 1475-1485）。
+//
+// 两字段都是 BIGINT 字符串化（string）；用指针类型 + 显式 nil 校验区分
+// "字段缺失"vs"显式传空"（与 steps_handler.PostSyncRequest 同模式 —— 值类型
+// string 缺失会解析为 ""，与显式传 "" 无法区分；用 *string 能拦截字段缺失）。
+type equipRequest struct {
+	PetID              *string `json:"petId"`
+	UserCosmeticItemID *string `json:"userCosmeticItemId"`
+}
+
+// Equip 处理 POST /api/v1/cosmetics/equip（Story 26.3）。
+//
+// # 流程
+//
+//  1. ShouldBindJSON（JSON 类型错 → 1002）
+//  2. 参数校验：petId / userCosmeticItemId 非 nil + 非空串 + 可被
+//     strconv.ParseUint(s,10,64) 解析为合法 BIGINT（否则 1002，V1 §8.3
+//     步骤 2 行 1547）
+//  3. 从 c.Get(UserIDKey) 拿 userID（auth 中间件已注入；不存在 / 类型断言
+//     失败 → 1009 unreachable 兜底）—— 与 GetInventory 1:1 同模式
+//  4. 调 equipSvc.Equip(ctx, EquipInput{...}) —— ctx = c.Request.Context()
+//     （**不**用 *gin.Context；ADR-0007 §2.2）
+//  5. 成功 → response.Success(c, equipResponseDTO(out), "ok")
+//  6. 失败 → c.Error(err) + return（ErrorMappingMiddleware 写 envelope）
+//
+// # 关键
+//
+// 本 handler **不**直接调 response.Error 写 envelope（ADR-0006 单一 envelope
+// 生产者；与 GetCatalog / GetInventory 同模式）。equip **无** idempotencyKey
+// （V1 §8.3 行 1468 钦定；与 chest/open 不同 —— 故走标准 authedGroup 中间件链
+// 而非 chestOpenGroup handler 内层 rate_limit 特例）。
+func (h *CosmeticsHandler) Equip(c *gin.Context) {
+	var req equipRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		_ = c.Error(apperror.Wrap(err, apperror.ErrInvalidParam, apperror.DefaultMessages[apperror.ErrInvalidParam]))
+		return
+	}
+
+	// petId / userCosmeticItemId 必填 + 合法 BIGINT 字符串（V1 §8.3 步骤 2
+	// 行 1547；BIGINT 字符串↔uint64 用 strconv.ParseUint(s,10,64)）。
+	if req.PetID == nil || *req.PetID == "" {
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "petId 必填"))
+		return
+	}
+	if req.UserCosmeticItemID == nil || *req.UserCosmeticItemID == "" {
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "userCosmeticItemId 必填"))
+		return
+	}
+	petID, err := strconv.ParseUint(*req.PetID, 10, 64)
+	if err != nil || petID == 0 {
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "petId 非合法 BIGINT 字符串"))
+		return
+	}
+	userCosmeticItemID, err := strconv.ParseUint(*req.UserCosmeticItemID, 10, 64)
+	if err != nil || userCosmeticItemID == 0 {
+		_ = c.Error(apperror.New(apperror.ErrInvalidParam, "userCosmeticItemId 非合法 BIGINT 字符串"))
+		return
+	}
+
+	// 从 auth 中间件取 userID（与 GetInventory 行 159-170 1:1 同模式）
+	v, ok := c.Get(middleware.UserIDKey)
+	if !ok {
+		_ = c.Error(apperror.New(apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy]))
+		return
+	}
+	userID, ok := v.(uint64)
+	if !ok {
+		_ = c.Error(apperror.New(apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy]))
+		return
+	}
+
+	out, err := h.equipSvc.Equip(c.Request.Context(), service.EquipParams{
+		UserID:             userID,
+		PetID:              petID,
+		UserCosmeticItemID: userCosmeticItemID,
+	})
+	if err != nil {
+		// service 已 wrap *AppError；handler 透传，让 ErrorMappingMiddleware 写 envelope
+		_ = c.Error(err)
+		return
+	}
+
+	response.Success(c, equipResponseDTO(out), "ok")
+}
+
+// equipResponseDTO 把 service 输出转成 V1 §8.3 钦定的 wire 格式
+// （响应体字段表行 1514-1521 + 返回示例行 1525-1540）。
+//
+// # 关键转换
+//
+//   - **`petId` / `equipped.userCosmeticItemId` / `equipped.cosmeticItemId`
+//     必须字符串化**：§8.3 字段表钦定均为 string（BIGINT 字符串化，与
+//     §2.5 全局约定一致）；用 strconv.FormatUint —— **不**直接塞 uint64
+//     （会序列化成 JSON number 破坏契约，iOS String 解码失败）。
+//   - `equipped.slot` 是 **int** 直接下发（§8.3 行 1518 钦定 int 枚举，
+//     **不**字符串化 —— 只有 id 类字段字符串化）。
+//   - `equipped.name` 是 string 直接下发。
+//   - 字段名全 camelCase（V1 §2.4 + §8.3；与 catalog/inventory 同模式）。
+//   - `equipped` 永远非 null（§8.3 行 1517 钦定 object 必填非 null；
+//     service 成功路径必返完整 EquippedBrief，这里直接组装非 nil map）。
+func equipResponseDTO(out *service.EquipResult) gin.H {
+	return gin.H{
+		// petId 必须 string（§8.3 行 1516 BIGINT 字符串化）
+		"petId": strconv.FormatUint(out.PetID, 10),
+		"equipped": gin.H{
+			// slot 是 int 直接下发（§8.3 行 1518，**不**字符串化）
+			"slot": out.Equipped.Slot,
+			// userCosmeticItemId / cosmeticItemId 必须 string（§8.3 行 1519-1520）
+			"userCosmeticItemId": strconv.FormatUint(out.Equipped.UserCosmeticItemID, 10),
+			"cosmeticItemId":     strconv.FormatUint(out.Equipped.CosmeticItemID, 10),
+			"name":               out.Equipped.Name,
+		},
 	}
 }

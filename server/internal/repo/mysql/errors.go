@@ -95,4 +95,44 @@ var (
 	// 同事务前面 ClaimPending 必已 INSERT；实际触发说明上游调用顺序错乱，
 	// 按 1009 透传）。由 Story 20.6 引入。
 	ErrIdempotencyRecordNotFound = errors.New("mysql: idempotency record not found")
+
+	// ErrUserCosmeticItemNotFound: UserCosmeticItemRepo.FindByIDForEquip 按实例
+	// id 查不到行（V1 §8.3 服务端逻辑步骤 4："行不存在" → service 层用
+	// errors.Is 识别后翻译为 5001 道具不存在）。**仅**对应"实例 id 在
+	// user_cosmetic_items 完全无 row"（fix-review 26-1 r1 [P2] 锁定：实例存在
+	// 但属他人恒为 5002，**不**走本哨兵 —— service 拿到行后比对 user_id 自行
+	// 分流 5002，本哨兵只覆盖"完全无 row"）。Story 26.3 引入。
+	ErrUserCosmeticItemNotFound = errors.New("mysql: user_cosmetic_item not found")
+
+	// ErrUserPetEquipNotFound: UserPetEquipRepo.FindByPetSlot 按 (pet_id, slot)
+	// 查不到行（V1 §8.3 服务端逻辑步骤 8："该 slot 无装备" → 跳过同槽换装）。
+	// **合法 case，非异常**：service 层用 errors.Is 区分"slot 无装备 → 跳过
+	// 同槽换装卸旧分支"vs "DB 异常 → 1009"（与 ErrStepSyncLogNotFound /
+	// ErrIdempotencyRecordNotFound 合法 NotFound 哨兵同语义 —— **不**包成
+	// 1009 / 业务码）。Story 26.3 引入；Story 26.4 (unequip) 复用（unequip
+	// 时该 slot 无装备视为幂等无操作 / 业务码，由 26.4 决定）。
+	ErrUserPetEquipNotFound = errors.New("mysql: user_pet_equip not found")
+
+	// ErrUserPetEquipPetSlotDuplicate: UserPetEquipRepo.InsertInTx 时 UNIQUE
+	// KEY uk_pet_slot (pet_id, slot) 冲突（0016 schema）。语义："同 pet 同 slot
+	// 已有装备"——并发场景（同 pet 同 slot 并发 equip 不同实例，先入者 Tx 已
+	// commit user_pet_equips 行 → 后到者 INSERT 触发 MySQL ER_DUP_ENTRY 1062）。
+	// service 层用 errors.Is 识别后翻译为 1009 服务繁忙（V1 §8.3 关键约束
+	// 行 1560 + NFR11：一件实例同一时间只能装备一次；equip 无 idempotency，
+	// 并发兜底走 1009 而非业务码）。与 ErrRoomMembersUserIDDuplicate /
+	// ErrRoomMembersRoomUserDuplicate 双哨兵注释风格一致：不同唯一约束需独立
+	// 哨兵让 service 层日志能区分哪个约束被打破，便于审计 / debug。
+	// 由 Story 26.3 (POST /cosmetics/equip) 引入；Story 26.4 (unequip) 不触发
+	// （unequip 是 DELETE）。
+	ErrUserPetEquipPetSlotDuplicate = errors.New("mysql: user_pet_equips (pet_id, slot) duplicate (uk_pet_slot conflict)")
+
+	// ErrUserPetEquipItemDuplicate: UserPetEquipRepo.InsertInTx 时 UNIQUE KEY
+	// uk_user_cosmetic_item_id (user_cosmetic_item_id) 冲突（0016 schema）。
+	// 语义："同一实例已被装备到某 pet"——并发场景（同一实例并发 equip，先入者
+	// 已写 user_pet_equips 行 → 后到者 INSERT 触发 1062）。service 层用
+	// errors.Is 识别后同样翻译为 1009（V1 §8.3 关键约束行 1560 + NFR11）。
+	// 与 uk_pet_slot 分两个独立哨兵让 service 层日志区分冲突源（与
+	// ErrRoomMembersUserIDDuplicate / ErrRoomMembersRoomUserDuplicate 同模式）。
+	// Story 26.3 引入。
+	ErrUserPetEquipItemDuplicate = errors.New("mysql: user_pet_equips user_cosmetic_item_id duplicate (uk_user_cosmetic_item_id conflict)")
 )

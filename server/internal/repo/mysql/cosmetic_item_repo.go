@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	stderrors "errors"
 	"time"
 
 	"gorm.io/gorm"
@@ -184,6 +185,31 @@ type CosmeticItemRepo interface {
 	// < count **不是**错误，service 有放回抽满 count）。
 	// query 失败 → 返 raw error 透传（service 包成 1009）。
 	ListEnabledIDsByRarity(ctx context.Context, rarity int8) ([]uint64, error)
+
+	// FindSlotNameByID 按 cosmetic_item id 查 slot + name（V1 §8.3 服务端逻辑
+	// 步骤 7 查配置槽位，Story 26.3 引入）。
+	//
+	// SQL: SELECT slot, name FROM cosmetic_items WHERE id = ? LIMIT 1
+	//
+	// **返回三态（found bool 区分 missing-no-row vs DB 异常）**：
+	//   - 行存在 → (slot, name, true, nil)；service 拿 slot 继续步骤 8、name
+	//     用于步骤 11 response。
+	//   - 行不存在（missing-no-row：admin 物理删了 cosmetic_items 行但实例仍
+	//     status=1 在 user_cosmetic_items，与 §8.2 态 C 同源）→
+	//     (0, "", **false**, **nil**)。**故意不返 NotFound error** —— 让
+	//     service 据 found==false 走 missing-no-row → 5003 + log error 分支
+	//     （V1 §8.3 行 1501-1502 + fix-review 26-1 r2 [P2] 锁定），与"DB 异常
+	//     err != nil → 1009"路径明确区分（若复用 NotFound error 哨兵则 service
+	//     无法区分"配置被删的合法 equip 输入"和"DB 查询失败"两种语义）。
+	//   - DB 异常 → (0, "", false, rawErr)；service 包成 1009。
+	//
+	// 显式 Select 2 列（slot / name）—— equip 步骤 7/11 只需这 2 列。**不**复用
+	// ListByIDsForInventory（带 is_enabled 语义 + 批量 IN 查 + 多字段，与单行
+	// 按 id 查 slot/name 语义不符；与该 interface 行 77-83 范围红线一致）。
+	//
+	// **范围红线**：本 story（26.3）仅加 equip 步骤 7 查询方法；**不**预实装
+	// 其他 FindByID 类方法（YAGNI）。
+	FindSlotNameByID(ctx context.Context, id uint64) (slot int8, name string, found bool, err error)
 }
 
 // cosmeticItemRepo 是 CosmeticItemRepo 的默认实装。
@@ -319,4 +345,36 @@ func (r *cosmeticItemRepo) ListEnabledIDsByRarity(ctx context.Context, rarity in
 		ids = []uint64{}
 	}
 	return ids, nil
+}
+
+// FindSlotNameByID 实装：单 SELECT 显式 2 列 WHERE id=? LIMIT 1。
+// **三态返回**：行存在 → (slot, name, true, nil)；missing-no-row →
+// (0, "", false, nil)（gorm.ErrRecordNotFound 不当 error 返回 —— 让 service
+// 据 found==false 走 5003 + log error 分支，与 DB 异常 1009 区分）；DB 异常 →
+// (0, "", false, rawErr)。详见 CosmeticItemRepo.FindSlotNameByID 接口注释
+// （V1 §8.3 步骤 7 + fix-review 26-1 r2 [P2] 锁定）。
+func (r *cosmeticItemRepo) FindSlotNameByID(ctx context.Context, id uint64) (int8, string, bool, error) {
+	db := tx.FromContext(ctx, r.db).WithContext(ctx)
+
+	// 只取 slot / name 两列；用轻量结构体接收（不复用 CosmeticItem 全 struct ——
+	// 显式裁字段避免误读未 SELECT 列的 zero-value，与 emoji_repo 显式列同模式）。
+	var row struct {
+		Slot int8
+		Name string
+	}
+	err := db.
+		Model(&CosmeticItem{}).
+		Select("slot, name").
+		Where("id = ?", id).
+		First(&row).Error
+	if err != nil {
+		if stderrors.Is(err, gorm.ErrRecordNotFound) {
+			// missing-no-row：故意 found=false + err=nil（**非** error）——
+			// service 据此走 V1 §8.3 步骤 7 missing-no-row → 5003 + log error
+			// 分支（fix-review 26-1 r2 [P2] 锁定）。
+			return 0, "", false, nil
+		}
+		return 0, "", false, err
+	}
+	return row.Slot, row.Name, true, nil
 }

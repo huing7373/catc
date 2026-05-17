@@ -178,3 +178,59 @@ func TestUserCosmeticItemRepo_CreateInTx_DBError_ReturnsRawError(t *testing.T) {
 		t.Errorf("CreateInTx err = %v, want 透传底层 %v（repo 不翻译，service 层包 1009）", err, wantErr)
 	}
 }
+
+// Story 26.3 — FindByIDForEquip / UpdateStatusInTx sqlmock 单测。
+
+// FindByIDForEquip happy：显式 4 列 SELECT WHERE id=?（**无** user_id 过滤）。
+func TestUserCosmeticItemRepo_FindByIDForEquip_Happy(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserCosmeticItemRepo(gormDB)
+
+	rows := sqlmock.NewRows([]string{"id", "cosmetic_item_id", "status", "user_id"}).
+		AddRow(uint64(90001), uint64(12), int8(1), uint64(42))
+	mock.ExpectQuery(regexp.QuoteMeta(
+		"SELECT id, cosmetic_item_id, status, user_id FROM `user_cosmetic_items` WHERE id = ?")).
+		WithArgs(uint64(90001), 1). // id, LIMIT 1（**无** user_id arg）
+		WillReturnRows(rows)
+
+	got, err := repo.FindByIDForEquip(context.Background(), 90001)
+	if err != nil {
+		t.Fatalf("FindByIDForEquip: %v", err)
+	}
+	if got.ID != 90001 || got.CosmeticItemID != 12 || got.Status != 1 || got.UserID != 42 {
+		t.Errorf("got = %+v, want id=90001 ci=12 status=1 userID=42", got)
+	}
+}
+
+// FindByIDForEquip NotFound → ErrUserCosmeticItemNotFound 哨兵（service 翻 5001）。
+func TestUserCosmeticItemRepo_FindByIDForEquip_NotFound_ReturnsSentinel(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserCosmeticItemRepo(gormDB)
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, cosmetic_item_id, status, user_id FROM `user_cosmetic_items`")).
+		WithArgs(uint64(99999), 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	got, err := repo.FindByIDForEquip(context.Background(), 99999)
+	if got != nil {
+		t.Errorf("got = %+v, want nil", got)
+	}
+	if !errors.Is(err, ErrUserCosmeticItemNotFound) {
+		t.Errorf("err = %v, want ErrUserCosmeticItemNotFound", err)
+	}
+}
+
+// UpdateStatusInTx happy：UPDATE status 单字段 WHERE id=? → nil。
+func TestUserCosmeticItemRepo_UpdateStatusInTx_Happy(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserCosmeticItemRepo(gormDB)
+
+	// GORM Update("status", v) 带 updated_at autoUpdateTime → args: status, updated_at, id
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE `user_cosmetic_items` SET")).
+		WithArgs(int8(2), sqlmock.AnyArg(), uint64(90001)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := repo.UpdateStatusInTx(context.Background(), 90001, 2); err != nil {
+		t.Fatalf("UpdateStatusInTx: %v", err)
+	}
+}

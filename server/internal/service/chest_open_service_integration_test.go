@@ -1518,6 +1518,14 @@ func (f *faultCosmeticItemRepoOnList) ListEnabledIDsByRarity(ctx context.Context
 	panic("faultCosmeticItemRepoOnList.ListEnabledIDsByRarity not expected (chest_open 集成测试仅测开箱加权抽取 ROLLBACK 路径)")
 }
 
+// FindSlotNameByID: Story 26.3 给 CosmeticItemRepo interface 加了本方法
+// （POST /cosmetics/equip 步骤 7）；本 fault stub 仅测开箱加权抽取 ROLLBACK
+// 路径，不走 equip —— 防御性 panic（与 ListEnabledForCatalog 同模式；仅为
+// satisfy 扩展后的 interface 编译，不改 20.6/20.9 任何既有行为）。
+func (f *faultCosmeticItemRepoOnList) FindSlotNameByID(ctx context.Context, id uint64) (int8, string, bool, error) {
+	panic("faultCosmeticItemRepoOnList.FindSlotNameByID not expected (chest_open 集成测试仅测开箱加权抽取 ROLLBACK 路径)")
+}
+
 // faultChestOpenLogRepoOnCreate 让 Create 直接抛 injectErr —— ChestOpenLogRepo interface 仅 Create 一个方法
 // 所以本 wrapper 不需要透传其他方法。
 type faultChestOpenLogRepoOnCreate struct {

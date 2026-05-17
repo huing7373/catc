@@ -294,3 +294,48 @@ func TestCosmeticItemRepo_ListEnabledIDsByRarity_EmptyResult_ReturnsEmptySlice(t
 		t.Errorf("len(got) = %d, want 0", len(got))
 	}
 }
+
+// Story 26.3 — CosmeticItemRepo.FindSlotNameByID sqlmock 单测（equip 步骤 7
+// 查配置槽位；三态：found / missing-no-row / DB 异常）。
+
+// FindSlotNameByID happy：命中 → (slot, name, true, nil)。
+func TestCosmeticItemRepo_FindSlotNameByID_Found(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewCosmeticItemRepo(gormDB)
+
+	rows := sqlmock.NewRows([]string{"slot", "name"}).AddRow(int8(1), "小黄帽")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT slot, name FROM `cosmetic_items`")).
+		WithArgs(uint64(12), 1). // id, LIMIT 1
+		WillReturnRows(rows)
+
+	slot, name, found, err := repo.FindSlotNameByID(context.Background(), 12)
+	if err != nil {
+		t.Fatalf("FindSlotNameByID: %v", err)
+	}
+	if !found || slot != 1 || name != "小黄帽" {
+		t.Errorf("got (slot=%d name=%q found=%v), want (1 小黄帽 true)", slot, name, found)
+	}
+}
+
+// FindSlotNameByID missing-no-row：行不存在 → (0, "", false, **nil**)
+// （故意 err=nil 让 service 走 missing-no-row → 5003 + log error，与 DB
+// 异常 1009 区分；fix-review 26-1 r2 [P2] 锁定）。
+func TestCosmeticItemRepo_FindSlotNameByID_MissingNoRow_FalseNilErr(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewCosmeticItemRepo(gormDB)
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT slot, name FROM `cosmetic_items`")).
+		WithArgs(uint64(999), 1).
+		WillReturnRows(sqlmock.NewRows([]string{"slot", "name"}))
+
+	slot, name, found, err := repo.FindSlotNameByID(context.Background(), 999)
+	if found {
+		t.Errorf("found = true, want false (missing-no-row)")
+	}
+	if err != nil {
+		t.Errorf("err = %v, want nil (missing-no-row 不当 error)", err)
+	}
+	if slot != 0 || name != "" {
+		t.Errorf("got (slot=%d name=%q), want (0 \"\")", slot, name)
+	}
+}

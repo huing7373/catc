@@ -74,6 +74,12 @@ func (s *stubPetRepo) UpdateCurrentStateByID(ctx context.Context, petID uint64, 
 	panic("stubPetRepo.UpdateCurrentStateByID must not be called by auth_service")
 }
 
+// FindByID Story 26.3 加到 PetRepo interface（equip 步骤 6 校 pet 归属用）；
+// auth_service 不调本方法 —— 兜底 panic 让"误调"在测试期立刻可见。
+func (s *stubPetRepo) FindByID(ctx context.Context, petID uint64) (*mysql.Pet, error) {
+	panic("stubPetRepo.FindByID must not be called by auth_service")
+}
+
 type stubStepAccountRepo struct {
 	createFn       func(ctx context.Context, a *mysql.StepAccount) error
 	findByUserIDFn func(ctx context.Context, userID uint64) (*mysql.StepAccount, error)

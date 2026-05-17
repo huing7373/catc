@@ -182,6 +182,12 @@ func (s *roomTestStubPetRepo) UpdateCurrentStateByID(ctx context.Context, petID 
 	panic("roomTestStubPetRepo.UpdateCurrentStateByID must not be called by room_service")
 }
 
+// FindByID Story 26.3 加到 PetRepo interface（equip 步骤 6 用）；room_service
+// 不调本方法 —— 兜底 panic 让"误调"在测试期立刻可见。
+func (s *roomTestStubPetRepo) FindByID(ctx context.Context, petID uint64) (*mysql.Pet, error) {
+	panic("roomTestStubPetRepo.FindByID must not be called by room_service")
+}
+
 // roomTestRecordedBroadcast 记录单次 broadcastFn / broadcastExceptFn 调用入参 +
 // 调用时间戳（基于 atomic 序号，单调递增）；用于断言 close 4007 与 broadcast 顺序（r13）。
 //

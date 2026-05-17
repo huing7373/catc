@@ -53,6 +53,25 @@ type PetRepo interface {
 	// 如发生说明数据脏，service 包成 1009）。
 	FindDefaultByUserID(ctx context.Context, userID uint64) (*Pet, error)
 
+	// FindByID 按主键查一行 pets（V1 §8.3 服务端逻辑步骤 6 校 pet 归属，
+	// Story 26.3 引入）。
+	//
+	// SQL: SELECT * FROM pets WHERE id = ? LIMIT 1
+	//
+	// service 层拿到 *Pet 后比对 `pet.UserID == 当前用户`：不等 → 5002
+	// 道具不属于当前用户（epics.md §Story 26.3 AC "pet 不属于当前用户 → 5002"）。
+	//
+	// **NotFound → ErrPetNotFound 哨兵**：V1 §8.3 错误码集合**不**为"pet 不
+	// 存在"设独立出口；service 层把 ErrPetNotFound 与"pet 存在但 user_id 不
+	// 匹配"**同处理为 5002**（契约只给 5002 一个出口；与 FindDefaultByUserID
+	// 的 ErrPetNotFound 语义不同——后者是"必有默认猫"数据脏 → 1009，本方法
+	// 是"用户传的 petId 不存在"→ 与"非本人 pet"同视为 5002，由 service 区分
+	// 调用点决定翻译）。query 失败（非 NotFound）→ raw error 透传（1009）。
+	//
+	// **范围红线**：本 story（26.3）仅加 equip 步骤 6 校归属用查询；**不**预
+	// 实装其他 pet 写 / 查方法（YAGNI）。
+	FindByID(ctx context.Context, petID uint64) (*Pet, error)
+
 	// UpdateCurrentStateByID 按主键更新 pets.current_state 列（Story 14.2 引入；
 	// service 层先 FindDefaultByUserID 拿 pet.ID 后用主键定位更新）。
 	//
@@ -107,6 +126,24 @@ func (r *petRepo) FindDefaultByUserID(ctx context.Context, userID uint64) (*Pet,
 	var p Pet
 	err := db.WithContext(ctx).
 		Where("user_id = ? AND is_default = ?", userID, 1).
+		First(&p).Error
+	if err != nil {
+		if stderrors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrPetNotFound
+		}
+		return nil, err
+	}
+	return &p, nil
+}
+
+// FindByID 按主键查一行 pets。走 PRIMARY KEY；查不到返 ErrPetNotFound 哨兵
+// （与 FindDefaultByUserID gorm.ErrRecordNotFound → 哨兵同模式；service 层在
+// equip 调用点把 ErrPetNotFound 与"pet 非本人"同视为 5002，详见接口注释）。
+func (r *petRepo) FindByID(ctx context.Context, petID uint64) (*Pet, error) {
+	db := tx.FromContext(ctx, r.db)
+	var p Pet
+	err := db.WithContext(ctx).
+		Where("id = ?", petID).
 		First(&p).Error
 	if err != nil {
 		if stderrors.Is(err, gorm.ErrRecordNotFound) {

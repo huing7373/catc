@@ -68,6 +68,14 @@ func (s *stubCatalogCosmeticItemRepo) ListEnabledIDsByRarity(ctx context.Context
 	panic("stubCatalogCosmeticItemRepo.ListEnabledIDsByRarity not configured (本 case 走 ListCatalog / ListInventory 路径，不期望走 /dev/grant-cosmetic-batch)")
 }
 
+// FindSlotNameByID: Story 26.3 给 CosmeticItemRepo interface 加了本方法
+// （equip 步骤 7 查配置槽位）；cosmetic_service_test 仅测 ListCatalog /
+// ListInventory 路径，不走 equip —— 防御性 panic 让任何意外调用暴露
+// （仅为 satisfy 扩展后的 interface 编译，不改 23.x 任何既有行为）。
+func (s *stubCatalogCosmeticItemRepo) FindSlotNameByID(ctx context.Context, id uint64) (int8, string, bool, error) {
+	panic("stubCatalogCosmeticItemRepo.FindSlotNameByID not configured (本 case 走 ListCatalog / ListInventory 路径，不期望走 POST /cosmetics/equip)")
+}
+
 // stubUserCosmeticItemRepo: mysql.UserCosmeticItemRepo 的统一 stub
 // （service_test package 内唯一定义；Story 23.4 ListByUserForInventory 只读 +
 // Story 23.5 CreateInTx 入仓写两路径共用，去重为单一定义避免同 package 重声明）。
@@ -84,10 +92,27 @@ func (s *stubCatalogCosmeticItemRepo) ListEnabledIDsByRarity(ctx context.Context
 //     cosmetic_service_test ListCatalog case noop —— 均不调本方法）。
 //   - CreateInTx：可注入 createInTxFn；不注入则默认回填 item.ID=90001 + return nil。
 //     createInTxCall 记录每次调用的 item 供断言（chest_open_service_test 入仓 case 用）。
+//   - FindByIDForEquip：Story 26.3 加（equip 步骤 4 查实例归属）。注入
+//     findByIDForEquipFn 自定义返回；不注入则 panic（仅 equip
+//     cosmetic_equip_service_test 走该路径，其他 service test 不调）。
+//   - UpdateStatusInTx：Story 26.3 加（equip 步骤 8/9 status 1↔2 推进）。
+//     注入 updateStatusInTxFn；不注入则默认 record + return nil
+//     （chest_open / dev grant 路径不调本方法）。updateStatusInTxCalls 记录
+//     每次调用 (id, status) 供 equip 单测断言调用顺序。
 type stubUserCosmeticItemRepo struct {
 	listByUserForInventoryFn func(ctx context.Context, userID uint64) ([]mysql.UserCosmeticItem, error)
 	createInTxFn             func(ctx context.Context, item *mysql.UserCosmeticItem) error
 	createInTxCall           []*mysql.UserCosmeticItem
+	findByIDForEquipFn       func(ctx context.Context, id uint64) (*mysql.UserCosmeticItem, error)
+	updateStatusInTxFn       func(ctx context.Context, id uint64, status int8) error
+	updateStatusInTxCalls    []ucStatusUpdate
+}
+
+// ucStatusUpdate 记录 UpdateStatusInTx 一次调用的 (id, status)（equip 单测
+// 用于断言"旧实例 status→1 再新实例 status→2"调用顺序，Story 26.3）。
+type ucStatusUpdate struct {
+	id     uint64
+	status int8
 }
 
 func (s *stubUserCosmeticItemRepo) ListByUserForInventory(ctx context.Context, userID uint64) ([]mysql.UserCosmeticItem, error) {
@@ -105,6 +130,26 @@ func (s *stubUserCosmeticItemRepo) CreateInTx(ctx context.Context, item *mysql.U
 	// 默认 happy：模拟 GORM 回填 AUTO_INCREMENT ID
 	if item.ID == 0 {
 		item.ID = 90001
+	}
+	return nil
+}
+
+// FindByIDForEquip Story 26.3 加：equip 步骤 4 查实例归属。注入
+// findByIDForEquipFn 自定义返回；不注入则 panic（仅 equip 路径走本方法）。
+func (s *stubUserCosmeticItemRepo) FindByIDForEquip(ctx context.Context, id uint64) (*mysql.UserCosmeticItem, error) {
+	if s.findByIDForEquipFn == nil {
+		panic("stubUserCosmeticItemRepo.FindByIDForEquip not expected (仅 cosmetic_equip_service_test equip 路径走本方法；其他 service test 不调)")
+	}
+	return s.findByIDForEquipFn(ctx, id)
+}
+
+// UpdateStatusInTx Story 26.3 加：equip 步骤 8/9 status 1↔2 推进。record
+// 每次 (id, status) 供 equip 单测断言；注入 updateStatusInTxFn 自定义返回，
+// 不注入则默认 return nil（happy）。
+func (s *stubUserCosmeticItemRepo) UpdateStatusInTx(ctx context.Context, id uint64, status int8) error {
+	s.updateStatusInTxCalls = append(s.updateStatusInTxCalls, ucStatusUpdate{id: id, status: status})
+	if s.updateStatusInTxFn != nil {
+		return s.updateStatusInTxFn(ctx, id, status)
 	}
 	return nil
 }

@@ -46,6 +46,12 @@ func (s *stubHomePetRepo) UpdateCurrentStateByID(ctx context.Context, petID uint
 	return nil
 }
 
+// FindByID Story 26.3 加到 PetRepo interface（equip 步骤 6 用）；home_service
+// 不调本方法 —— 兜底 panic 让"误调"在测试期立刻可见。
+func (s *stubHomePetRepo) FindByID(ctx context.Context, petID uint64) (*mysql.Pet, error) {
+	panic("stubHomePetRepo.FindByID must not be called by home_service")
+}
+
 type stubHomeStepAccountRepo struct {
 	findByUserIDFn func(ctx context.Context, userID uint64) (*mysql.StepAccount, error)
 }

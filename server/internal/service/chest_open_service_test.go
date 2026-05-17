@@ -97,6 +97,15 @@ func (s *stubCosmeticItemRepo) ListEnabledIDsByRarity(ctx context.Context, rarit
 	panic("stubCosmeticItemRepo.ListEnabledIDsByRarity not expected (chest_open_service_test 仅测开箱加权抽取路径，不走 /dev/grant-cosmetic-batch 路径)")
 }
 
+// FindSlotNameByID: Story 26.3 给 CosmeticItemRepo interface 加了本方法
+// （POST /cosmetics/equip 步骤 7 查配置槽位）；本 20.6 stub 仅测开箱加权抽取
+// 路径，不走 equip —— 加防御性 panic 让任何意外调用暴露（与
+// ListEnabledForCatalog 同模式；仅为 satisfy 扩展后的 interface 编译，
+// 不改 20.6 任何既有行为）。
+func (s *stubCosmeticItemRepo) FindSlotNameByID(ctx context.Context, id uint64) (int8, string, bool, error) {
+	panic("stubCosmeticItemRepo.FindSlotNameByID not expected (chest_open_service_test 仅测开箱加权抽取路径，不走 POST /cosmetics/equip 路径)")
+}
+
 // **注**：mysql.UserCosmeticItemRepo 的统一 stub `stubUserCosmeticItemRepo`
 // 在 service_test package 内由无 build tag 的 cosmetic_service_test.go 统一定义
 // （Story 23.4 ListByUserForInventory 只读 + Story 23.5 CreateInTx 入仓写两路径

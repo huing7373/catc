@@ -468,6 +468,12 @@ func (f *faultPetRepo) UpdateCurrentStateByID(ctx context.Context, petID uint64,
 	return f.delegate.UpdateCurrentStateByID(ctx, petID, state)
 }
 
+// FindByID Story 26.3 加到 PetRepo interface（equip 步骤 6 用）；auth_service
+// 集成测试不调本方法，透传 delegate 让 PetRepo interface 完整实现（防 build 失败）。
+func (f *faultPetRepo) FindByID(ctx context.Context, petID uint64) (*mysql.Pet, error) {
+	return f.delegate.FindByID(ctx, petID)
+}
+
 // faultChestRepo 包装真实 ChestRepo，让 Create 抛 injectErr，FindByUserID 透传。
 //
 // 用于 AC3: 回滚 2（chest repo 第 6 步失败 → 前 5 步全部回滚）。

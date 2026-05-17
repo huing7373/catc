@@ -50,6 +50,12 @@ func (s *stubPetRepoForPetService) UpdateCurrentStateByID(ctx context.Context, p
 	return s.updateCurrentStateFn(ctx, petID, state)
 }
 
+// FindByID Story 26.3 加到 PetRepo interface（equip 步骤 6 用）；pet_service
+// 不调本方法 —— 兜底 panic 让"误调"在测试期立刻可见。
+func (s *stubPetRepoForPetService) FindByID(ctx context.Context, petID uint64) (*mysql.Pet, error) {
+	panic("stubPetRepoForPetService.FindByID not configured (pet_service should not call it)")
+}
+
 // stubUserRepoForPetService: 自 Story 14.4 起 service 层在 SyncCurrentState UPDATE
 // 成功路径会调 FindByID 查 users.current_room_id；其他方法（Create/UpdateNickname/
 // UpdateCurrentRoomID）pet service 永不调用，保持 panic 兜底以让"误调用"在测试期

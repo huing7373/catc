@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	stderrors "errors"
 	"time"
 
 	"gorm.io/gorm"
@@ -127,6 +128,51 @@ type UserCosmeticItemRepo interface {
 	// consumed 写方法归 Epic 26（穿戴）/ Epic 32-33（合成），本 story **不**预实装
 	// （YAGNI；与既有 ListByUserForInventory 范围红线一致）。
 	CreateInTx(ctx context.Context, item *UserCosmeticItem) error
+
+	// FindByIDForEquip 按实例 id 查一行 user_cosmetic_items（V1 §8.3 服务端
+	// 逻辑步骤 4 查实例归属，Story 26.3 引入）。
+	//
+	// SQL: SELECT id, cosmetic_item_id, status, user_id FROM user_cosmetic_items
+	//      WHERE id = ? LIMIT 1
+	//
+	// **仅按 id 查，禁止加 `AND user_id = ?` 过滤**（V1 §8.3 行 1492 + fix-review
+	// 26-1 r1 [P2] 强制锁定）：service 层拿到行后比对 user_id 自行分流
+	//   - 行不存在（id 完全无 row）→ 返 (nil, ErrUserCosmeticItemNotFound)
+	//     哨兵 → service 翻译 5001 道具不存在；
+	//   - 行存在 → 返 *UserCosmeticItem（service 比对 row.UserID != 当前用户
+	//     → 5002；==当前用户 → 继续校 status）。
+	// 合并 `WHERE id=? AND user_id=?` 查不到即 5001 的实装被契约**禁止**——会
+	// 使 epics.md §Story 26.3 AC "实例不属于当前用户 → 5002" 永不可达。
+	//
+	// 显式 Select 4 列（id / cosmetic_item_id / status / user_id）——
+	// equip 步骤 4-5 只需这 4 列（source / obtained_at 等不需要），与
+	// ListByUserForInventory 显式裁字段同模式。query 失败（非 NotFound）→ 返
+	// raw error 透传（service 包成 1009）。
+	//
+	// **范围红线**：本 story（26.3）仅加 equip 步骤 4 查询方法；**不**预实装
+	// 26.4/26.6/Epic 32 的查询方法（YAGNI；与该 interface 行 84-90 范围红线一致）。
+	FindByIDForEquip(ctx context.Context, id uint64) (*UserCosmeticItem, error)
+
+	// UpdateStatusInTx 在事务内按主键更新 user_cosmetic_items.status 单列
+	// （V1 §8.3 服务端逻辑步骤 8 旧实例 status 回 1=in_bag + 步骤 9 当前实例
+	// status 推进 2=equipped；Story 26.3 引入）。
+	//
+	// SQL: UPDATE user_cosmetic_items SET status=?, updated_at=NOW(3) WHERE id=?
+	//
+	// **必须在事务内调用**（与同事务的 user_pet_equips DELETE/INSERT 一起原子
+	// 提交；ADR-0007 §2.4 + 数据库设计 §8.4 "全部同事务"）。用
+	// Update("status", v) 单字段（与 pet_repo.UpdateCurrentStateByID 同模式
+	// —— status int8 无 nil-skip 陷阱，不需要 Updates(map) 路径；**不**用
+	// Save 避免写全字段引入并发数据丢失）。
+	//
+	// **err 二分**（与 pet_repo.UpdateCurrentStateByID 同模式）：err == nil →
+	// 成功（**不**读 RowsAffected —— service 已在步骤 4 FindByIDForEquip 确认
+	// 行存在；本 UPDATE 把 updated_at 也写新值，幂等场景 RowsAffected 语义不
+	// 可靠，不依赖）；err != nil → 透传 raw error（service 包成 1009）。
+	//
+	// **范围红线**：本 story（26.3）仅加 status 1↔2 推进；consumed(3) 写方法
+	// 归 Epic 32-33 合成，**不**预实装（YAGNI）。
+	UpdateStatusInTx(ctx context.Context, id uint64, status int8) error
 }
 
 // userCosmeticItemRepo 是 UserCosmeticItemRepo 的默认实装。
@@ -191,4 +237,38 @@ func (r *userCosmeticItemRepo) ListByUserForInventory(ctx context.Context, userI
 func (r *userCosmeticItemRepo) CreateInTx(ctx context.Context, item *UserCosmeticItem) error {
 	db := tx.FromContext(ctx, r.db)
 	return db.WithContext(ctx).Create(item).Error
+}
+
+// FindByIDForEquip 实装：单 SELECT 显式 4 列 WHERE id=? LIMIT 1（**无**
+// user_id 过滤 —— V1 §8.3 行 1492 + fix-review 26-1 r1 [P2] 强制）。
+// NotFound → ErrUserCosmeticItemNotFound 哨兵（service 翻译 5001；与
+// pet_repo.FindDefaultByUserID gorm.ErrRecordNotFound → 哨兵同模式）。
+// 详见 UserCosmeticItemRepo.FindByIDForEquip 接口注释。
+func (r *userCosmeticItemRepo) FindByIDForEquip(ctx context.Context, id uint64) (*UserCosmeticItem, error) {
+	db := tx.FromContext(ctx, r.db)
+	var item UserCosmeticItem
+	err := db.WithContext(ctx).
+		Select("id, cosmetic_item_id, status, user_id").
+		Where("id = ?", id).
+		First(&item).Error
+	if err != nil {
+		if stderrors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrUserCosmeticItemNotFound
+		}
+		return nil, err
+	}
+	return &item, nil
+}
+
+// UpdateStatusInTx 实装：Update("status", v) 单字段更新（参考
+// pet_repo.UpdateCurrentStateByID 模式 —— status int8 不存在 nil-skip 陷阱，
+// **不**需要 Updates(map) 路径；**不**用 Save 避免写全字段）。GORM autoUpdateTime
+// tag 自动写 updated_at。err 二分透传，不读 RowsAffected。详见
+// UserCosmeticItemRepo.UpdateStatusInTx 接口注释。
+func (r *userCosmeticItemRepo) UpdateStatusInTx(ctx context.Context, id uint64, status int8) error {
+	db := tx.FromContext(ctx, r.db)
+	return db.WithContext(ctx).
+		Model(&UserCosmeticItem{}).
+		Where("id = ?", id).
+		Update("status", status).Error
 }
