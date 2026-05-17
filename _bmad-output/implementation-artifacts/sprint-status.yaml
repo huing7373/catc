@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-05-17 (story 26-5 → review; epic-26 → in-progress)
+# last_updated: 2026-05-18 (story 26-5 → done; epic-26 → in-progress)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -251,7 +251,7 @@ development_status:
   26-2-user_pet_equips-migration: done
   26-3-post-cosmetics-equip-事务: done
   26-4-post-cosmetics-unequip-事务: done
-  26-5-layer-2-集成测试-穿戴事务全流程: review
+  26-5-layer-2-集成测试-穿戴事务全流程: done
   26-6-get-home-扩展-pet-equips-真实数据: backlog
   epic-26-retrospective: optional
   epic-27: backlog

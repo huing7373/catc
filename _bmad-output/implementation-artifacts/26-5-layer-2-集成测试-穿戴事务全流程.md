@@ -1,6 +1,6 @@
 # Story 26.5: Layer 2 集成测试 — 穿戴事务全流程（dockertest 真实 MySQL 在 26.3/26.4 已落地 service 层集成测试基础上**追加** epics.md §26.5 行 3603-3615 钦定 12 类场景：完整流程 / 同槽换装 / 3 回滚 / 2 并发(100 goroutine) / 3 边界 / 1 状态一致性矩阵；**不**实装新业务功能，仅扩展 integration test 覆盖矩阵）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 
