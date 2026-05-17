@@ -1,6 +1,6 @@
 # Story 23.5: 修改开箱事务 - 创建 user_cosmetic_items 实例 + 补 chest_open_logs.reward_user_cosmetic_item_id（入仓）（在 Story 20.6 已落地的 8 步开箱事务 runOpenChestTx 内、抽奖产出 pickedItem 之后 / 写 chest_open_logs 之前插入 1 条 user_cosmetic_items INSERT 拿真实 id，回填 chest_open_logs.RewardUserCosmeticItemID + OpenChestOutput.Reward.UserCosmeticItemID + cacheableResponse 缓存值，全部在既有 txCtx 同事务原子提交；UserCosmeticItemRepo 新增 CreateInTx 写方法 + chestServiceImpl 注入新 repo 依赖 + NewChestService 扩签名 + router.go / 全部 chest_open 单测 fixture 同步改 + 激活 Story 20.8 dev/grant-cosmetic-batch 真实写库 + 扩 Story 20.9 Layer 2 集成测试新增 user_cosmetic_items 入仓 + 回滚两组场景）
 
-Status: review
+Status: done
 
 <!-- Validation 可选。建议运行 validate-create-story 在 dev-story 前做一次质检。 -->
 

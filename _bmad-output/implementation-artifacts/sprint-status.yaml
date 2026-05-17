@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-05-17 (story 23-5 created → ready-for-dev)
+# last_updated: 2026-05-17 (story 23-5 → done)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -232,7 +232,7 @@ development_status:
   23-2-user_cosmetic_items-migration: done
   23-3-get-cosmetics-catalog-接口: done
   23-4-get-cosmetics-inventory-接口: done
-  23-5-修改开箱事务-创建-user_cosmetic_items-实例-补-chest_open_logs-reward_user_cosmetic_item_id: review
+  23-5-修改开箱事务-创建-user_cosmetic_items-实例-补-chest_open_logs-reward_user_cosmetic_item_id: done
   epic-23-retrospective: optional
   epic-24: backlog
   24-1-仓库页-swiftui-骨架: backlog
