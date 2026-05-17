@@ -451,3 +451,169 @@ func TestHomeHandler_NoUserIDInContext_Returns1009(t *testing.T) {
 		t.Errorf("envelope.code = %d, want %d", env.Code, apperror.ErrServiceBusy)
 	}
 }
+
+// ============================================================
+// Story 26.6: GET /home wire 层 pet.equips 真实数据
+//
+// 验证 handler.homeResponseDTO 在节点 9 阶段（26.6 落地后）的 wire 输出：
+//   - 有装备 → data.pet.equips 是真实数组，slot/rarity JSON number、
+//     userCosmeticItemId/cosmeticItemId JSON string（BIGINT 字符串化）、
+//     name/assetUrl string
+//   - 无装备 → data.pet.equips 是 [](空 JSON 数组，**非** null)；
+//     pet==nil 时 data.pet 整体 null（equips 不单独出现）
+// ============================================================
+
+// AC4.6 wire: 用户有 2 件装备 → response.data.pet.equips 长度 2 数组，
+// 字段类型正确（slot/rarity number、2 个 id string、name/assetUrl string）。
+func TestHomeHandler_TwoEquips_WireFieldTypesCorrect(t *testing.T) {
+	uid := uint64(1)
+	svc := &stubHomeService{
+		loadHomeFn: func(ctx context.Context, userID uint64) (*service.HomeOutput, error) {
+			return &service.HomeOutput{
+				User: service.UserBrief{ID: 1, Nickname: "u"},
+				Pet: &service.PetBrief{
+					ID: 2001, PetType: 1, Name: "p", CurrentState: 1,
+					Equips: []service.EquipBrief{
+						{Slot: 1, UserCosmeticItemID: 90001, CosmeticItemID: 12, Name: "小黄帽", Rarity: 1, AssetURL: "https://cdn/hat.png"},
+						{Slot: 2, UserCosmeticItemID: 90002, CosmeticItemID: 34, Name: "白手套", Rarity: 2, AssetURL: "https://cdn/gloves.png"},
+					},
+				},
+				StepAccount: service.StepAccountBrief{},
+				Chest: service.ChestBrief{
+					ID: 5, Status: 1, UnlockAt: time.Now().UTC().Add(10 * time.Minute),
+					OpenCostSteps: 1000, RemainingSeconds: 600,
+				},
+			}, nil
+		},
+	}
+	r := newHomeHandlerRouter(svc, &uid)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/home", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeHomeEnvelope(t, w.Body.Bytes())
+	data := env.Data.(map[string]any)
+	pet, ok := data["pet"].(map[string]any)
+	if !ok {
+		t.Fatalf("data.pet not object: %T", data["pet"])
+	}
+	equips, ok := pet["equips"].([]any)
+	if !ok {
+		t.Fatalf("pet.equips not array: %T", pet["equips"])
+	}
+	if len(equips) != 2 {
+		t.Fatalf("len(pet.equips) = %d, want 2", len(equips))
+	}
+
+	e0 := equips[0].(map[string]any)
+	// slot / rarity 必须是 JSON number（解码为 float64）
+	if slot, isNum := e0["slot"].(float64); !isNum || slot != 1 {
+		t.Errorf("equips[0].slot = %v (%T), want 1 (JSON number)", e0["slot"], e0["slot"])
+	}
+	if rarity, isNum := e0["rarity"].(float64); !isNum || rarity != 1 {
+		t.Errorf("equips[0].rarity = %v (%T), want 1 (JSON number)", e0["rarity"], e0["rarity"])
+	}
+	// userCosmeticItemId / cosmeticItemId 必须是 JSON string（BIGINT 字符串化）
+	if e0["userCosmeticItemId"] != "90001" {
+		t.Errorf("equips[0].userCosmeticItemId = %v (%T), want \"90001\" (string)", e0["userCosmeticItemId"], e0["userCosmeticItemId"])
+	}
+	if e0["cosmeticItemId"] != "12" {
+		t.Errorf("equips[0].cosmeticItemId = %v (%T), want \"12\" (string)", e0["cosmeticItemId"], e0["cosmeticItemId"])
+	}
+	if e0["name"] != "小黄帽" {
+		t.Errorf("equips[0].name = %v, want 小黄帽", e0["name"])
+	}
+	if e0["assetUrl"] != "https://cdn/hat.png" {
+		t.Errorf("equips[0].assetUrl = %v, want https://cdn/hat.png", e0["assetUrl"])
+	}
+
+	e1 := equips[1].(map[string]any)
+	if e1["userCosmeticItemId"] != "90002" || e1["cosmeticItemId"] != "34" {
+		t.Errorf("equips[1] id 字符串化错误: uci=%v ci=%v, want \"90002\"/\"34\"", e1["userCosmeticItemId"], e1["cosmeticItemId"])
+	}
+	if rarity, _ := e1["rarity"].(float64); rarity != 2 {
+		t.Errorf("equips[1].rarity = %v, want 2", e1["rarity"])
+	}
+	// 字面量验证：id 字符串化（含 "userCosmeticItemId":"90001" 而非 :90001）
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"userCosmeticItemId":"90001"`)) {
+		t.Errorf(`body 未含 "userCosmeticItemId":"90001" 字面量；body=%s`, w.Body.String())
+	}
+}
+
+// AC4.7 wire: 用户无装备 → data.pet.equips 是 [](空 JSON 数组，非 null)；
+// pet==nil → data.pet 整体 null（equips 不单独出现）—— 验证 nil slice
+// 不污染为 null 的序列化契约。
+func TestHomeHandler_NoEquips_EmptyArrayNotNull(t *testing.T) {
+	uid := uint64(1)
+	svc := &stubHomeService{
+		loadHomeFn: func(ctx context.Context, userID uint64) (*service.HomeOutput, error) {
+			return &service.HomeOutput{
+				User: service.UserBrief{ID: 1, Nickname: "u"},
+				Pet: &service.PetBrief{
+					ID: 2001, PetType: 1, Name: "p", CurrentState: 1,
+					Equips: []service.EquipBrief{}, // 无装备：非 nil 空切片
+				},
+				StepAccount: service.StepAccountBrief{},
+				Chest: service.ChestBrief{
+					ID: 5, Status: 1, UnlockAt: time.Now().UTC().Add(10 * time.Minute),
+					OpenCostSteps: 1000, RemainingSeconds: 600,
+				},
+			}, nil
+		},
+	}
+	r := newHomeHandlerRouter(svc, &uid)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/home", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	env := decodeHomeEnvelope(t, w.Body.Bytes())
+	data := env.Data.(map[string]any)
+	pet := data["pet"].(map[string]any)
+	equips, ok := pet["equips"].([]any)
+	if !ok {
+		t.Fatalf("pet.equips not array: %T (must be [], not null)", pet["equips"])
+	}
+	if len(equips) != 0 {
+		t.Errorf("len(pet.equips) = %d, want 0", len(equips))
+	}
+	// 字面量验证：必须含 "equips":[] 而非 "equips":null
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"equips":[]`)) {
+		t.Errorf(`body 未含 "equips":[] 字面量；body=%s`, w.Body.String())
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte(`"equips":null`)) {
+		t.Errorf(`body 含 "equips":null 字面量（错误！应为 []）；body=%s`, w.Body.String())
+	}
+
+	// pet==nil 时 data.pet 整体 null，equips 不单独出现（复用既有
+	// TestHomeHandler_NoDefaultPet_PetFieldIsNull 已覆盖 pet:null；此处
+	// 仅补充确认 nil-pet 分支不构造 equips —— 用 Pet:nil 走该路径）
+	svcNilPet := &stubHomeService{
+		loadHomeFn: func(ctx context.Context, userID uint64) (*service.HomeOutput, error) {
+			return &service.HomeOutput{
+				User:        service.UserBrief{ID: 1, Nickname: "u"},
+				Pet:         nil,
+				StepAccount: service.StepAccountBrief{},
+				Chest: service.ChestBrief{
+					ID: 5, Status: 1, UnlockAt: time.Now().UTC().Add(time.Hour),
+					OpenCostSteps: 1000, RemainingSeconds: 3600,
+				},
+			}, nil
+		},
+	}
+	r2 := newHomeHandlerRouter(svcNilPet, &uid)
+	w2 := httptest.NewRecorder()
+	r2.ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/api/v1/home", nil))
+	if !bytes.Contains(w2.Body.Bytes(), []byte(`"pet":null`)) {
+		t.Errorf(`pet==nil body 未含 "pet":null；body=%s`, w2.Body.String())
+	}
+	// equips key 不应在 pet==nil 时单独出现在顶层
+	if bytes.Contains(w2.Body.Bytes(), []byte(`"equips"`)) {
+		t.Errorf(`pet==nil body 不应含 "equips" key（pet 整体 null）；body=%s`, w2.Body.String())
+	}
+}

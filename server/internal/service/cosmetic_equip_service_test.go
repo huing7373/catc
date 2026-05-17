@@ -136,6 +136,13 @@ func (s *stubUserPetEquipRepo) DeleteByPetSlotInTxReturningAffected(ctx context.
 	return s.deleteByPetSlotReturningAffFn(ctx, petID, slot)
 }
 
+// ListEquipsForHome Story 26.6 加到 mysql.UserPetEquipRepo interface（GET
+// /home pet.equips JOIN 查询）；cosmetic_equip_service（equip/unequip 事务）
+// **不**调本方法 —— 仅为满足 interface 编译，调用即 panic 暴露误用。
+func (s *stubUserPetEquipRepo) ListEquipsForHome(ctx context.Context, userID, petID uint64) ([]mysql.HomeEquipRow, int64, error) {
+	panic("stubUserPetEquipRepo.ListEquipsForHome must not be called by cosmetic_equip_service (home_service 专用)")
+}
+
 // buildEquipService 装配 CosmeticEquipService（defaultStubTxMgr 直接调 fn）。
 func buildEquipService(
 	uc *stubUserCosmeticItemRepo,

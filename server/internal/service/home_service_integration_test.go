@@ -59,8 +59,12 @@ func buildHomeServiceIntegration(t *testing.T) (svc service.HomeService, sqlDB *
 	petRepo := mysql.NewPetRepo(gormDB)
 	stepRepo := mysql.NewStepAccountRepo(gormDB)
 	chestRepo := mysql.NewChestRepo(gormDB)
+	// Story 26.6 加：userPetEquipRepo —— GET /home pet.equips 单 SQL JOIN
+	// 查询数据源。NewHomeService 第 5 参（连锁签名变更，与 buildHomeService
+	// 单测 helper / router.go wire 同步）。
+	userPetEquipRepo := mysql.NewUserPetEquipRepo(gormDB)
 
-	svc = service.NewHomeService(userRepo, petRepo, stepRepo, chestRepo)
+	svc = service.NewHomeService(userRepo, petRepo, stepRepo, chestRepo, userPetEquipRepo)
 
 	rawDB, err := gormDB.DB()
 	if err != nil {
@@ -330,5 +334,123 @@ func TestHomeService_LoadHome_UserInRoom_CurrentRoomIDFromDB(t *testing.T) {
 	}
 	if *out.Room.CurrentRoomID != 3001 {
 		t.Errorf("*Room.CurrentRoomID = %d, want 3001", *out.Room.CurrentRoomID)
+	}
+}
+
+// ============================================================
+// Story 26.6: GET /home 扩展 - pet.equips 真实数据
+//
+// AC5 集成 happy: 创建 user + default pet + 复用 0012 seed 的 2 件
+// cosmetic_items 配置（hat_yellow slot=1 + gloves_white slot=2）+ INSERT
+// 2 件 user_cosmetic_items 实例（status=2 equipped）+ 2 行 user_pet_equips
+// → svc.LoadHome → 断言 Pet.Equips 长度=2 + 按 slot ASC + 6 字段值 1:1。
+//
+// 复用既有 helper（同 service_test 包）：
+//   - cosmeticIDByCode（cosmetic_service_integration_test.go）查 0012 seed
+//     的真实 AUTO_INCREMENT id
+//   - insertUserCosmeticItem（同上）INSERT 实例返回 AUTO_INCREMENT id
+//   - 新增 insertUserPetEquip helper（user_pet_equips 0016 schema）
+//
+// **不**走 26.3 service.Equip 路径：本 story 严格只测 home_service.LoadHome
+// 读 user_pet_equips JOIN 链路；直接 INSERT 解耦穿戴业务（与 4.8 / 11.10
+// 集成测试 "手工 INSERT" 同模式）。
+// ============================================================
+
+// insertUserPetEquip 手工 INSERT 一行 user_pet_equips（0016 migration 落地
+// §5.10 schema：user_id / pet_id / slot / user_cosmetic_item_id 全 NOT NULL）。
+// home pet.equips JOIN 查询数据源；Story 26.6 引入。
+func insertUserPetEquip(t *testing.T, sqlDB *sql.DB, userID, petID uint64, slot int8, userCosmeticItemID uint64) {
+	t.Helper()
+	_, err := sqlDB.Exec(
+		`INSERT INTO user_pet_equips (user_id, pet_id, slot, user_cosmetic_item_id) VALUES (?, ?, ?, ?)`,
+		userID, petID, slot, userCosmeticItemID,
+	)
+	if err != nil {
+		t.Fatalf("insert user_pet_equips (user=%d pet=%d slot=%d uci=%d): %v", userID, petID, slot, userCosmeticItemID, err)
+	}
+}
+
+func TestHomeService_LoadHome_TwoEquips_RealJOINData(t *testing.T) {
+	svc, sqlDB, cleanup := buildHomeServiceIntegration(t)
+	defer cleanup()
+
+	insertUser(t, sqlDB, 1, "uid-equip-1", "用户1", "")
+	insertPet(t, sqlDB, 2001, 1, 1, "默认小猫", 1, 1)
+	insertStepAccount(t, sqlDB, 1, 0, 0, 0)
+	insertChest(t, sqlDB, 5001, 1, 1, time.Now().UTC().Add(10*time.Minute), 1000)
+
+	// 复用 0012 seed 的 2 件配置（hat_yellow slot=1 + gloves_white slot=2）。
+	hatCfgID := cosmeticIDByCode(t, sqlDB, "hat_yellow")
+	glovesCfgID := cosmeticIDByCode(t, sqlDB, "gloves_white")
+
+	// 2 件实例（status=2 equipped）
+	hatInst := insertUserCosmeticItem(t, sqlDB, 1, hatCfgID, 2)
+	glovesInst := insertUserCosmeticItem(t, sqlDB, 1, glovesCfgID, 2)
+
+	// 2 行 user_pet_equips（故意先插 slot=2 再 slot=1，验证 ORDER BY slot ASC）
+	insertUserPetEquip(t, sqlDB, 1, 2001, 2, glovesInst)
+	insertUserPetEquip(t, sqlDB, 1, 2001, 1, hatInst)
+
+	out, err := svc.LoadHome(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadHome: %v", err)
+	}
+	if out.Pet == nil {
+		t.Fatal("Pet = nil, want non-nil")
+	}
+	if len(out.Pet.Equips) != 2 {
+		t.Fatalf("len(Pet.Equips) = %d, want 2", len(out.Pet.Equips))
+	}
+
+	// 按 slot ASC：[0] = hat(slot=1) / [1] = gloves(slot=2)
+	e0 := out.Pet.Equips[0]
+	if e0.Slot != 1 || e0.UserCosmeticItemID != hatInst || e0.CosmeticItemID != hatCfgID ||
+		e0.Name != "小黄帽" || e0.Rarity != 1 || e0.AssetURL != "https://placehold.co/128x128?text=Hat-Yellow" {
+		t.Errorf("Equips[0] = %+v, want slot=1 uci=%d ci=%d name=小黄帽 rarity=1 url=https://placehold.co/128x128?text=Hat-Yellow",
+			e0, hatInst, hatCfgID)
+	}
+	e1 := out.Pet.Equips[1]
+	if e1.Slot != 2 || e1.UserCosmeticItemID != glovesInst || e1.CosmeticItemID != glovesCfgID ||
+		e1.Name != "白手套" || e1.Rarity != 1 || e1.AssetURL != "https://placehold.co/128x128?text=Gloves-White" {
+		t.Errorf("Equips[1] = %+v, want slot=2 uci=%d ci=%d name=白手套 rarity=1 url=https://placehold.co/128x128?text=Gloves-White",
+			e1, glovesInst, glovesCfgID)
+	}
+}
+
+// AC5 (可选增强) edge: 插 1 行 user_pet_equips 但故意删对应 cosmetic_items
+// 配置行 → Equips 长度=0（INNER JOIN 过滤）+ 不 panic（rawCount=1 >
+// len(rows)=0 触发 service log warning，不报 error）。
+func TestHomeService_LoadHome_ConfigMissing_INNERJoinFilters(t *testing.T) {
+	svc, sqlDB, cleanup := buildHomeServiceIntegration(t)
+	defer cleanup()
+
+	insertUser(t, sqlDB, 1, "uid-equip-2", "用户1", "")
+	insertPet(t, sqlDB, 2001, 1, 1, "默认小猫", 1, 1)
+	insertStepAccount(t, sqlDB, 1, 0, 0, 0)
+	insertChest(t, sqlDB, 5001, 1, 1, time.Now().UTC().Add(10*time.Minute), 1000)
+
+	hatCfgID := cosmeticIDByCode(t, sqlDB, "hat_red")
+	hatInst := insertUserCosmeticItem(t, sqlDB, 1, hatCfgID, 2)
+	insertUserPetEquip(t, sqlDB, 1, 2001, 1, hatInst)
+
+	// 故意物理删 cosmetic_items 配置行（理论不该，模拟 §8.2 态 C 同源）。
+	// 先删 user_cosmetic_items 不会影响 —— INNER JOIN ci 缺失即过滤；这里
+	// 删 cosmetic_items 行让 ci JOIN 无匹配。
+	if _, err := sqlDB.Exec("DELETE FROM cosmetic_items WHERE id = ?", hatCfgID); err != nil {
+		t.Fatalf("DELETE cosmetic_items id=%d: %v", hatCfgID, err)
+	}
+
+	out, err := svc.LoadHome(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadHome: %v, want nil err (配置缺失只 INNER JOIN 过滤 + log warn 不报错)", err)
+	}
+	if out.Pet == nil {
+		t.Fatal("Pet = nil, want non-nil")
+	}
+	if out.Pet.Equips == nil {
+		t.Fatal("Pet.Equips = nil, want 非 nil 空切片")
+	}
+	if len(out.Pet.Equips) != 0 {
+		t.Errorf("len(Pet.Equips) = %d, want 0 (cosmetic_items 配置缺失被 INNER JOIN 过滤)", len(out.Pet.Equips))
 	}
 }

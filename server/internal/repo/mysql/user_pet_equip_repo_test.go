@@ -263,3 +263,120 @@ func TestUserPetEquipRepo_DeleteByPetSlotReturningAffected_DBError(t *testing.T)
 		t.Errorf("err = nil, want raw DB error")
 	}
 }
+
+// ================================================================
+// Story 26.6 — ListEquipsForHome sqlmock 单测
+// （单 SQL JOIN 主查 + 1 个 O(1) COUNT 校验查；验证 JOIN SQL + 列映射 +
+// 0 行返非 nil slice + rawCount + query err 透传）。
+// ================================================================
+
+// ListEquipsForHome happy：JOIN 命中 2 行 + COUNT=2 → 2 个 HomeEquipRow，
+// rawCount=2，按 slot ASC。
+func TestUserPetEquipRepo_ListEquipsForHome_Happy(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserPetEquipRepo(gormDB)
+
+	joinRows := sqlmock.NewRows([]string{"slot", "user_cosmetic_item_id", "cosmetic_item_id", "name", "rarity", "asset_url"}).
+		AddRow(int8(1), uint64(90001), uint64(12), "小黄帽", int8(1), "https://cdn/hat.png").
+		AddRow(int8(2), uint64(90002), uint64(34), "白手套", int8(1), "https://cdn/gloves.png")
+	mock.ExpectQuery(regexp.QuoteMeta("JOIN user_cosmetic_items uci ON uci.id = upe.user_cosmetic_item_id")).
+		WithArgs(uint64(42), uint64(2001)).
+		WillReturnRows(joinRows)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT count(*) FROM `user_pet_equips`")).
+		WithArgs(uint64(42), uint64(2001)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(2)))
+
+	rows, rawCount, err := repo.ListEquipsForHome(context.Background(), 42, 2001)
+	if err != nil {
+		t.Fatalf("ListEquipsForHome: %v", err)
+	}
+	if rawCount != 2 {
+		t.Errorf("rawCount = %d, want 2", rawCount)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("len(rows) = %d, want 2", len(rows))
+	}
+	if rows[0].Slot != 1 || rows[0].UserCosmeticItemID != 90001 || rows[0].CosmeticItemID != 12 ||
+		rows[0].Name != "小黄帽" || rows[0].Rarity != 1 || rows[0].AssetURL != "https://cdn/hat.png" {
+		t.Errorf("rows[0] = %+v, want slot=1 uci=90001 ci=12 name=小黄帽 rarity=1 url=https://cdn/hat.png", rows[0])
+	}
+	if rows[1].Slot != 2 || rows[1].UserCosmeticItemID != 90002 || rows[1].CosmeticItemID != 34 {
+		t.Errorf("rows[1] = %+v, want slot=2 uci=90002 ci=34", rows[1])
+	}
+}
+
+// ListEquipsForHome 0 行（pet 未穿任何装备）→ 返非 nil 空 slice + rawCount=0。
+func TestUserPetEquipRepo_ListEquipsForHome_Empty_ReturnsNonNilSlice(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserPetEquipRepo(gormDB)
+
+	mock.ExpectQuery(regexp.QuoteMeta("JOIN user_cosmetic_items uci ON uci.id = upe.user_cosmetic_item_id")).
+		WithArgs(uint64(42), uint64(2001)).
+		WillReturnRows(sqlmock.NewRows([]string{"slot", "user_cosmetic_item_id", "cosmetic_item_id", "name", "rarity", "asset_url"}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT count(*) FROM `user_pet_equips`")).
+		WithArgs(uint64(42), uint64(2001)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(0)))
+
+	rows, rawCount, err := repo.ListEquipsForHome(context.Background(), 42, 2001)
+	if err != nil {
+		t.Fatalf("ListEquipsForHome: %v", err)
+	}
+	if rows == nil {
+		t.Fatal("rows = nil, want 非 nil 空 slice []HomeEquipRow{}")
+	}
+	if len(rows) != 0 {
+		t.Errorf("len(rows) = %d, want 0", len(rows))
+	}
+	if rawCount != 0 {
+		t.Errorf("rawCount = %d, want 0", rawCount)
+	}
+}
+
+// ListEquipsForHome 配置缺失（INNER JOIN 过滤掉 1 行）→ JOIN 返 1 行但
+// COUNT=2（rawCount > len(rows) 让 service 层 log warning）。
+func TestUserPetEquipRepo_ListEquipsForHome_ConfigMissing_RawCountGreater(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserPetEquipRepo(gormDB)
+
+	joinRows := sqlmock.NewRows([]string{"slot", "user_cosmetic_item_id", "cosmetic_item_id", "name", "rarity", "asset_url"}).
+		AddRow(int8(1), uint64(90001), uint64(12), "小黄帽", int8(1), "https://cdn/hat.png")
+	mock.ExpectQuery(regexp.QuoteMeta("JOIN user_cosmetic_items uci ON uci.id = upe.user_cosmetic_item_id")).
+		WithArgs(uint64(42), uint64(2001)).
+		WillReturnRows(joinRows)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT count(*) FROM `user_pet_equips`")).
+		WithArgs(uint64(42), uint64(2001)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(2)))
+
+	rows, rawCount, err := repo.ListEquipsForHome(context.Background(), 42, 2001)
+	if err != nil {
+		t.Fatalf("ListEquipsForHome: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Errorf("len(rows) = %d, want 1 (INNER JOIN 过滤掉配置缺失行)", len(rows))
+	}
+	if rawCount != 2 {
+		t.Errorf("rawCount = %d, want 2 (user_pet_equips 实际 2 行)", rawCount)
+	}
+}
+
+// ListEquipsForHome 主 JOIN query 失败 → (nil, 0, raw error 透传)。
+func TestUserPetEquipRepo_ListEquipsForHome_QueryError_RawPassThrough(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserPetEquipRepo(gormDB)
+
+	rawErr := &mysql.MySQLError{Number: 1213, Message: "Deadlock found"}
+	mock.ExpectQuery(regexp.QuoteMeta("JOIN user_cosmetic_items uci ON uci.id = upe.user_cosmetic_item_id")).
+		WithArgs(uint64(42), uint64(2001)).
+		WillReturnError(rawErr)
+
+	rows, rawCount, err := repo.ListEquipsForHome(context.Background(), 42, 2001)
+	if rows != nil {
+		t.Errorf("rows = %+v, want nil on query error", rows)
+	}
+	if rawCount != 0 {
+		t.Errorf("rawCount = %d, want 0 on query error", rawCount)
+	}
+	if err == nil {
+		t.Fatal("err = nil, want raw DB error 透传")
+	}
+}

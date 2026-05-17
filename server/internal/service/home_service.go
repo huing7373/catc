@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	stderrors "errors"
+	"log/slog"
 	"time"
 
 	apperror "github.com/huing/cat/server/internal/pkg/errors"
@@ -57,13 +58,33 @@ type UserBrief struct {
 	AvatarURL string
 }
 
-// PetBrief 是 V1 §5.1 data.pet 的 service 层映射（不含 equips —— 节点 2 阶段 handler
-// 直接构造 `[]any{}`，避免 service 层关心展示用空切片）。
+// EquipBrief 是 V1 §5.1 data.pet.equips[] 元素的 service 层映射（Story 26.6
+// 引入）。节点 9 阶段含 6 字段；节点 10 由 Story 29.6 加 RenderConfig（本
+// story 不做 —— V1 §5.1 行 517 钦定，严格 6 字段无 renderConfig）。
+//
+// 字段类型与跨接口同义对齐（AC7）：slot/rarity int 数字、2 个 id uint64
+// （handler 层 strconv.FormatUint 字符串化）、name/assetUrl string 直出。
+type EquipBrief struct {
+	Slot               int    // V1 §6.8 枚举 {1,2,3,4,5,6,7,99}
+	UserCosmeticItemID uint64 // handler 层 strconv.FormatUint 字符串化
+	CosmeticItemID     uint64 // handler 层 strconv.FormatUint 字符串化
+	Name               string
+	Rarity             int // V1 §6.9 枚举 {1,2,3,4}
+	AssetURL           string
+}
+
+// PetBrief 是 V1 §5.1 data.pet 的 service 层映射。
+//
+// **Equips（Story 26.6 节点 9 加）**：value 切片，**空时为 []EquipBrief{}
+// 非 nil** —— handler 序列化为 [] 非 null，对齐 V1 §5.1 行 408 "节点 2
+// 强制 []" 语义在节点 9 延续（无装备时仍是 []）。节点 2 阶段（4.8）由
+// handler 写死 []any{}；节点 9（本 story）改为 service 查真实数据填充。
 type PetBrief struct {
 	ID           uint64
 	PetType      int
 	Name         string
 	CurrentState int
+	Equips       []EquipBrief // Story 26.6：空时 []EquipBrief{} 非 nil
 }
 
 // StepAccountBrief 是 V1 §5.1 data.stepAccount 的 service 层映射。
@@ -109,31 +130,43 @@ type RoomBrief struct {
 // homeServiceImpl 是 HomeService 的默认实装。
 //
 // 依赖（DI 注入；bootstrap.NewRouter 内 wire）：
-//   - userRepo / petRepo / stepAccountRepo / chestRepo: 4 个 mysql repo
+//   - userRepo / petRepo / stepAccountRepo / chestRepo: 4.8 落地的 4 个 mysql repo
+//   - userPetEquipRepo: Story 26.6 加 —— pet.equips 单 SQL JOIN 查询数据源
 //
 // **不**依赖：
 //   - authBindingRepo（home 不查 binding 表）
 //   - txMgr（GET /home 全是只读查询，无事务需求）
 //   - signer（auth 中间件已校验 token，handler 已注入 userID）
+//   - logger 注入：本 service log warning 用 slog.WarnContext(ctx, ...) 直调
+//     —— 与 pet_service / cosmetic_service / dev_*_service 既有 service log
+//     模式一致（项目无 service 层 logger 构造注入先例；Story 26.6 AC2(d)
+//     "以既有模式为准，不臆造"，故 NewHomeService 仅 +1 个 repo 参数，
+//     **不**加 logger 参数）。
 type homeServiceImpl struct {
-	userRepo        mysql.UserRepo
-	petRepo         mysql.PetRepo
-	stepAccountRepo mysql.StepAccountRepo
-	chestRepo       mysql.ChestRepo
+	userRepo         mysql.UserRepo
+	petRepo          mysql.PetRepo
+	stepAccountRepo  mysql.StepAccountRepo
+	chestRepo        mysql.ChestRepo
+	userPetEquipRepo mysql.UserPetEquipRepo
 }
 
 // NewHomeService 构造 HomeService。
+//
+// Story 26.6 加第 5 个入参 userPetEquipRepo（追加在 4.8 既有 4 repo 之后，
+// 保持 user/pet/stepAccount/chest 顺序不变 —— 最小化对既有调用点 diff）。
 func NewHomeService(
 	userRepo mysql.UserRepo,
 	petRepo mysql.PetRepo,
 	stepAccountRepo mysql.StepAccountRepo,
 	chestRepo mysql.ChestRepo,
+	userPetEquipRepo mysql.UserPetEquipRepo,
 ) HomeService {
 	return &homeServiceImpl{
-		userRepo:        userRepo,
-		petRepo:         petRepo,
-		stepAccountRepo: stepAccountRepo,
-		chestRepo:       chestRepo,
+		userRepo:         userRepo,
+		petRepo:          petRepo,
+		stepAccountRepo:  stepAccountRepo,
+		chestRepo:        chestRepo,
+		userPetEquipRepo: userPetEquipRepo,
 	}
 }
 
@@ -178,6 +211,54 @@ func (s *homeServiceImpl) LoadHome(ctx context.Context, userID uint64) (*HomeOut
 			PetType:      int(pet.PetType),
 			Name:         pet.Name,
 			CurrentState: int(pet.CurrentState),
+			// Equips 在下方 (2b) 块按 pet.ID 查真实数据填充（节点 9 / Story 26.6）。
+		}
+	}
+
+	// (2b) pet.equips — Story 26.6 节点 9 真实数据（替换 4.8 节点 2 阶段
+	// handler 写死的 []any{}）。
+	//
+	//   - petBrief == nil（用户无默认 pet）→ 跳过装备查询（无 pet 无装备
+	//     语义，也避免 petID 无值）；**不**调 ListEquipsForHome。
+	//   - petBrief != nil → 单 SQL JOIN 查（用 (2) 块 pet 变量的 pet.ID）。
+	//     query err → 整体 1009 不部分降级（与 stepAccount/chest 失败同
+	//     契约，epics.md §Story 4.8 行 1136）；成功 → 转 []EquipBrief，
+	//     空结果 → []EquipBrief{}（非 nil；AC2 happy: 没穿装备 → []）。
+	//
+	// **AC3 配置缺失 skip + log warning**：repo 用 INNER JOIN（cosmetic_items
+	// 配置被 admin 物理删的 upe 行自然不进结果，自然 skip）+ 返 rawCount
+	// （user_pet_equips 真实行数，O(1) COUNT 非 N+1）。rawCount > len(rows)
+	// → slog.WarnContext 一条（含 userID/petID/差值），**不**报 error /
+	// **不**中断（与 §8.2 态 C "missing-no-row 仍返回 + log" 同根因；log
+	// 用 slog.WarnContext 直调，与 cosmetic_service / pet_service 既有 service
+	// log 模式一致）。
+	if petBrief != nil {
+		rows, rawCount, equipErr := s.userPetEquipRepo.ListEquipsForHome(ctx, userID, pet.ID)
+		if equipErr != nil {
+			return nil, apperror.Wrap(equipErr, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+		}
+		equips := make([]EquipBrief, 0, len(rows))
+		for _, r := range rows {
+			equips = append(equips, EquipBrief{
+				Slot:               int(r.Slot),
+				UserCosmeticItemID: r.UserCosmeticItemID,
+				CosmeticItemID:     r.CosmeticItemID,
+				Name:               r.Name,
+				Rarity:             int(r.Rarity),
+				AssetURL:           r.AssetURL,
+			})
+		}
+		petBrief.Equips = equips // 空时为长度 0 的非 nil 切片（make(...,0,...)）
+
+		if rawCount > int64(len(rows)) {
+			// 某些 user_pet_equips 行对应的 cosmetic_items 配置被删（INNER
+			// JOIN 过滤掉了）→ skip + warn（不报 error 不中断）。
+			slog.WarnContext(ctx, "home pet.equips: some equipped cosmetic_items config missing; skipped via INNER JOIN",
+				slog.Uint64("userId", userID),
+				slog.Uint64("petId", pet.ID),
+				slog.Int64("rawEquipCount", rawCount),
+				slog.Int("joinedEquipCount", len(rows)),
+				slog.Int64("skippedCount", rawCount-int64(len(rows))))
 		}
 	}
 

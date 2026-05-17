@@ -314,6 +314,12 @@ func (f *faultUserPetEquipRepoOnDelete) DeleteByPetSlotInTxReturningAffected(ctx
 	return f.delegate.DeleteByPetSlotInTxReturningAffected(ctx, petID, slot)
 }
 
+// ListEquipsForHome Story 26.6 加到 mysql.UserPetEquipRepo interface（home
+// pet.equips JOIN）；equip/unequip 事务路径不调，透传 delegate 满足 interface。
+func (f *faultUserPetEquipRepoOnDelete) ListEquipsForHome(ctx context.Context, userID, petID uint64) ([]mysql.HomeEquipRow, int64, error) {
+	return f.delegate.ListEquipsForHome(ctx, userID, petID)
+}
+
 // faultUserCosmeticItemRepoOnUpdateStatus 包装真实 mysql.UserCosmeticItemRepo：
 // UpdateStatusInTx 返 injectErr，其余 4 方法透传。服务回滚 2（equip slot 空 →
 // INSERT user_pet_equips 成功 → 最后一步 UpdateStatusInTx(当前实例,equipped)
@@ -1185,6 +1191,12 @@ func (f *findByPetSlotNotFoundStub) FindUserCosmeticItemIDByPetSlotForUpdate(ctx
 
 func (f *findByPetSlotNotFoundStub) DeleteByPetSlotInTxReturningAffected(ctx context.Context, petID uint64, slot int8) (int64, error) {
 	return f.delegate.DeleteByPetSlotInTxReturningAffected(ctx, petID, slot)
+}
+
+// ListEquipsForHome Story 26.6 加到 mysql.UserPetEquipRepo interface（home
+// pet.equips JOIN）；equip 事务路径不调，透传 delegate 满足 interface。
+func (f *findByPetSlotNotFoundStub) ListEquipsForHome(ctx context.Context, userID, petID uint64) ([]mysql.HomeEquipRow, int64, error) {
+	return f.delegate.ListEquipsForHome(ctx, userID, petID)
 }
 
 // TestCosmeticEquipServiceIntegration_UkPetSlotDuplicateKey_DeterministicFallback

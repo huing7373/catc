@@ -342,9 +342,22 @@ func NewRouter(deps Deps) *gin.Engine {
 		// auth handler
 		authHandler := handler.NewAuthHandler(authSvc)
 
+		// Story 26.6 加：userPetEquipRepo 实例**上移**到此处（原 Story 26.3 在
+		// 下方 cosmetics 路由块 line ~536 创建）—— 因 Story 26.6 让 homeSvc
+		// 依赖 user_pet_equips JOIN 查询（GET /home pet.equips 真实数据），而
+		// homeSvc wire 在 cosmeticEquipSvc 之前。下游 homeSvc（NewHomeService
+		// 第 5 参）+ cosmeticEquipSvc（NewCosmeticEquipService 第 5 参）两处
+		// **复用同实例**（**不**新建第二个，与 cosmeticItemRepo /
+		// userCosmeticItemRepo line ~378 上移注释 "复用既有实例不新建第二个"
+		// 同模式）。
+		userPetEquipRepo := repomysql.NewUserPetEquipRepo(deps.GormDB)
+
 		// Story 4.8 加：home service + handler（4 repo 串行 + chest 动态判定；
 		// **不**依赖 authBindingRepo / txMgr / signer —— GET /home 全只读）。
-		homeSvc := service.NewHomeService(userRepo, petRepo, stepAccountRepo, chestRepo)
+		// Story 26.6 加第 5 参 userPetEquipRepo（pet.equips 单 SQL JOIN 真实
+		// 数据；log warning 用 slog.WarnContext 直调不注入 logger，与既有
+		// service log 模式一致 —— 详见 service.NewHomeService 注释）。
+		homeSvc := service.NewHomeService(userRepo, petRepo, stepAccountRepo, chestRepo, userPetEquipRepo)
 		homeHandler := handler.NewHomeHandler(homeSvc)
 
 		// Story 17.4 加：emoji service + handler（单 SELECT 不开事务）。
@@ -533,7 +546,9 @@ func NewRouter(deps Deps) *gin.Engine {
 		// userPetEquipRepo 是 Story 26.3 新建（user_pet_equips 表首个 repo —— 26.2
 		// 仅落 struct/TableName）。equip 是写事务故注入 deps.TxMgr（catalog/inventory
 		// 只读不依赖 txMgr，故 NewCosmeticService 不收 txMgr）。
-		userPetEquipRepo := repomysql.NewUserPetEquipRepo(deps.GormDB)
+		// **Story 26.6 改**：userPetEquipRepo 实例已**上移**到 homeSvc wire 前
+		// （line ~347 上方），此处复用同一实例（**不**再 `:=` 新建第二个 ——
+		// 与 cosmeticItemRepo / userCosmeticItemRepo 上移复用同模式）。
 		cosmeticEquipSvc := service.NewCosmeticEquipService(
 			deps.TxMgr,
 			userCosmeticItemRepo,

@@ -113,18 +113,72 @@ func (s *stubHomeChestRepo) UpdateUnlockAtByID(ctx context.Context, chestID uint
 	panic("stubHomeChestRepo.UpdateUnlockAtByID not configured (home_service should not call it)")
 }
 
-// buildHomeService 用 4 个 stub repo 构造 HomeService。每个 case 独立设置 fn。
+// stubHomeUserPetEquipRepo Story 26.6 加：home_service 只调
+// ListEquipsForHome；其余 5 个 26.3/26.4 方法兜底 panic 让"误调"在测试期
+// 立刻可见（与 stubHomePetRepo.FindByID 兜底 panic 同模式）。
+//
+// listEquipsForHomeFn nil → 表示本 case 预期 ListEquipsForHome **不被调用**
+// （pet==nil 跳过装备查询场景）：调用即 panic 暴露逻辑错误。
+type stubHomeUserPetEquipRepo struct {
+	listEquipsForHomeFn func(ctx context.Context, userID, petID uint64) ([]mysql.HomeEquipRow, int64, error)
+}
+
+func (s *stubHomeUserPetEquipRepo) FindByPetSlot(ctx context.Context, petID uint64, slot int8) (*mysql.UserPetEquip, error) {
+	panic("stubHomeUserPetEquipRepo.FindByPetSlot must not be called by home_service")
+}
+func (s *stubHomeUserPetEquipRepo) DeleteByPetSlotInTx(ctx context.Context, petID uint64, slot int8) error {
+	panic("stubHomeUserPetEquipRepo.DeleteByPetSlotInTx must not be called by home_service")
+}
+func (s *stubHomeUserPetEquipRepo) InsertInTx(ctx context.Context, e *mysql.UserPetEquip) error {
+	panic("stubHomeUserPetEquipRepo.InsertInTx must not be called by home_service")
+}
+func (s *stubHomeUserPetEquipRepo) FindUserCosmeticItemIDByPetSlotForUpdate(ctx context.Context, petID uint64, slot int8) (uint64, error) {
+	panic("stubHomeUserPetEquipRepo.FindUserCosmeticItemIDByPetSlotForUpdate must not be called by home_service")
+}
+func (s *stubHomeUserPetEquipRepo) DeleteByPetSlotInTxReturningAffected(ctx context.Context, petID uint64, slot int8) (int64, error) {
+	panic("stubHomeUserPetEquipRepo.DeleteByPetSlotInTxReturningAffected must not be called by home_service")
+}
+func (s *stubHomeUserPetEquipRepo) ListEquipsForHome(ctx context.Context, userID, petID uint64) ([]mysql.HomeEquipRow, int64, error) {
+	if s.listEquipsForHomeFn == nil {
+		panic("stubHomeUserPetEquipRepo.ListEquipsForHome called but not configured (本 case 预期 pet==nil 跳过装备查询)")
+	}
+	return s.listEquipsForHomeFn(ctx, userID, petID)
+}
+
+// buildHomeService 用 4 个 stub repo 构造 HomeService（既有 4.8 / 11.10 case 用，
+// equipFn 用 nil —— pet 非 nil 时调 ListEquipsForHome 会 panic 提醒补 stub）。
+// Story 26.6 新 case 用 buildHomeServiceWithEquips 显式注入第 5 个 stub。
 func buildHomeService(
 	userFn func(ctx context.Context, id uint64) (*mysql.User, error),
 	petFn func(ctx context.Context, userID uint64) (*mysql.Pet, error),
 	stepFn func(ctx context.Context, userID uint64) (*mysql.StepAccount, error),
 	chestFn func(ctx context.Context, userID uint64) (*mysql.UserChest, error),
 ) service.HomeService {
+	// 既有 4.8 / 11.10 case 多数 petFn 返非 nil pet → LoadHome 会调
+	// ListEquipsForHome；给一个返空切片的默认 stub，让既有 case 在
+	// 不关心 equips 时仍通过（equips 为 [] 不影响它们断言的 user/pet/
+	// chest/room 字段）。
+	return buildHomeServiceWithEquips(userFn, petFn, stepFn, chestFn,
+		func(ctx context.Context, userID, petID uint64) ([]mysql.HomeEquipRow, int64, error) {
+			return []mysql.HomeEquipRow{}, 0, nil
+		})
+}
+
+// buildHomeServiceWithEquips Story 26.6 加：5 个 stub repo 构造 HomeService，
+// 显式注入 ListEquipsForHome stub fn（fn 为 nil → pet 非 nil 时调用即 panic）。
+func buildHomeServiceWithEquips(
+	userFn func(ctx context.Context, id uint64) (*mysql.User, error),
+	petFn func(ctx context.Context, userID uint64) (*mysql.Pet, error),
+	stepFn func(ctx context.Context, userID uint64) (*mysql.StepAccount, error),
+	chestFn func(ctx context.Context, userID uint64) (*mysql.UserChest, error),
+	equipFn func(ctx context.Context, userID, petID uint64) ([]mysql.HomeEquipRow, int64, error),
+) service.HomeService {
 	return service.NewHomeService(
 		&stubHomeUserRepo{findByIDFn: userFn},
 		&stubHomePetRepo{findDefaultByUserIDFn: petFn},
 		&stubHomeStepAccountRepo{findByUserIDFn: stepFn},
 		&stubHomeChestRepo{findByUserIDFn: chestFn},
+		&stubHomeUserPetEquipRepo{listEquipsForHomeFn: equipFn},
 	)
 }
 
@@ -504,6 +558,202 @@ func TestHomeService_LoadHome_PetRepoOtherError_Returns1009(t *testing.T) {
 	}
 	if got := apperror.Code(err); got != apperror.ErrServiceBusy {
 		t.Errorf("apperror.Code(err) = %d, want %d", got, apperror.ErrServiceBusy)
+	}
+	if !stderrors.Is(err, wantCause) {
+		t.Errorf("err 链不含 wantCause; err = %v", err)
+	}
+}
+
+// ============================================================
+// Story 26.6: GET /home 扩展 - pet.equips 真实数据
+//
+// 节点 9 阶段（26.6 落地）service 层在 pet != nil 时调
+// userPetEquipRepo.ListEquipsForHome 单 SQL JOIN 查真实装备，转
+// []EquipBrief 赋给 PetBrief.Equips。pet == nil 跳过查询。
+// query err → 整体 1009 不部分降级。配置缺失（rawCount > len(rows)）→
+// skip + log warning（slog.WarnContext，与 cosmetic_service 态 C 单测
+// 同模式：单测断言可观测结果 = 过滤后件数，log 行为由集成/人工覆盖）。
+// ============================================================
+
+// AC4.1 happy: 用户穿了 hat(slot=1) + gloves(slot=2) → Pet.Equips 长度=2 +
+// 6 字段值与 stub 返回 1:1。
+func TestHomeService_LoadHome_TwoEquips_PopulatesEquipsCorrectly(t *testing.T) {
+	svc := buildHomeServiceWithEquips(
+		func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1, Nickname: "u"}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.Pet, error) {
+			return &mysql.Pet{ID: 2001, UserID: 1, PetType: 1, Name: "p", CurrentState: 1, IsDefault: 1}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+			return &mysql.StepAccount{UserID: 1}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
+			return &mysql.UserChest{ID: 5, UserID: 1, Status: 1, UnlockAt: time.Now().UTC().Add(10 * time.Minute)}, nil
+		},
+		func(ctx context.Context, userID, petID uint64) ([]mysql.HomeEquipRow, int64, error) {
+			if userID != 1 || petID != 2001 {
+				t.Errorf("ListEquipsForHome(userID=%d, petID=%d), want (1, 2001) — 必须用 (2) 块 pet.ID", userID, petID)
+			}
+			return []mysql.HomeEquipRow{
+				{Slot: 1, UserCosmeticItemID: 90001, CosmeticItemID: 12, Name: "小黄帽", Rarity: 1, AssetURL: "https://cdn/hat.png"},
+				{Slot: 2, UserCosmeticItemID: 90002, CosmeticItemID: 34, Name: "白手套", Rarity: 1, AssetURL: "https://cdn/gloves.png"},
+			}, 2, nil
+		},
+	)
+
+	out, err := svc.LoadHome(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadHome: %v", err)
+	}
+	if out.Pet == nil {
+		t.Fatal("Pet = nil, want non-nil")
+	}
+	if len(out.Pet.Equips) != 2 {
+		t.Fatalf("len(Pet.Equips) = %d, want 2", len(out.Pet.Equips))
+	}
+	e0 := out.Pet.Equips[0]
+	if e0.Slot != 1 || e0.UserCosmeticItemID != 90001 || e0.CosmeticItemID != 12 ||
+		e0.Name != "小黄帽" || e0.Rarity != 1 || e0.AssetURL != "https://cdn/hat.png" {
+		t.Errorf("Equips[0] = %+v, want slot=1 uci=90001 ci=12 name=小黄帽 rarity=1 url=https://cdn/hat.png", e0)
+	}
+	e1 := out.Pet.Equips[1]
+	if e1.Slot != 2 || e1.UserCosmeticItemID != 90002 || e1.CosmeticItemID != 34 ||
+		e1.Name != "白手套" || e1.Rarity != 1 || e1.AssetURL != "https://cdn/gloves.png" {
+		t.Errorf("Equips[1] = %+v, want slot=2 uci=90002 ci=34 name=白手套 rarity=1 url=https://cdn/gloves.png", e1)
+	}
+}
+
+// AC4.2 happy: 用户没穿任何装备 → Pet.Equips 是长度 0 的**非 nil** 切片
+// （handler 序列化为 [] 非 null）。
+func TestHomeService_LoadHome_NoEquips_EquipsIsNonNilEmptySlice(t *testing.T) {
+	svc := buildHomeServiceWithEquips(
+		func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1, Nickname: "u"}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.Pet, error) {
+			return &mysql.Pet{ID: 2001, UserID: 1, PetType: 1, Name: "p", CurrentState: 1, IsDefault: 1}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+			return &mysql.StepAccount{UserID: 1}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
+			return &mysql.UserChest{ID: 5, UserID: 1, Status: 1, UnlockAt: time.Now().UTC().Add(10 * time.Minute)}, nil
+		},
+		func(ctx context.Context, userID, petID uint64) ([]mysql.HomeEquipRow, int64, error) {
+			return []mysql.HomeEquipRow{}, 0, nil
+		},
+	)
+
+	out, err := svc.LoadHome(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadHome: %v", err)
+	}
+	if out.Pet == nil {
+		t.Fatal("Pet = nil, want non-nil")
+	}
+	if out.Pet.Equips == nil {
+		t.Fatal("Pet.Equips = nil, want 非 nil 空切片 []EquipBrief{}（handler 序列化为 [] 非 null）")
+	}
+	if len(out.Pet.Equips) != 0 {
+		t.Errorf("len(Pet.Equips) = %d, want 0", len(out.Pet.Equips))
+	}
+}
+
+// AC4.3 happy: pet 为 nil（用户无默认 pet）→ Pet == nil，
+// **ListEquipsForHome stub 必须未被调用**（equipFn=nil → 调用即 panic）。
+func TestHomeService_LoadHome_PetNil_SkipsEquipQuery(t *testing.T) {
+	svc := buildHomeServiceWithEquips(
+		func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1, Nickname: "u"}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.Pet, error) {
+			return nil, mysql.ErrPetNotFound
+		},
+		func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+			return &mysql.StepAccount{UserID: 1}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
+			return &mysql.UserChest{ID: 5, UserID: 1, Status: 1, UnlockAt: time.Now().UTC().Add(10 * time.Minute)}, nil
+		},
+		nil, // equipFn=nil：pet==nil 时 LoadHome **不得**调 ListEquipsForHome；调用即 panic
+	)
+
+	out, err := svc.LoadHome(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadHome: %v, want nil err (pet 缺失视为可空)", err)
+	}
+	if out.Pet != nil {
+		t.Errorf("Pet = %+v, want nil (无默认 pet → 跳过装备查询)", out.Pet)
+	}
+}
+
+// AC4.4 happy: cosmetic_item 配置缺失 → stub 返 (rows=1件, rawCount=2, nil)
+// （模拟 INNER JOIN 过滤掉 1 件配置被删的）→ Equips 长度=1（可观测结果断言；
+// log warning 行为由集成/人工覆盖，与 cosmetic_service 态 C 单测同模式）。
+func TestHomeService_LoadHome_ConfigMissing_SkipsAndKeepsRemaining(t *testing.T) {
+	svc := buildHomeServiceWithEquips(
+		func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1, Nickname: "u"}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.Pet, error) {
+			return &mysql.Pet{ID: 2001, UserID: 1, PetType: 1, Name: "p", CurrentState: 1, IsDefault: 1}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+			return &mysql.StepAccount{UserID: 1}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
+			return &mysql.UserChest{ID: 5, UserID: 1, Status: 1, UnlockAt: time.Now().UTC().Add(10 * time.Minute)}, nil
+		},
+		func(ctx context.Context, userID, petID uint64) ([]mysql.HomeEquipRow, int64, error) {
+			// rawCount=2 但 JOIN 仅返 1 行 → service 据 rawCount>len(rows)
+			// 触发 log warning（不报 error 不中断）
+			return []mysql.HomeEquipRow{
+				{Slot: 1, UserCosmeticItemID: 90001, CosmeticItemID: 12, Name: "小黄帽", Rarity: 1, AssetURL: "https://cdn/hat.png"},
+			}, 2, nil
+		},
+	)
+
+	out, err := svc.LoadHome(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("LoadHome: %v, want nil err (配置缺失只 skip+warn 不报错)", err)
+	}
+	if out.Pet == nil {
+		t.Fatal("Pet = nil, want non-nil")
+	}
+	if len(out.Pet.Equips) != 1 {
+		t.Errorf("len(Pet.Equips) = %d, want 1 (配置缺失行被 INNER JOIN 过滤，剩余 1 件保留)", len(out.Pet.Equips))
+	}
+}
+
+// AC4.5 edge: ListEquipsForHome 返 query error → LoadHome 返 1009
+// (ErrServiceBusy) + HomeOutput == nil（不部分降级）。
+func TestHomeService_LoadHome_EquipQueryError_Returns1009NoPartialDowngrade(t *testing.T) {
+	wantCause := stderrors.New("simulated equip JOIN failure")
+	svc := buildHomeServiceWithEquips(
+		func(ctx context.Context, id uint64) (*mysql.User, error) {
+			return &mysql.User{ID: 1, Nickname: "u"}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.Pet, error) {
+			return &mysql.Pet{ID: 2001, UserID: 1, PetType: 1, Name: "p", CurrentState: 1, IsDefault: 1}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.StepAccount, error) {
+			return &mysql.StepAccount{UserID: 1}, nil
+		},
+		func(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
+			return &mysql.UserChest{ID: 5, UserID: 1, Status: 1, UnlockAt: time.Now().UTC().Add(10 * time.Minute)}, nil
+		},
+		func(ctx context.Context, userID, petID uint64) ([]mysql.HomeEquipRow, int64, error) {
+			return nil, 0, wantCause
+		},
+	)
+
+	out, err := svc.LoadHome(context.Background(), 1)
+	if out != nil {
+		t.Errorf("out = %+v, want nil (装备查询失败不部分降级)", out)
+	}
+	if got := apperror.Code(err); got != apperror.ErrServiceBusy {
+		t.Errorf("apperror.Code(err) = %d, want %d (ErrServiceBusy)", got, apperror.ErrServiceBusy)
 	}
 	if !stderrors.Is(err, wantCause) {
 		t.Errorf("err 链不含 wantCause; err = %v", err)

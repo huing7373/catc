@@ -74,6 +74,24 @@ type UserPetEquip struct {
 // TableName 显式声明 "user_pet_equips"。
 func (UserPetEquip) TableName() string { return "user_pet_equips" }
 
+// HomeEquipRow 是 ListEquipsForHome 的 JOIN 投影行（Story 26.6 引入）。
+//
+// **轻量结构体接收 JOIN 投影列，不复用 UserPetEquip 全 struct** —— JOIN 跨
+// 3 表（user_pet_equips / user_cosmetic_items / cosmetic_items）的列不在单
+// struct 上，显式裁字段避免误读未 SELECT 列的 zero-value，与
+// cosmetic_item_repo 轻量 struct 同模式。
+//
+// 字段类型与 3 表对应列 1:1：slot/rarity int8（TINYINT）、id 列 uint64
+// （BIGINT UNSIGNED）、name/asset_url string（VARCHAR）。
+type HomeEquipRow struct {
+	Slot               int8   `gorm:"column:slot"`
+	UserCosmeticItemID uint64 `gorm:"column:user_cosmetic_item_id"`
+	CosmeticItemID     uint64 `gorm:"column:cosmetic_item_id"`
+	Name               string `gorm:"column:name"`
+	Rarity             int8   `gorm:"column:rarity"`
+	AssetURL           string `gorm:"column:asset_url"`
+}
+
 // UserPetEquipRepo 是 user_pet_equips 表的访问接口（Story 26.3 **首次**落地 ——
 // Story 26.2 仅落地 UserPetEquip GORM struct + TableName() 最小骨架，**没有**
 // interface / 任何方法；本 story 在同文件追加 interface / impl，与
@@ -195,6 +213,35 @@ type UserPetEquipRepo interface {
 	// (0, raw error 透传给 service（service 包成 1009）)；否则
 	// (result.RowsAffected, nil)。
 	DeleteByPetSlotInTxReturningAffected(ctx context.Context, petID uint64, slot int8) (int64, error)
+
+	// ListEquipsForHome 单 SQL JOIN 查某 pet 当前全部装备（GET /home pet.equips
+	// 数据源，Story 26.6 引入；V1 §5.1 节点 9 真实数据 + epics.md §Story 26.6）。
+	//
+	// 主查 SQL（单查，禁止 N+1 —— epics.md §Story 26.6 AC4 edge 钦定）:
+	//   SELECT upe.slot, upe.user_cosmetic_item_id,
+	//          ci.id AS cosmetic_item_id, ci.name, ci.rarity, ci.asset_url
+	//   FROM user_pet_equips upe
+	//   JOIN user_cosmetic_items uci ON uci.id = upe.user_cosmetic_item_id
+	//   JOIN cosmetic_items ci       ON ci.id  = uci.cosmetic_item_id
+	//   WHERE upe.user_id = ? AND upe.pet_id = ?
+	//   ORDER BY upe.slot ASC
+	//
+	// 走 0016 落地的 idx_user_pet (user_id, pet_id) 索引（数据库设计 §5.10）。
+	// ORDER BY slot ASC：client 渲染稳定顺序（防 grid 抖动；单 pet 单 slot
+	// UNIQUE，slot ASC 已是全序，与 catalog ORDER BY 同根因模式）。
+	//
+	// **INNER JOIN 自然 skip 配置缺失（AC3）**：若某 upe 行对应的
+	// cosmetic_items 配置被 admin 物理删（理论不该，与 §8.2 态 C 同源），该行
+	// 不进 JOIN 结果。为让 service 层 log warning，本方法**额外发 1 个 O(1)
+	// COUNT**（`SELECT COUNT(*) FROM user_pet_equips WHERE user_id=? AND
+	// pet_id=?`）返 rawCount；service 据 rawCount > len(rows) 判定有配置缺失
+	// → log warn。**COUNT 是固定 1 次额外查询（与装备件数无关），不违反
+	// N+1 约束**（N+1 指"每件装备 1 查"，此处主查仍是单 JOIN）。
+	//
+	// 空结果（pet 未穿任何装备）→ 返 ([]HomeEquipRow{}（**非 nil**), 0, nil)；
+	// service 透传为 pet.equips=[] 非 error（AC2 happy: 没穿装备 → []）。
+	// 主 query 失败 → 返 (nil, 0, raw error 透传)（service 包成 1009）。
+	ListEquipsForHome(ctx context.Context, userID, petID uint64) (rows []HomeEquipRow, rawCount int64, err error)
 }
 
 // userPetEquipRepo 是 UserPetEquipRepo 的默认实装。
@@ -296,4 +343,53 @@ func (r *userPetEquipRepo) DeleteByPetSlotInTxReturningAffected(ctx context.Cont
 		return 0, result.Error
 	}
 	return result.RowsAffected, nil
+}
+
+// ListEquipsForHome 实装：单 SQL 3 表 INNER JOIN 主查（显式列裁剪 + ORDER BY
+// slot ASC + tx.FromContext）+ 1 个 O(1) COUNT 校验查。详见接口注释
+// （V1 §5.1 节点 9 真实数据 + epics.md §Story 26.6 AC4 禁止 N+1）。
+//
+// 与本文件既有方法风格一致优先：本方法无锁子句，用 GORM
+// Table().Select().Joins().Where().Order().Find() builder（显式列裁剪），
+// 0 行 → []HomeEquipRow{} 兜底（与 cosmetic_item_repo.ListEnabledForCatalog
+// 0 行非 nil 兜底同模式），**不**走 Raw（Raw 留给 FOR UPDATE 锁语法特例）。
+func (r *userPetEquipRepo) ListEquipsForHome(ctx context.Context, userID, petID uint64) ([]HomeEquipRow, int64, error) {
+	db := tx.FromContext(ctx, r.db).WithContext(ctx)
+
+	var rows []HomeEquipRow
+	// 显式列裁剪（不依赖 GORM 自动 SELECT *）：与 V1 §5.1 行 475-484 节点 9
+	// 真实数据示例 6 字段 1:1（slot / userCosmeticItemId / cosmeticItemId /
+	// name / rarity / assetUrl）。`ci.id AS cosmetic_item_id` 让 GORM 按
+	// HomeEquipRow.CosmeticItemID 的 column tag 映射。
+	err := db.
+		Table("user_pet_equips upe").
+		Select("upe.slot AS slot, upe.user_cosmetic_item_id AS user_cosmetic_item_id, "+
+			"ci.id AS cosmetic_item_id, ci.name AS name, ci.rarity AS rarity, ci.asset_url AS asset_url").
+		Joins("JOIN user_cosmetic_items uci ON uci.id = upe.user_cosmetic_item_id").
+		Joins("JOIN cosmetic_items ci ON ci.id = uci.cosmetic_item_id").
+		Where("upe.user_id = ? AND upe.pet_id = ?", userID, petID).
+		Order("upe.slot ASC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, 0, err
+	}
+	// GORM Find 在 0 行时一般返回 nil slice；显式兜底空 slice 让 service 层
+	// 调用方不需要 nil-check（AC2 happy: 没穿装备 → pet.equips=[] 非 null）。
+	if rows == nil {
+		rows = []HomeEquipRow{}
+	}
+
+	// O(1) COUNT 校验查（与装备件数无关的固定 1 次额外查询，**不**是 N+1）：
+	// user_pet_equips 真实行数 vs JOIN 后行数。rawCount > len(rows) 说明有
+	// 装备的 cosmetic_items 配置被删（INNER JOIN 过滤掉了），service 据此
+	// log warning（AC3）。
+	var rawCount int64
+	if err := db.
+		Model(&UserPetEquip{}).
+		Where("user_id = ? AND pet_id = ?", userID, petID).
+		Count(&rawCount).Error; err != nil {
+		return nil, 0, err
+	}
+
+	return rows, rawCount, nil
 }

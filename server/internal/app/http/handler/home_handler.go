@@ -101,14 +101,36 @@ func homeResponseDTO(out *service.HomeOutput) gin.H {
 	// nil map 序列化也是 null，但 any 类型最稳定且 reviewer 一目了然）
 	var petDTO any
 	if out.Pet != nil {
+		// equips 节点 9 阶段（Story 26.6）落地真实数据：遍历 out.Pet.Equips
+		// （[]service.EquipBrief）转 wire 数组。**用 make([]gin.H, 0, len)
+		// 而非 var ... []gin.H** —— 空切片必须序列化为 [] 非 null（V1 §5.1
+		// 行 408 钦定 pet.equips 是 array，无装备时 []；nil slice 序列化为
+		// null 会破坏 schema，与之前节点 2 阶段用 []any{} 非 nil 同根因）。
+		//
+		// 字段类型对齐 V1 §5.1 行 475-484 节点 9 真实数据示例 6 字段 +
+		// §2.5 BIGINT 字符串化约定（AC7 跨接口同义对齐）：
+		//   - slot / rarity：int 数字（小整数枚举，与 petType/currentState/
+		//     chest.status 同走数字路径）
+		//   - userCosmeticItemId / cosmeticItemId：strconv.FormatUint 字符串化
+		//     （BIGINT，与 §8.1/§8.2/§8.3 同义同型）
+		//   - name / assetUrl：string 直出
+		equipsDTO := make([]gin.H, 0, len(out.Pet.Equips))
+		for _, e := range out.Pet.Equips {
+			equipsDTO = append(equipsDTO, gin.H{
+				"slot":               e.Slot,                                   // int 数字
+				"userCosmeticItemId": strconv.FormatUint(e.UserCosmeticItemID, 10), // BIGINT 字符串化
+				"cosmeticItemId":     strconv.FormatUint(e.CosmeticItemID, 10),     // BIGINT 字符串化
+				"name":               e.Name,
+				"rarity":             e.Rarity, // int 数字
+				"assetUrl":           e.AssetURL,
+			})
+		}
 		petDTO = gin.H{
 			"id":           strconv.FormatUint(out.Pet.ID, 10),
 			"petType":      out.Pet.PetType,
 			"name":         out.Pet.Name,
 			"currentState": out.Pet.CurrentState,
-			// equips 节点 2 阶段强制 []：用 []any{} 而非 nil（nil slice 序列化为 null）。
-			// Story 26.6 节点 9 才把这里替换成真实 []equipDTO{...}，DTO 嵌套结构对齐 V1 §5.1。
-			"equips": []any{},
+			"equips":       equipsDTO,
 		}
 	}
 
