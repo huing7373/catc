@@ -2,7 +2,7 @@
 date: 2026-05-17
 source_review: "file: /tmp/epic-loop-review-26-1-r1.md (codex review, epic-loop r1)"
 story: 26-1-接口契约最终化
-commit: <pending>
+commit: d7386ec
 lesson_count: 1
 ---
 
