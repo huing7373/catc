@@ -68,7 +68,6 @@ import (
 	"context"
 	"database/sql"
 	stderrors "errors"
-	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -773,36 +772,57 @@ func TestCosmeticEquipServiceIntegration_UnequipUpdateStatusFails_AllRollback(t 
 // （AC7，epics.md 行 3608「只 1 成功其余 99 error，DB UNIQUE(pet_id,slot) 兜底」
 // + 行 3613 NFR2 一致性约束）：1 user + 1 pet + slot **初始为空** + 100 件不同
 // hat 实例（全 slot=1）→ `<-start` 屏障强制 100 goroutine 同时释放 → 各 Equip
-// 不同实例 → 断言**恰 1 成功 / 99 撞 1009 回滚** + **终态一致性矩阵**（恰 1 行 /
-// 恰 1 个 status=2 / 无中间态 / 无部分提交 / 双向一致）。
+// 不同实例 → 断言**终态一致性矩阵**（(pet,slot) 终态恰 1 行 / 恰 1 个 status=2 /
+// 其余 N-1 全 status=1 / 无中间态 / 行↔状态对齐 / 双向一致），成功数仅断言
+// **>= 1**（slot 空必有一个 equip 占住），**不**对成功**数量**设上界。
 //
-// ===== 守门注释：根因不变量（改此 case 前必读，违反即"改坏测试"）=====
+// ===== 守门注释：本 case 的真不变量是终态一致性，**不是**调用成功计数 =====
+// =====（改断言前必读 —— 这是已跑满 3 轮的 over-correction chain 终点）=====
 //
-// **此 case 的恰-1 不变量来自测试结构，不是断言强弱选择**：
+// **决定性实证（codex r3，2026-05-17）**：直接实跑
+//   go test ./internal/service -tags=integration -count=3 \
+//     -run TestCosmeticEquipServiceIntegration_Concurrent100SamePetSlot_FinalStateConsistent
+// → **报告 91 个成功 equip**（不是 1）。硬证据：`successCount == 1` 在
+// 服务**完全正确**时也会误失败 → CI flaky/blocking。**不要**把成功数
+// 断言收紧回 `== 1`（已被实证 3 次否定，见文末 chain）。
 //
-//  1. setup 钉死「slot 初始为空」：insertPet 后 **无任何 prior equip**；
-//  2. `<-start` 屏障钉死「真并发」：100 goroutine 同时释放，**无错峰**；
-//  3. 被测路径因 (1)+(2) 结构上**确定性收敛到唯一一条**：
-//     `runEquipTx` 步骤 8 `FindByPetSlot` 是**普通 SELECT（无 FOR UPDATE）**
+// **为何成功数不是 1（swap 语义，不是 insert-only 竞争）**：
+//
+//  1. `<-start` 屏障只同步 goroutine **启动**，**不**同步各事务读
+//     `user_pet_equips` 的**时刻**；100 goroutine 同时释放后，其事务对
+//     `FindByPetSlot` 的执行时刻仍渐次错开（连接池上限 / 调度抖动）。
+//  2. `runEquipTx` 步骤 8 `FindByPetSlot` 是**普通 SELECT（无 FOR UPDATE）**
 //     —— 见 user_pet_equip_repo.go:214 `First()`；FOR UPDATE 变体
 //     `FindUserCosmeticItemIDByPetSlotForUpdate` **仅** runUnequipTx 步骤 5 用，
-//     equip **不**用。slot 空 + 屏障同步 ⟹ 绝大多数 tx 的 MVCC 快照看到
-//     「无旧行」⟹ 全部跳过 swap 分支、直奔步骤 9 `InsertInTx` ⟹ `uk_pet_slot`
-//     UNIQUE **确定性恰放 1 个 INSERT 过、其余 99 撞 1062**
-//     → ErrUserPetEquipPetSlotDuplicate → 步骤 9 Wrap 成 ErrServiceBusy(1009)
-//     → 整事务回滚 → Equip 返 1009。
+//     equip **不**用。
+//  3. 首个 tx commit 后，其余 ~99 个 goroutine 的事务陆续读到那条**已提交
+//     的旧行** ⟹ 走 swap 分支（查旧 → 删旧 user_pet_equips 行 + 旧实例
+//     status 回 1 in_bag → 插新行 + 新实例 status=2 equipped）⟹ **串行化
+//     合法成功 commit**。这正是 26-1 冻结契约 §8.3 钦定的「同槽自动换装」
+//     语义（client 无需先 unequip）。r2 守门注释声称的"slot 空 + 屏障 ⟹
+//     swap 路径结构不可达 ⟹ 确定性恰 1"被 codex r3 实证（91/100）**证伪**：
+//     屏障同步的是启动不是事务读时刻，swap 路径**完全可达**。
 //
-// **r1 codex 担心的"串行化 swap 让多个成功"在此 case 结构上不可达**：swap
-// 路径要"成功换装"需该 tx 看得到一条**已提交的旧行**——只在 ① slot 非空，
-// 或 ② goroutine 错峰（后启动者看到先提交者的行）时成立。本 case 用屏障专门
-// 排除错峰、slot 又是空的，**swap 路径在此结构上不可达**。故 `successCount
-// == 1` 在服务正确时**不会误失败**（化解 r1 合法担忧），又**能抓 uk_pet_slot
-// 回滚回归**（满足 epics.md 行 3608 AC + r2 codex）。r1 把它放松成 `>= 1`
-// 是过度修正（断言强弱 ping-pong 的表层翻转，非根因解决）。
+// **本 case 的真并发正确性不变量 = 终态一致性矩阵**：epics.md 行 3608 AC
+// 括注「DB UNIQUE(pet_id, slot) 兜底」真正保证的是「**任意时刻至多 1 行 /
+// 终态恰 1 行**」（= 下方不变量 1~4 在断言的东西），**不是**「99 个调用
+// 失败」。AC 行 3608 措辞「只 1 个成功其他 99 返回错误」基于 **26-1 冻结
+// 契约之前的过时心智模型**（误以为 equip 是 insert-only、靠 uk_pet_slot
+// 拒绝重复）；26-1 §8.3 + 26-3 实装已把 equip 钦定为 swap，串行化的后续
+// equip **设计上就该成功**。该 AC 措辞视为被 26-1 冻结契约 supersede（详见
+// story 26-5 文件 Debug Log AC 偏差登记）。uk_pet_slot 的回滚/兜底由「终态
+// 恰 1 行 + 无脏写 + 无孤儿」覆盖，**不需要**「99 调用失败」来证。
 //
-// **⚠️ 谁若在此 case 前置一条 equip 让 slot 非空、或移除 `<-start` 屏障让
-// goroutine 错峰 —— 恰-1 不变量就会被 swap 路径破坏。那是改坏测试结构，不是
-// "放松断言"。想再把 `==1` 放松回 `>=1` 前，先反驳上面 (1)(2)(3) 的结构论证。**
+// **⚠️ 警告未来维护者**：**不要**把成功数断言再收紧回 `== 1`。完整 chain：
+//   r0 写 `==1` → r1 codex「swap 可串行多成功 → 放松」→ r1 放松成 `>=1`
+//   + 加终态矩阵（方向本对）→ r2 codex「`>=1` 丢 uk_pet_slot 回归 → 恢复
+//   强断言」→ r2（被错误根因指令误导）强制 `==1` + 99 个 1009 逐个断言
+//   + 写"swap 不可达"守门注释 → r3 codex 实跑复现 91/100 成功，证伪 r2
+//   模型 → 本轮（r3 fix）回到 `>=1` + 删 r2 的 1009 逐个断言 + 此注释。
+//   `successCount == 1` 是 swap 语义下的**伪不变量**，已被实证 3 次否定，
+//   再设回 `==1` = 第 4 跳 ping-pong。失败的 goroutine（若有）失败原因在
+//   swap 竞争下可能是行锁等待超时 / 重复键 等多种合法竞争结果，**不**构成
+//   回归信号，故**不**对失败 err 做具体错误码断言。
 //
 // goroutine 收集 + start barrier 模式抄 20.9 _Concurrent100SameKey 行 810。
 func TestCosmeticEquipServiceIntegration_Concurrent100SamePetSlot_FinalStateConsistent(t *testing.T) {
@@ -839,34 +859,32 @@ func TestCosmeticEquipServiceIntegration_Concurrent100SamePetSlot_FinalStateCons
 	close(start)
 	wg.Wait()
 
-	// 恰 1 个成功（epics.md 行 3608 AC + 守门注释根因不变量：slot 空 + 屏障
-	// 同步 ⟹ swap 路径不可达 ⟹ 全部走 INSERT 竞争 ⟹ uk_pet_slot 确定性恰 1
-	// 个 INSERT commit 过；**不**放松成 >= 1，见函数头守门注释）。
+	// 成功数仅断言 **>= 1**（slot 初始空 ⟹ 至少一个 equip 必成功占住 slot）。
+	// swap 语义下后续 goroutine 读到已提交旧行会走换装路径**合法成功**，N 个
+	// 里成功数 ∈ [1, N] 都是合法的（codex r3 实跑 -count=3 复现 91/100），故
+	// **不**对成功**数量**设上界、**不**对失败 goroutine 做具体错误码断言
+	// （swap 竞争下失败原因可能是行锁等待超时/重复键 等多种合法竞争结果，
+	// 不构成回归信号）。真并发正确性不变量在下方终态一致性矩阵。**不要**把
+	// 此断言再收紧回 `== 1`（swap 语义下的伪不变量，已被实证 3 次否定，详见
+	// 函数头守门注释完整 over-correction chain）。
 	successCount := 0
-	for i, err := range errs {
+	for _, err := range errs {
 		if err == nil {
 			successCount++
-			continue
 		}
-		// 那 99 个失败必须是**确切的 uk_pet_slot 重复键回滚错**（1009
-		// ErrServiceBusy —— InsertInTx 撞 uk_pet_slot 1062 →
-		// ErrUserPetEquipPetSlotDuplicate → 步骤 9 Wrap 成 1009）。用
-		// AppError code 精确断言，**不**只数 err != nil —— 证明确实走了
-		// uk_pet_slot 回滚路径，而非偶发别的错（否则"99 个 error"会被任意
-		// 错误满足，回归抓不住根因）。
-		requireEquipAppError(t, err, apperror.ErrServiceBusy,
-			fmt.Sprintf("并发1 goroutine[%d] 失败应为 uk_pet_slot 重复键回滚错(1009)", i))
 	}
-	if successCount != 1 {
-		t.Fatalf("并发1 同 pet 同 slot 100 equip: 成功 %d 个, want 恰 1（slot 初始空 + <-start 屏障 ⟹ swap 路径不可达 ⟹ uk_pet_slot 确定性恰 1 成功 / 99 撞 1009 回滚；见函数头守门注释）", successCount)
+	if successCount < 1 {
+		t.Fatalf("并发1 同 pet 同 slot 100 equip: 成功 %d 个, want >= 1（slot 初始空必有一个 equip 占住 slot；swap 语义下成功数 ∈ [1, N] 均合法，不设上界；见函数头守门注释 + codex r3 实证 91/100）", successCount)
 	}
 
-	// ===== 终态一致性矩阵（r1 增量价值，保留 —— 在恰-1 计数断言之上再校 DB
-	// 终态的双向一致性 / 无中间态 / 无部分提交，是并发正确性的补充真不变量）=====
+	// ===== 终态一致性矩阵（r1 加 / r2 保留 —— **这才是本 case 的核心真不变量**：
+	// swap 语义下并发正确性 = 任意串行化顺序后 DB 终态双向一致 / 无中间态 /
+	// 无孤儿，**不是**调用成功计数。uk_pet_slot 的回滚/兜底由"终态恰 1 行 +
+	// 无脏写"覆盖，不需"99 调用失败"来证）=====
 	//
 	// 不变量 1：uk_pet_slot 兜底 —— (pet_id, slot) 恰 1 行（至多 1 行由 UNIQUE
-	// 保证；恰 1 行因唯一赢家的 INSERT commit 并占住 slot，99 个失败 tx 全回滚
-	// 不留行 → 无脏写 / 无多行）。
+	// 保证；终态恰 1 行因 swap 语义下最后一个 commit 的 tx 删旧行 + 插自己那
+	// 一行 + 任意时刻 UNIQUE 保证不超 1 行 → 终态无脏写 / 无多行）。
 	assertCount(t, rawDB,
 		"user_pet_equips WHERE pet_id = ?", []any{petID}, 1,
 		"并发1 终态：user_pet_equips 恰 1 行（uk_pet_slot 兜底，无脏写/无多行）")

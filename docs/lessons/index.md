@@ -342,3 +342,4 @@
 | 2026-05-17 | [冻结契约里的并发卸下竞态必须 FOR UPDATE + affected-rows 双保险写死 & 上游声明可见可操作的缺失配置实例下游必须显式定义错误码分支（26-1 r2）](2026-05-17-frozen-contract-concurrency-guard-and-missing-config-equip-branch-26-1-r2.md) | 2 | error-handling, architecture, docs | `9ae0f57` |
 | 2026-05-17 | [并发集成测试断言必须匹配被测系统真实语义（swap≠互斥）& setup 构造必须满足相关表全部 UNIQUE（26-5 r1）](2026-05-17-concurrent-test-assertions-must-match-system-semantics-26-5-r1.md) | 2 | testing | `<pending>` |
 | 2026-05-18 | [并发断言强弱 ping-pong 的根因在"测试初始状态/并发结构"层而非"断言"层：用空槽 setup + 同步屏障钉死确定路径 + 守门注释终结 chain（26-5 r2）](2026-05-18-concurrent-assertion-strength-pingpong-root-cause-is-test-structure-26-5-r2.md) | 1 | testing | `<pending>` |
+| 2026-05-18 | [并发断言 over-correction chain 的终结根因：断言编码的不变量与契约语义（swap≠互斥）不符，靠实证 + 契约语义层收敛（26-5 r3）](2026-05-18-concurrent-pseudo-invariant-vs-frozen-contract-swap-semantics-26-5-r3.md) | 1 | testing, docs | `<pending>` |
