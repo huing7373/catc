@@ -87,13 +87,14 @@ func (s *stubCosmeticItemRepo) ListByIDsForInventory(ctx context.Context, ids []
 	panic("stubCosmeticItemRepo.ListByIDsForInventory not expected (chest_open_service_test 仅测开箱加权抽取路径，不走 GET /cosmetics/inventory 路径)")
 }
 
-// FindRandomByRarity: Story 23.5 给 CosmeticItemRepo interface 加了本方法
-// （/dev/grant-cosmetic-batch 真实写库数据源）；本 20.6 stub 仅测开箱加权抽取
-// 路径，不走 dev grant 路径 —— 加防御性 panic 让任何意外调用暴露（与
-// ListEnabledForCatalog / ListByIDsForInventory 同模式；本方法**仅**为 satisfy
-// 扩展后的 interface 编译，不改 20.6 任何既有行为）。
-func (s *stubCosmeticItemRepo) FindRandomByRarity(ctx context.Context, rarity int8, count int32) ([]uint64, error) {
-	panic("stubCosmeticItemRepo.FindRandomByRarity not expected (chest_open_service_test 仅测开箱加权抽取路径，不走 /dev/grant-cosmetic-batch 路径)")
+// ListEnabledIDsByRarity: Story 23.5 给 CosmeticItemRepo interface 加了本方法
+// （/dev/grant-cosmetic-batch 真实写库数据源；fix-review 23-5 r2 [P2] 根因
+// 修复后 FindRandomByRarity(rarity,count) → ListEnabledIDsByRarity(rarity)）；
+// 本 20.6 stub 仅测开箱加权抽取路径，不走 dev grant 路径 —— 加防御性 panic 让
+// 任何意外调用暴露（与 ListEnabledForCatalog / ListByIDsForInventory 同模式；
+// 本方法**仅**为 satisfy 扩展后的 interface 编译，不改 20.6 任何既有行为）。
+func (s *stubCosmeticItemRepo) ListEnabledIDsByRarity(ctx context.Context, rarity int8) ([]uint64, error) {
+	panic("stubCosmeticItemRepo.ListEnabledIDsByRarity not expected (chest_open_service_test 仅测开箱加权抽取路径，不走 /dev/grant-cosmetic-batch 路径)")
 }
 
 // **注**：mysql.UserCosmeticItemRepo 的统一 stub `stubUserCosmeticItemRepo`

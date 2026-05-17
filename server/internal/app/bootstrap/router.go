@@ -387,10 +387,13 @@ func NewRouter(deps Deps) *gin.Engine {
 		// Story 20.8 加：dev cosmetic service + handler。
 		// **节点 7 阶段**（已退役）：stub service 不写库，NewDevCosmeticService() 无参数。
 		// **节点 8 / Story 23.5 激活**：constructor 扩签名注入 cosmeticItemRepo +
-		// userCosmeticItemRepo（复用上面上移的实例）→ GrantCosmeticBatch 真实写库
-		// （FindRandomByRarity + CreateInTx）。接口签名 / 路由 / 客户端调用不变
-		// （兼容已部署 e2e 脚本）；router.go wire 顺序不变。
-		devCosmeticSvc := service.NewDevCosmeticService(cosmeticItemRepo, userCosmeticItemRepo)
+		// userCosmeticItemRepo（复用上面上移的实例）+ deps.TxMgr → GrantCosmeticBatch
+		// 真实写库（ListEnabledIDsByRarity 取池 + 有放回抽 count + WithTx 内 CreateInTx
+		// 原子批量发放）。fix-review 23-5 r2 [P2]：count 是实例数非 distinct 数
+		// （撤销 r1 `len<count→1009`）+ 批量发放必须原子事务（资产写入铁律，与
+		// NewDevChestService(deps.TxMgr, chestRepo) 同模式）。接口签名 / 路由 /
+		// 客户端调用不变（兼容已部署 e2e 脚本）；router.go wire 顺序不变。
+		devCosmeticSvc := service.NewDevCosmeticService(cosmeticItemRepo, userCosmeticItemRepo, deps.TxMgr)
 		devCosmeticHandler = handler.NewDevCosmeticHandler(devCosmeticSvc)
 
 		// Story 11.3 加：room service + handler（4 步事务：FindByID 预检 → INSERT rooms →

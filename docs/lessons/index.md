@@ -336,3 +336,4 @@
 | 2026-05-16 | [跨接口共享数据源的字段约束必须自洽：catalog 空 URL vs chest-open 非空冻结的矛盾（23-1 r2）](2026-05-16-cross-interface-url-contract-must-not-self-contradict-23-1-r2.md) | 1 | architecture | `f98dad1` |
 | 2026-05-16 | [冻结的列表契约必须一次性枚举全部边界 case：两级全序排序 + config 三态完整矩阵（23-1 r3）](2026-05-16-frozen-list-contract-must-enumerate-all-boundary-cases-23-1-r3.md) | 2 | docs, architecture | `36fe5fa` |
 | 2026-05-17 | [ORDER BY RAND() LIMIT N 池小于 N 时静默少发：只判空集漏掉 0<len<count 这一档（23-5 r1）](2026-05-17-random-limit-pool-shorter-than-count-silent-shortfall-23-5-r1.md) | 1 | error-handling | `<pending>` |
+| 2026-05-17 | [dev grant 的 count 是实例数不是 distinct 配置数：over-correction chain 第 2 跳，根因是数量语义而非校验松紧（23-5 r2）](2026-05-17-dev-grant-count-is-instance-count-not-distinct-over-correction-chain-23-5-r2.md) | 2 | architecture, error-handling | `<pending>` |

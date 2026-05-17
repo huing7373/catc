@@ -1507,13 +1507,15 @@ func (f *faultCosmeticItemRepoOnList) ListByIDsForInventory(ctx context.Context,
 	panic("faultCosmeticItemRepoOnList.ListByIDsForInventory not expected (chest_open 集成测试仅测开箱加权抽取 ROLLBACK 路径)")
 }
 
-// FindRandomByRarity: Story 23.5 给 CosmeticItemRepo interface 加了本方法
-// （/dev/grant-cosmetic-batch 真实写库数据源）；本 fault stub 仅测开箱加权抽取
-// ROLLBACK 路径，不走 dev grant 路径 —— 加防御性 panic 让任何意外调用暴露
-// （与 ListEnabledForCatalog / ListByIDsForInventory 同模式；仅为 satisfy
-// 扩展后的 interface 编译，不改 20.6 任何既有行为）。
-func (f *faultCosmeticItemRepoOnList) FindRandomByRarity(ctx context.Context, rarity int8, count int32) ([]uint64, error) {
-	panic("faultCosmeticItemRepoOnList.FindRandomByRarity not expected (chest_open 集成测试仅测开箱加权抽取 ROLLBACK 路径)")
+// ListEnabledIDsByRarity: Story 23.5 给 CosmeticItemRepo interface 加了本方法
+// （/dev/grant-cosmetic-batch 真实写库数据源；fix-review 23-5 r2 [P2] 根因
+// 修复后 FindRandomByRarity(rarity,count) → ListEnabledIDsByRarity(rarity)）；
+// 本 fault stub 仅测开箱加权抽取 ROLLBACK 路径，不走 dev grant 路径 —— 加
+// 防御性 panic 让任何意外调用暴露（与 ListEnabledForCatalog /
+// ListByIDsForInventory 同模式；仅为 satisfy 扩展后的 interface 编译，
+// 不改 20.6 任何既有行为）。
+func (f *faultCosmeticItemRepoOnList) ListEnabledIDsByRarity(ctx context.Context, rarity int8) ([]uint64, error) {
+	panic("faultCosmeticItemRepoOnList.ListEnabledIDsByRarity not expected (chest_open 集成测试仅测开箱加权抽取 ROLLBACK 路径)")
 }
 
 // faultChestOpenLogRepoOnCreate 让 Create 直接抛 injectErr —— ChestOpenLogRepo interface 仅 Create 一个方法

@@ -153,23 +153,37 @@ type CosmeticItemRepo interface {
 	// （SELECT * 全表扫，inventory 只需按 id 集合查指定字段）。
 	ListByIDsForInventory(ctx context.Context, ids []uint64) ([]CosmeticItem, error)
 
-	// FindRandomByRarity 按 rarity 随机抽 count 个 enabled cosmetic_item_id
-	// （Story 23.5 引入 —— /dev/grant-cosmetic-batch 节点 8 真实写库数据源，AC6）。
+	// ListEnabledIDsByRarity 返回某 rarity 下**全部** enabled cosmetic_item_id
+	// （Story 23.5 引入；fix-review 23-5 r2 [P2] 根因修复 —— 替换 r1 的
+	// FindRandomByRarity(rarity, count) `ORDER BY RAND() LIMIT count`）。
 	//
 	// SQL: SELECT id FROM cosmetic_items WHERE rarity = ? AND is_enabled = 1
-	//      ORDER BY RAND() LIMIT ?
+	//      （**无 LIMIT，无 ORDER BY RAND()**）
+	//
+	// **为何返回全池而非 LIMIT count（根因 / over-correction chain 收敛）**：
+	// dev grant 的 `count` 是要授予的**实例（instance）数**，**不是** distinct
+	// 配置数。`user_cosmetic_items`（DB §5.9）只有非唯一 KEY
+	// idx_user_id_cosmetic_item_id（**无** UNIQUE(user_id, cosmetic_item_id)），
+	// 同一 cosmetic_item_id 多实例合法且为合成 feature 核心所必需（§22 "手动
+	// 选择 10 个同品质道具实例"）。原 `LIMIT count` 把 pick 上限钉死在 distinct
+	// 池大小（seed common 仅 8 件 → 无法产 10 个 common 实例供合成 demo）；r1
+	// 的 `len<count→1009` 拒绝是对错误契约的二次 over-correct（把合法主 demo
+	// 用例打死）。根因解法：repo 只负责给出**池**（distinct enabled id 列表），
+	// 由 service 在 Go 层**有放回**抽 count 个 —— 数量语义与池大小彻底解耦。
 	//
 	// **WHERE is_enabled = 1 过滤理由**：dev 端点发放的应是可用配置（与
 	// ListEnabledForCatalog / ListEnabledForWeightedPick 一致 —— 不发已下架配置）。
-	// **ORDER BY RAND() LIMIT ?**：dev 产品语义是"按品质随机抽 count 个"，
-	// RAND() 在 dev 端点小样本（count ≤ 100）场景足够（**不**用于 prod 抽奖热路径 ——
-	// prod 开箱走 ListEnabledForWeightedPick + 加权采样，与本方法语义独立不复用）。
+	// **不复用** ListEnabledForWeightedPick（SELECT * 全表 + prod 加权采样语义）
+	// / ListEnabledForCatalog（带全序 ORDER BY，catalog 语义）—— 本方法只需
+	// 按 rarity 取 id 集合，语义独立。
 	//
 	// 返回 cosmetic_item_id slice（仅 id 列，dev 发放不需要其他元信息）；
-	// 空结果（理论 Story 20.3 seed ≥15 行不该发生）→ 返 []uint64{}（非 nil），
-	// service 层判 len==0 翻译为 1009（seed 数据完整性异常）。
+	// 空结果（该 rarity 无任何 enabled 配置 —— 理论 Story 20.3 seed ≥15 行
+	// 覆盖 4 rarity 不该发生）→ 返 []uint64{}（非 nil），service 层判 len==0
+	// 翻译为 1009（seed 数据完整性异常 —— 这是**真正**的错误档；池非空但
+	// < count **不是**错误，service 有放回抽满 count）。
 	// query 失败 → 返 raw error 透传（service 包成 1009）。
-	FindRandomByRarity(ctx context.Context, rarity int8, count int32) ([]uint64, error)
+	ListEnabledIDsByRarity(ctx context.Context, rarity int8) ([]uint64, error)
 }
 
 // cosmeticItemRepo 是 CosmeticItemRepo 的默认实装。
@@ -279,13 +293,13 @@ func (r *cosmeticItemRepo) ListByIDsForInventory(ctx context.Context, ids []uint
 	return rows, nil
 }
 
-// FindRandomByRarity 实装：SELECT id ... WHERE rarity=? AND is_enabled=1
-// ORDER BY RAND() LIMIT ?。详见 CosmeticItemRepo.FindRandomByRarity 接口注释
-// （Story 23.5 §AC6 钦定 —— /dev/grant-cosmetic-batch 节点 8 数据源）。
+// ListEnabledIDsByRarity 实装：SELECT id ... WHERE rarity=? AND is_enabled=1
+// （**无 LIMIT / 无 ORDER BY RAND()** —— 返回全池）。详见 CosmeticItemRepo
+// .ListEnabledIDsByRarity 接口注释（fix-review 23-5 r2 [P2] 根因修复）。
 //
 // **不**复用 ListEnabledForWeightedPick（SELECT * 全表 + service 加权采样，prod
 // 抽奖语义）/ ListEnabledForCatalog（带 ORDER BY rarity/slot/id 全序，catalog 语义）。
-func (r *cosmeticItemRepo) FindRandomByRarity(ctx context.Context, rarity int8, count int32) ([]uint64, error) {
+func (r *cosmeticItemRepo) ListEnabledIDsByRarity(ctx context.Context, rarity int8) ([]uint64, error) {
 	db := tx.FromContext(ctx, r.db).WithContext(ctx)
 
 	var ids []uint64
@@ -293,15 +307,14 @@ func (r *cosmeticItemRepo) FindRandomByRarity(ctx context.Context, rarity int8, 
 		Model(&CosmeticItem{}).
 		Select("id").
 		Where("rarity = ? AND is_enabled = ?", rarity, 1).
-		Order("RAND()").
-		Limit(int(count)).
 		Find(&ids).Error
 	if err != nil {
 		return nil, err
 	}
 	// GORM Find 0 行返空 slice 而非 nil；显式兜底让 service 层无需 nil-check
 	// （理论 Story 20.3 seed ≥15 行覆盖 4 个 rarity 不该发生空集；service 判
-	// len==0 翻译为 1009 seed 数据完整性异常）。
+	// len==0 翻译为 1009 seed 数据完整性异常 —— 池非空但 < count **不是**
+	// 错误，service 有放回抽满 count）。
 	if ids == nil {
 		ids = []uint64{}
 	}

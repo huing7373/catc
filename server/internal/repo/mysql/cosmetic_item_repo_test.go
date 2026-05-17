@@ -230,16 +230,20 @@ func TestCosmeticItemRepo_ListByIDsForInventory_NoMatch_ReturnsEmptySlice(t *tes
 	}
 }
 
-// Story 23.5 — CosmeticItemRepo.FindRandomByRarity sqlmock 单测（AC6）
+// Story 23.5 — CosmeticItemRepo.ListEnabledIDsByRarity sqlmock 单测（AC6 +
+// fix-review 23-5 r2 [P2] 根因修复后：FindRandomByRarity(rarity,count)
+// `ORDER BY RAND() LIMIT count` → ListEnabledIDsByRarity(rarity) 返全池
+// 无 LIMIT/无 ORDER BY RAND()）
 //
-// 验证 SQL 形态：SELECT id ... WHERE rarity=? AND is_enabled=? ORDER BY RAND()
-// LIMIT ? + 返回 cosmetic_item_id slice + 空集兜底（返 []uint64{} 非 nil，
-// service 层判 len==0 → 1009 seed 数据完整性异常）。RAND() 真随机性 + dev
-// grant 端到端在 dev_cosmetic_service 单测 + e2e 覆盖。
+// 验证 SQL 形态：SELECT id ... WHERE rarity=? AND is_enabled=?（**无 LIMIT /
+// 无 ORDER BY RAND()**）+ 返回 cosmetic_item_id 池 slice + 空集兜底（返
+// []uint64{} 非 nil，service 层判**空池** → 1009 seed 数据完整性异常；
+// 池非空但 < count 由 service 有放回抽满，**不**是错误）。有放回 pick +
+// dev grant 端到端在 dev_cosmetic_service 单测 + e2e 覆盖。
 
-// TestCosmeticItemRepo_FindRandomByRarity_HappyPath:
-// rarity=1 抽 3 个 → 返 3 个 enabled cosmetic_item_id。
-func TestCosmeticItemRepo_FindRandomByRarity_HappyPath(t *testing.T) {
+// TestCosmeticItemRepo_ListEnabledIDsByRarity_HappyPath:
+// rarity=1 → 返该 rarity 全部 enabled cosmetic_item_id（池，无 LIMIT）。
+func TestCosmeticItemRepo_ListEnabledIDsByRarity_HappyPath(t *testing.T) {
 	gormDB, mock := newGormWithMock(t)
 	repo := NewCosmeticItemRepo(gormDB)
 
@@ -249,15 +253,15 @@ func TestCosmeticItemRepo_FindRandomByRarity_HappyPath(t *testing.T) {
 		AddRow(uint64(42))
 
 	// SELECT `id` FROM `cosmetic_items` WHERE rarity = ? AND is_enabled = ?
-	// ORDER BY RAND() LIMIT ?（GORM Limit 渲染为 LIMIT 占位）
+	// （**无 ORDER BY RAND()、无 LIMIT** —— 根因修复：返全池由 service 有放回抽）
 	mock.ExpectQuery(regexp.QuoteMeta(
-		"SELECT `id` FROM `cosmetic_items` WHERE rarity = ? AND is_enabled = ? ORDER BY RAND() LIMIT ?")).
-		WithArgs(int8(1), 1, 3).
+		"SELECT `id` FROM `cosmetic_items` WHERE rarity = ? AND is_enabled = ?")).
+		WithArgs(int8(1), 1).
 		WillReturnRows(rows)
 
-	got, err := repo.FindRandomByRarity(context.Background(), 1, 3)
+	got, err := repo.ListEnabledIDsByRarity(context.Background(), 1)
 	if err != nil {
-		t.Fatalf("FindRandomByRarity: %v", err)
+		t.Fatalf("ListEnabledIDsByRarity: %v", err)
 	}
 	if len(got) != 3 {
 		t.Fatalf("len(got) = %d, want 3", len(got))
@@ -267,21 +271,21 @@ func TestCosmeticItemRepo_FindRandomByRarity_HappyPath(t *testing.T) {
 	}
 }
 
-// TestCosmeticItemRepo_FindRandomByRarity_EmptyResult_ReturnsEmptySlice:
-// 无匹配 rarity（理论 seed ≥15 行不该发生）→ 返 []uint64{}（非 nil），
-// service 层判 len==0 翻译为 1009。
-func TestCosmeticItemRepo_FindRandomByRarity_EmptyResult_ReturnsEmptySlice(t *testing.T) {
+// TestCosmeticItemRepo_ListEnabledIDsByRarity_EmptyResult_ReturnsEmptySlice:
+// 该 rarity 无任何 enabled 配置（理论 seed ≥15 行不该发生）→ 返 []uint64{}
+// （非 nil），service 层判**空池** → 1009 seed 数据完整性异常。
+func TestCosmeticItemRepo_ListEnabledIDsByRarity_EmptyResult_ReturnsEmptySlice(t *testing.T) {
 	gormDB, mock := newGormWithMock(t)
 	repo := NewCosmeticItemRepo(gormDB)
 
 	mock.ExpectQuery(regexp.QuoteMeta(
-		"SELECT `id` FROM `cosmetic_items` WHERE rarity = ? AND is_enabled = ? ORDER BY RAND() LIMIT ?")).
-		WithArgs(int8(9), 1, 5).
+		"SELECT `id` FROM `cosmetic_items` WHERE rarity = ? AND is_enabled = ?")).
+		WithArgs(int8(9), 1).
 		WillReturnRows(sqlmock.NewRows([]string{"id"})) // 0 行
 
-	got, err := repo.FindRandomByRarity(context.Background(), 9, 5)
+	got, err := repo.ListEnabledIDsByRarity(context.Background(), 9)
 	if err != nil {
-		t.Fatalf("FindRandomByRarity: %v", err)
+		t.Fatalf("ListEnabledIDsByRarity: %v", err)
 	}
 	if got == nil {
 		t.Errorf("got == nil, want []uint64{}（service 层无需 nil-check）")

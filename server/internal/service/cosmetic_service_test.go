@@ -59,12 +59,13 @@ func (s *stubCatalogCosmeticItemRepo) ListByIDsForInventory(ctx context.Context,
 	return s.listByIDsForInventoryFn(ctx, ids)
 }
 
-// FindRandomByRarity: Story 23.5 给 CosmeticItemRepo interface 加了本方法
-// （/dev/grant-cosmetic-batch 真实写库数据源）；cosmetic_service_test 仅测
-// ListCatalog / ListInventory 路径，不走 dev grant —— 防御性 panic 让任何
-// 意外调用暴露（仅为 satisfy 扩展后的 interface 编译）。
-func (s *stubCatalogCosmeticItemRepo) FindRandomByRarity(ctx context.Context, rarity int8, count int32) ([]uint64, error) {
-	panic("stubCatalogCosmeticItemRepo.FindRandomByRarity not configured (本 case 走 ListCatalog / ListInventory 路径，不期望走 /dev/grant-cosmetic-batch)")
+// ListEnabledIDsByRarity: Story 23.5 给 CosmeticItemRepo interface 加了本方法
+// （/dev/grant-cosmetic-batch 真实写库数据源；fix-review 23-5 r2 [P2] 根因
+// 修复后 FindRandomByRarity(rarity,count) → ListEnabledIDsByRarity(rarity)）；
+// cosmetic_service_test 仅测 ListCatalog / ListInventory 路径，不走 dev grant ——
+// 防御性 panic 让任何意外调用暴露（仅为 satisfy 扩展后的 interface 编译）。
+func (s *stubCatalogCosmeticItemRepo) ListEnabledIDsByRarity(ctx context.Context, rarity int8) ([]uint64, error) {
+	panic("stubCatalogCosmeticItemRepo.ListEnabledIDsByRarity not configured (本 case 走 ListCatalog / ListInventory 路径，不期望走 /dev/grant-cosmetic-batch)")
 }
 
 // stubUserCosmeticItemRepo: mysql.UserCosmeticItemRepo 的统一 stub
