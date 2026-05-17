@@ -19,6 +19,9 @@ package service
 //   - r10: rate_limit 在 handler 内层，service 层不感知
 //   - r11: time-derived 字段同源同时刻重算 + MVCC pending 不可见 + 1008 退役
 //   - r15: 1008 在本接口节点 7 不可达，service 兜底分支翻译为 1009
+//   - 23.5: 节点 8 入仓 —— 5g 与 5h 之间插 user_cosmetic_items INSERT（5g.5），
+//     回填 reward id 三处（5h log / 5j output / buildCacheableResponse 透传），
+//     同 txCtx 原子提交；5a~5f / 5i / 5k race-fix 不变量一律不动
 
 import (
 	"context"
@@ -68,7 +71,7 @@ type OpenChestOutput struct {
 
 // ChestRewardBrief: 开箱奖励三段嵌套之 reward 段。
 type ChestRewardBrief struct {
-	UserCosmeticItemID uint64 // **节点 7 阶段固定 0 占位**（V1 §7.2.4h + DB §5.7 注解；节点 8 Story 23.5 改）
+	UserCosmeticItemID uint64 // **Story 23.5 节点 8 起回填真实 user_cosmetic_items.id**（V1 §7.2.4h + DB §5.7 注解；节点 7 阶段曾固定 0 占位）
 	CosmeticItemID     uint64 // 真实 cosmetic_items.id
 	Name               string // cosmetic_items.name
 	Slot               int8   // cosmetic_items.slot
@@ -266,12 +269,32 @@ func (s *chestServiceImpl) runOpenChestTx(txCtx context.Context, in OpenChestInp
 	}
 	pickedItem := items[pickedIndex]
 
-	// 5h: 写 chest_open_logs（reward_user_cosmetic_item_id=0 节点 7 阶段占位）
+	// 5g.5: 创建 user_cosmetic_items 实例（Story 23.5 节点 8 入仓；epics.md §23.5 +
+	// V1 §7.2.4h 节点 8 + DB §8.3"插入一条 user_cosmetic_items"钦定）。
+	// **必须在 5h 写 chest_open_logs 之前** —— 要先拿到 user_cosmetic_items.id 才能
+	// 回填 chest_open_logs.reward_user_cosmetic_item_id（之前节点 7 阶段固定 0）。
+	// 全部在 txCtx 同事务（ADR-0007 §2.4 + DB §8.3）—— 任一步失败本 INSERT 跟随回滚。
+	chestID := chest.ID
+	newItem := &mysql.UserCosmeticItem{
+		UserID:         in.UserID,
+		CosmeticItemID: pickedItem.ID, // 5g 抽中的配置 id
+		Status:         1,             // 1=in_bag（§6.10 + struct 注释钦定）
+		Source:         1,             // 1=chest（§6.11 + struct 注释钦定）
+		SourceRefID:    &chestID,      // 被开启的宝箱 id（epics.md 行 3306 + struct 注释钦定；*uint64 非空指针）
+		ObtainedAt:     now,           // 复用 5d 已取的 now（同源同时刻，**不**重新 time.Now()）
+	}
+	if err := s.userCosmeticItemRepo.CreateInTx(txCtx, newItem); err != nil {
+		// 与同事务其他写步骤一致包成 1009（V1 §7.2 "任何其他 DB 错 → 1009"）
+		return nil, apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+	}
+	// newItem.ID 已由 GORM 回填（AUTO_INCREMENT）—— 用于 5h logRow + 5j output 回填
+
+	// 5h: 写 chest_open_logs（Story 23.5 节点 8 回填真实 user_cosmetic_items.id）
 	logRow := &mysql.ChestOpenLog{
 		UserID:                   in.UserID,
 		ChestID:                  chest.ID,
 		CostSteps:                uint32(chestOpenCostSteps),
-		RewardUserCosmeticItemID: 0, // V1 §7.2.4h 节点 7 阶段占位；节点 8 Story 23.5 改
+		RewardUserCosmeticItemID: newItem.ID, // Story 23.5 节点 8 回填真实 user_cosmetic_items.id（节点 7 阶段曾固定 0）
 		RewardCosmeticItemID:     pickedItem.ID,
 		RewardRarity:             pickedItem.Rarity,
 	}
@@ -297,7 +320,7 @@ func (s *chestServiceImpl) runOpenChestTx(txCtx context.Context, in OpenChestInp
 	// 5j: 序列化可缓存 response payload
 	output := &OpenChestOutput{
 		Reward: ChestRewardBrief{
-			UserCosmeticItemID: 0, // 节点 7 阶段占位
+			UserCosmeticItemID: newItem.ID, // Story 23.5 节点 8 真实 user_cosmetic_items.id（节点 7 阶段曾固定 0）
 			CosmeticItemID:     pickedItem.ID,
 			Name:               pickedItem.Name,
 			Slot:               pickedItem.Slot,

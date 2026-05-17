@@ -109,10 +109,11 @@ func buildChestOpenServiceIntegration(t *testing.T) (svc service.ChestService, s
 	idempotencyRepo := mysql.NewIdempotencyRepo(gormDB)
 	cosmeticItemRepo := mysql.NewCosmeticItemRepo(gormDB)
 	chestOpenLogRepo := mysql.NewChestOpenLogRepo(gormDB)
+	userCosmeticItemRepo := mysql.NewUserCosmeticItemRepo(gormDB) // Story 23.5 节点 8 入仓
 	txMgr := tx.NewManager(gormDB)
 	weightedPicker := random.NewCryptoWeightedPicker(rand.Reader)
 
-	svc = service.NewChestService(chestRepo, txMgr, idempotencyRepo, stepAccountRepo, cosmeticItemRepo, chestOpenLogRepo, weightedPicker)
+	svc = service.NewChestService(chestRepo, txMgr, idempotencyRepo, stepAccountRepo, cosmeticItemRepo, chestOpenLogRepo, weightedPicker, userCosmeticItemRepo)
 
 	rawDB, err := gormDB.DB()
 	if err != nil {
@@ -157,8 +158,10 @@ func TestChestOpenServiceIntegration_HappyPath_FullFlow(t *testing.T) {
 		t.Fatal("out = nil")
 	}
 	// 1. service 返回校验
-	if out.Reward.UserCosmeticItemID != 0 {
-		t.Errorf("Reward.UserCosmeticItemID = %d, want 0 (节点 7 占位)", out.Reward.UserCosmeticItemID)
+	// Story 23.5 节点 8 入仓：Reward.UserCosmeticItemID 从节点 7 占位 0 变为
+	// 真实 user_cosmetic_items.id（AUTO_INCREMENT 非零）。
+	if out.Reward.UserCosmeticItemID == 0 {
+		t.Errorf("Reward.UserCosmeticItemID = 0; want non-zero (Story 23.5 节点 8 回填真实 user_cosmetic_items.id)")
 	}
 	if out.Reward.CosmeticItemID == 0 {
 		t.Errorf("Reward.CosmeticItemID = 0; want non-zero (从 cosmetic_items seed 命中)")
@@ -200,6 +203,60 @@ func TestChestOpenServiceIntegration_HappyPath_FullFlow(t *testing.T) {
 	}
 	if logCount != 1 {
 		t.Errorf("DB chest_open_logs count = %d, want 1", logCount)
+	}
+
+	// 3b. Story 23.5 AC8 节点 8 入仓 happy：user_cosmetic_items 多 1 行 +
+	// 字段正确（user_id / cosmetic_item_id=抽中配置 / status=1 in_bag /
+	// source=1 chest / source_ref_id=被开启宝箱 id 5001）+ chest_open_logs
+	// .reward_user_cosmetic_item_id == 该 user_cosmetic_items.id（非零）+
+	// output.Reward.UserCosmeticItemID == 该 id（三处一致：实例 / log / response）。
+	var ucCount int
+	if err := sqlDB.QueryRow(
+		`SELECT COUNT(*) FROM user_cosmetic_items WHERE user_id = ?`, userID,
+	).Scan(&ucCount); err != nil {
+		t.Fatalf("query user_cosmetic_items count: %v", err)
+	}
+	if ucCount != 1 {
+		t.Errorf("DB user_cosmetic_items count = %d, want 1 (Story 23.5 节点 8 开箱入仓 1 行)", ucCount)
+	}
+
+	var ucID, ucCosmeticItemID uint64
+	var ucStatus, ucSource int8
+	var ucSourceRefID sql.NullInt64
+	if err := sqlDB.QueryRow(
+		`SELECT id, cosmetic_item_id, status, source, source_ref_id FROM user_cosmetic_items WHERE user_id = ?`, userID,
+	).Scan(&ucID, &ucCosmeticItemID, &ucStatus, &ucSource, &ucSourceRefID); err != nil {
+		t.Fatalf("query user_cosmetic_items row: %v", err)
+	}
+	if ucID == 0 {
+		t.Errorf("user_cosmetic_items.id = 0; want non-zero (AUTO_INCREMENT)")
+	}
+	if ucCosmeticItemID != out.Reward.CosmeticItemID {
+		t.Errorf("user_cosmetic_items.cosmetic_item_id = %d, want %d (抽中配置 id 一致)", ucCosmeticItemID, out.Reward.CosmeticItemID)
+	}
+	if ucStatus != 1 {
+		t.Errorf("user_cosmetic_items.status = %d, want 1 (in_bag)", ucStatus)
+	}
+	if ucSource != 1 {
+		t.Errorf("user_cosmetic_items.source = %d, want 1 (chest)", ucSource)
+	}
+	if !ucSourceRefID.Valid || uint64(ucSourceRefID.Int64) != 5001 {
+		t.Errorf("user_cosmetic_items.source_ref_id = %v, want 5001 (被开启宝箱 id)", ucSourceRefID)
+	}
+
+	// chest_open_logs.reward_user_cosmetic_item_id == 该 user_cosmetic_items.id（非零）
+	var logRewardUCID uint64
+	if err := sqlDB.QueryRow(
+		`SELECT reward_user_cosmetic_item_id FROM chest_open_logs WHERE user_id = ?`, userID,
+	).Scan(&logRewardUCID); err != nil {
+		t.Fatalf("query chest_open_logs.reward_user_cosmetic_item_id: %v", err)
+	}
+	if logRewardUCID != ucID {
+		t.Errorf("chest_open_logs.reward_user_cosmetic_item_id = %d, want %d (= user_cosmetic_items.id，非零)", logRewardUCID, ucID)
+	}
+	// output.Reward.UserCosmeticItemID == 该 id（三处一致）
+	if out.Reward.UserCosmeticItemID != ucID {
+		t.Errorf("out.Reward.UserCosmeticItemID = %d, want %d (= user_cosmetic_items.id；实例/log/response 三处一致)", out.Reward.UserCosmeticItemID, ucID)
 	}
 
 	// 4. 旧 chest 已 DELETE，新 chest INSERT（unlock_at ≈ now+10min, status=1, version=0）
@@ -363,6 +420,7 @@ func buildChestServiceWithRepos(t *testing.T) (
 	chestOpenLogRepo mysql.ChestOpenLogRepo,
 	txMgr tx.Manager,
 	weightedPicker random.WeightedPicker,
+	userCosmeticItemRepo mysql.UserCosmeticItemRepo,
 	cleanup func(),
 ) {
 	t.Helper()
@@ -387,6 +445,7 @@ func buildChestServiceWithRepos(t *testing.T) (
 	idempotencyRepo = mysql.NewIdempotencyRepo(gormDB)
 	cosmeticItemRepo = mysql.NewCosmeticItemRepo(gormDB)
 	chestOpenLogRepo = mysql.NewChestOpenLogRepo(gormDB)
+	userCosmeticItemRepo = mysql.NewUserCosmeticItemRepo(gormDB) // Story 23.5 节点 8 入仓
 	txMgr = tx.NewManager(gormDB)
 	weightedPicker = random.NewCryptoWeightedPicker(rand.Reader)
 
@@ -394,7 +453,7 @@ func buildChestServiceWithRepos(t *testing.T) (
 		_ = rawDB.Close()
 		dockerCleanup()
 	}
-	return rawDB, chestRepo, stepAccountRepo, idempotencyRepo, cosmeticItemRepo, chestOpenLogRepo, txMgr, weightedPicker, cleanup
+	return rawDB, chestRepo, stepAccountRepo, idempotencyRepo, cosmeticItemRepo, chestOpenLogRepo, txMgr, weightedPicker, userCosmeticItemRepo, cleanup
 }
 
 // requireAppError 断言 err 是 *apperror.AppError 且 Code == wantCode。
@@ -417,7 +476,7 @@ func requireAppError(t *testing.T, err error, wantCode int, ctx string) {
 // AC2: 回滚 1 — 扣步数失败 → 整体回滚
 // ============================================================
 func TestChestOpenServiceIntegration_StepAccountSpendFails_AllRollback(t *testing.T) {
-	sqlDB, chestRepo, stepAccountRepoReal, idempotencyRepo, cosmeticItemRepo, chestOpenLogRepo, txMgr, weightedPicker, cleanup := buildChestServiceWithRepos(t)
+	sqlDB, chestRepo, stepAccountRepoReal, idempotencyRepo, cosmeticItemRepo, chestOpenLogRepo, txMgr, weightedPicker, userCosmeticItemRepo, cleanup := buildChestServiceWithRepos(t)
 	defer cleanup()
 
 	// fault inject: Spend 抛 generic error
@@ -425,7 +484,7 @@ func TestChestOpenServiceIntegration_StepAccountSpendFails_AllRollback(t *testin
 		delegate:  stepAccountRepoReal,
 		injectErr: stderrors.New("synthetic step account spend failure"),
 	}
-	svc := service.NewChestService(chestRepo, txMgr, idempotencyRepo, stepAccountRepoFault, cosmeticItemRepo, chestOpenLogRepo, weightedPicker)
+	svc := service.NewChestService(chestRepo, txMgr, idempotencyRepo, stepAccountRepoFault, cosmeticItemRepo, chestOpenLogRepo, weightedPicker, userCosmeticItemRepo)
 
 	const userID = uint64(1)
 	const idempotencyKey = "test_rollback_step_spend"
@@ -461,12 +520,12 @@ func TestChestOpenServiceIntegration_StepAccountSpendFails_AllRollback(t *testin
 // AC3: 回滚 2 — cosmetic_items 空 → 整体回滚（已扣步数 undo）
 // ============================================================
 func TestChestOpenServiceIntegration_CosmeticItemsListEmpty_AllRollback(t *testing.T) {
-	sqlDB, chestRepo, stepAccountRepo, idempotencyRepo, _, chestOpenLogRepo, txMgr, weightedPicker, cleanup := buildChestServiceWithRepos(t)
+	sqlDB, chestRepo, stepAccountRepo, idempotencyRepo, _, chestOpenLogRepo, txMgr, weightedPicker, userCosmeticItemRepo, cleanup := buildChestServiceWithRepos(t)
 	defer cleanup()
 
 	// fault: ListEnabledForWeightedPick 返 ([]CosmeticItem{}, nil) → service 内 len==0 → ErrServiceBusy
 	cosmeticItemRepoFault := &faultCosmeticItemRepoOnList{returnEmpty: true}
-	svc := service.NewChestService(chestRepo, txMgr, idempotencyRepo, stepAccountRepo, cosmeticItemRepoFault, chestOpenLogRepo, weightedPicker)
+	svc := service.NewChestService(chestRepo, txMgr, idempotencyRepo, stepAccountRepo, cosmeticItemRepoFault, chestOpenLogRepo, weightedPicker, userCosmeticItemRepo)
 
 	const userID = uint64(1)
 	const idempotencyKey = "test_rollback_pick_empty"
@@ -501,13 +560,13 @@ func TestChestOpenServiceIntegration_CosmeticItemsListEmpty_AllRollback(t *testi
 // AC4: 回滚 3 — 写 chest_open_logs 失败 → 整体回滚
 // ============================================================
 func TestChestOpenServiceIntegration_ChestOpenLogCreateFails_AllRollback(t *testing.T) {
-	sqlDB, chestRepo, stepAccountRepo, idempotencyRepo, cosmeticItemRepo, _, txMgr, weightedPicker, cleanup := buildChestServiceWithRepos(t)
+	sqlDB, chestRepo, stepAccountRepo, idempotencyRepo, cosmeticItemRepo, _, txMgr, weightedPicker, userCosmeticItemRepo, cleanup := buildChestServiceWithRepos(t)
 	defer cleanup()
 
 	chestOpenLogRepoFault := &faultChestOpenLogRepoOnCreate{
 		injectErr: stderrors.New("synthetic chest open log create failure"),
 	}
-	svc := service.NewChestService(chestRepo, txMgr, idempotencyRepo, stepAccountRepo, cosmeticItemRepo, chestOpenLogRepoFault, weightedPicker)
+	svc := service.NewChestService(chestRepo, txMgr, idempotencyRepo, stepAccountRepo, cosmeticItemRepo, chestOpenLogRepoFault, weightedPicker, userCosmeticItemRepo)
 
 	const userID = uint64(1)
 	const idempotencyKey = "test_rollback_log_create"
@@ -536,6 +595,62 @@ func TestChestOpenServiceIntegration_ChestOpenLogCreateFails_AllRollback(t *test
 }
 
 // ============================================================
+// Story 23.5 AC8 — 回滚（节点 8 入仓核心高危回归保护）：
+// 5g.5 user_cosmetic_items INSERT 成功后某步失败 → user_cosmetic_items 也回滚
+// （DB §8.3"全部同事务"+ epics.md 行 3319 钦定）。
+//
+// **构造方式**：让 5h 写 chest_open_logs 失败（fault inject）—— 此时 5g.5
+// user_cosmetic_items INSERT 已在同 txCtx 内成功执行，但因 5h 失败 fn return
+// error → tx.WithTx ROLLBACK → user_cosmetic_items INSERT 必须跟随回滚
+// （证明 5g.5 走的是 txCtx 同事务而非独立连接 —— 否则会留下"孤儿实例 +
+// 步数没扣"的数据不一致，DB §8.3 行 999-1006 灾难）。
+//
+// 断言：user_cosmetic_items 无新增行（COUNT=0）+ available_steps 不变（步数没扣）
+// + chest 仍 unlockable（旧 chest 9001 未删未刷新）+ 返回 1009。
+// ============================================================
+func TestChestOpenServiceIntegration_UserCosmeticItemInsert_RollsBackWhenLaterStepFails(t *testing.T) {
+	sqlDB, chestRepo, stepAccountRepo, idempotencyRepo, cosmeticItemRepo, _, txMgr, weightedPicker, userCosmeticItemRepo, cleanup := buildChestServiceWithRepos(t)
+	defer cleanup()
+
+	// fault: 5h 写 chest_open_logs 失败（此时 5g.5 user_cosmetic_items 已 INSERT 成功）
+	chestOpenLogRepoFault := &faultChestOpenLogRepoOnCreate{
+		injectErr: stderrors.New("synthetic chest open log create failure (after 5g.5 user_cosmetic_items insert)"),
+	}
+	svc := service.NewChestService(chestRepo, txMgr, idempotencyRepo, stepAccountRepo, cosmeticItemRepo, chestOpenLogRepoFault, weightedPicker, userCosmeticItemRepo)
+
+	const userID = uint64(1)
+	const idempotencyKey = "test_rollback_user_cosmetic_item"
+	insertUser(t, sqlDB, userID, "uid-rollback-uc", "用户回滚入仓", "")
+	insertStepAccount(t, sqlDB, userID, 1500, 1500, 0)
+	insertChest(t, sqlDB, 9001, userID, 1, time.Now().UTC().Add(-1*time.Minute), 1000)
+
+	_, err := svc.OpenChest(context.Background(), service.OpenChestInput{UserID: userID, IdempotencyKey: idempotencyKey})
+	requireAppError(t, err, apperror.ErrServiceBusy, "AC8 UserCosmeticItemInsert_RollsBack")
+
+	// **核心断言**：user_cosmetic_items 无新增行（5g.5 INSERT 已执行但被 ROLLBACK
+	// —— 证明走 txCtx 同事务，未脱离事务到独立连接）
+	assertCount(t, sqlDB, "user_cosmetic_items WHERE user_id=?", []any{userID}, 0, "user_cosmetic_items (rollback —— 节点 8 入仓 INSERT 跟随回滚)")
+
+	// 步数没扣（5f Spend 已执行但 ROLLBACK）
+	var availableSteps, consumedSteps uint64
+	if err := sqlDB.QueryRow(`SELECT available_steps, consumed_steps FROM user_step_accounts WHERE user_id=?`, userID).Scan(&availableSteps, &consumedSteps); err != nil {
+		t.Fatalf("query step_account: %v", err)
+	}
+	if availableSteps != 1500 {
+		t.Errorf("available_steps=%d, want 1500 (rollback Spend；不能孤儿实例 + 步数没扣)", availableSteps)
+	}
+	if consumedSteps != 0 {
+		t.Errorf("consumed_steps=%d, want 0 (rollback)", consumedSteps)
+	}
+
+	assertCount(t, sqlDB, "chest_open_logs WHERE user_id=?", []any{userID}, 0, "chest_open_logs (rollback)")
+	assertCount(t, sqlDB, "chest_open_idempotency_records WHERE user_id=?", []any{userID}, 0, "idempotency (rollback)")
+	// chest 仍 unlockable：旧 chest 9001 未删未刷新（5i 未执行）
+	assertCount(t, sqlDB, "user_chests WHERE user_id=? AND id=9001 AND status=1", []any{userID}, 1, "old chest still unlockable (5i 未执行，未刷新)")
+	assertCount(t, sqlDB, "user_chests WHERE user_id=?", []any{userID}, 1, "user_chests count=1 (无新 chest)")
+}
+
+// ============================================================
 // AC5: 回滚 4 — 建新 chest 失败 → 整体回滚（含 Delete 旧 chest 也 undo）
 // ============================================================
 //
@@ -545,14 +660,14 @@ func TestChestOpenServiceIntegration_ChestOpenLogCreateFails_AllRollback(t *test
 // 记录） → Create(新 chest)（fault 抛 err → fn return error → tx.WithTx 触发 ROLLBACK → undo log
 // 把 Delete 也回滚 → 旧 chest 9001 恢复）。
 func TestChestOpenServiceIntegration_NextChestCreateFails_AllRollback(t *testing.T) {
-	sqlDB, chestRepoReal, stepAccountRepo, idempotencyRepo, cosmeticItemRepo, chestOpenLogRepo, txMgr, weightedPicker, cleanup := buildChestServiceWithRepos(t)
+	sqlDB, chestRepoReal, stepAccountRepo, idempotencyRepo, cosmeticItemRepo, chestOpenLogRepo, txMgr, weightedPicker, userCosmeticItemRepo, cleanup := buildChestServiceWithRepos(t)
 	defer cleanup()
 
 	chestRepoFault := &faultChestRepo{
 		delegate:  chestRepoReal,
 		injectErr: stderrors.New("synthetic next chest create failure"),
 	}
-	svc := service.NewChestService(chestRepoFault, txMgr, idempotencyRepo, stepAccountRepo, cosmeticItemRepo, chestOpenLogRepo, weightedPicker)
+	svc := service.NewChestService(chestRepoFault, txMgr, idempotencyRepo, stepAccountRepo, cosmeticItemRepo, chestOpenLogRepo, weightedPicker, userCosmeticItemRepo)
 
 	const userID = uint64(1)
 	const idempotencyKey = "test_rollback_next_chest"
@@ -1113,7 +1228,7 @@ func TestChestOpenServiceIntegration_UnlockAtMinus1ms_IsUnlockable(t *testing.T)
 // drop_weight=100 / rare=20 / epic=4 / legendary=1 唯一可区分 → 不依赖
 // cosmetic_items 表 ORDER BY（GORM Find 默认 MySQL 顺序未必稳定）。
 func TestChestOpenServiceIntegration_WeightedPickDistribution_DeterministicWiring_1000Opens(t *testing.T) {
-	sqlDB, chestRepo, stepAccountRepo, idempotencyRepo, cosmeticItemRepo, chestOpenLogRepo, txMgr, _, cleanup := buildChestServiceWithRepos(t)
+	sqlDB, chestRepo, stepAccountRepo, idempotencyRepo, cosmeticItemRepo, chestOpenLogRepo, txMgr, _, userCosmeticItemRepo, cleanup := buildChestServiceWithRepos(t)
 	defer cleanup()
 
 	// deterministic stub picker：900 common (weight=100) → 90 rare (weight=20) →
@@ -1125,7 +1240,7 @@ func TestChestOpenServiceIntegration_WeightedPickDistribution_DeterministicWirin
 		raritySequenceSpec{desiredWeight: 1, count: 1},     // legendary
 	)
 
-	svc := service.NewChestService(chestRepo, txMgr, idempotencyRepo, stepAccountRepo, cosmeticItemRepo, chestOpenLogRepo, stub)
+	svc := service.NewChestService(chestRepo, txMgr, idempotencyRepo, stepAccountRepo, cosmeticItemRepo, chestOpenLogRepo, stub, userCosmeticItemRepo)
 
 	const userID = uint64(1)
 	insertUser(t, sqlDB, userID, "uid-dist", "分布", "")
@@ -1390,6 +1505,15 @@ func (f *faultCosmeticItemRepoOnList) ListEnabledForCatalog(ctx context.Context)
 // 不改 20.6 任何既有行为）。
 func (f *faultCosmeticItemRepoOnList) ListByIDsForInventory(ctx context.Context, ids []uint64) ([]mysql.CosmeticItem, error) {
 	panic("faultCosmeticItemRepoOnList.ListByIDsForInventory not expected (chest_open 集成测试仅测开箱加权抽取 ROLLBACK 路径)")
+}
+
+// FindRandomByRarity: Story 23.5 给 CosmeticItemRepo interface 加了本方法
+// （/dev/grant-cosmetic-batch 真实写库数据源）；本 fault stub 仅测开箱加权抽取
+// ROLLBACK 路径，不走 dev grant 路径 —— 加防御性 panic 让任何意外调用暴露
+// （与 ListEnabledForCatalog / ListByIDsForInventory 同模式；仅为 satisfy
+// 扩展后的 interface 编译，不改 20.6 任何既有行为）。
+func (f *faultCosmeticItemRepoOnList) FindRandomByRarity(ctx context.Context, rarity int8, count int32) ([]uint64, error) {
+	panic("faultCosmeticItemRepoOnList.FindRandomByRarity not expected (chest_open 集成测试仅测开箱加权抽取 ROLLBACK 路径)")
 }
 
 // faultChestOpenLogRepoOnCreate 让 Create 直接抛 injectErr —— ChestOpenLogRepo interface 仅 Create 一个方法

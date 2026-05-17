@@ -22,14 +22,18 @@ import (
 	"github.com/huing/cat/server/internal/service"
 )
 
-// newChestServiceForGetCurrent: Story 20.6 起 service.NewChestService 签名扩为 7 参数；
-// 20.5 GetCurrent 测试只关心 chestRepo，其他依赖传 nil（GetCurrent 不消费）。本 helper
-// 集中签名扩展处，避免每个 case 都重复构造 7 参数。
+// newChestServiceForGetCurrent: Story 20.6 起 service.NewChestService 签名扩为 7 参数，
+// Story 23.5 起扩为 8 参数（第 8 = userCosmeticItemRepo）；20.5 GetCurrent 测试只关心
+// chestRepo，其他依赖传 nil（GetCurrent 不消费）。本 helper 集中签名扩展处，避免
+// 每个 case 都重复构造 8 参数。
 //
-// 注意：传 nil 的 stepAccountRepo / idempotencyRepo / picker 等不会被 GetCurrent 路径访问；
-// OpenChest 路径在本文件 test 不被调（chest_open_service_test.go 已独立覆盖）。
+// 注意：传 nil 的 stepAccountRepo / idempotencyRepo / picker / userCosmeticItemRepo 等
+// 不会被 GetCurrent 路径访问；OpenChest 路径在本文件 test 不被调
+// （chest_open_service_test.go 已独立覆盖）。
 func newChestServiceForGetCurrent(repo mysql.ChestRepo) service.ChestService {
-	return service.NewChestService(repo, nil, nil, nil, nil, nil, nil)
+	// Story 23.5 起 NewChestService 签名扩为 8 参数（第 8 = userCosmeticItemRepo）；
+	// 20.5 GetCurrent 测试只关心 chestRepo，其他依赖传 nil（GetCurrent 不消费）。
+	return service.NewChestService(repo, nil, nil, nil, nil, nil, nil, nil)
 }
 
 // 1. HappyPath_Counting: unlock_at 在未来 5 分钟 → status=1 (counting), remainingSeconds ≈ 300

@@ -152,6 +152,24 @@ type CosmeticItemRepo interface {
 	// 已拥有项消失 → 违背态 B 契约）/ **不**复用 ListEnabledForWeightedPick
 	// （SELECT * 全表扫，inventory 只需按 id 集合查指定字段）。
 	ListByIDsForInventory(ctx context.Context, ids []uint64) ([]CosmeticItem, error)
+
+	// FindRandomByRarity 按 rarity 随机抽 count 个 enabled cosmetic_item_id
+	// （Story 23.5 引入 —— /dev/grant-cosmetic-batch 节点 8 真实写库数据源，AC6）。
+	//
+	// SQL: SELECT id FROM cosmetic_items WHERE rarity = ? AND is_enabled = 1
+	//      ORDER BY RAND() LIMIT ?
+	//
+	// **WHERE is_enabled = 1 过滤理由**：dev 端点发放的应是可用配置（与
+	// ListEnabledForCatalog / ListEnabledForWeightedPick 一致 —— 不发已下架配置）。
+	// **ORDER BY RAND() LIMIT ?**：dev 产品语义是"按品质随机抽 count 个"，
+	// RAND() 在 dev 端点小样本（count ≤ 100）场景足够（**不**用于 prod 抽奖热路径 ——
+	// prod 开箱走 ListEnabledForWeightedPick + 加权采样，与本方法语义独立不复用）。
+	//
+	// 返回 cosmetic_item_id slice（仅 id 列，dev 发放不需要其他元信息）；
+	// 空结果（理论 Story 20.3 seed ≥15 行不该发生）→ 返 []uint64{}（非 nil），
+	// service 层判 len==0 翻译为 1009（seed 数据完整性异常）。
+	// query 失败 → 返 raw error 透传（service 包成 1009）。
+	FindRandomByRarity(ctx context.Context, rarity int8, count int32) ([]uint64, error)
 }
 
 // cosmeticItemRepo 是 CosmeticItemRepo 的默认实装。
@@ -259,4 +277,33 @@ func (r *cosmeticItemRepo) ListByIDsForInventory(ctx context.Context, ids []uint
 		rows = []CosmeticItem{}
 	}
 	return rows, nil
+}
+
+// FindRandomByRarity 实装：SELECT id ... WHERE rarity=? AND is_enabled=1
+// ORDER BY RAND() LIMIT ?。详见 CosmeticItemRepo.FindRandomByRarity 接口注释
+// （Story 23.5 §AC6 钦定 —— /dev/grant-cosmetic-batch 节点 8 数据源）。
+//
+// **不**复用 ListEnabledForWeightedPick（SELECT * 全表 + service 加权采样，prod
+// 抽奖语义）/ ListEnabledForCatalog（带 ORDER BY rarity/slot/id 全序，catalog 语义）。
+func (r *cosmeticItemRepo) FindRandomByRarity(ctx context.Context, rarity int8, count int32) ([]uint64, error) {
+	db := tx.FromContext(ctx, r.db).WithContext(ctx)
+
+	var ids []uint64
+	err := db.
+		Model(&CosmeticItem{}).
+		Select("id").
+		Where("rarity = ? AND is_enabled = ?", rarity, 1).
+		Order("RAND()").
+		Limit(int(count)).
+		Find(&ids).Error
+	if err != nil {
+		return nil, err
+	}
+	// GORM Find 0 行返空 slice 而非 nil；显式兜底让 service 层无需 nil-check
+	// （理论 Story 20.3 seed ≥15 行覆盖 4 个 rarity 不该发生空集；service 判
+	// len==0 翻译为 1009 seed 数据完整性异常）。
+	if ids == nil {
+		ids = []uint64{}
+	}
+	return ids, nil
 }

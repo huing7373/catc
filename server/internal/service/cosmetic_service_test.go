@@ -59,18 +59,53 @@ func (s *stubCatalogCosmeticItemRepo) ListByIDsForInventory(ctx context.Context,
 	return s.listByIDsForInventoryFn(ctx, ids)
 }
 
-// stubUserCosmeticItemRepo: mysql.UserCosmeticItemRepo 的 stub（Story 23.4）。
-// listByUserForInventoryFn 让每 case 自定义返回；ListCatalog 既有 case 用 noop
-// stub（listByUserForInventoryFn=nil → 不会被调，ListCatalog 路径不读 user repo）。
+// FindRandomByRarity: Story 23.5 给 CosmeticItemRepo interface 加了本方法
+// （/dev/grant-cosmetic-batch 真实写库数据源）；cosmetic_service_test 仅测
+// ListCatalog / ListInventory 路径，不走 dev grant —— 防御性 panic 让任何
+// 意外调用暴露（仅为 satisfy 扩展后的 interface 编译）。
+func (s *stubCatalogCosmeticItemRepo) FindRandomByRarity(ctx context.Context, rarity int8, count int32) ([]uint64, error) {
+	panic("stubCatalogCosmeticItemRepo.FindRandomByRarity not configured (本 case 走 ListCatalog / ListInventory 路径，不期望走 /dev/grant-cosmetic-batch)")
+}
+
+// stubUserCosmeticItemRepo: mysql.UserCosmeticItemRepo 的统一 stub
+// （service_test package 内唯一定义；Story 23.4 ListByUserForInventory 只读 +
+// Story 23.5 CreateInTx 入仓写两路径共用，去重为单一定义避免同 package 重声明）。
+//
+// **本定义放在无 build tag 的 cosmetic_service_test.go**（而非
+// `//go:build !integration` 的 chest_open_service_test.go）—— 因本文件在单测
+// 与集成测试两种构建下都参与编译且引用本 stub；放在 !integration 文件会让
+// `-tags integration` 构建找不到本类型（半成品 quota 中断遗留的 build tag
+// 错位，本次续做修正）。
+//
+//   - ListByUserForInventory：注入 listByUserForInventoryFn 自定义返回
+//     （cosmetic_service_test ListInventory case 用）；不注入则 panic
+//     （chest_open_service_test 仅测开箱入仓写路径，不走 GET /cosmetics/inventory；
+//     cosmetic_service_test ListCatalog case noop —— 均不调本方法）。
+//   - CreateInTx：可注入 createInTxFn；不注入则默认回填 item.ID=90001 + return nil。
+//     createInTxCall 记录每次调用的 item 供断言（chest_open_service_test 入仓 case 用）。
 type stubUserCosmeticItemRepo struct {
 	listByUserForInventoryFn func(ctx context.Context, userID uint64) ([]mysql.UserCosmeticItem, error)
+	createInTxFn             func(ctx context.Context, item *mysql.UserCosmeticItem) error
+	createInTxCall           []*mysql.UserCosmeticItem
 }
 
 func (s *stubUserCosmeticItemRepo) ListByUserForInventory(ctx context.Context, userID uint64) ([]mysql.UserCosmeticItem, error) {
 	if s.listByUserForInventoryFn == nil {
-		panic("stubUserCosmeticItemRepo.ListByUserForInventory not configured (本 case 走 ListCatalog 路径，不期望走 GET /cosmetics/inventory 实例查询)")
+		panic("stubUserCosmeticItemRepo.ListByUserForInventory not expected (chest_open_service_test 仅测开箱入仓写路径 / cosmetic_service_test ListCatalog 路径不读 user repo；ListInventory case 须注入 listByUserForInventoryFn)")
 	}
 	return s.listByUserForInventoryFn(ctx, userID)
+}
+
+func (s *stubUserCosmeticItemRepo) CreateInTx(ctx context.Context, item *mysql.UserCosmeticItem) error {
+	s.createInTxCall = append(s.createInTxCall, item)
+	if s.createInTxFn != nil {
+		return s.createInTxFn(ctx, item)
+	}
+	// 默认 happy：模拟 GORM 回填 AUTO_INCREMENT ID
+	if item.ID == 0 {
+		item.ID = 90001
+	}
+	return nil
 }
 
 // buildCosmeticService: ListCatalog 既有 case 用 —— catalogFn 注入 catalog

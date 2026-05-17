@@ -87,6 +87,22 @@ func (s *stubCosmeticItemRepo) ListByIDsForInventory(ctx context.Context, ids []
 	panic("stubCosmeticItemRepo.ListByIDsForInventory not expected (chest_open_service_test 仅测开箱加权抽取路径，不走 GET /cosmetics/inventory 路径)")
 }
 
+// FindRandomByRarity: Story 23.5 给 CosmeticItemRepo interface 加了本方法
+// （/dev/grant-cosmetic-batch 真实写库数据源）；本 20.6 stub 仅测开箱加权抽取
+// 路径，不走 dev grant 路径 —— 加防御性 panic 让任何意外调用暴露（与
+// ListEnabledForCatalog / ListByIDsForInventory 同模式；本方法**仅**为 satisfy
+// 扩展后的 interface 编译，不改 20.6 任何既有行为）。
+func (s *stubCosmeticItemRepo) FindRandomByRarity(ctx context.Context, rarity int8, count int32) ([]uint64, error) {
+	panic("stubCosmeticItemRepo.FindRandomByRarity not expected (chest_open_service_test 仅测开箱加权抽取路径，不走 /dev/grant-cosmetic-batch 路径)")
+}
+
+// **注**：mysql.UserCosmeticItemRepo 的统一 stub `stubUserCosmeticItemRepo`
+// 在 service_test package 内由无 build tag 的 cosmetic_service_test.go 统一定义
+// （Story 23.4 ListByUserForInventory 只读 + Story 23.5 CreateInTx 入仓写两路径
+// 共用，去重为单一定义避免同 package 重声明；放无 tag 文件以兼容单测 +
+// 集成测试两种构建）。本文件（!integration）直接复用该统一 stub：开箱入仓
+// case 注入 createInTxFn / 读 createInTxCall；不走 ListByUserForInventory。
+
 // stubChestOpenLogRepo: mysql.ChestOpenLogRepo 的 stub
 type stubChestOpenLogRepo struct {
 	createFn    func(ctx context.Context, log *mysql.ChestOpenLog) error
@@ -216,6 +232,10 @@ func (s *stubOpenChestStepAccountRepo) Spend(ctx context.Context, userID uint64,
 //
 // 注：本文件多数 case 用 chestRepo.findForUpdateFn 返回 unlockAt=time.Now().UTC().Add(-1*time.Minute)
 // 让 unlockable 判定走 chest.UnlockAt <= now 路径，避免 nowFn 注入 ceremony。
+// Story 23.5：fixtureService 扩第 8 参 ucRepo（NewChestService 扩签名第 8 参
+// userCosmeticItemRepo）。既有全部调用点同步扩参（多数传
+// happyUserCosmeticItemRepo()；错误分支 case 在 5g.5 之前 return 的传 happy
+// stub 不影响 —— 与 Story 23.4 NewCosmeticService 扩签名同模式）。
 func fixtureService(
 	t *testing.T,
 	idemRepo mysql.IdempotencyRepo,
@@ -224,10 +244,11 @@ func fixtureService(
 	cosmRepo mysql.CosmeticItemRepo,
 	logRepo mysql.ChestOpenLogRepo,
 	picker random.WeightedPicker,
+	ucRepo mysql.UserCosmeticItemRepo,
 ) service.ChestService {
 	t.Helper()
 	txMgr := defaultStubTxMgr()
-	return service.NewChestService(chestRepo, txMgr, idemRepo, stepRepo, cosmRepo, logRepo, picker)
+	return service.NewChestService(chestRepo, txMgr, idemRepo, stepRepo, cosmRepo, logRepo, picker, ucRepo)
 }
 
 // nowUTC: 单测用一致的 UTC 时间锚点。
@@ -269,6 +290,17 @@ func happyLogRepo() *stubChestOpenLogRepo {
 	return &stubChestOpenLogRepo{}
 }
 
+// happyUserCosmeticItemRepo: Story 23.5 入仓 happy stub —— CreateInTx 回填
+// item.ID=90001 + return nil（与 happyLogRepo 同模式）。
+func happyUserCosmeticItemRepo() *stubUserCosmeticItemRepo {
+	return &stubUserCosmeticItemRepo{
+		createInTxFn: func(ctx context.Context, item *mysql.UserCosmeticItem) error {
+			item.ID = 90001
+			return nil
+		},
+	}
+}
+
 func happyPicker() *stubWeightedPicker {
 	return &stubWeightedPicker{
 		pickFn: func(items []random.WeightedItem) (int, error) {
@@ -304,7 +336,7 @@ func TestChestService_OpenChest_HappyPath_FirstTime(t *testing.T) {
 	cosm := happyCosmeticRepo()
 	logR := happyLogRepo()
 	picker := happyPicker()
-	svc := fixtureService(t, idem, chestR, stepR, cosm, logR, picker)
+	svc := fixtureService(t, idem, chestR, stepR, cosm, logR, picker, happyUserCosmeticItemRepo())
 
 	out, err := svc.OpenChest(context.Background(), service.OpenChestInput{
 		UserID: 1001, IdempotencyKey: "test_key_001",
@@ -315,8 +347,8 @@ func TestChestService_OpenChest_HappyPath_FirstTime(t *testing.T) {
 	if out == nil {
 		t.Fatal("out = nil, want non-nil")
 	}
-	if out.Reward.UserCosmeticItemID != 0 {
-		t.Errorf("Reward.UserCosmeticItemID = %d, want 0 (节点 7 占位)", out.Reward.UserCosmeticItemID)
+	if out.Reward.UserCosmeticItemID != 90001 {
+		t.Errorf("Reward.UserCosmeticItemID = %d, want 90001 (Story 23.5 节点 8 真实 user_cosmetic_items.id；happy stub 回填 90001)", out.Reward.UserCosmeticItemID)
 	}
 	if out.Reward.CosmeticItemID != 24 {
 		t.Errorf("Reward.CosmeticItemID = %d, want 24", out.Reward.CosmeticItemID)
@@ -335,8 +367,8 @@ func TestChestService_OpenChest_HappyPath_FirstTime(t *testing.T) {
 		t.Errorf("chestOpenLogRepo.Create called %d times, want 1", len(logR.createCalls))
 	} else {
 		log := logR.createCalls[0]
-		if log.RewardUserCosmeticItemID != 0 {
-			t.Errorf("log.RewardUserCosmeticItemID = %d, want 0", log.RewardUserCosmeticItemID)
+		if log.RewardUserCosmeticItemID != 90001 {
+			t.Errorf("log.RewardUserCosmeticItemID = %d, want 90001 (Story 23.5 节点 8 回填真实 user_cosmetic_items.id)", log.RewardUserCosmeticItemID)
 		}
 		if log.RewardCosmeticItemID != 24 {
 			t.Errorf("log.RewardCosmeticItemID = %d, want 24", log.RewardCosmeticItemID)
@@ -406,7 +438,7 @@ func TestChestService_OpenChest_IdempotencyReplay_CachedSuccess(t *testing.T) {
 	}
 	logR := happyLogRepo()
 	picker := happyPicker()
-	svc := fixtureService(t, idem, chestR, stepR, cosm, logR, picker)
+	svc := fixtureService(t, idem, chestR, stepR, cosm, logR, picker, happyUserCosmeticItemRepo())
 
 	out, err := svc.OpenChest(context.Background(), service.OpenChestInput{
 		UserID: 1001, IdempotencyKey: "test_key_001",
@@ -446,7 +478,7 @@ func TestChestService_OpenChest_ChestNotFound_4001(t *testing.T) {
 			return nil, mysql.ErrChestNotFound
 		},
 	}
-	svc := fixtureService(t, idem, chestR, happyStepRepo(), happyCosmeticRepo(), happyLogRepo(), happyPicker())
+	svc := fixtureService(t, idem, chestR, happyStepRepo(), happyCosmeticRepo(), happyLogRepo(), happyPicker(), happyUserCosmeticItemRepo())
 
 	out, err := svc.OpenChest(context.Background(), service.OpenChestInput{UserID: 1001, IdempotencyKey: "k"})
 	if out != nil {
@@ -470,7 +502,7 @@ func TestChestService_OpenChest_ChestNotUnlockable_4002(t *testing.T) {
 			return &mysql.UserChest{ID: 5001, UserID: 1001, Status: 1, UnlockAt: nowUTC().Add(5 * time.Minute), OpenCostSteps: 1000, Version: 0}, nil
 		},
 	}
-	svc := fixtureService(t, idem, chestR, happyStepRepo(), happyCosmeticRepo(), happyLogRepo(), happyPicker())
+	svc := fixtureService(t, idem, chestR, happyStepRepo(), happyCosmeticRepo(), happyLogRepo(), happyPicker(), happyUserCosmeticItemRepo())
 
 	_, err := svc.OpenChest(context.Background(), service.OpenChestInput{UserID: 1001, IdempotencyKey: "k"})
 	appErr, ok := apperror.As(err)
@@ -490,7 +522,7 @@ func TestChestService_OpenChest_InsufficientSteps_3002(t *testing.T) {
 			return &mysql.StepAccount{UserID: 1001, TotalSteps: 500, AvailableSteps: 500, ConsumedSteps: 0, Version: 3}, nil
 		},
 	}
-	svc := fixtureService(t, idem, happyChestRepo(), stepR, happyCosmeticRepo(), happyLogRepo(), happyPicker())
+	svc := fixtureService(t, idem, happyChestRepo(), stepR, happyCosmeticRepo(), happyLogRepo(), happyPicker(), happyUserCosmeticItemRepo())
 
 	_, err := svc.OpenChest(context.Background(), service.OpenChestInput{UserID: 1001, IdempotencyKey: "k"})
 	appErr, ok := apperror.As(err)
@@ -510,7 +542,7 @@ func TestChestService_OpenChest_StepAccountNotFound_1009(t *testing.T) {
 			return nil, mysql.ErrStepAccountNotFound
 		},
 	}
-	svc := fixtureService(t, idem, happyChestRepo(), stepR, happyCosmeticRepo(), happyLogRepo(), happyPicker())
+	svc := fixtureService(t, idem, happyChestRepo(), stepR, happyCosmeticRepo(), happyLogRepo(), happyPicker(), happyUserCosmeticItemRepo())
 
 	_, err := svc.OpenChest(context.Background(), service.OpenChestInput{UserID: 1001, IdempotencyKey: "k"})
 	appErr, ok := apperror.As(err)
@@ -533,7 +565,7 @@ func TestChestService_OpenChest_OptimisticLockFails_1009(t *testing.T) {
 			return mysql.ErrStepAccountVersionMismatch
 		},
 	}
-	svc := fixtureService(t, idem, happyChestRepo(), stepR, happyCosmeticRepo(), happyLogRepo(), happyPicker())
+	svc := fixtureService(t, idem, happyChestRepo(), stepR, happyCosmeticRepo(), happyLogRepo(), happyPicker(), happyUserCosmeticItemRepo())
 
 	_, err := svc.OpenChest(context.Background(), service.OpenChestInput{UserID: 1001, IdempotencyKey: "k"})
 	appErr, ok := apperror.As(err)
@@ -553,7 +585,7 @@ func TestChestService_OpenChest_NoEnabledCosmetic_1009(t *testing.T) {
 			return []mysql.CosmeticItem{}, nil // empty
 		},
 	}
-	svc := fixtureService(t, idem, happyChestRepo(), happyStepRepo(), cosm, happyLogRepo(), happyPicker())
+	svc := fixtureService(t, idem, happyChestRepo(), happyStepRepo(), cosm, happyLogRepo(), happyPicker(), happyUserCosmeticItemRepo())
 
 	_, err := svc.OpenChest(context.Background(), service.OpenChestInput{UserID: 1001, IdempotencyKey: "k"})
 	appErr, ok := apperror.As(err)
@@ -606,7 +638,7 @@ func TestChestService_OpenChest_IdempotencyClaim_ExistingRow_ShortCircuitReplay(
 			return nil, nil
 		},
 	}
-	svc := fixtureService(t, idem, chestR, stepR, cosm, happyLogRepo(), happyPicker())
+	svc := fixtureService(t, idem, chestR, stepR, cosm, happyLogRepo(), happyPicker(), happyUserCosmeticItemRepo())
 
 	out, err := svc.OpenChest(context.Background(), service.OpenChestInput{UserID: 1001, IdempotencyKey: "k"})
 	if err != nil {
@@ -649,7 +681,7 @@ func TestChestService_OpenChest_WeightedPicker_IndexReverseMapsToItem(t *testing
 			return 2, nil
 		},
 	}
-	svc := fixtureService(t, idem, happyChestRepo(), happyStepRepo(), cosm, happyLogRepo(), picker)
+	svc := fixtureService(t, idem, happyChestRepo(), happyStepRepo(), cosm, happyLogRepo(), picker, happyUserCosmeticItemRepo())
 
 	out, err := svc.OpenChest(context.Background(), service.OpenChestInput{UserID: 1001, IdempotencyKey: "k"})
 	if err != nil {
@@ -674,7 +706,7 @@ func TestChestService_OpenChest_CachedPending_Returns1009(t *testing.T) {
 			}, nil
 		},
 	}
-	svc := fixtureService(t, idem, happyChestRepo(), happyStepRepo(), happyCosmeticRepo(), happyLogRepo(), happyPicker())
+	svc := fixtureService(t, idem, happyChestRepo(), happyStepRepo(), happyCosmeticRepo(), happyLogRepo(), happyPicker(), happyUserCosmeticItemRepo())
 
 	_, err := svc.OpenChest(context.Background(), service.OpenChestInput{UserID: 1001, IdempotencyKey: "k"})
 	appErr, ok := apperror.As(err)
@@ -693,7 +725,7 @@ func TestChestService_OpenChest_CachedPending_Returns1009(t *testing.T) {
 // 12. UserID_Zero_Returns1009: handler 兜底 / service 入口校验
 func TestChestService_OpenChest_UserIDZero_Returns1009(t *testing.T) {
 	idem := happyIdempotencyRepo()
-	svc := fixtureService(t, idem, happyChestRepo(), happyStepRepo(), happyCosmeticRepo(), happyLogRepo(), happyPicker())
+	svc := fixtureService(t, idem, happyChestRepo(), happyStepRepo(), happyCosmeticRepo(), happyLogRepo(), happyPicker(), happyUserCosmeticItemRepo())
 
 	_, err := svc.OpenChest(context.Background(), service.OpenChestInput{UserID: 0, IdempotencyKey: "k"})
 	appErr, ok := apperror.As(err)
@@ -712,7 +744,7 @@ func TestChestService_OpenChest_IdempotencyFindDBError_Returns1009(t *testing.T)
 			return nil, stderrors.New("synthetic db error")
 		},
 	}
-	svc := fixtureService(t, idem, happyChestRepo(), happyStepRepo(), happyCosmeticRepo(), happyLogRepo(), happyPicker())
+	svc := fixtureService(t, idem, happyChestRepo(), happyStepRepo(), happyCosmeticRepo(), happyLogRepo(), happyPicker(), happyUserCosmeticItemRepo())
 
 	_, err := svc.OpenChest(context.Background(), service.OpenChestInput{UserID: 1001, IdempotencyKey: "k"})
 	appErr, ok := apperror.As(err)
@@ -721,5 +753,186 @@ func TestChestService_OpenChest_IdempotencyFindDBError_Returns1009(t *testing.T)
 	}
 	if appErr.Code != apperror.ErrServiceBusy {
 		t.Errorf("err.Code = %d, want 1009", appErr.Code)
+	}
+}
+
+// ================================================================
+// Story 23.5 节点 8 入仓 —— 新增 ≥4 case（epics.md 行 3313-3316 钦定 1:1）
+// ================================================================
+
+// 14. Story 23.5: happy 开箱 → 5g.5 创建 user_cosmetic_items 实例 →
+// 断言 CreateInTx 被调一次 + item 字段正确（UserID / CosmeticItemID=pickedItem.ID /
+// Status=1 / Source=1 / *SourceRefID=chest.ID / ObtainedAt=now）+ output 回填真实 id。
+func TestChestService_OpenChest_CreatesUserCosmeticItem_Node8(t *testing.T) {
+	idem := happyIdempotencyRepo()
+	chestR := happyChestRepo()    // chest.ID=5001
+	stepR := happyStepRepo()
+	cosm := happyCosmeticRepo()   // pickedItem.ID=24
+	logR := happyLogRepo()
+	picker := happyPicker()
+	uc := happyUserCosmeticItemRepo() // CreateInTx 回填 ID=90001
+
+	svc := fixtureService(t, idem, chestR, stepR, cosm, logR, picker, uc)
+
+	out, err := svc.OpenChest(context.Background(), service.OpenChestInput{
+		UserID: 1001, IdempotencyKey: "test_node8_create",
+	})
+	if err != nil {
+		t.Fatalf("OpenChest: %v", err)
+	}
+
+	// CreateInTx 被调一次
+	if len(uc.createInTxCall) != 1 {
+		t.Fatalf("userCosmeticItemRepo.CreateInTx called %d times, want 1", len(uc.createInTxCall))
+	}
+	item := uc.createInTxCall[0]
+	if item.UserID != 1001 {
+		t.Errorf("item.UserID = %d, want 1001 (= in.UserID)", item.UserID)
+	}
+	if item.CosmeticItemID != 24 {
+		t.Errorf("item.CosmeticItemID = %d, want 24 (= pickedItem.ID)", item.CosmeticItemID)
+	}
+	if item.Status != 1 {
+		t.Errorf("item.Status = %d, want 1 (in_bag)", item.Status)
+	}
+	if item.Source != 1 {
+		t.Errorf("item.Source = %d, want 1 (chest)", item.Source)
+	}
+	if item.SourceRefID == nil {
+		t.Fatalf("item.SourceRefID = nil, want &chest.ID (开箱来源宝箱非空)")
+	}
+	if *item.SourceRefID != 5001 {
+		t.Errorf("*item.SourceRefID = %d, want 5001 (= chest.ID, 被开启宝箱 id)", *item.SourceRefID)
+	}
+	if item.ObtainedAt.IsZero() {
+		t.Errorf("item.ObtainedAt is zero; want 5d 的 now（同源同时刻；复用 s.nowFn()）")
+	}
+	// output 回填真实 id（非零）
+	if out.Reward.UserCosmeticItemID != 90001 {
+		t.Errorf("out.Reward.UserCosmeticItemID = %d, want 90001 (stub 回填值，非零)", out.Reward.UserCosmeticItemID)
+	}
+}
+
+// 15. Story 23.5: happy 开箱 → 5h chest_open_logs.RewardUserCosmeticItemID 回填真实 id。
+func TestChestService_OpenChest_LogFilledWithRealUserCosmeticItemID_Node8(t *testing.T) {
+	idem := happyIdempotencyRepo()
+	logR := happyLogRepo()
+	uc := happyUserCosmeticItemRepo() // 回填 ID=90001
+
+	svc := fixtureService(t, idem, happyChestRepo(), happyStepRepo(), happyCosmeticRepo(), logR, happyPicker(), uc)
+
+	if _, err := svc.OpenChest(context.Background(), service.OpenChestInput{
+		UserID: 1001, IdempotencyKey: "test_node8_log",
+	}); err != nil {
+		t.Fatalf("OpenChest: %v", err)
+	}
+
+	if len(logR.createCalls) != 1 {
+		t.Fatalf("chestOpenLogRepo.Create called %d times, want 1", len(logR.createCalls))
+	}
+	if logR.createCalls[0].RewardUserCosmeticItemID != 90001 {
+		t.Errorf("logRow.RewardUserCosmeticItemID = %d, want 90001 (回填真实 user_cosmetic_items.id，非节点 7 占位 0)", logR.createCalls[0].RewardUserCosmeticItemID)
+	}
+}
+
+// 16. Story 23.5: 5g.5 INSERT 失败 → 整体 return 1009 + chest_open_logs.Create
+// 未被调用（INSERT 失败应在 5h 之前 return，验证 INSERT 失败后续步骤不执行 +
+// 整体回滚语义；stubTxMgr.WithTx 直接调 fn，事务真实回滚由 dockertest AC8 覆盖）。
+func TestChestService_OpenChest_UserCosmeticItemInsertFails_RollsBack_1009(t *testing.T) {
+	idem := happyIdempotencyRepo()
+	logR := happyLogRepo()
+	uc := &stubUserCosmeticItemRepo{
+		createInTxFn: func(ctx context.Context, item *mysql.UserCosmeticItem) error {
+			return stderrors.New("synthetic user_cosmetic_items insert failure")
+		},
+	}
+
+	svc := fixtureService(t, idem, happyChestRepo(), happyStepRepo(), happyCosmeticRepo(), logR, happyPicker(), uc)
+
+	out, err := svc.OpenChest(context.Background(), service.OpenChestInput{
+		UserID: 1001, IdempotencyKey: "test_node8_insert_fail",
+	})
+	if out != nil {
+		t.Errorf("out should be nil on insert failure")
+	}
+	appErr, ok := apperror.As(err)
+	if !ok {
+		t.Fatalf("err = %v, want *AppError", err)
+	}
+	if appErr.Code != apperror.ErrServiceBusy {
+		t.Errorf("err.Code = %d, want %d (1009 ErrServiceBusy；与同事务其他 DB 错一致，不新增错误码)", appErr.Code, apperror.ErrServiceBusy)
+	}
+	// 5g.5 失败应在 5h 之前 return → logRepo.Create 不该被触发
+	if len(logR.createCalls) != 0 {
+		t.Errorf("chestOpenLogRepo.Create called %d times, want 0 (5g.5 INSERT 失败应在 5h 之前 return)", len(logR.createCalls))
+	}
+	// CreateInTx 确实被调一次（失败的那次）
+	if len(uc.createInTxCall) != 1 {
+		t.Errorf("userCosmeticItemRepo.CreateInTx called %d times, want 1", len(uc.createInTxCall))
+	}
+}
+
+// 17. Story 23.5: 幂等 replay 返回的 userCosmeticItemId 与首次开箱写入的真实 id 一致
+// （验证缓存透传链：5j 回填 → buildCacheableResponse → MarkSuccess 缓存 →
+// replayFromCachedResponse 读出，幂等 replay 与首次一致，**不**回 0）。
+//
+// **本 case 是高危纠偏点 3 的验证测试**：buildCacheableResponse /
+// replayFromCachedResponse Story 20.6 已正确透传 userCosmeticItemId，本 story
+// **未改**这两个 helper —— 改完 5j output.Reward.UserCosmeticItemID=newItem.ID 后
+// 缓存链自动正确。若后续 review 提"缓存没显式处理 userCosmeticItemId" = 误报，
+// 拿本绿测反驳。
+func TestChestService_OpenChest_IdempotencyReplay_ReturnsRealUserCosmeticItemID_Node8(t *testing.T) {
+	// 首次开箱：happy idem 的 MarkSuccess 捕获 responseJSON（含真实 id 90001）
+	idem := happyIdempotencyRepo()
+	uc := happyUserCosmeticItemRepo() // 回填 ID=90001
+
+	svc := fixtureService(t, idem, happyChestRepo(), happyStepRepo(), happyCosmeticRepo(), happyLogRepo(), happyPicker(), uc)
+
+	out1, err := svc.OpenChest(context.Background(), service.OpenChestInput{
+		UserID: 1001, IdempotencyKey: "test_node8_replay",
+	})
+	if err != nil {
+		t.Fatalf("first OpenChest: %v", err)
+	}
+	if out1.Reward.UserCosmeticItemID != 90001 {
+		t.Fatalf("first call: out.Reward.UserCosmeticItemID = %d, want 90001", out1.Reward.UserCosmeticItemID)
+	}
+	if idem.markCalls != 1 || len(idem.lastMarkJSON) == 0 {
+		t.Fatalf("MarkSuccess not invoked with response_json (markCalls=%d)", idem.markCalls)
+	}
+
+	// 用首次 MarkSuccess 写入的 responseJSON 构造 cached replay（handler 入口预检命中）
+	cachedJSON := idem.lastMarkJSON
+	idemReplay := &stubIdempotencyRepo{
+		findFn: func(ctx context.Context, userID uint64, key string) (*mysql.IdempotencyRecord, error) {
+			return &mysql.IdempotencyRecord{
+				ID: 1, UserID: 1001, IdempotencyKey: key,
+				Status: mysql.IdempotencyStatusSuccess, ResponseJSON: cachedJSON,
+			}, nil
+		},
+	}
+	// replay 路径不应触达任何写 repo；都用 panic-default / fail stub 暴露
+	chestR := &stubOpenChestChestRepo{
+		findForUpdateFn: func(ctx context.Context, userID uint64) (*mysql.UserChest, error) {
+			t.Fatal("chestRepo.FindByUserIDForUpdate should NOT be called on cached replay")
+			return nil, nil
+		},
+	}
+	ucReplay := &stubUserCosmeticItemRepo{
+		createInTxFn: func(ctx context.Context, item *mysql.UserCosmeticItem) error {
+			t.Fatal("userCosmeticItemRepo.CreateInTx should NOT be called on cached replay")
+			return nil
+		},
+	}
+	svcReplay := fixtureService(t, idemReplay, chestR, happyStepRepo(), happyCosmeticRepo(), happyLogRepo(), happyPicker(), ucReplay)
+
+	out2, err := svcReplay.OpenChest(context.Background(), service.OpenChestInput{
+		UserID: 1001, IdempotencyKey: "test_node8_replay",
+	})
+	if err != nil {
+		t.Fatalf("replay OpenChest: %v", err)
+	}
+	if out2.Reward.UserCosmeticItemID != 90001 {
+		t.Errorf("replay out.Reward.UserCosmeticItemID = %d, want 90001 (缓存透传链：与首次开箱真实 id 一致，**不**回 0)", out2.Reward.UserCosmeticItemID)
 	}
 }

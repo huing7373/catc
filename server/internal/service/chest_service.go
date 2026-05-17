@@ -55,6 +55,8 @@ type ChestService interface {
 //   - chestRepo: mysql.ChestRepo（4.6 已实装）
 //   - Story 20.6 起追加：txMgr / idempotencyRepo / stepAccountRepo / cosmeticItemRepo /
 //     chestOpenLogRepo / weightedPicker / nowFn（OpenChest 业务事务依赖）
+//   - Story 23.5 起追加：userCosmeticItemRepo（OpenChest 入仓依赖 —— 开箱事务
+//     步骤 5g.5 创建 user_cosmetic_items 实例；GetCurrent 不消费）
 type chestServiceImpl struct {
 	chestRepo mysql.ChestRepo
 
@@ -66,13 +68,21 @@ type chestServiceImpl struct {
 	chestOpenLogRepo mysql.ChestOpenLogRepo
 	weightedPicker   random.WeightedPicker
 	nowFn            func() time.Time
+
+	// Story 23.5 引入：开箱事务补入仓写 user_cosmetic_items 实例依赖
+	// （runOpenChestTx 步骤 5g.5；OpenChest 消费，GetCurrent 不消费）。
+	userCosmeticItemRepo mysql.UserCosmeticItemRepo
 }
 
-// NewChestService 构造 ChestService。Story 20.6 扩展签名为 7 参数 + nowFn 默认 UTC。
+// NewChestService 构造 ChestService。Story 20.6 扩签名为 7 参数 + nowFn 默认 UTC；
+// Story 23.5 扩签名为 8 参数（节点 8 入仓）—— 新增第 8 参 userCosmeticItemRepo
+// （开箱事务步骤 5g.5 创建 user_cosmetic_items 实例）。
 //
 // **签名变更（向后不兼容）**：Story 20.5 仅 1 参数（chestRepo）；Story 20.6 起需要
 // 注入业务事务全部依赖（txMgr / idempotencyRepo / stepAccountRepo /
-// cosmeticItemRepo / chestOpenLogRepo / weightedPicker）。router.go wire 一并扩展。
+// cosmeticItemRepo / chestOpenLogRepo / weightedPicker）；Story 23.5 追加
+// userCosmeticItemRepo（追加在 weightedPicker 之后）。router.go + 全部 chest_open
+// 测试 fixture 同步扩参（同 Story 23.4 NewCosmeticService 扩签名模式）。
 //
 // nowFn 内部默认 `func() time.Time { return time.Now().UTC() }`；单测可注入 mock
 // 时钟覆盖 chestServiceImpl.nowFn 字段。
@@ -84,16 +94,18 @@ func NewChestService(
 	cosmeticItemRepo mysql.CosmeticItemRepo,
 	chestOpenLogRepo mysql.ChestOpenLogRepo,
 	weightedPicker random.WeightedPicker,
+	userCosmeticItemRepo mysql.UserCosmeticItemRepo,
 ) ChestService {
 	return &chestServiceImpl{
-		chestRepo:        chestRepo,
-		txMgr:            txMgr,
-		idempotencyRepo:  idempotencyRepo,
-		stepAccountRepo:  stepAccountRepo,
-		cosmeticItemRepo: cosmeticItemRepo,
-		chestOpenLogRepo: chestOpenLogRepo,
-		weightedPicker:   weightedPicker,
-		nowFn:            func() time.Time { return time.Now().UTC() },
+		chestRepo:            chestRepo,
+		txMgr:                txMgr,
+		idempotencyRepo:      idempotencyRepo,
+		stepAccountRepo:      stepAccountRepo,
+		cosmeticItemRepo:     cosmeticItemRepo,
+		chestOpenLogRepo:     chestOpenLogRepo,
+		weightedPicker:       weightedPicker,
+		userCosmeticItemRepo: userCosmeticItemRepo,
+		nowFn:                func() time.Time { return time.Now().UTC() },
 	}
 }
 

@@ -109,6 +109,24 @@ type UserCosmeticItemRepo interface {
 	// 非 error（§8.2 行 1341：用户无任何实例返 {groups:[]} code=0 不报错）。
 	// query 失败 → 返 raw error 透传（service 包成 1009）。
 	ListByUserForInventory(ctx context.Context, userID uint64) ([]UserCosmeticItem, error)
+
+	// CreateInTx 在事务内插入一行 user_cosmetic_items（开箱事务"创建实例"步骤数据出口，
+	// Story 23.5 引入 —— epics.md §Story 23.5 + V1 §7.2.4h 节点 8 + DB §8.3 钦定）。
+	//
+	// GORM 在成功后回填 item.ID（AUTO_INCREMENT）—— 调用方拿这个真实 id 回填
+	// chest_open_logs.reward_user_cosmetic_item_id + response.reward.userCosmeticItemId。
+	//
+	// **必须在事务内调用**（与同事务的扣步数 / 写 chest_open_logs / 刷新 chest /
+	// MarkSuccess 一起原子提交；ADR-0007 §2.4 + DB §8.3"全部同事务"——
+	// 任一步失败本 INSERT 必须跟随回滚，杜绝"孤儿实例 + 步数没扣"数据不一致）。
+	//
+	// query 失败 → 返 raw error 透传（service 包成 1009，与同事务其他写步骤一致）。
+	//
+	// **范围红线**：本 story（23.5）加 CreateInTx 入仓写方法（开箱事务步骤 5g.5
+	// + dev /dev/grant-cosmetic-batch 批量发放复用，AC6）；status 1↔2↔3 推进 /
+	// consumed 写方法归 Epic 26（穿戴）/ Epic 32-33（合成），本 story **不**预实装
+	// （YAGNI；与既有 ListByUserForInventory 范围红线一致）。
+	CreateInTx(ctx context.Context, item *UserCosmeticItem) error
 }
 
 // userCosmeticItemRepo 是 UserCosmeticItemRepo 的默认实装。
@@ -161,4 +179,16 @@ func (r *userCosmeticItemRepo) ListByUserForInventory(ctx context.Context, userI
 		rows = []UserCosmeticItem{}
 	}
 	return rows, nil
+}
+
+// CreateInTx 实装：INSERT 一行 user_cosmetic_items；GORM 自动回填 item.ID。
+// 与 chest_open_log_repo.go Create（行 86-89）1:1 同模式：tx.FromContext 拿
+// db handle（事务内调用走 txCtx 注入的 tx 句柄 → 与开箱事务同事务原子提交；
+// 事务外调用走 r.db 直连 → dev /dev/grant-cosmetic-batch 批量发放路径）→
+// WithContext → Create → GORM 回填 item.ID（AUTO_INCREMENT）。
+//
+// 详见 UserCosmeticItemRepo.CreateInTx 接口注释（Story 23.5 §AC1 钦定）。
+func (r *userCosmeticItemRepo) CreateInTx(ctx context.Context, item *UserCosmeticItem) error {
+	db := tx.FromContext(ctx, r.db)
+	return db.WithContext(ctx).Create(item).Error
 }

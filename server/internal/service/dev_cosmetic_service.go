@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	apperror "github.com/huing/cat/server/internal/pkg/errors"
+	"github.com/huing/cat/server/internal/repo/mysql"
 )
 
 // DevCosmeticService 是 /dev/grant-cosmetic-batch 端点的依赖 interface（Story 20.8）。
@@ -14,55 +16,46 @@ import (
 // 让节点 11 合成 demo 不必反复开箱凑齐 10 件 common。仅供 demo / 自动化 e2e / 手工调试，
 // **不**走 prod。
 //
-// # 节点 7 vs 节点 8 阶段实装策略（**选项 C**，epics.md §20.8 行 2964 钦定）
+// # 节点 7 → 节点 8 阶段实装策略（**选项 C**，epics.md §20.8 行 2964 钦定）
 //
-// **节点 7 阶段（本 story 范围）：stub 显式失败实装**
-//   - 路由 /dev/grant-cosmetic-batch + handler 框架（DTO + 1002 参数校验）+ service 接口 final
-//   - service 实装内部 slog.WarnContext 输出"endpoint called in node-7 stub phase, returns 501 by design"
-//     警告，然后 **return apperror.New(ErrNotImplemented, "...")**（1010 + middleware 自动翻 HTTP 501 + WARN log）
-//   - **关键设计**：stub 期不能返 200 success —— silent false-positive 会让 e2e / demo 拿到"调用成功 +
-//     仓库空"的矛盾态，调试链路无故拉长。explicit failure 让调用方在请求层立刻看到"endpoint 还没激活"
-//   - **r2 改造**：从 ErrServiceBusy(1009 → HTTP 500 + ERROR log) 改为 ErrNotImplemented(1010 → HTTP 501 +
-//     WARN log) —— 1009 是"系统繁忙/panic 兜底"语义会触发 LB/监控告警 + 每次 stub 调用记 ERROR 污染监控；
-//     1010 是"endpoint 未实装"语义，HTTP 501 是标准"Not Implemented"，e2e 工具能正确识别 +
-//     WARN log 不污染 ERROR dashboard
-//   - 全套单测（service 3 case + handler 6 case + devtools 2 case + bootstrap 1 case），断言 1010 + HTTP 501
-//   - **不**新建 user_cosmetic_items_repo / **不**新建 migration / **不**改 cosmetic_item_repo
+// **节点 7 阶段（已退役，Story 20.8 交付）：stub 显式失败实装**
+//   - 路由 + handler 框架（DTO + 1002 参数校验）+ service 接口 final；service stub
+//     slog.WarnContext + return apperror.ErrNotImplemented (1010 → HTTP 501 + WARN log)
+//   - 设计原则：stub 期不返 200 success —— explicit failure 让调用方立刻看到"endpoint 还没激活"
 //
-// **节点 8 / Epic 23.5 阶段（**不**在本 story 范围 —— 由 23.5 owner 在本 service 内激活）：真实写库**
-//   - Story 23.2 落地 user_cosmetic_items migration + 23.5 落地 user_cosmetic_item_repo.BatchCreate
-//     + cosmetic_item_repo.FindRandomByRarity（若不存在则同步落地）后
-//   - 修改本 service 实装：移除"stub 返 1009"分支 → 加 cosmeticItemRepo.FindRandomByRarity(ctx, rarity, count)
-//     + userCosmeticItemRepo.BatchCreate(ctx, userID, []cosmeticItemIDs) 两步写库 → 成功 return nil
-//   - 修改 NewDevCosmeticService 构造函数签名加新 repo 依赖
-//   - 同步改本 service 单测：把 1009 断言换成"happy path return nil + repo BatchCreate 被调"
+// **节点 8 / Story 23.5 阶段（当前实装）：真实写库（本 service 已激活）**
+//   - Story 23.2 落地 user_cosmetic_items migration；Story 23.5 落地
+//     user_cosmetic_item_repo.CreateInTx + cosmetic_item_repo.FindRandomByRarity
+//   - 本 service 实装：移除 stub 1010 分支 → cosmeticItemRepo.FindRandomByRarity(ctx, rarity, count)
+//     抽 count 个 enabled cosmetic_item_id → 逐条 userCosmeticItemRepo.CreateInTx 写
+//     user_cosmetic_items（status=1 in_bag / **source=3 admin_grant** / source_ref_id=NULL
+//     / obtained_at=now）→ happy return nil；任一步失败 wrap 1009
+//   - **source disambiguation（Story 23.5）**：原下方接口注释行写 source=2，与 §6.11
+//     枚举（2=compose / 3=admin_grant）冲突；dev 发放语义是 admin_grant 应取
+//     **source=3**，以 §6.11 + UserCosmeticItem struct 注释为准（不反向改文档；
+//     与 23.4 r1 同源原则）
+//   - **dev grant 走事务外批量发放**（无 idempotency / 无步数语义）—— 逐条
+//     CreateInTx；tx.FromContext 在无 txCtx 时走 r.db 直连，行为正确
 //   - **接口签名 / 路由 / 客户端调用代码不变** —— 兼容已部署的 e2e 脚本
 //
 // # 错误约定（ADR-0006 三层映射）
 //
-// **节点 7 阶段（本 story）**：
 //   - rarity / count 越界由 handler 1002 拦截，service 不收到
-//   - service stub 实装 **永远 return ErrNotImplemented (1010)**：endpoint 物理可达但功能未激活
-//     → middleware 自动翻 HTTP 501 + WARN log，调用方明确知道"endpoint not yet implemented"
-//
-// **节点 8 阶段（激活后）**：
 //   - 真实写库 happy path → return nil
-//   - mysql.ErrCosmeticItemNotFound（FindRandomByRarity 没数据 —— 理论 Story 20.3 seed ≥15 行不该发生）
-//     → 包成 ErrServiceBusy (1009)（seed 数据完整性异常）
-//   - userCosmeticItemRepo.BatchCreate 失败 → 包成 ErrServiceBusy (1009)
-//   - userRepo.FindByID 验用户存在（可选，节点 8 owner 决定）→ ErrUserNotFound → ErrResourceNotFound (1003)
+//   - FindRandomByRarity 返回数量 < count（含返空 —— rarity 的 enabled 池
+//     < count，如 seed common 仅 8 件而 count=10）→ 包成 ErrServiceBusy (1009)，
+//     **写库前明确拒绝不静默少发**（fix-review 23-5 r1 [P1]）
+//   - FindRandomByRarity DB error / CreateInTx 失败 → 包成 ErrServiceBusy (1009)
 type DevCosmeticService interface {
 	// GrantCosmeticBatch 给指定 userID 批量发放 count 个 rarity 品质的 cosmetic_items 实例。
 	//
-	// **节点 7 阶段 stub 行为**：slog.WarnContext 记录调用 + **return apperror.ErrNotImplemented (1010)**
-	// → middleware 自动翻 HTTP 501 + WARN log。endpoint 物理可达（路由 / handler / DTO 校验完整），但 service 层
-	// 显式拒绝 —— 让调用方立刻知道"endpoint not yet implemented in node-7 phase"，避免 silent false-positive。
-	//
-	// **节点 8 激活后行为**：事务内或事务外（节点 8 owner 决定）：
-	//  1. cosmeticItemRepo.FindRandomByRarity(ctx, rarity, count) 返回 count 个 cosmetic_item_id（来自 enabled 池）
-	//  2. userCosmeticItemRepo.BatchCreate(ctx, userID, cosmeticItemIDs, source=2 admin_grant)
-	//     → INSERT 多条 user_cosmetic_items 行（status=1 in_bag / source=2 / source_ref_id=NULL / obtained_at=now）
-	//  3. happy path return nil；任一步失败 wrap 成 1009
+	// **节点 8 / Story 23.5 真实写库行为**（节点 7 stub 1010 已退役）：
+	//  1. cosmeticItemRepo.FindRandomByRarity(ctx, rarity, count) 返回 count 个 cosmetic_item_id（enabled 池）
+	//  2. 逐条 userCosmeticItemRepo.CreateInTx 写 user_cosmetic_items
+	//     （status=1 in_bag / **source=3 admin_grant**（§6.11 枚举；见上 disambiguation）
+	//     / source_ref_id=NULL / obtained_at=now）
+	//  3. happy path return nil；FindRandomByRarity 返回数量 < count（含空 —— 池
+	//     不足请求量，写库前拒绝不静默少发）/ DB error / CreateInTx 失败 wrap 1009
 	//
 	// 参数：
 	//   - userID：目标用户 ID（handler 已校验 > 0）
@@ -74,55 +67,97 @@ type DevCosmeticService interface {
 	GrantCosmeticBatch(ctx context.Context, userID uint64, rarity int8, count int32) error
 }
 
-// devCosmeticServiceImpl 是 DevCosmeticService 的节点 7 阶段 stub 实装。
+// devCosmeticServiceImpl 是 DevCosmeticService 的实装。
 //
-// **节点 7 阶段**：无 repo 依赖（不写库；显式返 1009）。
-// **节点 8 激活后**：在本 struct 加 cosmeticItemRepo + userCosmeticItemRepo 字段（节点 8 owner 改）。
-type devCosmeticServiceImpl struct{}
-
-// NewDevCosmeticService 构造 DevCosmeticService 节点 7 阶段 stub。
-//
-// **节点 7 阶段**：无参数（stub 不需要 repo）。
-// **节点 8 激活时**：节点 8 owner 改签名加 repo 依赖，如：
-//
-//	func NewDevCosmeticService(cosmeticItemRepo mysql.CosmeticItemRepo,
-//	    userCosmeticItemRepo mysql.UserCosmeticItemRepo) DevCosmeticService { ... }
-//
-// 接口签名 / 路由 / 客户端调用代码不变 → 兼容已部署的 e2e 脚本。
-func NewDevCosmeticService() DevCosmeticService {
-	return &devCosmeticServiceImpl{}
+// **节点 7 阶段（已退役）**：无 repo 依赖（不写库；显式返 1010）。
+// **节点 8 / Story 23.5 激活**：注入 cosmeticItemRepo（FindRandomByRarity 抽配置 id）
+// + userCosmeticItemRepo（CreateInTx 写实例）真实写库。
+type devCosmeticServiceImpl struct {
+	cosmeticItemRepo     mysql.CosmeticItemRepo
+	userCosmeticItemRepo mysql.UserCosmeticItemRepo
 }
 
-// GrantCosmeticBatch 节点 7 阶段 stub 实装：WARN 日志 + return ErrNotImplemented (1010)。
+// NewDevCosmeticService 构造 DevCosmeticService。
 //
-// **设计原则**：stub endpoint **绝不返 success** —— silent false-positive 会让 e2e / demo
-// 链路在"调用成功 + 仓库空"的矛盾态里调试很久才发现根因。显式返 1010 → middleware 翻 HTTP 501
-// (Not Implemented，标准语义) + WARN log，调用方立刻看到"endpoint not yet implemented in node-7
-// phase, awaits Story 23.5 to activate"。
+// **Story 23.5 扩签名（节点 8 激活）**：注入 cosmeticItemRepo + userCosmeticItemRepo。
+// 接口签名 / 路由 / 客户端调用代码不变 → 兼容已部署的 e2e 脚本（仅 constructor
+// 签名扩参 + service 实装从 stub 转真实写库）。
+func NewDevCosmeticService(
+	cosmeticItemRepo mysql.CosmeticItemRepo,
+	userCosmeticItemRepo mysql.UserCosmeticItemRepo,
+) DevCosmeticService {
+	return &devCosmeticServiceImpl{
+		cosmeticItemRepo:     cosmeticItemRepo,
+		userCosmeticItemRepo: userCosmeticItemRepo,
+	}
+}
+
+// GrantCosmeticBatch 节点 8 / Story 23.5 真实写库实装（节点 7 stub 1010 已退役）：
 //
-// **r2 改造**：从 ErrServiceBusy (1009 → HTTP 500 + ERROR log) 改为 ErrNotImplemented
-// (1010 → HTTP 501 + WARN log)。原因：
-//   - 1009 的 HTTP 500 + ERROR log 是"系统繁忙/panic 兜底"语义，会触发 LB / 监控告警
-//   - dev 端点 stub 阶段每次调用都记 ERROR → 污染监控 + 假告警，与"endpoint 未激活"语义不符
-//   - 1010 的 HTTP 501 是标准"Not Implemented"语义，e2e 工具能按 501 正确识别
-//   - WARN log 不污染 ERROR dashboard，但仍可通过 `phase=node-7-stub` grep 找出 stub 端点
+//  1. cosmeticItemRepo.FindRandomByRarity(ctx, rarity, count) 抽 count 个 enabled
+//     cosmetic_item_id；返回数量 < count（含空 —— rarity 池不足请求量）→ 1009
+//     写库前明确拒绝不静默少发（fix-review 23-5 r1 [P1]）；DB error → 1009
+//  2. 逐条 userCosmeticItemRepo.CreateInTx 写 user_cosmetic_items（status=1 in_bag /
+//     **source=3 admin_grant**（§6.11 枚举，见 interface 注释 disambiguation）/
+//     source_ref_id=NULL / obtained_at=now）；任一条失败 → 1009
+//  3. happy → slog.InfoContext "dev grant cosmetic batch applied" + return nil
 //
-// **节点 8 激活后** 替换为：
-//
-//	cosmeticItemIDs, err := s.cosmeticItemRepo.FindRandomByRarity(ctx, rarity, count)
-//	if err != nil { return apperror.Wrap(err, apperror.ErrServiceBusy, "...") }
-//	if err := s.userCosmeticItemRepo.BatchCreate(ctx, userID, cosmeticItemIDs, ...); err != nil {
-//	    return apperror.Wrap(err, apperror.ErrServiceBusy, "...")
-//	}
-//	slog.InfoContext(ctx, "dev grant cosmetic batch applied", ...)
-//	return nil
+// **dev grant 走事务外批量发放**（无 idempotency / 无步数语义）—— tx.FromContext
+// 在无 txCtx 时走 r.db 直连，逐条 CreateInTx 行为正确（区别于开箱事务步骤 5g.5
+// 走 txCtx 同事务）。
 func (s *devCosmeticServiceImpl) GrantCosmeticBatch(ctx context.Context, userID uint64, rarity int8, count int32) error {
-	slog.WarnContext(ctx, "dev grant-cosmetic-batch called in node-7 stub phase, returns 501 by design (endpoint not yet implemented; awaits Story 23.5 to activate after Story 23.2 user_cosmetic_items migration)",
+	// 1. 按 rarity 随机抽 count 个 enabled cosmetic_item_id
+	cosmeticItemIDs, err := s.cosmeticItemRepo.FindRandomByRarity(ctx, rarity, count)
+	if err != nil {
+		return apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+	}
+	// 池不足 count 时**明确拒绝**，不静默少发（fix-review 23-5 r1 [P1]）：
+	// FindRandomByRarity 用 `ORDER BY RAND() LIMIT ?`，当该 rarity 的 enabled 池
+	// < count 时**合法**返回少于 count 个 id（如 seed common 仅 8 件、handler 接受
+	// count 至 100、demo 用 count=10 → 只返 8 个）。原实装只把 len==0 当异常，
+	// 遗漏 0 < len < count 这一档 → 调用方静默拿到比请求少的实例（success 但短发）。
+	// 这里用 FindRandomByRarity **实际返回的 len** 与请求 count 直接比对（不引入
+	// "先 count 再 fetch" 双查询的 race），len < count 即在**写库前**拒绝并返回
+	// 明确错误（杜绝部分插入），与既有空池异常同族 ErrServiceBusy(1009)
+	// （语义一致：池数据无法满足请求；len==0 是 count>0 时本分支的子集）。
+	if len(cosmeticItemIDs) < int(count) {
+		// 池不足请求量（含 len==0 的 seed 数据完整性异常子集）→ 1009，不静默少发
+		return apperror.New(apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+	}
+
+	// 2. 逐条 CreateInTx 写 user_cosmetic_items（AC1 已落地方法复用）。
+	//
+	// **source=3 admin_grant**（§6.11 枚举 + UserCosmeticItem struct 注释钦定
+	// 3=admin_grant）—— **disambiguation**：本文件原行 64 注释写 source=2，与
+	// §6.11 枚举（2=compose / 3=admin_grant）冲突；dev 发放语义是 admin_grant
+	// 应取 source=3，以 §6.11 枚举为准（与 23.4 r1 同源原则"契约/文档不一致时
+	// 以更权威的枚举定义为准，记录 disambiguation，不反向改文档"）。
+	//
+	// dev grant 是事务外批量发放（无 idempotency / 无步数扣减语义）—— 逐条
+	// CreateInTx；tx.FromContext 在无 txCtx 时走 r.db 直连，行为正确。
+	// source_ref_id=NULL（dev 发放无来源记录，传 nil）；status=1 in_bag；
+	// obtained_at 传 time.Now().UTC()（与项目 UTC 时间钦定一致）。
+	now := time.Now().UTC()
+	for _, cid := range cosmeticItemIDs {
+		item := &mysql.UserCosmeticItem{
+			UserID:         userID,
+			CosmeticItemID: cid,
+			Status:         1,   // 1=in_bag
+			Source:         3,   // 3=admin_grant（§6.11 枚举，见上 disambiguation）
+			SourceRefID:    nil, // dev 发放无来源记录
+			ObtainedAt:     now,
+		}
+		if err := s.userCosmeticItemRepo.CreateInTx(ctx, item); err != nil {
+			return apperror.Wrap(err, apperror.ErrServiceBusy, apperror.DefaultMessages[apperror.ErrServiceBusy])
+		}
+	}
+
+	slog.InfoContext(ctx, "dev grant cosmetic batch applied",
 		"user_id", userID,
 		"rarity", rarity,
 		"count", count,
-		"phase", "node-7-stub",
-		"todo", "activate real writes in Story 23.5 (after Story 23.2 user_cosmetic_items migration)",
+		"granted", len(cosmeticItemIDs),
+		"source", 3,
 	)
-	return apperror.New(apperror.ErrNotImplemented, "dev/grant-cosmetic-batch not yet implemented (node-7 stub; awaits Story 23.5 to activate)")
+	return nil
 }

@@ -2,8 +2,10 @@ package mysql
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 )
@@ -113,5 +115,66 @@ func TestUserCosmeticItemRepo_ListByUserForInventory_EmptyResult_ReturnsEmptySli
 	}
 	if len(got) != 0 {
 		t.Errorf("len(got) = %d, want 0", len(got))
+	}
+}
+
+// Story 23.5 — UserCosmeticItemRepo.CreateInTx sqlmock 单测（AC1）
+//
+// 与 ListByUserForInventory 同测试风格（sqlmock，非 dockertest）。验证
+// CreateInTx 走 GORM Create → INSERT user_cosmetic_items + GORM 回填 item.ID
+// （AUTO_INCREMENT，LastInsertId）+ query 失败 raw error 透传（service 包 1009）。
+// "事务内调用走 txCtx 注入的 tx 句柄" 的端到端真值在开箱事务回滚集成测试覆盖。
+
+// TestUserCosmeticItemRepo_CreateInTx_HappyPath:
+// INSERT 成功 → GORM 回填 item.ID（AUTO_INCREMENT，来自 LastInsertId）。
+func TestUserCosmeticItemRepo_CreateInTx_HappyPath(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserCosmeticItemRepo(gormDB)
+
+	srcRef := uint64(5001)
+	item := &UserCosmeticItem{
+		UserID:         7,
+		CosmeticItemID: 24,
+		Status:         1,
+		Source:         1,
+		SourceRefID:    &srcRef,
+		ObtainedAt:     time.Now().UTC(),
+	}
+
+	// GORM Create → INSERT INTO `user_cosmetic_items` (...) VALUES (...)
+	// （本 gormDB mock 配置 SkipDefaultTransaction —— 单条 Create 无 implicit
+	// tx，直接 Exec）。回填 ID=90001 走 sqlmock LastInsertId。
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO `user_cosmetic_items`")).
+		WillReturnResult(sqlmock.NewResult(90001, 1))
+
+	if err := repo.CreateInTx(context.Background(), item); err != nil {
+		t.Fatalf("CreateInTx: %v", err)
+	}
+	if item.ID != 90001 {
+		t.Errorf("item.ID = %d, want 90001 (GORM 回填 AUTO_INCREMENT)", item.ID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("sqlmock expectations: %v", err)
+	}
+}
+
+// TestUserCosmeticItemRepo_CreateInTx_DBError_ReturnsRawError:
+// INSERT 失败 → 返 raw error 透传（不在 repo 层翻译；service 包成 1009）。
+func TestUserCosmeticItemRepo_CreateInTx_DBError_ReturnsRawError(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewUserCosmeticItemRepo(gormDB)
+
+	item := &UserCosmeticItem{UserID: 7, CosmeticItemID: 24, Status: 1, Source: 1, ObtainedAt: time.Now().UTC()}
+
+	wantErr := errors.New("synthetic insert failure")
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO `user_cosmetic_items`")).
+		WillReturnError(wantErr)
+
+	err := repo.CreateInTx(context.Background(), item)
+	if err == nil {
+		t.Fatal("CreateInTx err = nil, want raw error 透传")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("CreateInTx err = %v, want 透传底层 %v（repo 不翻译，service 层包 1009）", err, wantErr)
 	}
 }

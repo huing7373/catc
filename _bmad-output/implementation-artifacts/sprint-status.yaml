@@ -1,5 +1,5 @@
 # generated: 2026-04-23T22:58:47+08:00
-# last_updated: 2026-05-16 (story 23-4 review)
+# last_updated: 2026-05-17 (story 23-5 created → ready-for-dev)
 # project: cat
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-23T22:58:47+08:00
-last_updated: 2026-05-16  # Story 23.4 (GET /cosmetics/inventory 接口) review → done (epic-23 in-progress)
+last_updated: 2026-05-17  # Story 23.5 (修改开箱事务补入仓) → review (epic-23 in-progress; 这是 epic-23 最后一条 story)
 # Sprint Change Proposal v2.4 落地：Epic 37 iPhone 架构层重构 + UI Scaffold 中段插入；
 # 24-4 / 33-6 因 ADR-0009 推翻 Sheet 主入口而作废
 project: cat
@@ -232,7 +232,7 @@ development_status:
   23-2-user_cosmetic_items-migration: done
   23-3-get-cosmetics-catalog-接口: done
   23-4-get-cosmetics-inventory-接口: done
-  23-5-修改开箱事务-创建-user_cosmetic_items-实例-补-chest_open_logs-reward_user_cosmetic_item_id: backlog
+  23-5-修改开箱事务-创建-user_cosmetic_items-实例-补-chest_open_logs-reward_user_cosmetic_item_id: review
   epic-23-retrospective: optional
   epic-24: backlog
   24-1-仓库页-swiftui-骨架: backlog

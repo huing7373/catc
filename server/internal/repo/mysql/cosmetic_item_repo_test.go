@@ -229,3 +229,64 @@ func TestCosmeticItemRepo_ListByIDsForInventory_NoMatch_ReturnsEmptySlice(t *tes
 		t.Errorf("len(got) = %d, want 0", len(got))
 	}
 }
+
+// Story 23.5 — CosmeticItemRepo.FindRandomByRarity sqlmock 单测（AC6）
+//
+// 验证 SQL 形态：SELECT id ... WHERE rarity=? AND is_enabled=? ORDER BY RAND()
+// LIMIT ? + 返回 cosmetic_item_id slice + 空集兜底（返 []uint64{} 非 nil，
+// service 层判 len==0 → 1009 seed 数据完整性异常）。RAND() 真随机性 + dev
+// grant 端到端在 dev_cosmetic_service 单测 + e2e 覆盖。
+
+// TestCosmeticItemRepo_FindRandomByRarity_HappyPath:
+// rarity=1 抽 3 个 → 返 3 个 enabled cosmetic_item_id。
+func TestCosmeticItemRepo_FindRandomByRarity_HappyPath(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewCosmeticItemRepo(gormDB)
+
+	rows := sqlmock.NewRows([]string{"id"}).
+		AddRow(uint64(25)).
+		AddRow(uint64(31)).
+		AddRow(uint64(42))
+
+	// SELECT `id` FROM `cosmetic_items` WHERE rarity = ? AND is_enabled = ?
+	// ORDER BY RAND() LIMIT ?（GORM Limit 渲染为 LIMIT 占位）
+	mock.ExpectQuery(regexp.QuoteMeta(
+		"SELECT `id` FROM `cosmetic_items` WHERE rarity = ? AND is_enabled = ? ORDER BY RAND() LIMIT ?")).
+		WithArgs(int8(1), 1, 3).
+		WillReturnRows(rows)
+
+	got, err := repo.FindRandomByRarity(context.Background(), 1, 3)
+	if err != nil {
+		t.Fatalf("FindRandomByRarity: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len(got) = %d, want 3", len(got))
+	}
+	if got[0] != 25 || got[1] != 31 || got[2] != 42 {
+		t.Errorf("got = %v, want [25 31 42]", got)
+	}
+}
+
+// TestCosmeticItemRepo_FindRandomByRarity_EmptyResult_ReturnsEmptySlice:
+// 无匹配 rarity（理论 seed ≥15 行不该发生）→ 返 []uint64{}（非 nil），
+// service 层判 len==0 翻译为 1009。
+func TestCosmeticItemRepo_FindRandomByRarity_EmptyResult_ReturnsEmptySlice(t *testing.T) {
+	gormDB, mock := newGormWithMock(t)
+	repo := NewCosmeticItemRepo(gormDB)
+
+	mock.ExpectQuery(regexp.QuoteMeta(
+		"SELECT `id` FROM `cosmetic_items` WHERE rarity = ? AND is_enabled = ? ORDER BY RAND() LIMIT ?")).
+		WithArgs(int8(9), 1, 5).
+		WillReturnRows(sqlmock.NewRows([]string{"id"})) // 0 行
+
+	got, err := repo.FindRandomByRarity(context.Background(), 9, 5)
+	if err != nil {
+		t.Fatalf("FindRandomByRarity: %v", err)
+	}
+	if got == nil {
+		t.Errorf("got == nil, want []uint64{}（service 层无需 nil-check）")
+	}
+	if len(got) != 0 {
+		t.Errorf("len(got) = %d, want 0", len(got))
+	}
+}

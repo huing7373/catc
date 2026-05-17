@@ -55,10 +55,11 @@ func buildChestServiceIntegration(t *testing.T) (svc service.ChestService, sqlDB
 		t.Fatalf("db.Open: %v", err)
 	}
 
-	// Story 20.6: NewChestService 签名扩为 7 参数；20.5 集成测试只验 GetCurrent
-	// （事务依赖不消费），其他依赖传 nil。
+	// Story 20.6: NewChestService 签名扩为 7 参数；Story 23.5 扩为 8 参数
+	// （第 8 = userCosmeticItemRepo）；20.5 集成测试只验 GetCurrent（事务依赖
+	// 不消费），其他依赖传 nil。
 	chestRepo := mysql.NewChestRepo(gormDB)
-	svc = service.NewChestService(chestRepo, nil, nil, nil, nil, nil, nil)
+	svc = service.NewChestService(chestRepo, nil, nil, nil, nil, nil, nil, nil)
 
 	rawDB, err := gormDB.DB()
 	if err != nil {

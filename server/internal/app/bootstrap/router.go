@@ -375,16 +375,22 @@ func NewRouter(deps Deps) *gin.Engine {
 		devChestSvc := service.NewDevChestService(deps.TxMgr, chestRepo)
 		devChestHandler = handler.NewDevChestHandler(devChestSvc)
 
-		// Story 20.8 加：dev cosmetic service + handler（节点 7 阶段 stub —— 无 repo 依赖）。
-		//
-		// **节点 7 阶段**：stub service 不写库，NewDevCosmeticService() 无参数。
-		// **节点 8 / Story 23.5 激活后**：23.5 owner 改 constructor 签名加 repo 依赖，如：
-		//
-		//	devCosmeticSvc := service.NewDevCosmeticService(cosmeticItemRepo, userCosmeticItemRepo)
-		//
-		// router.go wire 顺序不变；只改 constructor 签名 + 加 repo 依赖（chestRepo 已在 if 块顶部 wire，
-		// cosmeticItemRepo 待 23.5 owner 新建实例 + 加 Deps 字段）。
-		devCosmeticSvc := service.NewDevCosmeticService()
+		// Story 23.5 加：cosmeticItemRepo + userCosmeticItemRepo 实例**上移**到此处
+		// （原 Story 20.6 在 line ~486 / Story 23.4 在 line ~517 创建）—— 因 Story 23.5
+		// 激活 devCosmeticSvc 真实写库需要这两个 repo，而 devCosmeticSvc wire 在
+		// chestSvc / cosmeticSvc 之前。下游 chestSvc（NewChestService 第 8 参）+
+		// cosmeticSvc（NewCosmeticService 2 参）+ devCosmeticSvc 三处**复用同实例**
+		// （**不**新建第二个，与 line ~505 注释"复用既有实例不新建第二个"同模式）。
+		cosmeticItemRepo := repomysql.NewCosmeticItemRepo(deps.GormDB)
+		userCosmeticItemRepo := repomysql.NewUserCosmeticItemRepo(deps.GormDB)
+
+		// Story 20.8 加：dev cosmetic service + handler。
+		// **节点 7 阶段**（已退役）：stub service 不写库，NewDevCosmeticService() 无参数。
+		// **节点 8 / Story 23.5 激活**：constructor 扩签名注入 cosmeticItemRepo +
+		// userCosmeticItemRepo（复用上面上移的实例）→ GrantCosmeticBatch 真实写库
+		// （FindRandomByRarity + CreateInTx）。接口签名 / 路由 / 客户端调用不变
+		// （兼容已部署 e2e 脚本）；router.go wire 顺序不变。
+		devCosmeticSvc := service.NewDevCosmeticService(cosmeticItemRepo, userCosmeticItemRepo)
 		devCosmeticHandler = handler.NewDevCosmeticHandler(devCosmeticSvc)
 
 		// Story 11.3 加：room service + handler（4 步事务：FindByID 预检 → INSERT rooms →
@@ -481,15 +487,16 @@ func NewRouter(deps Deps) *gin.Engine {
 		petsHandler := handler.NewPetsHandler(petSvc)
 
 		// Story 20.6 加：4 个新 repo 实例 + 1 个 weightedPicker（注入到 chestSvc）。
-		// idempotencyRepo / cosmeticItemRepo / chestOpenLogRepo 由本 story 首次落地；
+		// idempotencyRepo / chestOpenLogRepo 由 Story 20.6 首次落地；
+		// cosmeticItemRepo / userCosmeticItemRepo 已在上方（Story 23.5 上移段）创建并复用；
 		// weightedPicker 注入 crypto/rand.Reader（替代 math/rand 全局源 —— 防作弊钦定）。
-		cosmeticItemRepo := repomysql.NewCosmeticItemRepo(deps.GormDB)
 		chestOpenLogRepo := repomysql.NewChestOpenLogRepo(deps.GormDB)
 		idempotencyRepo := repomysql.NewIdempotencyRepo(deps.GormDB)
 		weightedPicker := random.NewCryptoWeightedPicker(cryptorand.Reader)
 
-		// Story 20.5 加：chest service + handler；Story 20.6 扩签名为 7 参数。
-		// 复用既有 chestRepo / stepAccountRepo / txMgr；注入本 story 4 新实例。
+		// Story 20.5 加：chest service + handler；Story 20.6 扩签名为 7 参数；
+		// Story 23.5 扩签名为 8 参（加 userCosmeticItemRepo 入仓 —— 复用上方上移实例，
+		// **不**新建第二个）。复用既有 chestRepo / stepAccountRepo / txMgr。
 		chestSvc := service.NewChestService(
 			chestRepo,
 			deps.TxMgr,
@@ -498,23 +505,23 @@ func NewRouter(deps Deps) *gin.Engine {
 			cosmeticItemRepo,
 			chestOpenLogRepo,
 			weightedPicker,
+			userCosmeticItemRepo,
 		)
 		chestHandler := handler.NewChestHandler(chestSvc, idempotencyRepo, deps.RateLimitCfg)
 
 		// Story 23.3 加：cosmetic service + handler（GET /cosmetics/catalog）。
-		// 复用 line 486 既有 cosmeticItemRepo 实例（**不**新建第二个实例 ——
-		// 与 chestSvc 复用同实例同模式）；CosmeticService.ListCatalog 调
-		// CosmeticItemRepo.ListEnabledForCatalog（23.3 新增独立方法，**不**复用
+		// 复用上方上移的 cosmeticItemRepo 实例（**不**新建第二个实例 ——
+		// 与 chestSvc / devCosmeticSvc 复用同实例同模式）；CosmeticService.ListCatalog
+		// 调 CosmeticItemRepo.ListEnabledForCatalog（23.3 新增独立方法，**不**复用
 		// 20.6 ListEnabledForWeightedPick）。
 		//
 		// Story 23.4 加：userCosmeticItemRepo（GET /cosmetics/inventory 实例
-		// 数据源）+ NewCosmeticService 扩签名 2 参（复用上面既有 cosmeticItemRepo
-		// 实例 + 新建 userCosmeticItemRepo，**不**新建第二个 cosmeticItemRepo）。
+		// 数据源）+ NewCosmeticService 扩签名 2 参（复用上方上移的 cosmeticItemRepo
+		// + userCosmeticItemRepo 实例，**不**新建第二个）。
 		// CosmeticService.ListInventory 调 UserCosmeticItemRepo.ListByUserForInventory
 		// + CosmeticItemRepo.ListByIDsForInventory（23.4 新增独立方法，**不**复用
 		// 23.3 ListEnabledForCatalog —— 那带 is_enabled=1 过滤会让 disabled
 		// 配置已拥有项静默丢失，违背 §8.2 态 B 契约）。
-		userCosmeticItemRepo := repomysql.NewUserCosmeticItemRepo(deps.GormDB)
 		cosmeticSvc := service.NewCosmeticService(cosmeticItemRepo, userCosmeticItemRepo)
 		cosmeticsHandler := handler.NewCosmeticsHandler(cosmeticSvc)
 
