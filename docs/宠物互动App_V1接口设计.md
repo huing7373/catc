@@ -81,6 +81,12 @@
   2. 触发 server Epic 23 已完成 story 的回归（影响 Story 23.2 ~ 23.5 已落地的 migration / handler / service / 开箱事务修改）
   3. 触发下游 Epic 26（穿戴）/ Epic 32（合成）契约 story（26.1 / 32.1）回归（穿戴 / 合成基于 inventory 实例模型扩展）
   4. 在本 story 文件 + epics.md 同步标注变更原因 + 影响范围
+- 自 2026-05-17（Story 26.1 完成日，对应 git commit hash 见 commit message）起，§8.3（POST /api/v1/cosmetics/equip）/ §8.4（POST /api/v1/cosmetics/unequip）两个节点 9 穿戴 / 卸下 REST 接口的 schema 进入**冻结**状态。
+- 任何字段名 / 字段类型 / equip 请求 `{petId, userCosmeticItemId}` / equip response `{petId, equipped:{slot, userCosmeticItemId, cosmeticItemId, name}}` / unequip 请求 `{petId, slot}` / unequip response `{petId, slot, unequipped:true}` / `slot` 枚举（`{1,2,3,4,5,6,7,99}`，与数据库 §6.8 同义）/ 同槽自动换装语义（server 事务内自动卸旧，client 无需先 unequip）/ unequip 空槽显式报 5004（非幂等 noop）/ 无 idempotencyKey 契约 / `unequipped` 恒 true / 事务一致性（NFR2 回滚不留半成品）/ DB `UNIQUE(pet_id,slot)` + `UNIQUE(user_cosmetic_item_id)` 并发兜底（NFR11）/ 错误码（equip：5001 / 5002 / 5003 / 5008 + 1001 / 1002 / 1005 / 1009；unequip：5002 / 5004 + 1001 / 1002 / 1005 / 1009）触发条件 / 5008 vs 5003 边界 的修改都必须（**冻结边界说明**：`user_pet_equips` 行的正常业务增减（equip / unequip 产生）/ `user_cosmetic_items` 行 status 在 1↔2 间的正常业务切换 / §5.1 `pet.equips` 节点 2 占位 `[]` → 节点 9 Story 26.6 真实化（已在 §1 Future Fields + Story 4.1 冻结边界锚定）**不**视为契约变更；1001 / 1002 / 1005 / 1009 等"触发条件"冻结在**抽象层** —— "走 §3 错误码表对应映射"这一不变量，**具体限频阈值**（如 60/min）由 Story 4.5 默认值 + 配置层管理，调整阈值**不**视为本接口契约变更；删除 auth / rate_limit 中间件 / 改 equip / unequip 请求或响应字段 / 改 `slot` 枚举 / 把同槽自动换装改成"client 必须先 unequip" / 把空槽 unequip 改成幂等 noop / 引入 idempotencyKey / 把 `unequipped` 改成可 false / 移除任一 DB UNIQUE 约束 / 合并 5008 与 5003 才视为契约变更）：
+  1. 触发 iOS Epic 27 重新评审（影响 Story 27.1 ~ 27.5 所有激活穿戴按钮 / EquipUseCase / UnequipUseCase / 文字降级 / 同槽换装动效 / 主界面实时刷新 story）
+  2. 触发 server Epic 26 已完成 story 的回归（影响 Story 26.2 ~ 26.6 已落地的 migration / equip handler / unequip handler / 集成测试 / GET /home pet.equips 扩展）
+  3. 触发下游 Epic 29（render_config）/ Epic 32（合成）契约 story（29.1 / 32.1）回归（节点 10 渲染基于穿戴关系扩展；合成基于实例模型扩展）
+  4. 在本 story 文件 + epics.md 同步标注变更原因 + 影响范围
 
 ---
 
@@ -1449,7 +1455,27 @@ JSON 示例：
 
 ### `POST /api/v1/cosmetics/equip`
 
+> 契约状态：已由 Story 26.1（节点 9）锚定并冻结（见 §1 节点 9 冻结声明）。
+
+#### 接口元信息
+
+| 字段 | 值 |
+|---|---|
+| HTTP Method | POST |
+| Path | /api/v1/cosmetics/equip |
+| 认证 | **需要** Bearer token（auth 中间件） |
+| 限频 | 默认（按 Story 4.5 rate_limit 默认值 60 次/分按 user_id 计） |
+| 幂等 | **无** idempotencyKey（重复 equip 同一实例由 5008 拦截 + DB `UNIQUE(user_cosmetic_item_id)` 兜底；穿戴是状态切换非资产消耗，与 NFR5 仅约束"开箱 / 合成"一致） |
+| 节点 | 节点 9（Epic 26 落地 / Epic 27 客户端集成） |
+| 事务 | **需要** MySQL 事务（数据库设计 §8.4 穿戴事务：校验 + 同槽换装卸旧 + INSERT user_pet_equips + UPDATE 实例 status 必须原子，NFR1） |
+| Query 参数 | **无** |
+
 #### 请求体
+
+| 字段 | 类型 | 必填 | 约束 | 说明 |
+|---|---|---|---|---|
+| `petId` | string | 必填 | BIGINT 字符串化（与 §2.5 全局约定 + 数据库 `pets.id BIGINT UNSIGNED` 一致）；length ≥ 1 | 目标宠物 id；与 §5.1 `pet.petId` 同义；service 层校验该 pet 属于当前用户（否则 5002，详见服务端逻辑） |
+| `userCosmeticItemId` | string | 必填 | BIGINT 字符串化（与数据库 `user_cosmetic_items.id BIGINT UNSIGNED` 一致）；length ≥ 1 | 要穿戴的玩家**实例** id（**不是**配置 id）；与 §8.2 `instances[].userCosmeticItemId` / §7.2 `reward.userCosmeticItemId`（节点 8 真实化后）同义；与数据库 §5.9 `user_cosmetic_items.id` 同义 |
 
 ```json
 {
@@ -1460,14 +1486,38 @@ JSON 示例：
 
 #### 服务端逻辑
 
-- 校验实例属于当前用户
-- 校验实例当前可装备
-- 查询配置槽位
-- 若槽位已有装备，则先卸下旧装备
-- 绑定到宠物对应槽位
-- 更新实例状态为 equipped
+1. **认证 & 限频**：auth 中间件校验 Bearer token；rate_limit 中间件按默认配置（user_id 60/min）限频。
+2. **参数校验**：`petId` / `userCosmeticItemId` 非空且为合法 BIGINT 字符串 → 否则 1002。
+3. **开启 MySQL 事务**（数据库设计 §8.4；以下步骤 4-9 全部在同一事务内，任一步失败整体回滚 —— NFR1）：
+4. **查实例归属**：`SELECT id, cosmetic_item_id, status, user_id FROM user_cosmetic_items WHERE id = ?`（**仅按实例 id 查，禁止在本步用 `AND user_id = ?` 过滤**）→ 分两种结果：
+   - **行不存在**（实例 id 在 `user_cosmetic_items` 完全无 row）→ **5001 道具不存在**。
+   - **行存在但 `user_id != 当前用户`** → **5002 道具不属于当前用户**（fix-review 26-1 r1 [P2]：契约**强制**该 case 映射 5002，**不**接受"合并 `WHERE id=? AND user_id=?` 查不到即 5001"的实装——那会使 epics.md §Story 26.3 AC 显式钦定的单测 case "实例不属于当前用户 → 5002" 永不可达，与本步下文"5002 必须可达"自相矛盾、削弱 iOS/server 共享冻结契约）。
+   - **行存在且 `user_id == 当前用户`** → 继续步骤 5（拿到 `cosmetic_item_id` / `status`）。
+   > **5002 必须可达**（不变量）：epics.md §Story 26.3 AC 显式要求"实例不属于当前用户 → 5002"与"pet 不属于当前用户 → 5002"两个 case 都触发 5002；故 5001 仅对应"实例完全不存在"，"实例存在但属他人"恒为 5002，**实装无自由度**。
+5. **校验实例状态**：实例 `status != 1 (in_bag)` → 若 `status = 2 (equipped)` → **5008 装扮已装备**（该实例当前已被穿戴，重复 equip 拒绝）；若 `status = 3 (consumed)` / `4 (invalid)` → **5003 道具状态不可用**。
+6. **校验 pet 归属**：`petId` 对应的 pet 必须属于当前用户 → 否则 **5002 道具不属于当前用户**（epics.md §Story 26.3 AC "pet 不属于当前用户 → 5002"）。
+7. **查配置槽位**：`SELECT slot FROM cosmetic_items WHERE id = <实例.cosmetic_item_id>` → 拿到 `slot`（枚举 §6.8）。
+8. **同槽换装（自动卸下旧装备）**：查 `user_pet_equips WHERE pet_id = ? AND slot = ?`：
+   - **已有旧装备** → `DELETE` 该旧 `user_pet_equips` 行 + `UPDATE user_cosmetic_items SET status = 1 (in_bag) WHERE id = <旧实例 id>`（自动卸下旧装备，client **无需**先调 unequip）。
+   - **该 slot 无装备** → 跳过本步。
+9. **绑定 + 状态推进**：`INSERT INTO user_pet_equips (user_id, pet_id, slot, user_cosmetic_item_id) VALUES (...)` + `UPDATE user_cosmetic_items SET status = 2 (equipped) WHERE id = <当前实例 id>`。
+10. **提交事务**（任一步 err → 整体回滚：user_pet_equips 与 user_cosmetic_items.status 必须保持 NFR2 一致性；回滚后旧装备仍 equipped + 新装备仍 in_bag + user_pet_equips 不变）。
+11. **响应**：返回 `{petId, equipped: {slot, userCosmeticItemId, cosmeticItemId, name}}`（`cosmeticItemId` = 当前实例的 cosmetic_item_id；`name` = cosmetic_items.name；`slot` = 步骤 7 查到的 slot）。
 
-#### 返回示例
+#### 响应体
+
+成功（code = 0）`data`：
+
+| 字段 | 类型 | 必填 | 约束 | 说明 |
+|---|---|---|---|---|
+| `petId` | string | 必填 | BIGINT 字符串化；length ≥ 1 | 目标宠物 id（回显请求 `petId`）；与 §5.1 `pet.petId` 同义 |
+| `equipped` | object | 必填 | 非 null | 本次穿戴结果对象 |
+| `equipped.slot` | int | 必填 | 枚举 `{1,2,3,4,5,6,7,99}`，与数据库 §6.8 `cosmetic_items.slot` 同义（`1=hat / 2=gloves / 3=glasses / 4=neck / 5=back / 6=body / 7=tail / 99=other`） | 装扮部位（由配置决定，非请求传入） |
+| `equipped.userCosmeticItemId` | string | 必填 | BIGINT 字符串化；length ≥ 1 | 玩家**实例** id（回显请求 `userCosmeticItemId`）；与 §8.2 `instances[].userCosmeticItemId` / §5.1 `pet.equips[].userCosmeticItemId`（节点 9 Story 26.6 真实化后）同义 |
+| `equipped.cosmeticItemId` | string | 必填 | BIGINT 字符串化；length ≥ 1 | 装扮**配置** id；与 §8.1 `items[].cosmeticItemId` / §8.2 `groups[].cosmeticItemId` / §7.2 `reward.cosmeticItemId` / §5.1 `pet.equips[].cosmeticItemId` 同义 |
+| `equipped.name` | string | 必填 | 1 ≤ length ≤ 64 | 装扮名称；与 §8.1 `items[].name` / 数据库 §5.8 `cosmetic_items.name` 同义 |
+
+##### 返回示例
 
 ```json
 {
@@ -1486,13 +1536,57 @@ JSON 示例：
 }
 ```
 
+#### 可能的错误码
+
+| code | 含义 | 触发条件 |
+|---|---|---|
+| 1001 | 未登录 / token 无效 | auth 中间件拦截（无 Authorization 头 / token 非法 / token 过期 / token 解析失败） |
+| 1002 | 参数错误 | `petId` / `userCosmeticItemId` 缺失 / 非合法 BIGINT 字符串（请求侧错，client 应停止重试并修正参数） |
+| 1005 | 操作过于频繁 | rate_limit 中间件拦截（已认证路由按 `user_id` 限频，每用户每分钟 > 60 次；按 Story 4.5 默认值，配置可调） |
+| 5001 | 道具不存在 | 实例 id 在 `user_cosmetic_items` **完全无 row**（**仅**此一种；"实例存在但属他人"恒走 5002，**不**得合并进 5001——见服务端逻辑步骤 4 fix-review 26-1 r1 [P2] 锁定） |
+| 5002 | 道具不属于当前用户 | 实例存在但 `user_id != current_user`，或目标 `petId` 对应的 pet 不属于当前用户（epics.md §Story 26.3 AC 显式要求两 case 均触发 5002） |
+| 5003 | 道具状态不可用 | 实例 `status = 3 (consumed)` 或 `status = 4 (invalid)`（已合成消耗 / 无效，不可穿戴） |
+| 5008 | 装扮已装备 | 实例 `status = 2 (equipped)`（该实例当前已被穿戴，重复 equip 拒绝；与 5003 区别：5008 是"已装备"可恢复状态、5003 是"不可用"终态） |
+| 1009 | 服务繁忙 | DB 异常（事务中任一 SQL 返回 `err != nil`，含 driver / 网络 / 慢查询超时等）/ DB UNIQUE 约束并发冲突兜底（见关键约束）/ 内部 panic → 事务整体回滚 |
+
+> **注**：`equipped.cosmeticItemId` 由 server 从实例反查（请求只传 `userCosmeticItemId` 实例 id，**不**传配置 id —— client 不需要也不应传配置 id）；同槽换装"自动卸下旧装备"是 server 事务内行为，client **无需**先调 unequip（与 epics.md §Story 26.3 "如果该槽位已有装备会自动先卸下"一致）。
+
+#### 关键约束
+
+- **无 idempotencyKey**契约：本接口**不**接受 `idempotencyKey`（NFR5 仅约束"开箱 / 合成"两个资产消耗类接口；穿戴是状态切换非资产消耗）。重复 equip 同一实例：第二次因实例已 `status = 2` 触发 **5008**；如未来引入 idempotencyKey，视为契约变更。
+- **DB UNIQUE 并发兜底**契约：service 事务步骤 9 `INSERT user_pet_equips` 受数据库设计 §5.10 `UNIQUE KEY uk_pet_slot (pet_id, slot)` + `UNIQUE KEY uk_user_cosmetic_item_id (user_cosmetic_item_id)` 兜底——同 pet 同 slot 并发 equip 不同实例 / 同一实例并发 equip 时，DB UNIQUE 拒绝第二条 INSERT，service 捕获后回滚 + 返回 **1009**（NFR11：一件实例同一时间只能装备一次）。该并发兜底属契约一部分；如未来移除任一 UNIQUE 约束，视为契约变更。
+- **事务一致性（NFR2）**契约：事务回滚后必须保持"所有 `status = 2 (equipped)` 实例必有对应 `user_pet_equips` 行，反之亦然"——即 equip 失败回滚后旧装备仍 equipped + 新装备仍 in_bag + user_pet_equips 行不变（无半成品状态）。如未来允许"部分提交"，视为契约变更。
+- **同槽自动换装**契约：equip 时若目标 slot 已有装备，server 在**同一事务内**自动卸下旧装备（删旧 user_pet_equips 行 + 旧实例 status 回 in_bag）；client **不**需要先调 unequip。如未来改为"client 必须先 unequip 否则报错"，视为契约变更。
+- **5008 vs 5003 边界**契约：5008 = 实例 `status = 2 (equipped)`（可恢复——unequip 后可再 equip）；5003 = 实例 `status = 3 (consumed)` / `4 (invalid)`（终态——不可恢复）。两者语义不同，client 处理策略不同（5008 提示"该道具已穿戴"、5003 提示"该道具不可用"）。如未来合并为单一错误码，视为契约变更。
+- **跨接口字段同义对齐**契约：`equipped.userCosmeticItemId` / `equipped.cosmeticItemId` / `equipped.slot` / `equipped.name` 与 §8.2 `instances[].userCosmeticItemId` / §8.1 `items[].cosmeticItemId` / §6.8 `slot` 枚举 / §8.1 `items[].name` **同义**；节点 9 起与 §5.1 `pet.equips[]` 同名字段同义对齐（§5.1 `pet.equips[]` 额外含 `rarity` / `assetUrl`，由 Story 26.6 从 `cosmetic_items` JOIN 补充——本接口 equip response **不**加这两字段，与 epics.md §Story 26.1 AC 一致）。§5.1 `pet.equips` 节点 2 占位 `[]` → 节点 9 Story 26.6 真实化**不**视为契约变更（已在 §1 Future Fields + Story 4.1 冻结边界锚定）；本接口契约**不**反向修改 §5.1。
+
 ---
 
 ## 8.4 卸下装扮
 
 ### `POST /api/v1/cosmetics/unequip`
 
+> 契约状态：已由 Story 26.1（节点 9）锚定并冻结（见 §1 节点 9 冻结声明）。
+
+#### 接口元信息
+
+| 字段 | 值 |
+|---|---|
+| HTTP Method | POST |
+| Path | /api/v1/cosmetics/unequip |
+| 认证 | **需要** Bearer token（auth 中间件） |
+| 限频 | 默认（按 Story 4.5 rate_limit 默认值 60 次/分按 user_id 计） |
+| 幂等 | **无** idempotencyKey（重复 unequip 同一空槽位由 5004 拦截；卸下是状态切换非资产消耗，与 NFR5 一致） |
+| 节点 | 节点 9（Epic 26 落地 / Epic 27 客户端集成） |
+| 事务 | **需要** MySQL 事务（DELETE user_pet_equips 行 + UPDATE 实例 status 必须原子，NFR1 / NFR2） |
+| Query 参数 | **无** |
+
 #### 请求体
+
+| 字段 | 类型 | 必填 | 约束 | 说明 |
+|---|---|---|---|---|
+| `petId` | string | 必填 | BIGINT 字符串化；length ≥ 1 | 目标宠物 id；service 层校验该 pet 属于当前用户（否则 5002） |
+| `slot` | int | 必填 | 枚举 `{1,2,3,4,5,6,7,99}`，与数据库 §6.8 `cosmetic_items.slot` 同义 | 要卸下的装备**槽位**（按槽位指定，**不是**按实例 id 指定——一个 slot 至多 1 件装备，§5.10 `UNIQUE(pet_id, slot)`） |
 
 ```json
 {
@@ -1501,7 +1595,28 @@ JSON 示例：
 }
 ```
 
-#### 返回示例
+#### 服务端逻辑
+
+1. **认证 & 限频**：auth 中间件校验 Bearer token；rate_limit 中间件按默认配置（user_id 60/min）限频。
+2. **参数校验**：`petId` 非空合法 BIGINT 字符串 + `slot` 为 int 且在枚举 `{1,2,3,4,5,6,7,99}` 内 → 否则 1002。
+3. **开启 MySQL 事务**（以下步骤 4-7 全部在同一事务内，任一步失败整体回滚 —— NFR1）：
+4. **校验 pet 归属**：`petId` 对应 pet 必须属于当前用户 → 否则 **5002 道具不属于当前用户**（epics.md §Story 26.4 AC）。
+5. **查装备关系**：`SELECT user_cosmetic_item_id FROM user_pet_equips WHERE pet_id = ? AND slot = ?` → 行不存在 → **5004 装备槽位不匹配**（该槽位当前无装备，无可卸下对象）。
+6. **解绑 + 状态回退**：`DELETE FROM user_pet_equips WHERE pet_id = ? AND slot = ?` + `UPDATE user_cosmetic_items SET status = 1 (in_bag) WHERE id = <步骤 5 拿到的 user_cosmetic_item_id>`。
+7. **提交事务**（任一步 err → 整体回滚：user_pet_equips 行仍存在 + 实例仍 equipped，保持 NFR2 一致性）。
+8. **响应**：返回 `{petId, slot, unequipped: true}`（`unequipped` 恒为 `true` —— 失败走错误码，不返回 `unequipped: false`）。
+
+#### 响应体
+
+成功（code = 0）`data`：
+
+| 字段 | 类型 | 必填 | 约束 | 说明 |
+|---|---|---|---|---|
+| `petId` | string | 必填 | BIGINT 字符串化；length ≥ 1 | 目标宠物 id（回显请求 `petId`） |
+| `slot` | int | 必填 | 枚举 `{1,2,3,4,5,6,7,99}`，与数据库 §6.8 同义 | 被卸下的槽位（回显请求 `slot`） |
+| `unequipped` | bool | 必填 | 恒为 `true`（失败走错误码，不返回 `false`） | 卸下成功标志 |
+
+##### 返回示例
 
 ```json
 {
@@ -1515,6 +1630,27 @@ JSON 示例：
   "requestId": "req_xxx"
 }
 ```
+
+#### 可能的错误码
+
+| code | 含义 | 触发条件 |
+|---|---|---|
+| 1001 | 未登录 / token 无效 | auth 中间件拦截（无 Authorization 头 / token 非法 / token 过期 / token 解析失败） |
+| 1002 | 参数错误 | `petId` 缺失 / 非合法 BIGINT 字符串，或 `slot` 缺失 / 非 int / 不在枚举 `{1,2,3,4,5,6,7,99}` 内（请求侧错，client 应停止重试并修正参数） |
+| 1005 | 操作过于频繁 | rate_limit 中间件拦截（已认证路由按 `user_id` 限频，每用户每分钟 > 60 次；按 Story 4.5 默认值，配置可调） |
+| 5002 | 道具不属于当前用户 | `petId` 对应的 pet 不属于当前用户（epics.md §Story 26.4 AC） |
+| 5004 | 装备槽位不匹配 | `user_pet_equips` 中该 `pet_id + slot` 无对应行（该槽位当前无装备，无可卸下对象） |
+| 1009 | 服务繁忙 | DB 异常（事务中任一 SQL 返回 `err != nil`）/ 内部 panic → 事务整体回滚 |
+
+> **注**：unequip 空槽位（该 slot 无装备）返回 **5004 装备槽位不匹配**（**不是**幂等成功 `unequipped: true`）——契约层选择"显式报错"而非"幂等 noop"，让 client 感知"卸下的槽位本来就空"（可能是 UI 状态不同步信号）；如未来改为"空槽 unequip 幂等返回成功"，视为契约变更。
+
+#### 关键约束
+
+- **按 slot 指定**契约：unequip 请求按 `slot` 指定卸下哪个槽位（**不是**按 `userCosmeticItemId` 实例 id），因 §5.10 `UNIQUE(pet_id, slot)` 保证一个 slot 至多 1 件装备，slot 已能唯一定位。如未来改为按实例 id 卸下，视为契约变更。
+- **空槽显式报错**契约：unequip 一个无装备的 slot 返回 **5004**（非幂等成功）；如未来改为幂等 noop，视为契约变更。
+- **无 idempotencyKey**契约：本接口**不**接受 `idempotencyKey`（同 §8.3 理由——卸下是状态切换非资产消耗）。重复 unequip 同一槽位：第二次因该槽已空触发 **5004**；如未来引入 idempotencyKey，视为契约变更。
+- **事务一致性（NFR2）**契约：事务回滚后 user_pet_equips 行仍存在 + 实例仍 `status = 2 (equipped)`（无半成品状态——保持"equipped 实例必有 user_pet_equips 行"一致性不变量）。如未来允许部分提交，视为契约变更。
+- **`unequipped` 恒 true**契约：成功响应 `unequipped` 永远为 `true`（失败走错误码，不返回 `unequipped: false`）；防 client 解析 `unequipped` 为可选/可 false。如未来引入 `unequipped: false` 软失败路径，视为契约变更。
 
 ---
 
