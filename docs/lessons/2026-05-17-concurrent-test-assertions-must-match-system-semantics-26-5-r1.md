@@ -2,7 +2,7 @@
 date: 2026-05-17
 source_review: "file: /tmp/epic-loop-review-26-5-r1.md (codex review, epic-loop r1)"
 story: 26-5-layer-2-集成测试-穿戴事务全流程
-commit: <pending>
+commit: 93a1d6e
 lesson_count: 2
 ---
 
