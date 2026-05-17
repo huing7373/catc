@@ -2,7 +2,7 @@
 date: 2026-05-17
 source_review: "codex review --base output (file: /tmp/epic-loop-review-23-5-r2.md)"
 story: 23-5-修改开箱事务-创建-user_cosmetic_items-实例-补-chest_open_logs-reward_user_cosmetic_item_id
-commit: <pending>
+commit: 8de823f
 lesson_count: 2
 prev_lesson: 2026-05-17-random-limit-pool-shorter-than-count-silent-shortfall-23-5-r1.md
 over_correction_chain: "23-5 dev grant pick 语义 —— 第 2 跳（r1 修复方向被本轮推翻）"
