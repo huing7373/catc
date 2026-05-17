@@ -339,3 +339,4 @@
 | 2026-05-17 | [dev grant 的 count 是实例数不是 distinct 配置数：over-correction chain 第 2 跳，根因是数量语义而非校验松紧（23-5 r2）](2026-05-17-dev-grant-count-is-instance-count-not-distinct-over-correction-chain-23-5-r2.md) | 2 | architecture, error-handling | `8de823f` |
 | 2026-05-17 | [被网络层包裹的取消不能误弹 RetryView：catch is CancellationError 漏掉 APIError.network(URLError.cancelled)（24-2 r1）](2026-05-17-wrapped-cancellation-must-not-trigger-retry.md) | 1 | error-handling | `a3736ad` |
 | 2026-05-17 | [冻结契约不得把对外可观测的错误码映射写成"实装层二选一"——会让 epics AC 钦定的单测 case 永不可达（26-1 r1）](2026-05-17-frozen-contract-must-not-leave-error-code-mapping-optional-26-1-r1.md) | 1 | docs | `<pending>` |
+| 2026-05-17 | [冻结契约里的并发卸下竞态必须 FOR UPDATE + affected-rows 双保险写死 & 上游声明可见可操作的缺失配置实例下游必须显式定义错误码分支（26-1 r2）](2026-05-17-frozen-contract-concurrency-guard-and-missing-config-equip-branch-26-1-r2.md) | 2 | error-handling, architecture, docs | `<pending>` |

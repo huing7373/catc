@@ -1496,7 +1496,10 @@ JSON 示例：
    > **5002 必须可达**（不变量）：epics.md §Story 26.3 AC 显式要求"实例不属于当前用户 → 5002"与"pet 不属于当前用户 → 5002"两个 case 都触发 5002；故 5001 仅对应"实例完全不存在"，"实例存在但属他人"恒为 5002，**实装无自由度**。
 5. **校验实例状态**：实例 `status != 1 (in_bag)` → 若 `status = 2 (equipped)` → **5008 装扮已装备**（该实例当前已被穿戴，重复 equip 拒绝）；若 `status = 3 (consumed)` / `4 (invalid)` → **5003 道具状态不可用**。
 6. **校验 pet 归属**：`petId` 对应的 pet 必须属于当前用户 → 否则 **5002 道具不属于当前用户**（epics.md §Story 26.3 AC "pet 不属于当前用户 → 5002"）。
-7. **查配置槽位**：`SELECT slot FROM cosmetic_items WHERE id = <实例.cosmetic_item_id>` → 拿到 `slot`（枚举 §6.8）。
+7. **查配置槽位**：`SELECT slot FROM cosmetic_items WHERE id = <实例.cosmetic_item_id>` → 分两种结果：
+   - **行存在** → 拿到 `slot`（枚举 §6.8），继续步骤 8。
+   - **行不存在**（missing-no-row：admin 物理删了该 `cosmetic_items` 行，但实例仍在 `user_cosmetic_items` 且 `status = 1`，与 §8.2 态 C 同源——该实例在 inventory 仍可见故 client 可合法发起 equip）→ **5003 道具状态不可用**（**无法确定目标 slot，该实例不可穿戴**；映射到已在 §3 / 本接口冻结错误码集合内的 **5003**，**不**新造错误码、**不**扩张 §1 节点 9 冻结的 equip 错误码集合 `{5001,5002,5003,5008}`）。**log error**（与 §8.2 态 C 一致：物理删仍被持有的 cosmetic_items 行是需运维介入的数据治理事件，日志级别 error 触发告警）。事务整体回滚（本步在事务内，回滚后实例 / user_pet_equips 不变）。
+   > **missing-no-row equip → 5003（不变量，fix-review 26-1 r2 [P2] 锁定）**：§8.2 态 C 保证 missing-no-row 实例（`status IN (1,2)`）在 inventory 仍可见，故 `status = 1` 的 missing-no-row 实例是 client 可合法发起 equip 的输入（不是脏数据异常）；本步必须把它映射到 **5003**（语义=该实例当前不可穿戴：配置已物理删除、slot 不可得，与 5003 既有语义"道具状态不可用"一致；**不**用 5001——实例**存在**于 `user_cosmetic_items`，5001 由 fix-review 26-1 r1 [P2] 锁定**仅**对应"实例完全无 row"，复用 5001 会与 r1 锁定的 5001 语义冲突）。**禁止**让该合法流落进 1009 / 未定义路径（那等于"§8.2 声明可见可 equip 但 §8.3 无契约"的跨文档缺口）。如未来改用其他错误码或新造错误码，视为契约变更（破坏 §1 节点 9 冻结的 equip 错误码集合）。
 8. **同槽换装（自动卸下旧装备）**：查 `user_pet_equips WHERE pet_id = ? AND slot = ?`：
    - **已有旧装备** → `DELETE` 该旧 `user_pet_equips` 行 + `UPDATE user_cosmetic_items SET status = 1 (in_bag) WHERE id = <旧实例 id>`（自动卸下旧装备，client **无需**先调 unequip）。
    - **该 slot 无装备** → 跳过本步。
@@ -1545,7 +1548,7 @@ JSON 示例：
 | 1005 | 操作过于频繁 | rate_limit 中间件拦截（已认证路由按 `user_id` 限频，每用户每分钟 > 60 次；按 Story 4.5 默认值，配置可调） |
 | 5001 | 道具不存在 | 实例 id 在 `user_cosmetic_items` **完全无 row**（**仅**此一种；"实例存在但属他人"恒走 5002，**不**得合并进 5001——见服务端逻辑步骤 4 fix-review 26-1 r1 [P2] 锁定） |
 | 5002 | 道具不属于当前用户 | 实例存在但 `user_id != current_user`，或目标 `petId` 对应的 pet 不属于当前用户（epics.md §Story 26.3 AC 显式要求两 case 均触发 5002） |
-| 5003 | 道具状态不可用 | 实例 `status = 3 (consumed)` 或 `status = 4 (invalid)`（已合成消耗 / 无效，不可穿戴） |
+| 5003 | 道具状态不可用 | 实例 `status = 3 (consumed)` 或 `status = 4 (invalid)`（已合成消耗 / 无效，不可穿戴）；**或** missing-no-row：实例存在且 `status = 1` 但其 `cosmetic_item_id` 对应的 `cosmetic_items` 行已被 admin 物理删除（slot 不可得 → 不可穿戴，与 §8.2 态 C 同源；服务端逻辑步骤 7 + log error，fix-review 26-1 r2 [P2] 锁定） |
 | 5008 | 装扮已装备 | 实例 `status = 2 (equipped)`（该实例当前已被穿戴，重复 equip 拒绝；与 5003 区别：5008 是"已装备"可恢复状态、5003 是"不可用"终态） |
 | 1009 | 服务繁忙 | DB 异常（事务中任一 SQL 返回 `err != nil`，含 driver / 网络 / 慢查询超时等）/ DB UNIQUE 约束并发冲突兜底（见关键约束）/ 内部 panic → 事务整体回滚 |
 
@@ -1558,6 +1561,7 @@ JSON 示例：
 - **事务一致性（NFR2）**契约：事务回滚后必须保持"所有 `status = 2 (equipped)` 实例必有对应 `user_pet_equips` 行，反之亦然"——即 equip 失败回滚后旧装备仍 equipped + 新装备仍 in_bag + user_pet_equips 行不变（无半成品状态）。如未来允许"部分提交"，视为契约变更。
 - **同槽自动换装**契约：equip 时若目标 slot 已有装备，server 在**同一事务内**自动卸下旧装备（删旧 user_pet_equips 行 + 旧实例 status 回 in_bag）；client **不**需要先调 unequip。如未来改为"client 必须先 unequip 否则报错"，视为契约变更。
 - **5008 vs 5003 边界**契约：5008 = 实例 `status = 2 (equipped)`（可恢复——unequip 后可再 equip）；5003 = 实例 `status = 3 (consumed)` / `4 (invalid)`（终态——不可恢复）。两者语义不同，client 处理策略不同（5008 提示"该道具已穿戴"、5003 提示"该道具不可用"）。如未来合并为单一错误码，视为契约变更。
+- **missing-no-row equip → 5003**契约（fix-review 26-1 r2 [P2] 锁定）：§8.2 态 C 保证 missing-no-row 实例（`cosmetic_items` 行被 admin 物理删但实例仍在 `user_cosmetic_items` 且 `status IN (1,2)`）在 inventory **仍可见**，故 `status = 1` 的 missing-no-row 实例是 client 可合法发起 equip 的输入。服务端逻辑步骤 7 必须为该 case 分支映射到 **5003 道具状态不可用**（slot 不可得 → 不可穿戴）+ log error（数据治理告警），**不**得落进 1009 / 未定义路径，**不**得复用 5001（实例存在，5001 由 fix-review 26-1 r1 [P2] 锁定仅对应"实例完全无 row"）。该错误码取自 §1 节点 9 冻结的 equip 错误码集合 `{5001,5002,5003,5008}`（**未扩张**集合）。如未来改用其他 / 新造错误码，视为契约变更。
 - **跨接口字段同义对齐**契约：`equipped.userCosmeticItemId` / `equipped.cosmeticItemId` / `equipped.slot` / `equipped.name` 与 §8.2 `instances[].userCosmeticItemId` / §8.1 `items[].cosmeticItemId` / §6.8 `slot` 枚举 / §8.1 `items[].name` **同义**；节点 9 起与 §5.1 `pet.equips[]` 同名字段同义对齐（§5.1 `pet.equips[]` 额外含 `rarity` / `assetUrl`，由 Story 26.6 从 `cosmetic_items` JOIN 补充——本接口 equip response **不**加这两字段，与 epics.md §Story 26.1 AC 一致）。§5.1 `pet.equips` 节点 2 占位 `[]` → 节点 9 Story 26.6 真实化**不**视为契约变更（已在 §1 Future Fields + Story 4.1 冻结边界锚定）；本接口契约**不**反向修改 §5.1。
 
 ---
@@ -1601,8 +1605,8 @@ JSON 示例：
 2. **参数校验**：`petId` 非空合法 BIGINT 字符串 + `slot` 为 int 且在枚举 `{1,2,3,4,5,6,7,99}` 内 → 否则 1002。
 3. **开启 MySQL 事务**（以下步骤 4-7 全部在同一事务内，任一步失败整体回滚 —— NFR1）：
 4. **校验 pet 归属**：`petId` 对应 pet 必须属于当前用户 → 否则 **5002 道具不属于当前用户**（epics.md §Story 26.4 AC）。
-5. **查装备关系**：`SELECT user_cosmetic_item_id FROM user_pet_equips WHERE pet_id = ? AND slot = ?` → 行不存在 → **5004 装备槽位不匹配**（该槽位当前无装备，无可卸下对象）。
-6. **解绑 + 状态回退**：`DELETE FROM user_pet_equips WHERE pet_id = ? AND slot = ?` + `UPDATE user_cosmetic_items SET status = 1 (in_bag) WHERE id = <步骤 5 拿到的 user_cosmetic_item_id>`。
+5. **查装备关系（行锁串行化）**：`SELECT user_cosmetic_item_id FROM user_pet_equips WHERE pet_id = ? AND slot = ? FOR UPDATE` → 行不存在 → **5004 装备槽位不匹配**（该槽位当前无装备，无可卸下对象）。`FOR UPDATE` 对该 `pet_id + slot` 行加排他锁：同 `pet_id + slot` 的并发 unequip 在此排队，输家事务必须等赢家 commit（行已被 DELETE）后再进入本步，此时 SELECT 查不到行 → 直接 5004，**不**会两个并发请求都越过本步走到步骤 6（消除 SELECT-then-DELETE 的 TOCTOU 竞态）。
+6. **解绑 + 状态回退（DELETE 必须检查 affected rows）**：`DELETE FROM user_pet_equips WHERE pet_id = ? AND slot = ?` → **必须检查 `RowsAffected`**：若 `RowsAffected == 0`（步骤 5 与本步之间该行已被并发事务删除——理论上已由步骤 5 `FOR UPDATE` 排他锁阻止，本检查为不依赖锁实现细节的契约级冗余兜底）→ **回滚事务 + 返回 5004 装备槽位不匹配**（**禁止**带着 0 affected rows 继续 commit 而误返 `unequipped: true`）；`RowsAffected == 1` → 继续 `UPDATE user_cosmetic_items SET status = 1 (in_bag) WHERE id = <步骤 5 拿到的 user_cosmetic_item_id>`。
 7. **提交事务**（任一步 err → 整体回滚：user_pet_equips 行仍存在 + 实例仍 equipped，保持 NFR2 一致性）。
 8. **响应**：返回 `{petId, slot, unequipped: true}`（`unequipped` 恒为 `true` —— 失败走错误码，不返回 `unequipped: false`）。
 
@@ -1643,11 +1647,14 @@ JSON 示例：
 | 1009 | 服务繁忙 | DB 异常（事务中任一 SQL 返回 `err != nil`）/ 内部 panic → 事务整体回滚 |
 
 > **注**：unequip 空槽位（该 slot 无装备）返回 **5004 装备槽位不匹配**（**不是**幂等成功 `unequipped: true`）——契约层选择"显式报错"而非"幂等 noop"，让 client 感知"卸下的槽位本来就空"（可能是 UI 状态不同步信号）；如未来改为"空槽 unequip 幂等返回成功"，视为契约变更。
+>
+> **unequip 非幂等 + 并发对已空槽必返 5004（不变量，fix-review 26-1 r2 [P1] 锁定）**：unequip **非幂等**——对同一 `pet_id + slot` 的重复 / 并发请求，**有且仅有第一个删到行的请求**返回成功 `unequipped: true`，其余（不论串行重试还是并发竞争）因目标行已不存在，**必须**返回 **5004**，**禁止**任何一个对"已空槽"的请求误返成功。该不变量由步骤 5 `SELECT ... FOR UPDATE` 行锁串行化（并发请求在该 `pet_id + slot` 行排他锁上排队，输家进入步骤 5 时行已被赢家 DELETE → 查不到 → 5004）+ 步骤 6 `DELETE` 的 `RowsAffected == 0 → 回滚 + 5004` 冗余兜底**双重**保证（兜底不依赖锁实现细节，是契约级保障）。如未来移除步骤 5 行锁或步骤 6 affected-rows 检查、或允许并发 loser 返成功，视为契约变更（破坏"已空槽必 5004"不变量 + NFR2 一致性）。
 
 #### 关键约束
 
 - **按 slot 指定**契约：unequip 请求按 `slot` 指定卸下哪个槽位（**不是**按 `userCosmeticItemId` 实例 id），因 §5.10 `UNIQUE(pet_id, slot)` 保证一个 slot 至多 1 件装备，slot 已能唯一定位。如未来改为按实例 id 卸下，视为契约变更。
 - **空槽显式报错**契约：unequip 一个无装备的 slot 返回 **5004**（非幂等成功）；如未来改为幂等 noop，视为契约变更。
+- **并发卸下串行化 + affected-rows 兜底**契约（fix-review 26-1 r2 [P1] 锁定）：服务端逻辑步骤 5 必须用 `SELECT ... FROM user_pet_equips WHERE pet_id = ? AND slot = ? FOR UPDATE` 对该 `pet_id + slot` 行加排他锁（同 `pet_id + slot` 并发 unequip 串行化，输家事务等赢家 commit 后行已删 → 5004）；步骤 6 `DELETE` **必须**检查 `RowsAffected`，`RowsAffected == 0` → 回滚 + 5004（不依赖锁实现细节的契约级冗余兜底，**禁止** 0 affected rows 仍 commit 误返 `unequipped: true`）。该机制与 §8.6/§8.7 房间事务"`FOR UPDATE` 行锁 + `RowsAffected == 0` 兜底正交双保险"同根因模式（参见数据库设计 §8.6/§8.7 leave 事务"输家走完后续步骤"防御）。如未来移除行锁或 affected-rows 检查，视为契约变更。
 - **无 idempotencyKey**契约：本接口**不**接受 `idempotencyKey`（同 §8.3 理由——卸下是状态切换非资产消耗）。重复 unequip 同一槽位：第二次因该槽已空触发 **5004**；如未来引入 idempotencyKey，视为契约变更。
 - **事务一致性（NFR2）**契约：事务回滚后 user_pet_equips 行仍存在 + 实例仍 `status = 2 (equipped)`（无半成品状态——保持"equipped 实例必有 user_pet_equips 行"一致性不变量）。如未来允许部分提交，视为契约变更。
 - **`unequipped` 恒 true**契约：成功响应 `unequipped` 永远为 `true`（失败走错误码，不返回 `unequipped: false`）；防 client 解析 `unequipped` 为可选/可 false。如未来引入 `unequipped: false` 软失败路径，视为契约变更。
