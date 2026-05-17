@@ -340,3 +340,4 @@
 | 2026-05-17 | [被网络层包裹的取消不能误弹 RetryView：catch is CancellationError 漏掉 APIError.network(URLError.cancelled)（24-2 r1）](2026-05-17-wrapped-cancellation-must-not-trigger-retry.md) | 1 | error-handling | `a3736ad` |
 | 2026-05-17 | [冻结契约不得把对外可观测的错误码映射写成"实装层二选一"——会让 epics AC 钦定的单测 case 永不可达（26-1 r1）](2026-05-17-frozen-contract-must-not-leave-error-code-mapping-optional-26-1-r1.md) | 1 | docs | `d7386ec` |
 | 2026-05-17 | [冻结契约里的并发卸下竞态必须 FOR UPDATE + affected-rows 双保险写死 & 上游声明可见可操作的缺失配置实例下游必须显式定义错误码分支（26-1 r2）](2026-05-17-frozen-contract-concurrency-guard-and-missing-config-equip-branch-26-1-r2.md) | 2 | error-handling, architecture, docs | `9ae0f57` |
+| 2026-05-17 | [并发集成测试断言必须匹配被测系统真实语义（swap≠互斥）& setup 构造必须满足相关表全部 UNIQUE（26-5 r1）](2026-05-17-concurrent-test-assertions-must-match-system-semantics-26-5-r1.md) | 2 | testing | `<pending>` |
