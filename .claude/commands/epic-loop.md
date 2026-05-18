@@ -41,6 +41,7 @@ argument-hint: [epic_num | 空（自动取当前 in-progress epic）]
 - ❌ **主 agent 自己绝不 commit / 不改 sprint-status / 不改 story 文件** —— 所有这类副作用都通过 sub-agent 完成（dev-story / fix-review / story-done 各自 commit）。主 agent 只做：调度 sub-agent + 重读 sprint-status 校验 + 调 codex review + 输出进度 + （唯一例外）`--auto-stash` 模式下跑一次 `git stash push -u -m "epic-loop autosave ..."` 把脏文件备份。这条约束保证 commit 历史的作者归属清晰（每个 commit 都来自对应的 BMAD workflow），而非 epic-loop 偷偷做事；stash 不是 commit、且无损可恢复，作为唯一例外允许
 - ❌ 主 agent 调 codex review Bash 时**必须**显式 `timeout: 600000`（10 分钟）—— 默认 120s 不够大 diff 跑完
 - ❌ sub-agent prompt 里**必须**显式禁止递归调用 `Skill(skill="epic-loop")` / `Skill(skill="loop")` / `CronCreate`
+- ❌ **主 agent 不得把"未经实证的理论根因模型"当强制指令写进 fix_review_subagent 的 dispatch prompt**（Epic 26 retro AP1，来源：26-5 r2 主 agent 用"空槽+屏障⟹swap 结构不可达⟹确定性恰 1"理论强压 `==1` → r3 codex 实跑 91/100 实证证伪 → 引入回归 + 多烧 2 轮）。当主 agent 对 over-correction chain 给根因方向时，若该根因依赖**"被测系统在某并发结构/时序/调度下的确定性行为"这类可被一次实跑实证证伪的命题**，主 agent **必须**二选一：(a) dispatch fix_review 前先派最小 sub-agent（或要求 fix_review sub-agent 第一步）**实跑取证**该命题，用实证再定方向；(b) prompt 里把该根因**显式标注"假说待验证、非强制——实跑/实证与此不符以实证为准"**，绝不写成"必须按此根因修"的强制断言。判据：自问"这根因若错，是不是一次 `go test`/一次实跑就能证伪？"——是则它是假说非定论，不得强制。违反 = 主 agent 自己成为 over-correction chain 的源头
 
 ## 执行流程
 
@@ -298,6 +299,13 @@ loop until break:
   # ========== 视为不通过 → DISPATCH fix_review_subagent ==========
   注意：fix-review.md 步骤 2 要求"等用户确认分诊"——sub-agent 没 user 通道，
   必须在 prompt 里明示"你就是用户的代理，自己分诊自己确认，直接进步骤 3"。
+
+  ⚠️ **AP1 守门（Epic 26 retro，dispatch 前必查）**：若本轮你（主 agent）
+  要在 dispatch prompt 里给"根因方向"，先过硬约束那条 AP1——该根因是否依赖
+  "被测系统在某并发结构/时序/调度下的确定性行为"这类一次实跑就能证伪的
+  命题？是 → 必须先实证取证 (a)，或把根因显式降级为"假说待验证、非强制、
+  实证优先" (b)。**禁止**把自信但未实证的理论根因写成"必须按此修"的强制
+  断言压给 fix-review。
   
   → DISPATCH fix_review_subagent(
        story_key=<story-key>,
